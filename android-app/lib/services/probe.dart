@@ -7,11 +7,12 @@ import '../core/constants.dart';
 /// 证书回调逐个核对主机+端口，其余一律拒绝。
 /// 用于探活与更新（清单/安装包）——与 Windows 版同一信任口径；
 /// 不发送任何凭据，完整性另有 SHA256 兜底（更新）与状态码判定（探活）。
-HttpClient trustedHttpClient({Duration? connectionTimeout}) {
+HttpClient trustedHttpClient({Duration? connectionTimeout, int port = kServerPort}) {
+  final trustedPort = port;
   final client = HttpClient();
   if (connectionTimeout != null) client.connectionTimeout = connectionTimeout;
-  client.badCertificateCallback = (cert, host, port) =>
-      host == kServerHost && port == kServerPort;
+  client.badCertificateCallback = (cert, host, cbPort) =>
+      host == kServerHost && cbPort == trustedPort;
   return client;
 }
 

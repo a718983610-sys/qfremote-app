@@ -15,6 +15,7 @@ class QfToolbar extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onHome;
   final VoidCallback onFriends;
+  final VoidCallback onForum;
   final VoidCallback onProbeTap;
   final VoidCallback onUpdateTap;
   final void Function(String action) onMenuAction;
@@ -30,6 +31,7 @@ class QfToolbar extends StatelessWidget {
     required this.onRefresh,
     required this.onHome,
     required this.onFriends,
+    required this.onForum,
     required this.onProbeTap,
     required this.onUpdateTap,
     required this.onMenuAction,
@@ -67,6 +69,11 @@ class QfToolbar extends StatelessWidget {
             tooltip: '好友',
             icon: Icon(Icons.person_add_outlined, size: 21, color: iconColor),
             onPressed: onFriends,
+          ),
+          IconButton(
+            tooltip: '论坛',
+            icon: Icon(Icons.forum_outlined, size: 21, color: iconColor),
+            onPressed: onForum,
           ),
           const Spacer(),
           // 服务器状态灯（真探活，点击看最近一次结果）
@@ -122,6 +129,7 @@ class QfToolbar extends StatelessWidget {
               PopupMenuItem(value: 'fullscreen', child: Text('全屏模式')),
               PopupMenuItem(value: 'screenshot', child: Text('截图保存')),
               PopupMenuItem(value: 'checkUpdate', child: Text('检查更新')),
+              PopupMenuItem(value: 'lock', child: Text('隐私锁')),
               PopupMenuItem(value: 'about', child: Text('关于')),
             ],
           ),

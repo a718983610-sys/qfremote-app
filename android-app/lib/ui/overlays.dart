@@ -100,7 +100,7 @@ class OfflineView extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                '网络恢复后会自动回到控制台，不用你操作。\n将在 $secondsLeft 秒后自动重试',
+                '网络恢复后将自动回到控制台，无需操作。\n将在 $secondsLeft 秒后自动重试',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: palette.onCardDim, fontSize: 13, height: 1.5),
               ),

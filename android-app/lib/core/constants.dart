@@ -17,6 +17,15 @@ const String kConsoleUrl = '$kServerOrigin/';
 const int kFriendsPort = 8445;
 const String kFriendsUrl = 'https://$kServerHost:$kFriendsPort/friends';
 
+/// 论坛入口：临时通道单点，与官网 product.json 的 web.forumUrl 同源，
+/// 域名落地时同批切换；该域名正经证书，证书白名单无需放宽
+/// （论坛服务只听服务器回环 8446，公网仅经通道可达——已实查）。
+const String kForumUrl = 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/forum';
+
+/// 隐私锁接口（与好友同服务族、同端口，路径 /lock；契约见线 B 接缝文件）。
+const int kLockPort = 8445;
+const String kLockApiBase = 'https://$kServerHost:$kLockPort/lock';
+
 /// WebView 证书校验：只认自家主机的控制台与好友页两个端口。
 bool isTrustedWebViewHostPort(String host, int port) =>
     host == kServerHost && (port == kServerPort || port == kFriendsPort);

@@ -19,6 +19,7 @@ import 'services/settings.dart';
 import 'services/updater.dart';
 import 'ui/about.dart';
 import 'ui/force_update.dart';
+import 'ui/lock.dart';
 import 'ui/overlays.dart';
 import 'ui/theme.dart';
 import 'ui/toolbar.dart';
@@ -116,7 +117,7 @@ class _HomePageState extends State<HomePage> {
   bool _remindedThisSession = false;
   bool _fullscreen = false;
 
-  String get _currentVersion => _pkg?.version ?? '1.0.6';
+  String get _currentVersion => _pkg?.version ?? '2.0.0';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -212,7 +213,7 @@ class _HomePageState extends State<HomePage> {
     try {
       manifest = await _updateService.fetchManifest();
     } catch (_) {
-      if (manual && mounted) _snack('检查更新失败：连不上服务器');
+      if (manual && mounted) _snack('检查更新失败：无法连接服务器，请检查网络后重试。');
       return null;
     }
     final entry = manifest.android;
@@ -262,7 +263,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openInstaller(File file) async {
     final result = await OpenFilex.open(file.path);
     if (result.type != ResultType.done && mounted) {
-      _snack('打开安装包没成功（${result.message}），文件在：${file.path}');
+      _snack('安装包打开失败（${result.message}），文件位于：${file.path}');
     }
   }
 
@@ -420,6 +421,19 @@ class _HomePageState extends State<HomePage> {
       case 'checkUpdate':
         _sessionUpdateCheck(manual: true);
         break;
+      case 'lock':
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => LockPage(
+              palette: _palette,
+              onNeedLogin: () {
+                Navigator.of(context).pop();
+                _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl)));
+              },
+            ),
+          ),
+        );
+        break;
       case 'about':
         _showAbout();
         break;
@@ -533,6 +547,7 @@ class _HomePageState extends State<HomePage> {
                       onRefresh: () => _web?.reload(),
                       onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
                       onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl))),
+                      onForum: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kForumUrl))),
                       onProbeTap: () async {
                         final r = await _runProbe();
                         if (mounted) _snack(r.describe());

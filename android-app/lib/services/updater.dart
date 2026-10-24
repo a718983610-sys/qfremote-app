@@ -90,10 +90,10 @@ class UpdateService {
       await _quietDelete(part);
       await _quietDelete(dest);
       if (e is FormatException && e.message == '大小对不上') {
-        throw const FormatException('下载不完整（大小对不上），已删掉重下即可');
+        throw const FormatException('下载不完整（大小对不上），已删除，请重新下载。');
       }
       if (e is FormatException && e.message == 'SHA256 对不上') {
-        throw const FormatException('完整性核对没通过（SHA256 对不上），已删掉这个文件');
+        throw const FormatException('完整性核对未通过（SHA256 对不上），已删除该文件，请重新下载。');
       }
       rethrow;
     }
