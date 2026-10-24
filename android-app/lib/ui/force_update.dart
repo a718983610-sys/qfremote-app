@@ -141,7 +141,7 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                     style: FilledButton.styleFrom(
                       backgroundColor: QfPalette.brand,
                       padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                     ),
                     child: const Text('打开安装包'),
                   )
@@ -151,7 +151,7 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                     style: FilledButton.styleFrom(
                       backgroundColor: QfPalette.brand,
                       padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                     ),
                     child: Text(_downloading ? '下载中…' : (_error != null ? '重新下载更新' : '立即更新')),
                   ),
