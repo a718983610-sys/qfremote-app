@@ -38,7 +38,7 @@ jobs:
         run: |
           RUN_ID=$(gh run list --repo ${{ github.repository }} --workflow android.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
           echo "build run: $RUN_ID"
-          gh run download "$RUN_ID" --repo ${{ github.repository }} -n QFRemote-v2.0.0-apk -D prod
+          gh run download "$RUN_ID" --repo ${{ github.repository }} -n QFRemote-v2.0.1-apk -D prod
           ls -la prod/
 
       - name: 编译测试包（指向本机夹具服务器）

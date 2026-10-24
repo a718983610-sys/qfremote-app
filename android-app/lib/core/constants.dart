@@ -22,6 +22,11 @@ const String kFriendsUrl = 'https://$kServerHost:$kFriendsPort/friends';
 /// （论坛服务只听服务器回环 8446，公网仅经通道可达——已实查）。
 const String kForumUrl = 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/forum';
 
+/// 注册入口（v2.0.1 新增，工具栏与登录界面可见）：临时通道单点，
+/// 与官网 product.json 的 web.registerUrl 同源，域名落地时同批切换；
+/// 该域名正经证书，证书白名单无需放宽（注册服务经通道 /register 出网）。
+const String kRegisterUrl = 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/register';
+
 /// 隐私锁接口（与好友同服务族、同端口，路径 /lock；契约见线 B 接缝文件）。
 const int kLockPort = 8445;
 const String kLockApiBase = 'https://$kServerHost:$kLockPort/lock';

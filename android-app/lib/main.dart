@@ -117,7 +117,7 @@ class _HomePageState extends State<HomePage> {
   bool _remindedThisSession = false;
   bool _fullscreen = false;
 
-  String get _currentVersion => _pkg?.version ?? '2.0.0';
+  String get _currentVersion => _pkg?.version ?? '2.0.1';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -548,6 +548,7 @@ class _HomePageState extends State<HomePage> {
                       onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
                       onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl))),
                       onForum: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kForumUrl))),
+                      onRegister: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kRegisterUrl))),
                       onProbeTap: () async {
                         final r = await _runProbe();
                         if (mounted) _snack(r.describe());
