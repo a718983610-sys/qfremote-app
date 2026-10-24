@@ -114,88 +114,200 @@ class _AboutDialogState extends State<_AboutDialog> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('诊断信息已复制')));
   }
 
+  Widget _infoRow(QfPalette p, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 76,
+            child: Text(label, style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(color: p.onCard, fontSize: 13.5, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final d = widget.deps;
-    return AlertDialog(
-      title: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.asset('assets/icon.png', width: 34, height: 34, fit: BoxFit.cover),
-          ),
-          const SizedBox(width: 10),
-          const Text('QFRemote'),
-        ],
-      ),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('版本 v${d.currentVersion}（构建日期 $kBuildDate）'),
-            const SizedBox(height: 4),
-            const Text('服务器 $kServerOrigin'),
-            const Divider(height: 22),
-            if (_probeText != null) Text(_probeText!, style: const TextStyle(fontSize: 13)),
-            const SizedBox(height: 6),
-            OutlinedButton.icon(
-              onPressed: _probing ? null : _probe,
-              icon: const Icon(Icons.network_ping, size: 18),
-              label: Text(_probing ? '检查中…' : '检查服务器状态'),
-            ),
-            const Divider(height: 22),
-            if (_updateText != null) Text(_updateText!, style: const TextStyle(fontSize: 13)),
-            if (_entry != null && _entry!.notes.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(_entry!.notes, style: const TextStyle(fontSize: 13, height: 1.5)),
-            ],
-            if (_downloading || _file != null) ...[
+    final p = d.palette;
+    final primaryStyle = FilledButton.styleFrom(
+      backgroundColor: QfPalette.brand,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    );
+    final ghostStyle = OutlinedButton.styleFrom(
+      foregroundColor: p.onCard,
+      side: BorderSide(color: p.tileBorder),
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    );
+    return Dialog(
+      backgroundColor: p.cardColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: p.tileFill,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: p.tileBorder),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(9),
+                      child: Image.asset('assets/icon.png', fit: BoxFit.cover),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('QFRemote',
+                            style: TextStyle(color: p.onCard, fontSize: 18, fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 2),
+                        Text('关于', style: TextStyle(color: p.onCardDim, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close, size: 19, color: p.onCardDim),
+                    style: IconButton.styleFrom(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                    ),
+                    tooltip: '关闭',
+                  ),
+                ],
+              ),
               const SizedBox(height: 10),
-              LinearProgressIndicator(value: _percent / 100),
-              const SizedBox(height: 4),
-              Text(_file != null ? '下载完成，完整性核对通过' : '正在下载… $_percent%', style: const TextStyle(fontSize: 12)),
-            ],
-            if (_downloadError != null) ...[
-              const SizedBox(height: 6),
-              Text(_downloadError!, style: const TextStyle(color: QfPalette.probeBad, fontSize: 12.5)),
-            ],
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: _checking ? null : _check,
-                  icon: const Icon(Icons.system_update_alt, size: 18),
-                  label: Text(_checking ? '检查中…' : '检查更新'),
-                ),
-                if (_entry != null && _file == null)
-                  FilledButton.icon(
-                    onPressed: _downloading ? null : _download,
-                    icon: const Icon(Icons.download, size: 18),
-                    label: const Text('下载更新'),
-                  ),
-                if (_file != null)
-                  FilledButton.icon(
-                    onPressed: () => d.openInstaller(_file!),
-                    icon: const Icon(Icons.install_mobile, size: 18),
-                    label: const Text('打开安装包'),
-                  ),
+              _infoRow(p, '当前版本', 'v${d.currentVersion}'),
+              Divider(height: 1, color: p.tileBorder),
+              _infoRow(p, '构建日期', kBuildDate),
+              Divider(height: 1, color: p.tileBorder),
+              _infoRow(p, '服务器', kServerOrigin),
+              const SizedBox(height: 14),
+              if (_probeText != null) ...[
+                Text(_probeText!, style: TextStyle(color: p.onCard, fontSize: 13)),
+                const SizedBox(height: 8),
               ],
-            ),
-            const Divider(height: 22),
-            OutlinedButton.icon(
-              onPressed: _copyDiag,
-              icon: const Icon(Icons.copy_all_outlined, size: 18),
-              label: const Text('复制诊断信息'),
-            ),
-          ],
+              FilledButton.icon(
+                onPressed: _probing ? null : _probe,
+                style: primaryStyle,
+                icon: const Icon(Icons.network_ping, size: 18),
+                label: Text(_probing ? '检查中…' : '检查服务器状态'),
+              ),
+              const SizedBox(height: 16),
+              if (_updateText != null) ...[
+                Text(_updateText!, style: TextStyle(color: p.onCard, fontSize: 13)),
+                const SizedBox(height: 6),
+              ],
+              if (_entry != null && _entry!.notes.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: p.isDark
+                        ? const Color(0xFF2B2F36)
+                        : const Color(0xFFEEF3FB),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: p.isDark
+                            ? Colors.white.withValues(alpha: 0.10)
+                            : const Color(0xFFDFE7F2)),
+                  ),
+                  child: Text(_entry!.notes,
+                      style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+                ),
+              if (_downloading || _file != null) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: _percent / 100,
+                    minHeight: 8,
+                    backgroundColor: p.onCardDim.withValues(alpha: 0.2),
+                    valueColor: const AlwaysStoppedAnimation<Color>(QfPalette.brand),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(_file != null ? '下载完成，完整性核对通过' : '正在下载… $_percent%',
+                    style: TextStyle(color: p.onCardDim, fontSize: 12)),
+              ],
+              if (_downloadError != null) ...[
+                const SizedBox(height: 8),
+                Text(_downloadError!, style: const TextStyle(color: QfPalette.probeBad, fontSize: 12.5)),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _checking ? null : _check,
+                      style: ghostStyle,
+                      icon: const Icon(Icons.system_update_alt, size: 18),
+                      label: Text(_checking ? '检查中…' : '检查更新'),
+                    ),
+                  ),
+                  if (_entry != null && _file == null) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _downloading ? null : _download,
+                        style: primaryStyle,
+                        icon: const Icon(Icons.download, size: 18),
+                        label: const Text('下载更新'),
+                      ),
+                    ),
+                  ],
+                  if (_file != null) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: () => d.openInstaller(_file!),
+                        style: primaryStyle,
+                        icon: const Icon(Icons.install_mobile, size: 18),
+                        label: const Text('打开安装包'),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: _copyDiag,
+                style: ghostStyle,
+                icon: const Icon(Icons.copy_all_outlined, size: 18),
+                label: const Text('复制诊断信息'),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  style: TextButton.styleFrom(foregroundColor: p.onCardDim),
+                  child: const Text('关闭'),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('关闭')),
-      ],
     );
   }
 }

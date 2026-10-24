@@ -38,7 +38,7 @@ class QfRemoteApp extends StatelessWidget {
       title: 'QFRemote',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1450B4)),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2470E0)),
         useMaterial3: true,
       ),
       home: const HomePage(),
@@ -117,7 +117,7 @@ class _HomePageState extends State<HomePage> {
   bool _remindedThisSession = false;
   bool _fullscreen = false;
 
-  String get _currentVersion => _pkg?.version ?? '2.0.1';
+  String get _currentVersion => _pkg?.version ?? '2.1.0';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -399,7 +399,15 @@ class _HomePageState extends State<HomePage> {
 
   void _snack(String msg, {SnackBarAction? action}) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), action: action, duration: const Duration(seconds: 4)),
+      SnackBar(
+        content: Text(msg),
+        action: action,
+        backgroundColor: const Color(0xFF1F2D47),
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
     );
   }
 

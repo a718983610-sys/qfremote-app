@@ -146,11 +146,11 @@ class _LockPageState extends State<LockPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('隐私锁'),
-        backgroundColor: palette.isDark ? const Color(0xFF2B2F36) : const Color(0xFF1450B4),
+        backgroundColor: palette.toolbarColor,
         foregroundColor: Colors.white,
       ),
       body: Container(
-        decoration: BoxDecoration(gradient: palette.pageGradient),
+        decoration: BoxDecoration(color: palette.pageColor),
         child: ListView(
           padding: const EdgeInsets.fromLTRB(18, 20, 18, 24),
           children: [
@@ -177,7 +177,7 @@ class _LockPageState extends State<LockPage> {
                     const SizedBox(height: 16),
                     FilledButton(
                       onPressed: widget.onNeedLogin,
-                      style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1450B4)),
+                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand),
                       child: const Text('去登录'),
                     ),
                   ],
@@ -196,7 +196,7 @@ class _LockPageState extends State<LockPage> {
                     const SizedBox(height: 16),
                     FilledButton(
                       onPressed: _load,
-                      style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1450B4)),
+                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand),
                       child: const Text('重试'),
                     ),
                   ],

@@ -12,8 +12,8 @@ const int kServerPort = 8443;
 const String kServerOrigin = 'https://$kServerHost:$kServerPort';
 const String kConsoleUrl = '$kServerOrigin/';
 
-/// 好友页（独立服务 qfremote-friends；与控制台同账号体系、会话独立，
-/// 好友页需再登一次）。
+/// 好友页（独立服务 qfremote-friends；与控制台同账号体系，好友服务认
+/// 控制台会话 cookie——同一 WebView 打开即 SSO 直达，不再二次登录）。
 const int kFriendsPort = 8445;
 const String kFriendsUrl = 'https://$kServerHost:$kFriendsPort/friends';
 

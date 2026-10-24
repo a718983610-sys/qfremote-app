@@ -65,24 +65,35 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
     return PopScope(
       canPop: false,
       child: Container(
-        decoration: BoxDecoration(gradient: p.pageGradient),
+        color: p.pageColor,
         child: Center(
           child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 28),
             padding: const EdgeInsets.fromLTRB(26, 30, 26, 26),
             decoration: BoxDecoration(
               color: p.cardColor,
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 24, offset: const Offset(0, 10))],
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: p.cardBorder),
+              boxShadow: p.cardShadow,
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Center(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(14),
-                    child: Image.asset('assets/icon.png', width: 56, height: 56, fit: BoxFit.cover),
+                  child: Container(
+                    width: 60,
+                    height: 60,
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: p.tileFill,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: p.tileBorder),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset('assets/icon.png', fit: BoxFit.cover),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -110,7 +121,7 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                       value: _percent / 100,
                       minHeight: 8,
                       backgroundColor: p.onCardDim.withValues(alpha: 0.2),
-                      valueColor: const AlwaysStoppedAnimation<Color>(QfPalette.accent),
+                      valueColor: const AlwaysStoppedAnimation<Color>(QfPalette.brand),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -127,13 +138,21 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                 if (_file != null)
                   FilledButton(
                     onPressed: () => widget.openInstaller(_file!),
-                    style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1450B4)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: QfPalette.brand,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
                     child: const Text('打开安装包'),
                   )
                 else
                   FilledButton(
                     onPressed: _downloading ? null : _startDownload,
-                    style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1450B4)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: QfPalette.brand,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
                     child: Text(_downloading ? '下载中…' : (_error != null ? '重新下载更新' : '立即更新')),
                   ),
                 const SizedBox(height: 6),

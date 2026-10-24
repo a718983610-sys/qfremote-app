@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'theme.dart';
 
-/// 启动画面（家族语言：深蓝渐变＋自家标＋橙色进度条），
+/// 启动画面（家族语言：平涂深蓝底＋白色图标托＋橙色进度条），
 /// 控制台首屏加载完才退场（最短停留与 Windows 版同为 850ms，在主页逻辑里控制）。
 class SplashView extends StatelessWidget {
   final QfPalette palette;
@@ -12,47 +12,66 @@ class SplashView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(gradient: palette.pageGradient),
+      color: palette.pageColor,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 92,
-              height: 92,
+              width: 96,
+              height: 96,
+              padding: const EdgeInsets.all(5),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(22),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withValues(alpha: 0.35), blurRadius: 24, offset: const Offset(0, 10)),
-                ],
+                // 品牌标牌面：浅色底深蓝牌、深色底白牌（与 Windows 壳同一口径）
+                color: palette.isDark ? Colors.white : const Color(0xFF0B2B5B),
+                borderRadius: BorderRadius.circular(24),
               ),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(22),
+                borderRadius: BorderRadius.circular(20),
                 child: Image.asset('assets/icon.png', fit: BoxFit.cover),
               ),
             ),
             const SizedBox(height: 20),
-            const Text(
+            Text(
               'QFRemote',
-              style: TextStyle(color: Colors.white, fontSize: 27, fontWeight: FontWeight.w600, letterSpacing: 1.2),
+              style: TextStyle(
+                color: palette.isDark ? Colors.white : const Color(0xFF1F2D47),
+                fontSize: 27,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
+              ),
             ),
             const SizedBox(height: 6),
-            const Text('远程控制', style: TextStyle(color: Colors.white70, fontSize: 14)),
+            Text(
+              '远程控制',
+              style: TextStyle(
+                color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90),
+                fontSize: 14,
+                letterSpacing: 5,
+              ),
+            ),
             const SizedBox(height: 30),
             Container(
               width: 168,
               height: 5,
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(3), color: Colors.white24),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(3),
+                color: palette.isDark ? Colors.white24 : const Color(0xFFDFE7F2),
+              ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(3),
                 child: const LinearProgressIndicator(
                   backgroundColor: Colors.transparent,
-                  valueColor: AlwaysStoppedAnimation<Color>(QfPalette.accent),
+                  valueColor: AlwaysStoppedAnimation<Color>(QfPalette.brand),
                 ),
               ),
             ),
             const SizedBox(height: 26),
-            Text('v$version', style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            Text('v$version',
+                style: TextStyle(
+                  color: palette.isDark ? Colors.white38 : const Color(0xFF6B7A90),
+                  fontSize: 12,
+                )),
           ],
         ),
       ),
@@ -61,7 +80,7 @@ class SplashView extends StatelessWidget {
 }
 
 /// 整页断线友好页（与 Windows 版断线页同行为）：
-/// 自家卡片＋「连不上服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
+/// 白卡（深色 #22262E）＋「连不上服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
 class OfflineView extends StatelessWidget {
   final QfPalette palette;
   final int secondsLeft;
@@ -76,22 +95,33 @@ class OfflineView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(gradient: palette.pageGradient),
+      color: palette.pageColor,
       child: Center(
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 28),
           padding: const EdgeInsets.fromLTRB(26, 30, 26, 26),
           decoration: BoxDecoration(
             color: palette.cardColor,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 24, offset: const Offset(0, 10))],
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: palette.cardBorder),
+            boxShadow: palette.cardShadow,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Image.asset('assets/icon.png', width: 56, height: 56, fit: BoxFit.cover),
+              Container(
+                width: 60,
+                height: 60,
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: palette.tileFill,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: palette.tileBorder),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.asset('assets/icon.png', fit: BoxFit.cover),
+                ),
               ),
               const SizedBox(height: 16),
               Text(
@@ -107,7 +137,11 @@ class OfflineView extends StatelessWidget {
               const SizedBox(height: 20),
               FilledButton(
                 onPressed: onRetryNow,
-                style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1450B4)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: QfPalette.brand,
+                  padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
                 child: const Text('立即重试'),
               ),
             ],
