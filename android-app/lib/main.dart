@@ -10,10 +10,12 @@ import 'package:path_provider/path_provider.dart';
 
 import 'build_info.dart';
 import 'core/constants.dart';
+import 'core/svc_urls.dart';
 import 'core/manifest.dart';
 import 'core/update_policy.dart';
 import 'core/version.dart';
 import 'core/watchdog_core.dart';
+import 'services/points.dart';
 import 'services/probe.dart';
 import 'services/settings.dart';
 import 'services/updater.dart';
@@ -83,7 +85,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _updateService = UpdateService();
   final _evaluator = _WebViewEvaluator();
 
@@ -117,21 +119,39 @@ class _HomePageState extends State<HomePage> {
   bool _remindedThisSession = false;
   bool _fullscreen = false;
 
-  String get _currentVersion => _pkg?.version ?? '2.1.0';
+  // 2.2.0：扩展服务（积分心跳/站长判定/管理令牌）与前台状态。
+  ExtService? _ext;
+  Timer? _heartbeatTimer;
+  int _heartbeatTicks = 0;
+  bool _foreground = true;
+  bool _isAdmin = false;
+
+  ExtService get _extService =>
+      _ext ??= ExtService(cookieProvider: _consoleCookieHeader);
+
+  String get _currentVersion => _pkg?.version ?? '2.2.0';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _boot();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _watchdog?.stop();
     _offlineTimer?.cancel();
     _probeTimer?.cancel();
+    _heartbeatTimer?.cancel();
     super.dispose();
   }
 
@@ -149,6 +169,54 @@ class _HomePageState extends State<HomePage> {
     });
     await _launchGate(settings);
     _startProbeLoop();
+    unawaited(SvcUrls.instance.ensureResolved());
+    _startHeartbeatLoop();
+  }
+
+  // ---------------- 积分心跳与站长判定（2.2.0） ----------------
+
+  /// 控制台会话 cookie：从 WebView 的 CookieManager 取控制台源的 cookie 值，
+  /// 拼成请求头字符串；没登录/取不到返回 null（心跳与判定自动跳过）。
+  Future<String?> _consoleCookieHeader() async {
+    try {
+      final cookies =
+          await CookieManager.instance().getCookies(url: WebUri(kServerOrigin));
+      if (cookies.isEmpty) return null;
+      return cookies.map((c) => '${c.name}=${c.value}').join('; ');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _startHeartbeatLoop() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer =
+        Timer.periodic(const Duration(seconds: 60), (_) => _heartbeatTick());
+  }
+
+  /// 每 60 秒：App 在前台且控制台已登录（取得到 cookie）才发心跳；
+  /// 每 5 拍顺带复查一次站长身份（管理入口显隐）。
+  Future<void> _heartbeatTick() async {
+    if (!mounted || !_foreground) return;
+    final cookie = await _consoleCookieHeader();
+    if (cookie == null) return;
+    _heartbeatTicks++;
+    await _extService.heartbeat();
+    if (_heartbeatTicks % 5 == 1) {
+      final admin = await _extService.checkIsAdmin();
+      if (mounted && admin != _isAdmin) setState(() => _isAdmin = admin);
+    }
+  }
+
+  /// 打开站长管理页：先用控制台会话换一次性令牌，再在 WebView 打开管理页；
+  /// 换不到令牌时直接打开管理页（服务端会自行走登录）。
+  Future<void> _openAdmin() async {
+    final token = await _extService.fetchSsoToken();
+    if (!mounted) return;
+    final url = token != null
+        ? SvcUrls.instance.adminLoginUrl(token)
+        : SvcUrls.instance.adminUrl;
+    _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
   }
 
   /// 启动门（更新政策）：落盘有待更新时先取清单裁决——
@@ -436,11 +504,14 @@ class _HomePageState extends State<HomePage> {
               palette: _palette,
               onNeedLogin: () {
                 Navigator.of(context).pop();
-                _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl)));
+                _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl)));
               },
             ),
           ),
         );
+        break;
+      case 'admin':
+        _openAdmin();
         break;
       case 'about':
         _showAbout();
@@ -505,6 +576,7 @@ class _HomePageState extends State<HomePage> {
         download: _downloadApk,
         openInstaller: _openInstaller,
         diagnosticsText: () async => _diagnosticsText(),
+        fetchPoints: () => _extService.fetchMe(),
       ),
     );
   }
@@ -554,9 +626,10 @@ class _HomePageState extends State<HomePage> {
                       onBack: () => _web?.goBack(),
                       onRefresh: () => _web?.reload(),
                       onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
-                      onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl))),
-                      onForum: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kForumUrl))),
-                      onRegister: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kRegisterUrl))),
+                      onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl))),
+                      onForum: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.forumUrl))),
+                      onRegister: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.registerUrl))),
+                      showAdmin: _isAdmin,
                       onProbeTap: () async {
                         final r = await _runProbe();
                         if (mounted) _snack(r.describe());

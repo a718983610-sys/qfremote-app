@@ -109,6 +109,8 @@ class _LockPageState extends State<LockPage> {
       final ok = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: QfPalette.hairline)),
           title: const Text('关闭隐私锁'),
           content: const Text('关掉隐私锁后，本次密码立即作废。'),
           actions: [
@@ -156,7 +158,7 @@ class _LockPageState extends State<LockPage> {
           children: [
             Text(
               '锁只锁电脑跟前：屏幕变黑、要输密码才能用；远程控制不受影响。',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 13.5, height: 1.5),
+              style: TextStyle(color: palette.isDark ? Colors.white.withValues(alpha: 0.85) : QfPalette.textDim, fontSize: 13.5, height: 1.5),
             ),
             const SizedBox(height: 18),
             if (_loading)
@@ -177,7 +179,7 @@ class _LockPageState extends State<LockPage> {
                     const SizedBox(height: 16),
                     FilledButton(
                       onPressed: widget.onNeedLogin,
-                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand),
+                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
                       child: const Text('去登录'),
                     ),
                   ],
@@ -196,7 +198,7 @@ class _LockPageState extends State<LockPage> {
                     const SizedBox(height: 16),
                     FilledButton(
                       onPressed: _load,
-                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand),
+                      style: FilledButton.styleFrom(backgroundColor: QfPalette.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
                       child: const Text('重试'),
                     ),
                   ],
@@ -216,7 +218,8 @@ class _LockPageState extends State<LockPage> {
       padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
       decoration: BoxDecoration(
         color: palette.cardColor,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: palette.cardBorder),
       ),
       child: child,
     );
@@ -230,13 +233,24 @@ class _LockPageState extends State<LockPage> {
       padding: const EdgeInsets.fromLTRB(18, 16, 12, 16),
       decoration: BoxDecoration(
         color: palette.cardColor,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: palette.cardBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: palette.iconChipColor,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.computer_outlined, size: 20, color: QfPalette.brand),
+              ),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -318,6 +332,8 @@ class _EnableDialogState extends State<_EnableDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: QfPalette.hairline)),
       title: const Text('设置本次密码'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -390,6 +406,8 @@ class _ResetDialogState extends State<_ResetDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: QfPalette.hairline)),
       title: const Text('用登录密码重设'),
       content: Column(
         mainAxisSize: MainAxisSize.min,

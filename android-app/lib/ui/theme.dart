@@ -65,4 +65,123 @@ class QfPalette {
   static const Color probeOk = Color(0xFF1DB954);
   static const Color probeBad = Color(0xFFE5484D);
   static const Color probeBusy = Color(0xFFF5A623);
+
+  /// 冻结令牌（2.2.0 与 Win 线同一套）：深蓝/发丝/正文/次要。
+  static const Color navy = Color(0xFF0B2B5B);
+  static const Color hairline = Color(0xFFDFE7F2);
+  static const Color textMain = Color(0xFF1F2D47);
+  static const Color textDim = Color(0xFF6B7A90);
+
+  /// 列表行浅蓝图标片底色（深色模式用卡片内浅一档）。
+  Color get iconChipColor =>
+      isDark ? const Color(0xFF2B3038) : const Color(0xFFEEF3FB);
+}
+
+/// 品牌默认头像占位（全产品统一）：深蓝圆盘＋白色断环＋橙点。
+/// 没有真实头像时一律用它，不许用系统默认人像或灰色剪影。
+class QfAvatarPlaceholder extends StatelessWidget {
+  final double size;
+  const QfAvatarPlaceholder({super.key, this.size = 40});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: const BoxDecoration(color: QfPalette.navy, shape: BoxShape.circle),
+      child: CustomPaint(painter: _AvatarMarkPainter(), size: Size(size, size)),
+    );
+  }
+}
+
+class _AvatarMarkPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = size.width * 0.30;
+    final ring = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size.width * 0.075
+      ..strokeCap = StrokeCap.round;
+    // 断环：留出右上缺口放橙点（与品牌标志同一画法）。
+    canvas.drawArc(
+      Rect.fromCircle(center: c, radius: r),
+      0.9,
+      5.1,
+      false,
+      ring,
+    );
+    final dot = Paint()..color = QfPalette.accent;
+    canvas.drawCircle(
+      Offset(c.dx + r * 0.78, c.dy - r * 0.78),
+      size.width * 0.085,
+      dot,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+/// 列表行（全产品统一）：浅蓝图标片＋标题＋右箭头，整行可点，行高不小于 48。
+class QfListRow extends StatelessWidget {
+  final QfPalette palette;
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onTap;
+
+  const QfListRow({
+    super.key,
+    required this.palette,
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: p.iconChipColor,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 20, color: QfPalette.brand),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title,
+                      style: TextStyle(
+                          color: p.onCard, fontSize: 15, fontWeight: FontWeight.w600)),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(subtitle!,
+                        style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+                  ],
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, size: 20, color: p.onCardDim),
+          ],
+        ),
+      ),
+    );
+  }
 }

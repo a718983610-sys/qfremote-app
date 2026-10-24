@@ -140,7 +140,7 @@ class OfflineView extends StatelessWidget {
                 style: FilledButton.styleFrom(
                   backgroundColor: QfPalette.brand,
                   padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
                 child: const Text('立即重试'),
               ),

@@ -1,0 +1,131 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'constants.dart';
+
+/// 服务地址单点收口（2.2.0）：所有入口（好友/论坛/注册/积分/管理）只许从这里取地址。
+///
+/// 解析顺序：内存（本次运行从官网 product.json 拉到的 web.*）→ 本地缓存
+/// （上次成功拉到的值）→ constants.dart 的写死兜底。
+/// 好友入口例外：保持直连 8445 的 SSO 口径不动（与控制台同 WebView、同会话
+/// cookie、同自签证书校验），不走 product.json 的通道地址。
+class SvcUrls {
+  SvcUrls._();
+
+  static final SvcUrls instance = SvcUrls._();
+
+  static const _kForum = 'svc_forum_url';
+  static const _kRegister = 'svc_register_url';
+  static const _kPoints = 'svc_points_url';
+  static const _kAdmin = 'svc_admin_url';
+
+  String? _forum;
+  String? _register;
+  String? _points;
+  String? _admin;
+  bool _loaded = false;
+  Future<void>? _resolving;
+
+  /// 好友页：直连口径恒定（见类注释）。
+  String get friendsUrl => kFriendsUrl;
+
+  String get forumUrl => _forum ?? kForumUrl;
+  String get registerUrl => _register ?? kRegisterUrl;
+  String get pointsUrl => _points ?? kPointsUrlFallback;
+  String get adminUrl => _admin ?? kAdminUrlFallback;
+
+  /// 积分接口基址（pointsUrl 本身即 /points 前缀，接口在其下 /api/*）。
+  String get pointsApiBase => pointsUrl;
+
+  /// 管理接口基址（/admin 前缀下 /api/*）。
+  String get adminApiBase => adminUrl;
+
+  /// 令牌换发地址：拿控制台会话换一次性登录令牌，再打开管理页。
+  String get ssoTokenUrl => '$adminUrl/api/sso-token';
+
+  /// 管理页登录地址（带一次性令牌）。
+  String adminLoginUrl(String token) =>
+      '$adminUrl/login?token=${Uri.encodeQueryComponent(token)}';
+
+  static bool _usable(String? v) =>
+      v != null && v.startsWith('https://') && v.length > 10 && !v.contains(' ');
+
+  /// 从 product.json 的 JSON 文本里取 web.* 地址（纯函数，供自测）。
+  /// 返回字段名 → 地址的映射，只收 https 的字符串值。
+  static Map<String, String> parseProductWeb(String body) {
+    final root = jsonDecode(body);
+    if (root is! Map<String, dynamic>) {
+      throw const FormatException('清单格式不对');
+    }
+    final web = root['web'];
+    if (web is! Map<String, dynamic>) {
+      throw const FormatException('清单缺 web 字段');
+    }
+    final out = <String, String>{};
+    for (final key in ['forumUrl', 'registerUrl', 'pointsUrl', 'adminUrl']) {
+      final v = web[key];
+      if (_usable(v is String ? v : null)) out[key] = v as String;
+    }
+    return out;
+  }
+
+  /// 启动时调用一次：先读本地缓存垫底，再异步拉官网清单刷新（失败安静保留旧值）。
+  Future<void> ensureResolved() {
+    return _resolving ??= _resolve();
+  }
+
+  Future<void> _resolve() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!_loaded) {
+        _loaded = true;
+        if (_usable(prefs.getString(_kForum))) _forum = prefs.getString(_kForum);
+        if (_usable(prefs.getString(_kRegister))) {
+          _register = prefs.getString(_kRegister);
+        }
+        if (_usable(prefs.getString(_kPoints))) _points = prefs.getString(_kPoints);
+        if (_usable(prefs.getString(_kAdmin))) _admin = prefs.getString(_kAdmin);
+      }
+      final fetched = await _fetchProductWeb();
+      if (fetched == null) return;
+      void apply(String key, String? v, void Function(String) set) {
+        if (v != null) {
+          set(v);
+          unawaited(prefs.setString(key, v));
+        }
+      }
+
+      apply(_kForum, fetched['forumUrl'], (v) => _forum = v);
+      apply(_kRegister, fetched['registerUrl'], (v) => _register = v);
+      apply(_kPoints, fetched['pointsUrl'], (v) => _points = v);
+      apply(_kAdmin, fetched['adminUrl'], (v) => _admin = v);
+    } catch (_) {
+      // 拉不到/解析失败：一律安静走缓存与兜底，入口永不因此不可用。
+    }
+  }
+
+  Future<Map<String, String>?> _fetchProductWeb() async {
+    final client = HttpClient();
+    client.connectionTimeout = const Duration(seconds: 6);
+    try {
+      final req = await client
+          .getUrl(Uri.parse(kProductJsonUrl))
+          .timeout(const Duration(seconds: 6));
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final res = await req.close().timeout(const Duration(seconds: 6));
+      if (res.statusCode != 200) return null;
+      final body = await res
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 6));
+      return parseProductWeb(body);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+}

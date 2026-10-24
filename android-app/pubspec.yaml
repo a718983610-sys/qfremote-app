@@ -1,7 +1,7 @@
 name: qfremote
 description: QFRemote 远程控制 — 安卓控制端（与 Windows 版同口径的品牌外壳）
 publish_to: 'none'
-version: 2.1.0+21000
+version: 2.2.0+22000
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

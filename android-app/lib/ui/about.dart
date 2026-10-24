@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../build_info.dart';
 import '../core/constants.dart';
 import '../core/manifest.dart';
+import '../services/points.dart';
 import '../services/probe.dart';
 import 'theme.dart';
 
@@ -19,6 +20,9 @@ class AboutDeps {
   final Future<void> Function(File file) openInstaller;
   final Future<String> Function() diagnosticsText;
 
+  /// 积分/使用时长取数（2.2.0）：取不到返回 null，两行显示「—」。
+  final Future<PointsInfo?> Function()? fetchPoints;
+
   const AboutDeps({
     required this.currentVersion,
     required this.palette,
@@ -27,6 +31,7 @@ class AboutDeps {
     required this.download,
     required this.openInstaller,
     required this.diagnosticsText,
+    this.fetchPoints,
   });
 }
 
@@ -46,6 +51,7 @@ class _AboutDialog extends StatefulWidget {
 }
 
 class _AboutDialogState extends State<_AboutDialog> {
+  PointsInfo? _points;
   String? _probeText;
   bool _probing = false;
   ReleaseEntry? _entry;
@@ -55,6 +61,20 @@ class _AboutDialogState extends State<_AboutDialog> {
   int _percent = 0;
   File? _file;
   String? _downloadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPoints();
+  }
+
+  Future<void> _loadPoints() async {
+    final fetch = widget.deps.fetchPoints;
+    if (fetch == null) return;
+    final info = await fetch();
+    if (!mounted) return;
+    setState(() => _points = info);
+  }
 
   Future<void> _probe() async {
     setState(() => _probing = true);
@@ -139,13 +159,13 @@ class _AboutDialogState extends State<_AboutDialog> {
     final primaryStyle = FilledButton.styleFrom(
       backgroundColor: QfPalette.brand,
       padding: const EdgeInsets.symmetric(vertical: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     );
     final ghostStyle = OutlinedButton.styleFrom(
       foregroundColor: p.onCard,
       side: BorderSide(color: p.tileBorder),
       padding: const EdgeInsets.symmetric(vertical: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     );
     return Dialog(
       backgroundColor: p.cardColor,
@@ -202,6 +222,10 @@ class _AboutDialogState extends State<_AboutDialog> {
               _infoRow(p, '构建日期', kBuildDate),
               Divider(height: 1, color: p.tileBorder),
               _infoRow(p, '服务器', kServerOrigin),
+              Divider(height: 1, color: p.tileBorder),
+              _infoRow(p, '使用时长', _points?.displayText ?? '—'),
+              Divider(height: 1, color: p.tileBorder),
+              _infoRow(p, '我的积分', _points?.points == null ? '—' : '${_points!.points} 分'),
               const SizedBox(height: 14),
               if (_probeText != null) ...[
                 Text(_probeText!, style: TextStyle(color: p.onCard, fontSize: 13)),
