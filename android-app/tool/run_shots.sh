@@ -15,21 +15,27 @@ for i in $(seq 1 60); do
   sleep 2
 done
 sleep 8
+# 关掉「后台应用 ANR 弹窗」并重启一次桌面进程：桌面在开机高负载时 ANR 后，
+# 它的系统框会一直挂在所有截图上（点 Wait 坐标不可靠，直接从源头掐掉）
+"$ADB" shell settings put global anr_show_background_dialogs 0 > /dev/null 2>&1
+"$ADB" shell am force-stop com.google.android.apps.nexuslauncher > /dev/null 2>&1
+sleep 2
 
 dismiss_anr() {
-  # 画面上有「… isn't responding」系统框时，点它的 Wait，别让它挡截图
+  # 兜底：画面上还有「… isn't responding」系统框时，选最宽的 Wait 行点它
   "$ADB" shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
   local xml
   xml=$("$ADB" shell cat /sdcard/ui.xml 2>/dev/null)
   if echo "$xml" | grep -q "isn.t responding"; then
-    local bounds
-    bounds=$(echo "$xml" | tr '>' '\n' | grep 'text="Wait"' | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | head -1)
-    if [ -n "$bounds" ]; then
-      local xy
-      xy=$(echo "$bounds" | sed 's/[^0-9,]/ /g' | awk '{print int(($1+$3)/2), int(($2+$4)/2)}')
-      set -- $xy
-      echo "dismiss ANR dialog (tap Wait at $1,$2)"
-      "$ADB" shell input tap "$1" "$2" > /dev/null 2>&1
+    local best
+    best=$(echo "$xml" | tr '>' '\n' | grep 'text="Wait"' | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | \
+      awk -F'[],[]' '{w=$4-$2; print w, $2, $3, $4, $5}' | sort -rn | head -1)
+    if [ -n "$best" ]; then
+      local cx cy
+      cx=$(echo "$best" | awk '{print int(($2+$4)/2)}')
+      cy=$(echo "$best" | awk '{print int(($3+$5)/2)}')
+      echo "dismiss ANR dialog (tap Wait at $cx,$cy)"
+      "$ADB" shell input tap "$cx" "$cy" > /dev/null 2>&1
       sleep 1
     fi
   fi
@@ -47,7 +53,10 @@ seed_prefs() {
   "$ADB" push /tmp/prefs.xml /data/local/tmp/prefs.xml > /dev/null 2>&1
   "$ADB" shell run-as $PKG mkdir -p shared_prefs > /dev/null 2>&1
   "$ADB" shell run-as $PKG cp /data/local/tmp/prefs.xml shared_prefs/FlutterSharedPreferences.xml > /dev/null 2>&1
-  echo "prefs seeded"
+  # 回读验证真种进去了（run-as 失败时别默默往下跑）
+  local back
+  back=$("$ADB" shell run-as $PKG cat shared_prefs/FlutterSharedPreferences.xml 2>/dev/null | tr -d '\r\n')
+  echo "prefs seeded: $back"
 }
 THEME_XML='<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <map>
@@ -59,7 +68,9 @@ PENDING_XML='<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 </map>'
 
 echo "=== P1 正式包：启动画面 + 真实控制台登录页（不登录） ==="
-"$ADB" install -r prod/QFRemote-v1.0.4.apk || FAIL=1
+PROD_APK=$(ls prod/*.apk 2>/dev/null | head -1)
+echo "prod apk: $PROD_APK"
+"$ADB" install -r "$PROD_APK" || FAIL=1
 launch; dismiss_anr; sleep 1; shot 01-splash.png
 sleep 12; shot 02-console-login.png
 "$ADB" uninstall $PKG > /dev/null 2>&1
