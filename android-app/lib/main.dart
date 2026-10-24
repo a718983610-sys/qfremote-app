@@ -114,7 +114,7 @@ class _HomePageState extends State<HomePage> {
   bool _remindedThisSession = false;
   bool _fullscreen = false;
 
-  String get _currentVersion => _pkg?.version ?? '1.0.4';
+  String get _currentVersion => _pkg?.version ?? '1.0.5';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -514,6 +514,7 @@ class _HomePageState extends State<HomePage> {
                       onBack: () => _web?.goBack(),
                       onRefresh: () => _web?.reload(),
                       onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
+                      onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(kFriendsUrl))),
                       onProbeTap: () async {
                         final r = await _runProbe();
                         if (mounted) _snack(r.describe());
@@ -565,10 +566,10 @@ class _HomePageState extends State<HomePage> {
                             if (request.isForMainFrame == true) _enterOffline();
                           },
                           onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                            // 证书只认自家主机：逐个核对主机+端口，其余一律拒绝
+                            // 证书只认自家主机：逐个核对主机+端口（控制台 8443、好友页 8445），其余一律拒绝
                             final host = challenge.protectionSpace.host;
                             final port = challenge.protectionSpace.port;
-                            final ok = host == kServerHost && port == kServerPort;
+                            final ok = port != null && isTrustedWebViewHostPort(host, port);
                             return ServerTrustAuthResponse(
                               action: ok
                                   ? ServerTrustAuthResponseAction.PROCEED

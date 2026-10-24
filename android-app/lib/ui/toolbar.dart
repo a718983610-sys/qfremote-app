@@ -14,6 +14,7 @@ class QfToolbar extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onRefresh;
   final VoidCallback onHome;
+  final VoidCallback onFriends;
   final VoidCallback onProbeTap;
   final VoidCallback onUpdateTap;
   final void Function(String action) onMenuAction;
@@ -28,6 +29,7 @@ class QfToolbar extends StatelessWidget {
     required this.onBack,
     required this.onRefresh,
     required this.onHome,
+    required this.onFriends,
     required this.onProbeTap,
     required this.onUpdateTap,
     required this.onMenuAction,
@@ -60,6 +62,11 @@ class QfToolbar extends StatelessWidget {
             tooltip: '主页',
             icon: Icon(Icons.home_outlined, size: 21, color: iconColor),
             onPressed: onHome,
+          ),
+          IconButton(
+            tooltip: '好友',
+            icon: Icon(Icons.person_add_outlined, size: 21, color: iconColor),
+            onPressed: onFriends,
           ),
           const Spacer(),
           // 服务器状态灯（真探活，点击看最近一次结果）
