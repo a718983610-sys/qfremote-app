@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QFRemote 安卓截图 + 看护实测（GitHub macOS 模拟器里跑）。
+# QFRemote 安卓截图 + 看护实测（GitHub Ubuntu 模拟器里跑）。
 # 前置（工作流已完成）：正式包在 prod/、测试 debug 包已编译、夹具服务器已在 8791 端口运行。
 # 产出 shots/*.png 与日志；最后做断言：会话页自动点恰好 1 次、登录页 0 次。
 set -u
@@ -8,7 +8,34 @@ PKG=com.qfremote.android
 mkdir -p shots
 FAIL=0
 
-shot() { "$ADB" exec-out screencap -p > "shots/$1" 2>/dev/null; echo "shot $1 ($(wc -c < "shots/$1") bytes)"; }
+# 等系统完全开机再动手（冷启动+装包高负载下 Pixel Launcher 容易弹 ANR 框，先稳住）
+"$ADB" wait-for-device
+for i in $(seq 1 60); do
+  [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+  sleep 2
+done
+sleep 8
+
+dismiss_anr() {
+  # 画面上有「… isn't responding」系统框时，点它的 Wait，别让它挡截图
+  "$ADB" shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
+  local xml
+  xml=$("$ADB" shell cat /sdcard/ui.xml 2>/dev/null)
+  if echo "$xml" | grep -q "isn.t responding"; then
+    local bounds
+    bounds=$(echo "$xml" | tr '>' '\n' | grep 'text="Wait"' | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | head -1)
+    if [ -n "$bounds" ]; then
+      local xy
+      xy=$(echo "$bounds" | sed 's/[^0-9,]/ /g' | awk '{print int(($1+$3)/2), int(($2+$4)/2)}')
+      set -- $xy
+      echo "dismiss ANR dialog (tap Wait at $1,$2)"
+      "$ADB" shell input tap "$1" "$2" > /dev/null 2>&1
+      sleep 1
+    fi
+  fi
+}
+
+shot() { dismiss_anr; "$ADB" exec-out screencap -p > "shots/$1" 2>/dev/null; echo "shot $1 ($(wc -c < "shots/$1") bytes)"; }
 ctl() { curl -s "http://127.0.0.1:8791/ctl/$1" > /dev/null; }
 launch() {
   "$ADB" shell am force-stop $PKG > /dev/null 2>&1
@@ -31,21 +58,18 @@ PENDING_XML='<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
     <string name="flutter.pending_update_version">9.9.9</string>
 </map>'
 
-"$ADB" wait-for-device
-"$ADB" shell settings put global window_animation_scale 0 > /dev/null 2>&1
-
 echo "=== P1 正式包：启动画面 + 真实控制台登录页（不登录） ==="
 "$ADB" install -r prod/QFRemote-v1.0.4.apk || FAIL=1
-launch; sleep 1.3; shot 01-splash.png
-sleep 6; shot 02-console-login.png
+launch; dismiss_anr; sleep 1; shot 01-splash.png
+sleep 12; shot 02-console-login.png
 "$ADB" uninstall $PKG > /dev/null 2>&1
 
 echo "=== P2 测试包：会话断线看护（应自动点 1 次并恢复） ==="
 "$ADB" install -r android-app/build/app/outputs/flutter-apk/app-debug.apk || FAIL=1
 ctl fake-off; ctl session
 "$ADB" logcat -c > /dev/null 2>&1
-launch; sleep 3; shot 03-session-disconnected.png
-sleep 11; shot 04-session-recovered.png
+launch; sleep 4; shot 03-session-disconnected.png
+sleep 20; shot 04-session-recovered.png
 "$ADB" logcat -d > shots/logcat-session.txt 2>/dev/null
 CLICKS=$(grep -c "QFWATCHDOG clicked" shots/logcat-session.txt || true)
 echo "session clicks=$CLICKS"
@@ -53,26 +77,26 @@ echo "session clicks=$CLICKS"
 echo "=== P3 登录页诱饵：看护零点击 ==="
 ctl login
 "$ADB" logcat -c > /dev/null 2>&1
-launch; sleep 8; shot 05-login-page.png
+launch; sleep 10; shot 05-login-page.png
 "$ADB" logcat -d > shots/logcat-login.txt 2>/dev/null
 LOGIN_CLICKS=$(grep -c "QFWATCHDOG clicked" shots/logcat-login.txt || true)
 echo "login clicks=$LOGIN_CLICKS"
 
 echo "=== P4 更新提醒（会话内只提醒：徽标+一条提示） ==="
 ctl fake-on
-launch; sleep 6; shot 06-update-remind.png
+launch; sleep 8; shot 06-update-remind.png
 
 echo "=== P5 深灰主题 ==="
 seed_prefs "$THEME_XML"
-launch; sleep 5; shot 07-dark-theme.png
+launch; sleep 6; shot 07-dark-theme.png
 
 echo "=== P6 整页断线友好页 ==="
 ctl dead
-launch; sleep 5; shot 08-offline.png
+launch; sleep 6; shot 08-offline.png
 
 echo "=== P7 强制更新页（退出重进命中待更新） ==="
 seed_prefs "$PENDING_XML"
-launch; sleep 5; shot 09-force-update.png
+launch; sleep 6; shot 09-force-update.png
 # 找到「立即更新」按钮坐标（Flutter 语义节点）并点击
 "$ADB" shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
 BOUNDS=$("$ADB" shell cat /sdcard/ui.xml 2>/dev/null | tr '>' '\n' | grep '立即更新' | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | head -1)
@@ -84,7 +108,7 @@ else
   echo "uiautomator 没找到按钮，用估算坐标"
   "$ADB" shell input tap 540 1560 > /dev/null 2>&1
 fi
-sleep 8; shot 10-force-downloaded.png
+sleep 10; shot 10-force-downloaded.png
 
 {
   echo "session_clicks=$CLICKS (expect 1)"

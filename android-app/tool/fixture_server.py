@@ -46,6 +46,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception:
+            try:
+                self._send("fixture server error", code=500)
+            except Exception:
+                pass
+
+    def _do_GET(self):
         p = self.path.split("?")[0]
         if p == "/start.html":
             self._send(START_HTML, "text/html; charset=utf-8")
@@ -88,7 +97,8 @@ class Handler(BaseHTTPRequestHandler):
             with open(APK_PATH, "rb") as f:
                 self._send(f.read(), "application/vnd.android.package-archive")
         elif p in ("/session.html", "/login.html"):
-            with open(os.path.join(HERE, "fixtures", p[1:]), "rb") as f:
+            fname = "fixture-session.html" if p == "/session.html" else "fixture-login.html"
+            with open(os.path.join(HERE, "fixtures", fname), "rb") as f:
                 self._send(f.read(), "text/html; charset=utf-8")
         else:
             self._send("not found", code=404)

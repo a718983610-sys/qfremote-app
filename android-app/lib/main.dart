@@ -101,6 +101,8 @@ class _HomePageState extends State<HomePage> {
   bool _canGoBack = false;
 
   bool _offline = false;
+  bool _mainFrameFailed = false; // 本次主框架加载已报错：随后而来的 loadStop 是错误页，不算成功
+  bool _sessionCheckScheduled = false;
   int _offlineIdx = 0;
   int _offlineSecondsLeft = 0;
   Timer? _offlineTimer;
@@ -284,6 +286,19 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _onPageLoaded() async {
+    if (_mainFrameFailed) {
+      // 错误页的 loadStop：不算加载成功（整页断线页继续盖着，等重试成功再退场）。
+      // 只处理启动画面退场，让断线卡片露出来。
+      if (!_firstLoaded) {
+        _firstLoaded = true;
+        final elapsed = DateTime.now().difference(_bornAt).inMilliseconds;
+        if (elapsed < 850) {
+          await Future<void>.delayed(Duration(milliseconds: 850 - elapsed));
+        }
+        if (mounted) setState(() => _splashVisible = false);
+      }
+      return;
+    }
     if (_offline) _exitOffline();
     if (!_firstLoaded) {
       _firstLoaded = true;
@@ -293,6 +308,9 @@ class _HomePageState extends State<HomePage> {
         await Future<void>.delayed(Duration(milliseconds: 850 - elapsed));
       }
       if (mounted) setState(() => _splashVisible = false);
+    }
+    if (!_sessionCheckScheduled) {
+      _sessionCheckScheduled = true;
       // 打开后 2 秒查一次更新（会话内只提醒，失败安静）
       Future<void>.delayed(const Duration(seconds: 2), () {
         if (mounted) _sessionUpdateCheck();
@@ -561,9 +579,15 @@ class _HomePageState extends State<HomePage> {
                             }
                             return NavigationActionPolicy.CANCEL;
                           },
+                          onLoadStart: (controller, url) {
+                            _mainFrameFailed = false;
+                          },
                           onLoadStop: (controller, url) => _onPageLoaded(),
                           onReceivedError: (controller, request, error) {
-                            if (request.isForMainFrame == true) _enterOffline();
+                            if (request.isForMainFrame == true) {
+                              _mainFrameFailed = true;
+                              _enterOffline();
+                            }
                           },
                           onReceivedServerTrustAuthRequest: (controller, challenge) async {
                             // 证书只认自家主机：逐个核对主机+端口（控制台 8443、好友页 8445），其余一律拒绝
