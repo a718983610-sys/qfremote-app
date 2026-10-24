@@ -75,11 +75,14 @@ void main() {
       final events = <WatchdogStatus>[];
       final core = makeCore(ev, events);
       core.start();
-      // 冷却 60ms→120ms 封顶，轮询 30ms：600ms 内应点到多次但远少于轮询次数
-      await Future<void>.delayed(const Duration(milliseconds: 600));
+      // 等到至少点满 3 次（CI 机器慢，给足时间，不用固定时长赌时序）
+      await waitFor(() => ev.clicks >= 3, tries: 500);
+      final clicksSoFar = ev.clicks;
+      // 再过 400ms：有冷却节流，新增点击必然有限（无节流时 30ms 轮询会点十多次）
+      await Future<void>.delayed(const Duration(milliseconds: 400));
       core.stop();
-      expect(ev.clicks, greaterThanOrEqualTo(2));
-      expect(ev.clicks, lessThan(10));
+      expect(ev.clicks, greaterThanOrEqualTo(3));
+      expect(ev.clicks - clicksSoFar, lessThanOrEqualTo(6));
     });
 
     test('B. 登录页豁免：有密码框时绝不点、无状态事件', () async {
