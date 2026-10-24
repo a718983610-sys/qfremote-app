@@ -106,6 +106,8 @@ launch; sleep 6; shot 07-dark-theme.png
 echo "=== P6 整页断线友好页 ==="
 ctl dead
 launch; sleep 6; shot 08-offline.png
+# 慢模拟器上首次报错可能来得晚，再等一轮重试周期补一张（断线卡片应已盖住错误页）
+sleep 14; shot 08b-offline-late.png
 
 echo "=== P7 强制更新页（退出重进命中待更新） ==="
 seed_prefs "$PENDING_XML"
@@ -116,6 +118,8 @@ launch; sleep 6; shot 09-force-update.png
 echo "tap 立即更新 at 540,1415"
 "$ADB" shell input tap 540 1415 > /dev/null 2>&1
 sleep 10; shot 10-force-downloaded.png
+# 再等一会抓下载完成态（按钮变「打开安装包」）；抓不到也不影响断言
+sleep 20; shot 10b-force-done.png
 
 {
   echo "session_clicks=$CLICKS (expect 1)"
