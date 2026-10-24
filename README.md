@@ -1,6 +1,14 @@
-# QFRemote（Windows 控制端）
+# QFRemote
 
-QFRemote 是我们自有的远程控制软件：电脑装一次，之后用电脑软件或手机浏览器打开，就能连上你的电脑。
+QFRemote 是我们自有的远程控制软件：电脑装一次，之后用电脑软件、手机 App 或手机浏览器打开，就能连上你的电脑。
+
+## 安卓控制端（android-app/）
+
+Flutter 壳，与 Windows 版同口径：打开直达控制台、登录记住、断线自动重连、软件内更新（查同一份版本清单）。云端 GitHub Actions 编译，专属签名。
+
+- 手动跑构建：仓库 Actions 页选「Android 正式构建」→ Run workflow；产物在该次运行的 Artifacts 里。
+
+## Windows 控制端
 
 - 官方网站与下载：见官网（GitHub Pages，仓库 `qfremote-website`）
 - 安装包：见本仓库 Releases（只认正式版，草稿与预发布不要下载）
