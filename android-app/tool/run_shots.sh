@@ -60,7 +60,7 @@ seed_prefs() {
 }
 THEME_XML='<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <map>
-    <string name="flutter.qf_theme">dark</string>
+    <string name="flutter.theme">dark</string>
 </map>'
 PENDING_XML='<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <map>
@@ -96,6 +96,8 @@ echo "login clicks=$LOGIN_CLICKS"
 echo "=== P4 更新提醒（会话内只提醒：徽标+一条提示） ==="
 ctl fake-on
 launch; sleep 8; shot 06-update-remind.png
+# 关掉假新版：否则后面每次启动的会话检查都会重新记下待更新，把 P6 的断线页拦成强制页
+ctl fake-off
 
 echo "=== P5 深灰主题 ==="
 seed_prefs "$THEME_XML"
@@ -107,18 +109,12 @@ launch; sleep 6; shot 08-offline.png
 
 echo "=== P7 强制更新页（退出重进命中待更新） ==="
 seed_prefs "$PENDING_XML"
+ctl fake-on
 launch; sleep 6; shot 09-force-update.png
-# 找到「立即更新」按钮坐标（Flutter 语义节点）并点击
-"$ADB" shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
-BOUNDS=$("$ADB" shell cat /sdcard/ui.xml 2>/dev/null | tr '>' '\n' | grep '立即更新' | grep -o 'bounds="\[[0-9,]*\]\[[0-9,]*\]"' | head -1)
-if [ -n "$BOUNDS" ]; then
-  XY=$(echo "$BOUNDS" | sed 's/[^0-9,]/ /g' | awk '{print int(($1+$3)/2), int(($2+$4)/2)}')
-  set -- $XY; echo "tap 立即更新 at $1,$2"
-  "$ADB" shell input tap "$1" "$2" > /dev/null 2>&1
-else
-  echo "uiautomator 没找到按钮，用估算坐标"
-  "$ADB" shell input tap 540 1560 > /dev/null 2>&1
-fi
+# 点「立即更新」：pixel_6（1080x2400）下卡片按钮位置固定，直接点中心；
+# 之前从 uiautomator 解析坐标两次都偏，固定坐标更可靠
+echo "tap 立即更新 at 540,1415"
+"$ADB" shell input tap 540 1415 > /dev/null 2>&1
 sleep 10; shot 10-force-downloaded.png
 
 {
