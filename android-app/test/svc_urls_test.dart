@@ -38,7 +38,7 @@ void main() {
 
     test('管理登录地址带令牌且转义', () {
       expect(SvcUrls.instance.adminLoginUrl('a b&c'),
-          '${kAdminUrlFallback}/login?token=a+b%26c');
+          '$kAdminUrlFallback/login?token=a+b%26c');
     });
   });
 
