@@ -24,7 +24,9 @@ class ReleaseEntry {
     final seg = Uri.parse(url).pathSegments;
     if (seg.isEmpty) return 'QFRemote.apk';
     final name = seg.last.replaceAll(RegExp(r'[^\w.\- ]'), '_');
-    return name.isEmpty ? 'QFRemote.apk' : name;
+    // 深查加固：'.'/'..' 是目录名不是文件名，一律回落默认名
+    if (name.isEmpty || name == '.' || name == '..') return 'QFRemote.apk';
+    return name;
   }
 }
 

@@ -167,6 +167,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 登录 → 都不行才露登录页提示。恢复全程盖着启动画面，不闪登录页。
   // 手动退出账号是唯一人工终止：清会话、清凭据、清记住标记，此后不再自动登录。
   final _credStore = CredentialStore();
+
+  /// 凭据/快照落盘串行链（深查修复）：退出清库与紧接着的重登存凭据都是
+  /// 异步写，若并发交叉，慢到的清库会把刚存好的新凭据抹掉。所有写操作
+  /// 一律排进这条链按发生顺序执行，读操作不进链（内存镜像先行更新）。
+  Future<void> _authChain = Future<void>.value();
+
+  Future<void> _enqueueAuth(Future<void> Function() op) {
+    final run = _authChain.then((_) async {
+      try {
+        await op();
+      } catch (_) {
+        // 单步失败不许毒死整条链
+      }
+    });
+    _authChain = run;
+    return run;
+  }
   final _deviceKeyVault = DeviceKeyVault();
   final _forumSso = ForumSso();
 
@@ -407,7 +424,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<bool> _onCreateWindowInPlace(
       InAppWebViewController controller, CreateWindowAction action) async {
     final u = action.request.url;
-    if (u != null) {
+    if (u != null && (u.scheme == 'http' || u.scheme == 'https')) {
       try {
         await controller.loadUrl(urlRequest: URLRequest(url: u));
       } catch (_) {}
@@ -432,7 +449,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       InAppWebViewController controller, NavigationAction action) async {
     final url = action.request.url;
     if (url == null) return NavigationActionPolicy.CANCEL;
-    if (url.path == '/logout') _noteManualLogout();
+    // /logout 只认自有服务源：外站同名路径不许误触发手动退出清凭据
+    if (url.path == '/logout' && SvcUrls.instance.isOwnOrigin(url.toString())) {
+      _noteManualLogout();
+    }
     if (url.scheme == 'http' || url.scheme == 'https') {
       return NavigationActionPolicy.ALLOW;
     }
@@ -777,20 +797,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if (pending.rememberPassword) {
         try {
-          await _credStore.saveCredentials(pending.username, pending.password);
+          await _enqueueAuth(() => _credStore.saveCredentials(pending.username, pending.password));
           _savedCreds = SavedCredentials(
               username: pending.username, password: pending.password);
         } catch (_) {}
       } else {
         try {
-          await _credStore.clearCredentials();
+          await _enqueueAuth(() => _credStore.clearCredentials());
         } catch (_) {}
         _savedCreds = null;
       }
       if (!pending.rememberDevice && !pending.rememberPassword) {
         // 两个记住都没勾：会话快照也不留（关 App 掉登录是应有之义）
         try {
-          await _credStore.clearSession();
+          await _enqueueAuth(() => _credStore.clearSession());
         } catch (_) {}
         _savedSession = null;
       }
@@ -838,7 +858,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if ((map['xid'] ?? '').isEmpty) return;
       final snap = SessionSnapshot(cookies: map, savedAt: DateTime.now());
-      await _credStore.saveSession(snap);
+      await _enqueueAuth(() => _credStore.saveSession(snap));
       _savedSession = snap;
       _lastSnapshotAt = DateTime.now();
       debugPrint('QFLOGIN session snapshot saved (${map.keys.join(',')})');
@@ -1026,7 +1046,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _clearAuthState() async {
     try {
-      await _credStore.clearAll();
+      await _enqueueAuth(() => _credStore.clearAll());
     } catch (_) {}
     // 设备钥匙不清（L 线定版口径：退出登录不等于换设备；副本按账号存
     // 在服务端，本机钥匙留着，下个账号在本机解锁后会补写自己的副本）。
@@ -1236,7 +1256,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _handlePageDownload(DownloadStartRequest req) async {
     try {
       final cookies = await CookieManager.instance().getCookies(url: req.url);
-      final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 20));
+      // 证书校验端口跟随下载地址本身（好友源 8445 与控制台 8443 都是自家
+      // 自签证书；此前写死 8443，从好友/聊天页发起的下载会被证书校验拒掉）
+      final client = trustedHttpClient(
+          connectionTimeout: const Duration(seconds: 20), port: req.url.port);
       try {
         final request = await client.getUrl(Uri.parse(req.url.toString()));
         if (cookies.isNotEmpty) {
@@ -1254,6 +1277,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           name = seg.isNotEmpty ? seg.last : 'download.bin';
         }
         name = name.replaceAll(RegExp(r'[^\w.\- ]'), '_');
+        if (name.isEmpty || name == '.' || name == '..') name = 'download.bin';
         final file = File('${dir.path}/$name');
         final sink = file.openWrite();
         await res.pipe(sink);
@@ -1376,7 +1400,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             if (!v) {
               // 关掉记住此设备：会话快照一并清（下次打开需重新登录）
               try {
-                await _credStore.clearSession();
+                await _enqueueAuth(() => _credStore.clearSession());
               } catch (_) {}
               _savedSession = null;
             }
@@ -1385,7 +1409,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             await _settings?.setRememberPassword(v);
             if (!v) {
               try {
-                await _credStore.clearCredentials();
+                await _enqueueAuth(() => _credStore.clearCredentials());
               } catch (_) {}
               _savedCreds = null;
             }
@@ -1565,7 +1589,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             final url = action.request.url;
                             if (url == null) return NavigationActionPolicy.CANCEL;
                             // 跳登出地址 = 本人手动退出：先记下，别被自动恢复拉回来
-                            if (url.path == '/logout') _noteManualLogout();
+                            // （只认自有服务源，外站同名路径不许误触发）
+                            if (url.path == '/logout' &&
+                                SvcUrls.instance.isOwnOrigin(url.toString())) {
+                              _noteManualLogout();
+                            }
                             if (url.scheme == 'http' || url.scheme == 'https') {
                               return NavigationActionPolicy.ALLOW;
                             }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 深查加固：凭据/会话快照/设备钥匙的密文落在 flutter_secure_storage 的
+     SharedPreferences 里（解密钥匙在本机 Keystore、换机也解不开），一律
+     排除出云备份与换机迁移，不让密文离开本机。两种历史文件名都列上。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+        <exclude domain="sharedpref" path="flutter_secure_storage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+        <exclude domain="sharedpref" path="flutter_secure_storage.xml" />
+    </device-transfer>
+</data-extraction-rules>

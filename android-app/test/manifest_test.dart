@@ -29,6 +29,17 @@ void main() {
       expect(m.android?.fileName, 'QFRemote-v1.0.4.apk');
     });
 
+    test('文件名加固：异常尾段回落默认名，正常名保留', () {
+      ReleaseEntry entry(String url) => ReleaseEntry(
+          version: '1.0.0', notes: '', url: url, sha256: 'a' * 64, size: null);
+      expect(entry('https://54.248.9.192:8443/QFRemote-v2.apk').fileName,
+          'QFRemote-v2.apk');
+      final dotdot = entry('https://54.248.9.192:8443/..').fileName;
+      expect(dotdot, isNot('..'));
+      expect(dotdot, isNot('.'));
+      expect(dotdot, isNotEmpty);
+    });
+
     test('没有 android 段时 android 为 null', () {
       const body = '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha","size":1}';
       final m = ReleaseManifest.parse(body, trustedOrigin: _origin);

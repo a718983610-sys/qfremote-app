@@ -49,6 +49,34 @@ class SvcUrls {
   /// 令牌换发地址：拿控制台会话换一次性登录令牌，再打开管理页。
   String get ssoTokenUrl => '$adminUrl/api/sso-token';
 
+  /// 自有服务源集合：控制台直连、好友直连、当前解析到的通道源。
+  /// 导航策略据此识别「自家页面的 /logout」——外站同名路径不许触发
+  /// 本机手动退出（深查修复：防外链 /logout 误清凭据）。
+  Set<String> ownOrigins() {
+    final out = <String>{
+      kServerOrigin,
+      'https://$kServerHost:$kFriendsPort',
+    };
+    for (final u in [forumUrl, registerUrl, pointsUrl, adminUrl, termsUrl]) {
+      try {
+        out.add(Uri.parse(u).origin);
+      } catch (_) {
+        // 解析不了的地址不进集合
+      }
+    }
+    return out;
+  }
+
+  /// 这个地址是不是自有服务源上的（无法解析一律 false）。
+  bool isOwnOrigin(String? url) {
+    if (url == null) return false;
+    try {
+      return ownOrigins().contains(Uri.parse(url).origin);
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 管理页登录地址（带一次性令牌）。
   String adminLoginUrl(String token) =>
       '$adminUrl/login?token=${Uri.encodeQueryComponent(token)}';

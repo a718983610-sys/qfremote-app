@@ -54,7 +54,8 @@ class UpdateService {
       var received = 0;
       final sink = part.openWrite();
       try {
-        await for (final chunk in res) {
+        // 30 秒无新数据视为连接已死：抛错删半截文件，不无限挂在「正在下载」
+        await for (final chunk in res.timeout(const Duration(seconds: 30))) {
           received += chunk.length;
           sink.add(chunk);
           onProgress(
