@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import '../core/client_header.dart';
 import '../core/constants.dart';
 import '../core/manifest.dart';
 import 'probe.dart' show trustedHttpClient;
@@ -29,6 +30,7 @@ class UpdateService {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 8));
     try {
       final req = await client.getUrl(Uri.parse(kReleaseUrl));
+      applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) {
@@ -58,6 +60,7 @@ class UpdateService {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 15));
     try {
       final req = await client.getUrl(Uri.parse(entry.url));
+      applyClientVersionHeader(req);
       final res = await req.close().timeout(responseTimeout);
       if (res.statusCode != 200) {
         throw HttpException('下载失败：HTTP ${res.statusCode}');

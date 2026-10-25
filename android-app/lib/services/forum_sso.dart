@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/client_header.dart';
+
 /// 论坛免登桥（2.3.0 追加·单次登录硬门）。
 ///
 /// 现状（2026-10-25 服务器本地实测）：论坛服务没有控制台会话（xid）互认，
@@ -23,6 +25,7 @@ class ForumSso {
       final req = await client
           .getUrl(forumOrigin.resolve('/api/forum/me'))
           .timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
       if (cookieHeader.isNotEmpty) {
         req.headers.set(HttpHeaders.cookieHeader, cookieHeader);
       }
@@ -46,6 +49,7 @@ class ForumSso {
       final req = await client
           .postUrl(forumOrigin.resolve('/api/forum/login'))
           .timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode({
         'username': username,

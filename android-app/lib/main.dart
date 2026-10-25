@@ -10,6 +10,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'build_info.dart';
+import 'core/client_header.dart';
 import 'core/constants.dart';
 import 'core/license.dart';
 import 'core/login_bridge.dart';
@@ -256,7 +257,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   LicenseClient get _licenseService => _licenseClient ??=
       LicenseClient(cookieProvider: _consoleCookieHeader);
 
-  String get _currentVersion => _pkg?.version ?? '2.3.1';
+  String get _currentVersion => _pkg?.version ?? kAppVersion;
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -1554,6 +1555,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           connectionTimeout: const Duration(seconds: 20), port: req.url.port);
       try {
         final request = await client.getUrl(Uri.parse(req.url.toString()));
+        applyClientVersionHeader(request);
         if (cookies.isNotEmpty) {
           request.headers.set(HttpHeaders.cookieHeader,
               cookies.map((c) => '${c.name}=${c.value}').join('; '));

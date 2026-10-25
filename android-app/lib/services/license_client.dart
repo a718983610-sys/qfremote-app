@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/client_header.dart';
 import '../core/license.dart';
 import '../core/svc_urls.dart';
 import 'points.dart' show ConsoleCookieProvider;
@@ -40,6 +41,7 @@ class LicenseClient {
       final req = method == 'POST'
           ? await client.postUrl(uri).timeout(const Duration(seconds: 8))
           : await client.getUrl(uri).timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
       if (cookie != null) req.headers.set(HttpHeaders.cookieHeader, cookie);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (jsonBody != null) {

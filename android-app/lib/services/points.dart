@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/client_header.dart';
 import '../core/svc_urls.dart';
 
 /// 积分信息（扩展服务 /points 的 /api/me 返回）。
@@ -74,6 +75,7 @@ class ExtService {
       final req = method == 'POST'
           ? await client.postUrl(uri).timeout(const Duration(seconds: 8))
           : await client.getUrl(uri).timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.cookieHeader, cookie);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (jsonBody != null) {

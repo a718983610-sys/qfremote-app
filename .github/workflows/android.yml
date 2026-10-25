@@ -82,12 +82,12 @@ jobs:
           echo "build-tools: $BT"
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
-          cp "$APK" build/app/outputs/flutter-apk/QFRemote-v2.3.1.apk
+          cp "$APK" build/app/outputs/flutter-apk/QFRemote-v2.3.2.apk
           ls -la build/app/outputs/flutter-apk/
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: QFRemote-v2.3.1-apk
-          path: android-app/build/app/outputs/flutter-apk/QFRemote-v2.3.1.apk
+          name: QFRemote-v2.3.2-apk
+          path: android-app/build/app/outputs/flutter-apk/QFRemote-v2.3.2.apk
           if-no-files-found: error
