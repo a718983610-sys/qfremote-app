@@ -224,3 +224,65 @@ String buildLoginBridgeJs({
 })()
 ''';
 }
+
+// ================= 聊天页桥（2.3.0 追加·单次登录硬门） =================
+// 聊天页（social-svc /chat）自带会话互认：带控制台 cookie 打开即自动换令牌
+// 进会话层，不再要登录；剩下的是端到端加密钥匙解锁（设计使然，不是登录）。
+// 本桥两件事：
+//  ① 解锁视图出现且本机存有密码（勾过「记住账号密码」）→ 静默回填点解锁，
+//     每页只试一次，失败不再试（页面自己显示错误，如密码已改）；
+//  ② 解锁视图出现但没存密码 → 把标题/说明改成「聊天加密解锁」口径，
+//     写清这不是登录、是聊天加密解锁（站长 10:19 定的例外形态）。
+// 另外登录视图若意外出现（如聊天令牌彻底失效）且有已存凭据，回填提交一次。
+
+/// 聊天解锁视图在「没有已存密码」时改写的标题（例外形态文案）。
+const String kChatUnlockTitle = '聊天加密解锁';
+
+/// 聊天解锁视图在「没有已存密码」时改写的说明（例外形态文案）。
+const String kChatUnlockNotice =
+    '您已经登录，这一步不是登录。聊天记录由您的密码加密保护，输入账号密码解开后即可查看。'
+    '没有勾选「记住账号密码」时，每次打开聊天需要手动解开一次。';
+
+/// 生成聊天页桥脚本。[username]/[password] 为已存凭据（未存时传 null）：
+/// 有凭据才带回填动作，没凭据只做解锁文案对齐。
+String buildChatBridgeJs({String? username, String? password}) {
+  final hasCreds = username != null &&
+      username.isNotEmpty &&
+      password != null &&
+      password.isNotEmpty;
+  final userJs = hasCreds ? jsonEncode(username) : 'null';
+  final passJs = hasCreds ? jsonEncode(password) : 'null';
+  return '(function(){'
+      'function vis(id){var e=document.getElementById(id);if(!e)return false;'
+      'if(e.classList.contains("hidden"))return false;'
+      'var s=getComputedStyle(e);return s.display!=="none"&&s.visibility!=="hidden";}'
+      'function fill(id,v){var e=document.getElementById(id);if(!e)return;'
+      'e.value=v;e.dispatchEvent(new Event("input",{bubbles:true}));'
+      'e.dispatchEvent(new Event("change",{bubbles:true}));}'
+      'var user=$userJs,pass=$passJs;'
+      'if(vis("unlockView")){'
+      'if(pass){'
+      'if(!window.__qfUnlockTried){window.__qfUnlockTried=1;'
+      'fill("ukPass",pass);var b=document.getElementById("ukBtn");if(b)b.click();'
+      'return "unlock-submitted";}'
+      'return "unlock-tried";'
+      '}'
+      'var card=document.querySelector("#unlockView .card");'
+      'if(card){var t=card.querySelector("div");'
+      'if(t&&t.textContent.indexOf(${jsonEncode(kChatUnlockTitle)})<0)'
+      't.textContent=${jsonEncode(kChatUnlockTitle)};'
+      'var n=card.querySelector(".notice");'
+      'if(n)n.textContent=${jsonEncode(kChatUnlockNotice)};}'
+      'return "unlock-relabeled";'
+      '}'
+      'if(vis("loginView")){'
+      'if(user&&pass&&!window.__qfChatLoginTried){window.__qfChatLoginTried=1;'
+      'fill("lgUser",user);fill("lgPass",pass);'
+      'var r=document.getElementById("lgRemember");if(r)r.checked=true;'
+      'var lb=document.getElementById("lgBtn");if(lb)lb.click();'
+      'return "login-submitted";}'
+      'return "login-visible";'
+      '}'
+      'return "chat-ready";'
+      '})()';
+}

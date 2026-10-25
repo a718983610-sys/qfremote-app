@@ -19,6 +19,7 @@ import 'core/update_policy.dart';
 import 'core/version.dart';
 import 'core/watchdog_core.dart';
 import 'services/credential_store.dart';
+import 'services/forum_sso.dart';
 import 'services/points.dart';
 import 'services/probe.dart';
 import 'services/settings.dart';
@@ -150,6 +151,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 登录 → 都不行才露登录页提示。恢复全程盖着启动画面，不闪登录页。
   // 手动退出账号是唯一人工终止：清会话、清凭据、清记住标记，此后不再自动登录。
   final _credStore = CredentialStore();
+  final _forumSso = ForumSso();
   final _autoLogin = AutoLoginController();
   SavedCredentials? _savedCreds;
   SessionSnapshot? _savedSession;
@@ -282,6 +284,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ? SvcUrls.instance.adminLoginUrl(token)
         : SvcUrls.instance.adminUrl;
     _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+  }
+
+  /// 打开论坛（2.3.0 追加·单次登录硬门）：论坛服务只认自家会话 cookie，
+  /// 没有会话且本机存有凭据时，先用凭据换回论坛会话写入 WebView 再打开，
+  /// 用户不再被要求二次登录；换不到就照常打开（论坛页自行处理）。
+  Future<void> _openForum() async {
+    final forumUrl = SvcUrls.instance.forumUrl;
+    try {
+      final pageUri = Uri.parse(forumUrl);
+      final origin = Uri(
+        scheme: pageUri.scheme,
+        host: pageUri.host,
+        port: pageUri.hasPort ? pageUri.port : null,
+      );
+      final cookieHeader = await _consoleCookieHeader() ?? '';
+      final user = await _forumSso.me(origin, cookieHeader);
+      if (user == null &&
+          !(_settings?.credentialBlocked ?? false) &&
+          !(_autoLogin.suppressedByManualLogout)) {
+        final creds = _savedCreds ?? await _credStore.loadCredentials();
+        if (creds != null) {
+          final frm = await _forumSso.login(
+              origin, creds.username, creds.password);
+          if (frm != null) {
+            await CookieManager.instance().setCookie(
+              url: WebUri(origin.toString()),
+              name: 'qfr_frm',
+              value: frm,
+              path: '/',
+            );
+          }
+        }
+      }
+    } catch (_) {
+      // 免登桥失败不挡路：照常打开论坛页
+    }
+    if (!mounted) return;
+    _web?.loadUrl(urlRequest: URLRequest(url: WebUri(forumUrl)));
   }
 
   /// 启动门（更新政策）：落盘有待更新时先取清单裁决——
@@ -417,9 +457,50 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 聊天页判定：好友服务 /chat 路径（直连 8445 与隧道同源两种形态）。
+  bool get _isChatPage {
+    if (kHasTestUrl) return false;
+    final uri = Uri.tryParse(_currentUrl);
+    if (uri == null) return false;
+    return uri.path == '/chat' || uri.path.startsWith('/chat/');
+  }
+
+  /// 聊天页一拍：注入聊天桥——有已存密码则静默解锁，没有则对齐
+  /// 「聊天加密解锁」文案（详见 login_bridge.dart 的聊天桥说明）。
+  Future<void> _chatTick() async {
+    final web = _web;
+    if (web == null) return;
+    String? user, pass;
+    if ((_settings?.rememberPassword ?? false) &&
+        !(_settings?.credentialBlocked ?? false) &&
+        !_autoLogin.suppressedByManualLogout) {
+      final creds = _savedCreds ?? await _credStore.loadCredentials();
+      if (creds != null) {
+        user = creds.username;
+        pass = creds.password;
+      }
+    }
+    try {
+      final r = await web.evaluateJavascript(
+          source: buildChatBridgeJs(username: user, password: pass));
+      debugPrint('QFCHAT bridge -> $r');
+    } catch (_) {
+      // 页面正在跳转：下一拍再来
+    }
+  }
+
   Future<void> _loginTick() async {
     if (_loginTickBusy || !mounted || _web == null) return;
     if (!_gateDone || _forceEntry != null || _offline) return;
+    if (_isChatPage) {
+      _loginTickBusy = true;
+      try {
+        await _chatTick();
+      } finally {
+        _loginTickBusy = false;
+      }
+      return;
+    }
     if (!_isConsolePage) return;
     _loginTickBusy = true;
     try {
@@ -1084,7 +1165,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       onRefresh: () => _web?.reload(),
                       onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
                       onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl))),
-                      onForum: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.forumUrl))),
+                      onForum: _openForum,
                       onRegister: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.registerUrl))),
                       showAdmin: _isAdmin,
                       onProbeTap: () async {
