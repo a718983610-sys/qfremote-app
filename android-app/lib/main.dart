@@ -416,7 +416,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           forceLogoutSignal:
               report.deviceForceLogout && !report.reviewPending,
         );
-        if (await _applyGateAction(action)) return;
+        if (await _applyGateAction(action)) {
+          return;
+        }
       }
       final me = await _licenseService.fetchLicenseMe();
       if (!mounted) return;
@@ -428,8 +430,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           decision: me.decision,
           forceLogoutSignal: me.forceLogout,
         );
-        if (await _applyGateAction(action,
-            gateCodeHint: me.gateCode)) return;
+        if (await _applyGateAction(action, gateCodeHint: me.gateCode)) {
+          return;
+        }
       }
       if (report == null && me == null && !_licenseErrorSnacked) {
         _licenseErrorSnacked = true;
