@@ -44,24 +44,24 @@ void main() {
     });
   });
 
-  group('聊天桥脚本', () {
-    test('有凭据：含静默解锁与登录回填、每页一次的闸', () {
+  group('聊天桥脚本（追加八：只剩登录兜底，解锁框相关全撤）', () {
+    test('有凭据：只含登录回填与每页一次的闸，绝不碰解锁框元素', () {
       final js = buildChatBridgeJs(username: 'user1', password: 'pass1');
-      expect(js, contains('ukPass'));
-      expect(js, contains('ukBtn'));
-      expect(js, contains('__qfUnlockTried'));
       expect(js, contains('lgUser'));
       expect(js, contains('lgBtn'));
       expect(js, contains('__qfChatLoginTried'));
       expect(js, contains('"pass1"'));
+      // 解锁框全删口径：桥脚本不得出现解锁输入/按钮/改写文案任何痕迹
+      expect(js, isNot(contains('ukPass')));
+      expect(js, isNot(contains('ukBtn')));
+      expect(js, isNot(contains('unlockView')));
+      expect(js, isNot(contains('聊天加密解锁')));
     });
 
-    test('无凭据：不带密码、只改「聊天加密解锁」文案', () {
+    test('无凭据：不带密码、不做任何文案改写', () {
       final js = buildChatBridgeJs();
       expect(js, contains('var user=null,pass=null'));
-      expect(js, contains(kChatUnlockTitle));
-      expect(js, contains('这一步不是登录'));
-      expect(js, contains('unlock-relabeled'));
+      expect(js, isNot(contains('unlock')));
     });
 
     test('空字符串凭据按没存处理', () {

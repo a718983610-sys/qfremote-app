@@ -225,26 +225,17 @@ String buildLoginBridgeJs({
 ''';
 }
 
-// ================= 聊天页桥（2.3.0 追加·单次登录硬门） =================
+// ================= 聊天页桥（2.3.0 追加八·解锁框全删后的口径） =================
 // 聊天页（social-svc /chat）自带会话互认：带控制台 cookie 打开即自动换令牌
-// 进会话层，不再要登录；剩下的是端到端加密钥匙解锁（设计使然，不是登录）。
-// 本桥两件事：
-//  ① 解锁视图出现且本机存有密码（勾过「记住账号密码」）→ 静默回填点解锁，
-//     每页只试一次，失败不再试（页面自己显示错误，如密码已改）；
-//  ② 解锁视图出现但没存密码 → 把标题/说明改成「聊天加密解锁」口径，
-//     写清这不是登录、是聊天加密解锁（站长 10:19 定的例外形态）。
-// 另外登录视图若意外出现（如聊天令牌彻底失效）且有已存凭据，回填提交一次。
+// 进会话层，不再要登录。**加密解锁全程无界面**：解锁编排在 chat_device.dart
+// （顺序＝会话托管取回 → 设备副本 → 已存凭据调 qfShellUnlock，均是程序调用，
+// 不碰任何输入框）；解锁框/解锁页相关旧实现（回填 ukPass、改写「聊天加密
+// 解锁」标题文案）已按站长 11:54 令全部撤除，例外取消。
+// 本桥只剩一件事：登录视图若意外出现（如聊天令牌彻底失效＝未登录，不是
+// 解锁）且有已存凭据，回填提交一次——这是账号登录兜底，不是加密解锁。
 
-/// 聊天解锁视图在「没有已存密码」时改写的标题（例外形态文案）。
-const String kChatUnlockTitle = '聊天加密解锁';
-
-/// 聊天解锁视图在「没有已存密码」时改写的说明（例外形态文案）。
-const String kChatUnlockNotice =
-    '您已经登录，这一步不是登录。聊天记录由您的密码加密保护，输入账号密码解开后即可查看。'
-    '没有勾选「记住账号密码」时，每次打开聊天需要手动解开一次。';
-
-/// 生成聊天页桥脚本。[username]/[password] 为已存凭据（未存时传 null）：
-/// 有凭据才带回填动作，没凭据只做解锁文案对齐。
+/// 生成聊天页登录兜底桥脚本。[username]/[password] 为已存凭据（未存时传
+/// null）：仅当聊天页登录视图可见时回填提交一次，其余情况不动页面。
 String buildChatBridgeJs({String? username, String? password}) {
   final hasCreds = username != null &&
       username.isNotEmpty &&
@@ -260,21 +251,6 @@ String buildChatBridgeJs({String? username, String? password}) {
       'e.value=v;e.dispatchEvent(new Event("input",{bubbles:true}));'
       'e.dispatchEvent(new Event("change",{bubbles:true}));}'
       'var user=$userJs,pass=$passJs;'
-      'if(vis("unlockView")){'
-      'if(pass){'
-      'if(!window.__qfUnlockTried){window.__qfUnlockTried=1;'
-      'fill("ukPass",pass);var b=document.getElementById("ukBtn");if(b)b.click();'
-      'return "unlock-submitted";}'
-      'return "unlock-tried";'
-      '}'
-      'var card=document.querySelector("#unlockView .card");'
-      'if(card){var t=card.querySelector("div");'
-      'if(t&&t.textContent.indexOf(${jsonEncode(kChatUnlockTitle)})<0)'
-      't.textContent=${jsonEncode(kChatUnlockTitle)};'
-      'var n=card.querySelector(".notice");'
-      'if(n)n.textContent=${jsonEncode(kChatUnlockNotice)};}'
-      'return "unlock-relabeled";'
-      '}'
       'if(vis("loginView")){'
       'if(user&&pass&&!window.__qfChatLoginTried){window.__qfChatLoginTried=1;'
       'fill("lgUser",user);fill("lgPass",pass);'

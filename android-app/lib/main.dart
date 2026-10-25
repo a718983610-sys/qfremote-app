@@ -628,40 +628,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return uri.path == '/chat' || uri.path.startsWith('/chat/');
   }
 
-  /// 聊天页一拍（对好友槽的控制器）：顺序按 L 线定版口径——
-  /// ① 设备静默解锁优先（探 qfChatState → planChatDevice 决策 → 递入设备
-  ///    密钥，页面自行解开设备包裹副本；已解锁无副本时后台补写）；
-  /// ② 密码路径兜底（聊天桥：已存凭据回填解锁/登录；无凭据时文案对齐）。
+  /// 聊天页一拍（对好友槽的控制器）：解锁编排按追加八绝对口径——
+  /// 会话托管取回 → 设备副本 → 已存凭据（仅迁移源、程序调用无界面），
+  /// 全程不出现任何输密码解锁界面；解锁后无托管/设备副本时后台补发补写。
+  /// 编排裁决在 chat_device.dart 的 planChatUnlock；本拍没走解锁步时才落
+  /// 登录兜底桥（那是聊天令牌失效＝未登录，与解锁无关）。
   Future<void> _chatTick() async {
     final web = _friendsWeb;
     if (web == null) return;
-    try {
-      final raw = await web.evaluateJavascript(source: kChatStateProbeJs);
-      final st = parseChatState(raw?.toString());
-      if (st != null) {
-        final action = planChatDevice(
-          manualLogout: _autoLogin.suppressedByManualLogout,
-          hasToken: st.hasToken,
-          locked: st.locked,
-          unlocked: st.unlocked,
-          hasShellDeviceCopy: st.hasShellDeviceCopy,
-        );
-        if (action == ChatDeviceAction.deviceUnlock ||
-            action == ChatDeviceAction.deviceEnroll) {
-          final key = await _deviceKeyVault.getOrCreate();
-          final script = action == ChatDeviceAction.deviceUnlock
-              ? buildChatDeviceUnlockScript(key)
-              : buildChatDeviceEnrollScript(key);
-          final r = await web.evaluateJavascript(source: script);
-          debugPrint('QFCHAT device -> $action $r');
-          if (action == ChatDeviceAction.deviceUnlock) {
-            return; // 已递入，本拍不再走密码路径，等页面自行进入会话
-          }
-        }
-      }
-    } catch (_) {
-      // 页面未就绪（钩子还没挂）：落到密码路径桥，本拍继续
-    }
+    // 已存凭据先备好（裁决要用；凭据在这里只是解锁迁移源，不进任何界面）
     String? user, pass;
     if ((_settings?.rememberPassword ?? false) &&
         !(_settings?.credentialBlocked ?? false) &&
@@ -672,6 +647,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         pass = creds.password;
       }
     }
+    var orchestrated = false;
+    try {
+      final raw = await web.evaluateJavascript(source: kChatStateProbeJs);
+      final st = parseChatState(raw?.toString());
+      if (st != null) {
+        final capsRaw = await web.evaluateJavascript(source: kChatCapsProbeJs);
+        final caps = parseChatCaps(capsRaw?.toString());
+        final step = planChatUnlock(
+          manualLogout: _autoLogin.suppressedByManualLogout,
+          state: st,
+          caps: caps,
+          hasCreds: pass != null && pass.isNotEmpty,
+        );
+        switch (step) {
+          case ChatUnlockStep.custodyUnlock:
+            final r = await web.evaluateJavascript(
+                source: buildChatCustodyUnlockScript());
+            debugPrint('QFCHAT custody-unlock -> $r');
+            orchestrated = true;
+          case ChatUnlockStep.deviceUnlock:
+          case ChatUnlockStep.deviceEnroll:
+            final key = await _deviceKeyVault.getOrCreate();
+            final script = step == ChatUnlockStep.deviceUnlock
+                ? buildChatDeviceUnlockScript(key)
+                : buildChatDeviceEnrollScript(key);
+            final r = await web.evaluateJavascript(source: script);
+            debugPrint('QFCHAT $step -> $r');
+            orchestrated = true;
+          case ChatUnlockStep.credentialUnlock:
+            final r = await web.evaluateJavascript(
+                source: buildChatCredentialUnlockScript(pass!));
+            debugPrint('QFCHAT credential-unlock -> $r');
+            orchestrated = true;
+          case ChatUnlockStep.custodyEnroll:
+            final r = await web.evaluateJavascript(
+                source: buildChatCustodyEnrollScript());
+            debugPrint('QFCHAT custody-enroll -> $r');
+            orchestrated = true;
+          case ChatUnlockStep.none:
+            break;
+        }
+      }
+    } catch (_) {
+      // 页面未就绪（钩子还没挂）：落到登录兜底桥，本拍继续
+    }
+    if (orchestrated) return; // 已走解锁步的拍不再叠加注入
     try {
       final r = await web.evaluateJavascript(
           source: buildChatBridgeJs(username: user, password: pass));
