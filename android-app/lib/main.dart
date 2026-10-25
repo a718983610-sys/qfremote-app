@@ -537,6 +537,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return _licenseService.claimKey(key);
   }
 
+  /// 打开换绑申诉页（§11.9）：由壳自动带入本机设备码，用户不手填。
+  Future<void> _openRebind() async {
+    _deviceCode ??= await _deviceCodeStore.getOrCreate();
+    await _openShellWeb('申诉换绑设备',
+        '${SvcUrls.instance.rebindUrl}?dc=${Uri.encodeQueryComponent(_deviceCode ?? '')}&platform=mobile&ch=android');
+  }
+
   /// 在壳内打开自有网页（购买/查询/申诉/客服）：先移植会话，再推壳内页。
   Future<void> _openShellWeb(String title, String url) async {
     await _transplantSessionToExt();
@@ -872,6 +879,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         } else if (target == 'status') {
           unawaited(
               _openShellWeb('查询密钥', SvcUrls.instance.licenseStatusUrl));
+        } else if (target == 'rebind') {
+          unawaited(_openRebind());
         }
       },
     );
@@ -1825,6 +1834,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         },
         onAppeal: () => _openShellWeb('提交申诉',
             '${SvcUrls.instance.appealUrl}?u=${Uri.encodeQueryComponent(_gateUsername)}'),
+        onRebind: () => unawaited(_openRebind()),
         onSupport: () =>
             _openShellWeb('智能客服', '${SvcUrls.instance.extOrigin}/support'),
         onLogout: _manualLogoutFromMenu,

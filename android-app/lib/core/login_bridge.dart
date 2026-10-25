@@ -26,8 +26,10 @@ const String kHandlerManualLogout = 'qfManualLogout';
 
 /// JS 处理器名：登录页许可入口导航（2.3.1 登录页版式 16:37 定版——
 /// 登录/注册区最后一行「购买密钥」黑底白字、其下「查询密钥」蓝色无边框
-/// 文字链；点击经本处理器回原生层，由原生层在壳内打开 /purchase 或
-/// /license/status，不许整页外跳）。回传 {target: 'purchase'|'status'}。
+/// 文字链；其下另有「申诉换绑设备」文字链（§11.9，与查询密钥同式）；
+/// 点击经本处理器回原生层，由原生层在壳内打开 /purchase、/license/status
+/// 或带本机设备码打开 /license/rebind，不许整页外跳）。
+/// 回传 {target: 'purchase'|'status'|'rebind'}。
 const String kHandlerLicenseNav = 'qfLicenseNav';
 
 /// 登录页探针结果。
@@ -215,6 +217,11 @@ String buildLoginBridgeJs({
   // 重复注入安全（qfWired / id 守卫）。
   var srvBuy = document.getElementById('qfBuyKeyRow');
   var srvQuery = document.getElementById('qfQueryKeyRow');
+  var srvRebind = document.getElementById('qfRebindRow');
+  if (srvRebind && !srvRebind.dataset.qfWired) {
+    srvRebind.dataset.qfWired = '1';
+    srvRebind.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'rebind' }); });
+  }
   if (srvBuy || srvQuery) {
     if (srvBuy && !srvBuy.dataset.qfWired) {
       srvBuy.dataset.qfWired = '1';
@@ -239,8 +246,14 @@ String buildLoginBridgeJs({
     query.textContent = '查询密钥';
     query.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0';
     query.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'status' }); });
+    var rebind = document.createElement('div');
+    rebind.id = 'qfRebindRowShell';
+    rebind.textContent = '申诉换绑设备';
+    rebind.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:4px 0 2px 0;cursor:pointer;background:none;border:0';
+    rebind.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'rebind' }); });
     lbox.appendChild(buy);
     lbox.appendChild(query);
+    lbox.appendChild(rebind);
     panel.appendChild(lbox);
   }
   if (!FILL || !HAS_SAVED) return 'hooks-only';

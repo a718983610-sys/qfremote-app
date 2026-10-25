@@ -143,6 +143,21 @@ void main() {
           isFalse);
     });
 
+    test('G3 带换绑入口（§11.9），其余状态不带', () {
+      expect(
+          gateCopyFor(const LicenseDecision(allow: false, code: 'G3'))!
+              .hasRebind,
+          isTrue);
+      expect(
+          gateCopyFor(const LicenseDecision(allow: false, code: 'G1'))!
+              .hasRebind,
+          isFalse);
+      expect(
+          gateCopyFor(const LicenseDecision(allow: false, code: 'G4'))!
+              .hasRebind,
+          isFalse);
+    });
+
     test('BAN_PERM 主按钮申诉；B6 用审核认定事由', () {
       final c = gateCopyFor(const LicenseDecision(
           allow: false, code: 'BAN_PERM', banCode: 'B6'))!;
@@ -286,6 +301,21 @@ void main() {
       expect(js, contains('#2470E0')); // 查询链蓝字
       expect(js, contains('qfBuyKeyRow')); // 服务端已有行时接管点击
     });
+
+    test('桥脚本含换绑入口（§11.9）：服务端行接管＋补注入行＋rebind 回传', () {
+      final js = buildLoginBridgeJs(
+        savedUsername: null,
+        savedPassword: null,
+        rememberPasswordChecked: false,
+        rememberDeviceChecked: false,
+        fillSaved: false,
+      );
+      expect(js, contains('申诉换绑设备'));
+      expect(js, contains('qfRebindRow')); // 服务端已有行时接管点击
+      expect(js, contains("'rebind'"));
+      expect(SvcUrls.instance.rebindUrl,
+          '${SvcUrls.instance.extOrigin}/license/rebind');
+    });
   });
 
   group('拦截面 widget（G1）', () {
@@ -324,6 +354,30 @@ void main() {
       expect(claimed, 'QFR8K-M2X9P-7W4TD-H6N3C-V5YQZ');
       expect(find.text('领取成功。'), findsOneWidget);
       expect(rechecks, 1); // 领取成功后复查消解拦截
+    });
+
+    testWidgets('G3 态：换绑入口可见且可点（§11.9）', (tester) async {
+      var rebinds = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: LicenseGatePage(
+          palette: const QfPalette(QfThemeMode.blue),
+          username: 'u1',
+          copy: gateCopyFor(const LicenseDecision(
+              allow: false, code: 'G3', enforce: true))!,
+          onClaim: null,
+          onPurchase: () {},
+          onAppeal: () {},
+          onSupport: () {},
+          onLogout: () {},
+          onRecheck: () {},
+          onRebind: () => rebinds++,
+        ),
+      ));
+      expect(find.text('设备名额已满'), findsOneWidget);
+      await tester.ensureVisible(find.text('申诉换绑设备'));
+      await tester.pump();
+      await tester.tap(find.text('申诉换绑设备'));
+      expect(rebinds, 1);
     });
 
     testWidgets('封禁态：申诉主按钮＋申诉入口可达、无激活框', (tester) async {

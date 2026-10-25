@@ -207,12 +207,16 @@ class GateCopy {
   /// G1/G2/G5 附转赠领取指引（设计稿 L16）。
   final bool hasTransferGuide;
 
+  /// G3 附「申诉换绑设备」入口（设计稿 §11.9 定版）。
+  final bool hasRebind;
+
   const GateCopy({
     required this.title,
     required this.body,
     required this.primary,
     this.hasClaimBox = false,
     this.hasTransferGuide = false,
+    this.hasRebind = false,
   });
 }
 
@@ -253,11 +257,12 @@ GateCopy? gateCopyFor(LicenseDecision d) {
         hasClaimBox: true,
         hasTransferGuide: true,
       );
-    case 'G3': // L10
+    case 'G3': // L10（正文逐字不变；另加「申诉换绑设备」入口，§11.9 定版）
       return const GateCopy(
         title: '设备名额已满',
         body: '本设备尚未绑定密钥。您的密钥已绑定一台电脑与一部手机，如需在本设备使用，请购买新密钥。',
         primary: GatePrimary.purchase,
+        hasRebind: true,
       );
     case 'G4': // L13
       return const GateCopy(

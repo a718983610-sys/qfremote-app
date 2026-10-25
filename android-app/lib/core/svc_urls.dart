@@ -95,6 +95,9 @@ class SvcUrls {
   /// 账户状态查询页（登录页「查询密钥」落点，§十）。
   String get licenseStatusUrl => '$extOrigin/license/status';
 
+  /// 换绑申诉页（§11.9；打开时由壳带入本机设备码，见 main.dart _openRebind）。
+  String get rebindUrl => '$extOrigin/license/rebind';
+
   /// 申诉页（既有 /appeal 通道，全状态可达）。
   String get appealUrl => '$extOrigin/appeal';
 

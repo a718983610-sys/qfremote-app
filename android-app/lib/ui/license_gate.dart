@@ -19,6 +19,9 @@ class LicenseGatePage extends StatefulWidget {
   final VoidCallback onLogout;
   final VoidCallback onRecheck;
 
+  /// G3 时的「申诉换绑设备」入口（§11.9）；为 null 时不显示。
+  final VoidCallback? onRebind;
+
   const LicenseGatePage({
     super.key,
     required this.palette,
@@ -30,6 +33,7 @@ class LicenseGatePage extends StatefulWidget {
     required this.onSupport,
     required this.onLogout,
     required this.onRecheck,
+    this.onRebind,
   });
 
   @override
@@ -192,6 +196,11 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                 ),
                 child: const Text('提交申诉',
                     style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700)),
+              ),
+            if (copy.hasRebind && widget.onRebind != null)
+              TextButton(
+                onPressed: widget.onRebind,
+                child: const Text('申诉换绑设备'),
               ),
             const SizedBox(height: 6),
             TextButton(
