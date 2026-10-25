@@ -21,11 +21,13 @@ class SvcUrls {
   static const _kRegister = 'svc_register_url';
   static const _kPoints = 'svc_points_url';
   static const _kAdmin = 'svc_admin_url';
+  static const _kTerms = 'svc_terms_url';
 
   String? _forum;
   String? _register;
   String? _points;
   String? _admin;
+  String? _terms;
   bool _loaded = false;
   Future<void>? _resolving;
 
@@ -34,6 +36,7 @@ class SvcUrls {
 
   String get forumUrl => _forum ?? kForumUrl;
   String get registerUrl => _register ?? kRegisterUrl;
+  String get termsUrl => _terms ?? kTermsUrl;
   String get pointsUrl => _points ?? kPointsUrlFallback;
   String get adminUrl => _admin ?? kAdminUrlFallback;
 
@@ -58,14 +61,14 @@ class SvcUrls {
   static Map<String, String> parseProductWeb(String body) {
     final root = jsonDecode(body);
     if (root is! Map<String, dynamic>) {
-      throw const FormatException('清单格式不对');
+      throw const FormatException('更新清单格式不正确');
     }
     final web = root['web'];
     if (web is! Map<String, dynamic>) {
-      throw const FormatException('清单缺 web 字段');
+      throw const FormatException('更新清单缺少服务地址配置');
     }
     final out = <String, String>{};
-    for (final key in ['forumUrl', 'registerUrl', 'pointsUrl', 'adminUrl']) {
+    for (final key in ['forumUrl', 'registerUrl', 'pointsUrl', 'adminUrl', 'termsUrl']) {
       final v = web[key];
       if (_usable(v is String ? v : null)) out[key] = v as String;
     }
@@ -88,6 +91,7 @@ class SvcUrls {
         }
         if (_usable(prefs.getString(_kPoints))) _points = prefs.getString(_kPoints);
         if (_usable(prefs.getString(_kAdmin))) _admin = prefs.getString(_kAdmin);
+        if (_usable(prefs.getString(_kTerms))) _terms = prefs.getString(_kTerms);
       }
       final fetched = await _fetchProductWeb();
       if (fetched == null) return;
@@ -102,6 +106,7 @@ class SvcUrls {
       apply(_kRegister, fetched['registerUrl'], (v) => _register = v);
       apply(_kPoints, fetched['pointsUrl'], (v) => _points = v);
       apply(_kAdmin, fetched['adminUrl'], (v) => _admin = v);
+      apply(_kTerms, fetched['termsUrl'], (v) => _terms = v);
     } catch (_) {
       // 拉不到/解析失败：一律安静走缓存与兜底，入口永不因此不可用。
     }
