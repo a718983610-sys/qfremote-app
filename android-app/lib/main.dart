@@ -223,7 +223,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   ExtService get _extService =>
       _ext ??= ExtService(cookieProvider: _consoleCookieHeader);
 
-  String get _currentVersion => _pkg?.version ?? '2.2.0';
+  String get _currentVersion => _pkg?.version ?? '2.3.0';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
