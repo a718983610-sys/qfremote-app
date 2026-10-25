@@ -398,7 +398,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         allowsInlineMediaPlayback: true,
         iframeAllow: 'fullscreen',
         applicationNameForUserAgent: 'QFRemote',
+        // target=_blank / window.open 不另开窗：onCreateWindow 里就地打开
+        supportMultipleWindows: true,
       );
+
+  /// 新窗口请求（target=_blank 等）就地打开：不跳外部浏览器、不丢当前页
+  /// 上下文（页面返回键仍可回）。返回 false＝不创建新窗口。
+  Future<bool> _onCreateWindowInPlace(
+      InAppWebViewController controller, CreateWindowAction action) async {
+    final u = action.request.url;
+    if (u != null) {
+      try {
+        await controller.loadUrl(urlRequest: URLRequest(url: u));
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  /// 槽内内容页（好友/聊天/论坛）加载完成：藏掉页面自带顶/底栏（壳框架
+  /// 即定版框架，见 slot_nav.dart 的口径说明），功能与内容不动。
+  Future<void> _injectShellChrome(
+      InAppWebViewController controller, WebUri? url) async {
+    if (!isShellContentPage(url?.toString())) return;
+    try {
+      await controller.evaluateJavascript(source: buildShellChromeHideScript());
+    } catch (_) {
+      // 页面已切走：下一页加载完成时再注入
+    }
+  }
 
   /// 槽内导航口径（与控制台一致）：跳登出地址＝手动退出；只放行 http/https。
   Future<NavigationActionPolicy?> _slotUrlPolicy(
@@ -1364,6 +1391,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             }
           },
           onCheckUpdate: () => _sessionUpdateCheck(manual: true),
+          onLogout: () {
+            Navigator.of(context).pop();
+            _manualLogoutFromMenu();
+          },
           onOpenTerms: () {
             Navigator.of(context).pop();
             _activateSlot(AppSlot.devices);
@@ -1519,8 +1550,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             allowsInlineMediaPlayback: true,
                             iframeAllow: 'fullscreen',
                             applicationNameForUserAgent: 'QFRemote',
+                            supportMultipleWindows: true,
                             // 明文流量开关由清单管（main 关、debug 为测试夹具开），插件无此项
                           ),
+                          onCreateWindow: _onCreateWindowInPlace,
                           onWebViewCreated: (controller) {
                             _web = controller;
                             _evaluator.controller = controller;
@@ -1604,6 +1637,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             if (_chromeVisible) _maybeLoadSlot(AppSlot.friends);
                           },
                           shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onCreateWindow: _onCreateWindowInPlace,
+                          onLoadStop: _injectShellChrome,
                           onUpdateVisitedHistory: (controller, url, isReload) async {
                             if (url != null) _friendsCurrentUrl = url.toString();
                             final can = await controller.canGoBack();
@@ -1624,6 +1659,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             if (_chromeVisible) _maybeLoadSlot(AppSlot.forum);
                           },
                           shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onCreateWindow: _onCreateWindowInPlace,
+                          onLoadStop: _injectShellChrome,
                           onUpdateVisitedHistory: (controller, url, isReload) async {
                             final can = await controller.canGoBack();
                             if (mounted) setState(() => _forumCanGoBack = can);

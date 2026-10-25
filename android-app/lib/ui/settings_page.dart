@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'frame.dart';
+import 'logout_confirm.dart';
 import 'theme.dart';
 
 /// 主题选择：跟随系统不是一个 QfThemeMode，用独立枚举表达三态。
@@ -21,6 +22,9 @@ class SettingsPage extends StatefulWidget {
   final VoidCallback onCheckUpdate;
   final VoidCallback onOpenTerms;
 
+  /// 正式「退出登录」入口（追加十）：确认后走主框架手动退出收口。
+  final VoidCallback onLogout;
+
   const SettingsPage({
     super.key,
     required this.palette,
@@ -33,6 +37,7 @@ class SettingsPage extends StatefulWidget {
     required this.onToggleRememberPassword,
     required this.onCheckUpdate,
     required this.onOpenTerms,
+    required this.onLogout,
   });
 
   @override
@@ -172,6 +177,18 @@ class _SettingsPageState extends State<SettingsPage> {
                     last: true,
                   ),
                 ]),
+                _section('账号'),
+                _group([
+                  _row(
+                    title: '退出账号',
+                    sub: '清除本机保存的登录信息',
+                    titleColor: QfPalette.probeBad,
+                    trailing: Icon(Icons.chevron_right, size: 18, color: p.onCardDim),
+                    onTap: () => confirmAndLogout(context,
+                        palette: p, onLogout: widget.onLogout),
+                    last: true,
+                  ),
+                ]),
               ],
             ),
           ),
@@ -206,6 +223,7 @@ class _SettingsPageState extends State<SettingsPage> {
     required Widget trailing,
     VoidCallback? onTap,
     bool last = false,
+    Color? titleColor,
   }) {
     final p = widget.palette;
     return InkWell(
@@ -221,7 +239,7 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: TextStyle(color: p.onCard, fontSize: 15, fontWeight: FontWeight.w600)),
+                  Text(title, style: TextStyle(color: titleColor ?? p.onCard, fontSize: 15, fontWeight: FontWeight.w600)),
                   if (sub != null) ...[
                     const SizedBox(height: 2),
                     Text(sub, style: TextStyle(color: p.onCardDim, fontSize: 12.5)),

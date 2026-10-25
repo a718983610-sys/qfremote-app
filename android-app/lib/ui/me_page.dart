@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/points.dart';
+import 'logout_confirm.dart';
 import 'theme.dart';
 
 /// 「我的」页（2.3.0 定版样图 m09）：个人卡＋使用时长/积分双统计卡＋账号行。
@@ -183,7 +184,8 @@ class _MePageState extends State<MePage> {
                   title: '退出账号',
                   titleColor: QfPalette.probeBad,
                   sub: '退出后记住的密码会一起清掉',
-                  onTap: widget.onLogout,
+                  onTap: () => confirmAndLogout(context,
+                      palette: p, onLogout: widget.onLogout),
                 ),
               ],
             ),

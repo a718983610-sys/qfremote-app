@@ -317,6 +317,7 @@ void main() {
           onToggleRememberPassword: (_) {},
           onCheckUpdate: () {},
           onOpenTerms: () {},
+          onLogout: () {},
         ),
       ));
       await tester.pump();

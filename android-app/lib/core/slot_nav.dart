@@ -46,3 +46,33 @@ class SlotLoadTracker {
 
   void invalidateAll() => _loaded.clear();
 }
+
+/// 壳内内容页路径（好友/聊天/论坛）：这些页自带一套浏览器形态的顶栏
+/// （header.appbar）与移动底栏（nav.tabbar），在 App 里与壳框架（顶栏＋
+/// 底部标签）重复。定版样图 m04–m06 的口径是壳框架当框、页面只出内容，
+/// 故壳在槽内加载这些页时注入一段样式藏掉页面自带框，并把页面为固定
+/// 顶栏预留的 --topbar-h 归零（内容上移、板块粘性定位自动跟随）。
+/// 页面本体与功能一概不动（同一页面、同一模板）。
+bool isShellContentPage(String? url) {
+  if (url == null) return false;
+  final path = Uri.tryParse(url)?.path ?? '';
+  return path == '/friends' ||
+      path == '/chat' ||
+      path.startsWith('/chat/') ||
+      path == '/forum' ||
+      path.startsWith('/forum/');
+}
+
+/// 藏页面自带框的注入脚本（幂等：同一文档重复注入只留一份样式）。
+String buildShellChromeHideScript() {
+  return '(function(){'
+      'if(document.getElementById("__qfShellChrome"))return "already";'
+      'var s=document.createElement("style");'
+      's.id="__qfShellChrome";'
+      's.textContent=":root{--topbar-h:0px !important}"'
+      '+"header.appbar{display:none !important}"'
+      '+"nav.tabbar{display:none !important}";'
+      '(document.head||document.documentElement).appendChild(s);'
+      'return "injected";'
+      '})()';
+}
