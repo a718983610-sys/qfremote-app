@@ -45,23 +45,23 @@ class ReleaseManifest {
     try {
       root = jsonDecode(body);
     } catch (_) {
-      throw const FormatException('清单格式不对');
+      throw const FormatException('更新清单格式不正确');
     }
     if (root is! Map<String, dynamic>) {
-      throw const FormatException('清单格式不对');
+      throw const FormatException('更新清单格式不正确');
     }
     ReleaseEntry? parseEntry(dynamic raw) {
       if (raw == null) return null;
       if (raw is! Map<String, dynamic>) {
-        throw const FormatException('清单条目格式不对');
+        throw const FormatException('更新清单格式不正确');
       }
       final version = raw['version'];
       if (version is! String || !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(version)) {
-        throw const FormatException('清单缺版本号');
+        throw const FormatException('更新清单缺少版本号');
       }
       final urlRaw = raw['url'];
       if (urlRaw is! String || urlRaw.isEmpty) {
-        throw const FormatException('清单缺下载地址');
+        throw const FormatException('更新清单缺少下载地址');
       }
       final abs = Uri.parse(kReleaseUrl).resolve(urlRaw).toString();
       if (Uri.parse(abs).origin != origin) {
@@ -69,7 +69,7 @@ class ReleaseManifest {
       }
       final sha = (raw['sha256'] is String) ? (raw['sha256'] as String).toLowerCase() : '';
       if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(sha)) {
-        throw const FormatException('清单缺完整的 SHA256');
+        throw const FormatException('更新清单缺少完整的 SHA256 校验码');
       }
       final sizeRaw = raw['size'];
       return ReleaseEntry(

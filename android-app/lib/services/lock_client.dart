@@ -187,7 +187,7 @@ class LockClient {
     } on LockException {
       rethrow;
     } catch (e) {
-      throw LockException('暂时连不上隐私锁服务，请检查网络后重试。');
+      throw LockException('暂时无法连接隐私锁服务，请检查网络后重试。');
     } finally {
       client.close(force: true);
     }

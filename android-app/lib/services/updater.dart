@@ -20,7 +20,7 @@ class UpdateService {
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) {
-        throw HttpException('取清单失败：HTTP ${res.statusCode}');
+        throw HttpException('获取更新清单失败：HTTP ${res.statusCode}');
       }
       final body = await utf8.decodeStream(res).timeout(const Duration(seconds: 8));
       return ReleaseManifest.parse(body);
@@ -78,22 +78,22 @@ class UpdateService {
     try {
       final len = await part.length();
       if (entry.size != null && len != entry.size) {
-        throw const FormatException('大小对不上');
+        throw const FormatException('文件大小与清单不一致');
       }
       final digest = await sha256.bind(part.openRead()).first;
       if (digest.toString().toLowerCase() != entry.sha256.toLowerCase()) {
-        throw const FormatException('SHA256 对不上');
+        throw const FormatException('SHA256 校验码不一致');
       }
       await part.rename(dest.path);
       return dest;
     } catch (e) {
       await _quietDelete(part);
       await _quietDelete(dest);
-      if (e is FormatException && e.message == '大小对不上') {
-        throw const FormatException('下载不完整（大小对不上），已删除，请重新下载。');
+      if (e is FormatException && e.message == '文件大小与清单不一致') {
+        throw const FormatException('下载不完整（文件大小与清单不一致），已删除，请重新下载。');
       }
-      if (e is FormatException && e.message == 'SHA256 对不上') {
-        throw const FormatException('完整性核对未通过（SHA256 对不上），已删除该文件，请重新下载。');
+      if (e is FormatException && e.message == 'SHA256 校验码不一致') {
+        throw const FormatException('完整性核对未通过（SHA256 校验码不一致），已删除该文件，请重新下载。');
       }
       rethrow;
     }

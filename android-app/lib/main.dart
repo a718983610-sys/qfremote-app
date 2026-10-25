@@ -13,12 +13,15 @@ import 'build_info.dart';
 import 'core/constants.dart';
 import 'core/login_bridge.dart';
 import 'core/session_recovery.dart';
+import 'core/chat_device.dart';
+import 'core/slot_nav.dart';
 import 'core/svc_urls.dart';
 import 'core/manifest.dart';
 import 'core/update_policy.dart';
 import 'core/version.dart';
 import 'core/watchdog_core.dart';
 import 'services/credential_store.dart';
+import 'services/device_key_vault.dart';
 import 'services/forum_sso.dart';
 import 'services/points.dart';
 import 'services/probe.dart';
@@ -28,6 +31,9 @@ import 'ui/about.dart';
 import 'ui/force_update.dart';
 import 'ui/lock.dart';
 import 'ui/overlays.dart';
+import 'ui/frame.dart';
+import 'ui/me_page.dart';
+import 'ui/settings_page.dart';
 import 'ui/theme.dart';
 import 'ui/toolbar.dart';
 
@@ -48,6 +54,16 @@ class QfRemoteApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2470E0)),
         useMaterial3: true,
       ),
+      // 深色定义补齐（与品牌令牌同一种子色）：Material 层控件跟随系统深浅；
+      // 壳内自绘面（工具栏/卡片等）走 QfPalette 双主题令牌，口径一致。
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF2470E0),
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: ThemeMode.system,
       home: const HomePage(),
     );
   }
@@ -68,7 +84,7 @@ class _WebViewEvaluator implements WatchdogEvaluator {
   @override
   Future<String> detect() async {
     final c = controller;
-    if (c == null) throw StateError('webview 未就绪');
+    if (c == null) throw StateError('页面尚未就绪');
     final r = await c.evaluateJavascript(source: kDetectJs);
     final s = _clean(r);
     return const ['login', 'disconnected', 'partial', 'ok'].contains(s) ? s : 'unknown';
@@ -151,7 +167,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 登录 → 都不行才露登录页提示。恢复全程盖着启动画面，不闪登录页。
   // 手动退出账号是唯一人工终止：清会话、清凭据、清记住标记，此后不再自动登录。
   final _credStore = CredentialStore();
+  final _deviceKeyVault = DeviceKeyVault();
   final _forumSso = ForumSso();
+
+  // 2.3.0 追加五/六：框架槽位（设备/好友/论坛三 WebView 保活＋我的原生页）。
+  AppSlot _slot = AppSlot.devices;
+  final SlotLoadTracker _slotLoads = SlotLoadTracker();
+  InAppWebViewController? _friendsWeb;
+  InAppWebViewController? _forumWeb;
+  String _friendsCurrentUrl = '';
+  bool _friendsCanGoBack = false;
+  bool _forumCanGoBack = false;
+  bool _chromeVisible = false; // 登录前不显示顶栏/标签（样图 m01 登录页无框架）
+  bool _slotsPreloaded = false;
   final _autoLogin = AutoLoginController();
   SavedCredentials? _savedCreds;
   SessionSnapshot? _savedSession;
@@ -194,6 +222,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _foreground = state == AppLifecycleState.resumed;
   }
 
+  /// 系统深浅切换时跟随（仅限从没手动选过主题的用户；选过的听用户的）。
+  @override
+  void didChangePlatformBrightness() {
+    super.didChangePlatformBrightness();
+    final s = _settings;
+    if (s == null || !mounted) return;
+    if (s.themePref != null && s.themePref!.isNotEmpty) return;
+    setState(() {
+      _themeMode = resolveThemeMode(
+        pref: null,
+        platformBrightness:
+            WidgetsBinding.instance.platformDispatcher.platformBrightness,
+      );
+    });
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -231,7 +275,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {
       _settings = settings;
       _pkg = pkg;
-      _themeMode = QfThemeModeX.fromPref(settings.theme);
+      _themeMode = resolveThemeMode(
+        pref: settings.themePref,
+        platformBrightness:
+            WidgetsBinding.instance.platformDispatcher.platformBrightness,
+      );
       _booted = true;
     });
     await _launchGate(settings);
@@ -278,6 +326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 打开站长管理页：先用控制台会话换一次性令牌，再在 WebView 打开管理页；
   /// 换不到令牌时直接打开管理页（服务端会自行走登录）。
   Future<void> _openAdmin() async {
+    _activateSlot(AppSlot.devices);
     final token = await _extService.fetchSsoToken();
     if (!mounted) return;
     final url = token != null
@@ -289,7 +338,118 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 打开论坛（2.3.0 追加·单次登录硬门）：论坛服务只认自家会话 cookie，
   /// 没有会话且本机存有凭据时，先用凭据换回论坛会话写入 WebView 再打开，
   /// 用户不再被要求二次登录；换不到就照常打开（论坛页自行处理）。
-  Future<void> _openForum() async {
+  // ---------------- 框架槽位（追加五/六） ----------------
+
+  InAppWebViewController? get _activeWeb => switch (_slot) {
+        AppSlot.devices => _web,
+        AppSlot.friends => _friendsWeb,
+        AppSlot.forum => _forumWeb,
+        AppSlot.me => null,
+      };
+
+  String get _slotTitle => switch (_slot) {
+        AppSlot.devices => '我的设备',
+        AppSlot.friends => '好友',
+        AppSlot.forum => '论坛',
+        AppSlot.me => '我的',
+      };
+
+  /// 切槽：已加载过的槽直接显示（保活，不重载、不闪白）；
+  /// 没加载过的按登录态首次加载。
+  void _activateSlot(AppSlot slot) {
+    if (_slot != slot) setState(() => _slot = slot);
+    _maybeLoadSlot(slot);
+  }
+
+  void _maybeLoadSlot(AppSlot slot) {
+    if (slot == AppSlot.friends) {
+      if (_friendsWeb != null && _slotLoads.needsLoad(AppSlot.friends)) {
+        _slotLoads.markLoaded(AppSlot.friends);
+        _friendsWeb?.loadUrl(
+            urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl)));
+      }
+    } else if (slot == AppSlot.forum) {
+      if (_forumWeb != null && _slotLoads.needsLoad(AppSlot.forum)) {
+        unawaited(_ensureForumLoaded());
+      }
+    }
+  }
+
+  /// 登录成功后预加载好友/论坛槽（再次点开即达）。
+  void _preloadSlots() {
+    if (_slotsPreloaded) return;
+    _slotsPreloaded = true;
+    _maybeLoadSlot(AppSlot.friends);
+    _maybeLoadSlot(AppSlot.forum);
+  }
+
+  /// 好友/论坛槽的 WebView 设置（与控制台同口径：脚本/存储/三方 cookie 全开）。
+  InAppWebViewSettings _slotWebViewSettings() => InAppWebViewSettings(
+        javaScriptEnabled: true,
+        domStorageEnabled: true,
+        databaseEnabled: true,
+        cacheEnabled: true,
+        thirdPartyCookiesEnabled: true,
+        supportZoom: true,
+        builtInZoomControls: true,
+        displayZoomControls: false,
+        useShouldOverrideUrlLoading: true,
+        mediaPlaybackRequiresUserGesture: false,
+        allowsInlineMediaPlayback: true,
+        iframeAllow: 'fullscreen',
+        applicationNameForUserAgent: 'QFRemote',
+      );
+
+  /// 槽内导航口径（与控制台一致）：跳登出地址＝手动退出；只放行 http/https。
+  Future<NavigationActionPolicy?> _slotUrlPolicy(
+      InAppWebViewController controller, NavigationAction action) async {
+    final url = action.request.url;
+    if (url == null) return NavigationActionPolicy.CANCEL;
+    if (url.path == '/logout') _noteManualLogout();
+    if (url.scheme == 'http' || url.scheme == 'https') {
+      return NavigationActionPolicy.ALLOW;
+    }
+    return NavigationActionPolicy.CANCEL;
+  }
+
+  /// 证书挑战（与控制台一致）：只认自家主机＋端口，其余拒绝。
+  Future<ServerTrustAuthResponse> _onTrustChallenge(
+      InAppWebViewController controller,
+      URLAuthenticationChallenge challenge) async {
+    final host = challenge.protectionSpace.host;
+    final port = challenge.protectionSpace.port;
+    final ok = port != null && isTrustedWebViewHostPort(host, port);
+    return ServerTrustAuthResponse(
+      action: ok
+          ? ServerTrustAuthResponseAction.PROCEED
+          : ServerTrustAuthResponseAction.CANCEL,
+    );
+  }
+
+  /// 系统返回键分级：先页内后退 → 再回设备槽 → 最后退出（纯裁决见 slot_nav）。
+  Future<void> _handleSystemBack() async {
+    final can = switch (_slot) {
+      AppSlot.devices => _canGoBack,
+      AppSlot.friends => _friendsCanGoBack,
+      AppSlot.forum => _forumCanGoBack,
+      AppSlot.me => false,
+    };
+    final action = decideBackAction(active: _slot, activeCanGoBack: can);
+    switch (action) {
+      case BackAction.pageBack:
+        await _activeWeb?.goBack();
+      case BackAction.toDevices:
+        _activateSlot(AppSlot.devices);
+      case BackAction.exitApp:
+        await SystemNavigator.pop();
+    }
+  }
+
+  /// 打开论坛槽：先走免登桥（无会话且有已存凭据时换回 qfr_frm），
+  /// 再把论坛页加载进论坛槽（保活，后续点开不再重载）。
+  Future<void> _ensureForumLoaded() async {
+    if (_forumWeb == null || !_slotLoads.needsLoad(AppSlot.forum)) return;
+    _slotLoads.markLoaded(AppSlot.forum);
     final forumUrl = SvcUrls.instance.forumUrl;
     try {
       final pageUri = Uri.parse(forumUrl);
@@ -318,10 +478,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
       }
     } catch (_) {
-      // 免登桥失败不挡路：照常打开论坛页
+      // 免登桥失败不挡路：照常加载论坛页
     }
     if (!mounted) return;
-    _web?.loadUrl(urlRequest: URLRequest(url: WebUri(forumUrl)));
+    _forumWeb?.loadUrl(urlRequest: URLRequest(url: WebUri(forumUrl)));
   }
 
   /// 启动门（更新政策）：落盘有待更新时先取清单裁决——
@@ -402,6 +562,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       handlerName: kHandlerManualLogout,
       callback: (args) => _noteManualLogout(),
     );
+    // 设备钥匙递入走 evaluateJavascript 直调页面钩子（L 线定版契约
+    // qfShellDeviceUnlock/qfShellDeviceEnroll，在 _chatTick 里按决策递入），
+    // 不再另设 JS 处理器——页面不主动取钥匙，钥匙只经壳单向递入内存。
   }
 
   Future<LoginProbe?> _probeLogin() async {
@@ -457,19 +620,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 聊天页判定：好友服务 /chat 路径（直连 8445 与隧道同源两种形态）。
+  /// 聊天页判定：好友槽当前页为 /chat（聊天随好友槽保活，追加五）。
   bool get _isChatPage {
     if (kHasTestUrl) return false;
-    final uri = Uri.tryParse(_currentUrl);
+    final uri = Uri.tryParse(_friendsCurrentUrl);
     if (uri == null) return false;
     return uri.path == '/chat' || uri.path.startsWith('/chat/');
   }
 
-  /// 聊天页一拍：注入聊天桥——有已存密码则静默解锁，没有则对齐
-  /// 「聊天加密解锁」文案（详见 login_bridge.dart 的聊天桥说明）。
+  /// 聊天页一拍（对好友槽的控制器）：顺序按 L 线定版口径——
+  /// ① 设备静默解锁优先（探 qfChatState → planChatDevice 决策 → 递入设备
+  ///    密钥，页面自行解开设备包裹副本；已解锁无副本时后台补写）；
+  /// ② 密码路径兜底（聊天桥：已存凭据回填解锁/登录；无凭据时文案对齐）。
   Future<void> _chatTick() async {
-    final web = _web;
+    final web = _friendsWeb;
     if (web == null) return;
+    try {
+      final raw = await web.evaluateJavascript(source: kChatStateProbeJs);
+      final st = parseChatState(raw?.toString());
+      if (st != null) {
+        final action = planChatDevice(
+          manualLogout: _autoLogin.suppressedByManualLogout,
+          hasToken: st.hasToken,
+          locked: st.locked,
+          unlocked: st.unlocked,
+          hasShellDeviceCopy: st.hasShellDeviceCopy,
+        );
+        if (action == ChatDeviceAction.deviceUnlock ||
+            action == ChatDeviceAction.deviceEnroll) {
+          final key = await _deviceKeyVault.getOrCreate();
+          final script = action == ChatDeviceAction.deviceUnlock
+              ? buildChatDeviceUnlockScript(key)
+              : buildChatDeviceEnrollScript(key);
+          final r = await web.evaluateJavascript(source: script);
+          debugPrint('QFCHAT device -> $action $r');
+          if (action == ChatDeviceAction.deviceUnlock) {
+            return; // 已递入，本拍不再走密码路径，等页面自行进入会话
+          }
+        }
+      }
+    } catch (_) {
+      // 页面未就绪（钩子还没挂）：落到密码路径桥，本拍继续
+    }
     String? user, pass;
     if ((_settings?.rememberPassword ?? false) &&
         !(_settings?.credentialBlocked ?? false) &&
@@ -492,7 +684,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _loginTick() async {
     if (_loginTickBusy || !mounted || _web == null) return;
     if (!_gateDone || _forceEntry != null || _offline) return;
-    if (_isChatPage) {
+    if (_slot == AppSlot.friends && _isChatPage && _friendsWeb != null) {
       _loginTickBusy = true;
       try {
         await _chatTick();
@@ -564,6 +756,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _stepWaitUntil = null;
     _failureSnackShown = false;
     await _maybeSnapshotSession();
+    // 已登录：框架顶栏/标签出现，并预加载好友/论坛槽
+    if (mounted && !_chromeVisible) {
+      setState(() => _chromeVisible = true);
+    }
+    _preloadSlots();
     if (mounted && (_recoveryCover || _splashVisible)) {
       setState(() {
         _recoveryCover = false;
@@ -692,7 +889,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if (hadAttempts && !_failureSnackShown && mounted) {
         _failureSnackShown = true;
-        _snack('自动登录没有成功，请重新登录。');
+        _snack('自动登录未成功，请重新登录。');
+      }
+      // 恢复失败、停在登录页：框架收起并回设备槽（登录页无框架，样图 m01）
+      if (mounted && _chromeVisible) {
+        setState(() {
+          _chromeVisible = false;
+          _slot = AppSlot.devices;
+        });
       }
       return;
     }
@@ -754,6 +958,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _stepWaitUntil = null;
     _failureSnackShown = false;
     debugPrint('QFLOGIN manual logout: clearing auth state');
+    // 框架复位：回设备槽、收起顶栏/标签、槽位账本作废（不残留上个账号页面）
+    _slotsPreloaded = false;
+    _slotLoads.invalidateAll();
+    if (mounted) {
+      setState(() {
+        _slot = AppSlot.devices;
+        _chromeVisible = false;
+      });
+    }
     unawaited(_clearAuthState());
     if (mounted && (_recoveryCover || _splashVisible)) {
       setState(() {
@@ -767,6 +980,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await _credStore.clearAll();
     } catch (_) {}
+    // 设备钥匙不清（L 线定版口径：退出登录不等于换设备；副本按账号存
+    // 在服务端，本机钥匙留着，下个账号在本机解锁后会补写自己的副本）。
     _savedCreds = null;
     _savedSession = null;
     _lastSnapshotAt = null;
@@ -776,6 +991,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await CookieManager.instance().deleteAllCookies();
     } catch (_) {}
+    // 好友/论坛槽页面清空，防止下个账号看到上个账号的保活页
+    try {
+      await _friendsWeb?.loadUrl(
+          urlRequest: URLRequest(url: WebUri('about:blank')));
+      await _forumWeb?.loadUrl(
+          urlRequest: URLRequest(url: WebUri('about:blank')));
+    } catch (_) {}
+    _friendsCurrentUrl = '';
   }
 
   /// 原生菜单「退出账号」：清干净后走服务端登出地址回登录页。
@@ -832,9 +1055,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (mounted) setState(() => _updateEntry = entry);
       if (!_remindedThisSession) {
         _remindedThisSession = true;
-        if (mounted) _snack('发现新版 v${entry.version}，可在「关于」里下载更新');
+        if (mounted) _snack('发现新版 v${entry.version}，可在「关于」中下载更新');
       } else if (manual && mounted) {
-        _snack('发现新版 v${entry.version}，可在「关于」里下载更新');
+        _snack('发现新版 v${entry.version}，可在「关于」中下载更新');
       }
       return entry;
     }
@@ -1018,6 +1241,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onMenuAction(String action) {
     switch (action) {
+      case 'refresh':
+        _activeWeb?.reload();
+        break;
+      case 'register':
+        _activateSlot(AppSlot.devices);
+        _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.registerUrl)));
+        break;
       case 'theme':
         final next = _themeMode == QfThemeMode.blue ? QfThemeMode.dark : QfThemeMode.blue;
         setState(() => _themeMode = next);
@@ -1039,7 +1269,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               palette: _palette,
               onNeedLogin: () {
                 Navigator.of(context).pop();
-                _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl)));
+                _activateSlot(AppSlot.friends);
               },
             ),
           ),
@@ -1052,9 +1282,75 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _openAdmin();
         break;
       case 'about':
-        _showAbout();
+        _activateSlot(AppSlot.me);
         break;
     }
+  }
+
+  /// 打开「设置」页（样图 m11）：主题三态/两个记住开关在此页统一管理。
+  void _openSettings() {
+    final s = _settings;
+    if (s == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsPage(
+          palette: _palette,
+          themeChoice: s.themePref == null
+              ? ThemeChoice.followSystem
+              : (s.themePref == 'dark' ? ThemeChoice.dark : ThemeChoice.blue),
+          rememberDevice: s.rememberDevice,
+          rememberPassword: s.rememberPassword,
+          currentVersion: _currentVersion,
+          onThemeChoice: (choice) async {
+            final settings = _settings;
+            if (settings == null) return;
+            switch (choice) {
+              case ThemeChoice.followSystem:
+                await settings.clearTheme();
+                if (!mounted) return;
+                setState(() {
+                  _themeMode = resolveThemeMode(
+                    pref: null,
+                    platformBrightness: WidgetsBinding
+                        .instance.platformDispatcher.platformBrightness,
+                  );
+                });
+              case ThemeChoice.blue:
+                await settings.setTheme(QfThemeMode.blue.prefValue);
+                if (mounted) setState(() => _themeMode = QfThemeMode.blue);
+              case ThemeChoice.dark:
+                await settings.setTheme(QfThemeMode.dark.prefValue);
+                if (mounted) setState(() => _themeMode = QfThemeMode.dark);
+            }
+          },
+          onToggleRememberDevice: (v) async {
+            await _settings?.setRememberDevice(v);
+            if (!v) {
+              // 关掉记住此设备：会话快照一并清（下次打开需重新登录）
+              try {
+                await _credStore.clearSession();
+              } catch (_) {}
+              _savedSession = null;
+            }
+          },
+          onToggleRememberPassword: (v) async {
+            await _settings?.setRememberPassword(v);
+            if (!v) {
+              try {
+                await _credStore.clearCredentials();
+              } catch (_) {}
+              _savedCreds = null;
+            }
+          },
+          onCheckUpdate: () => _sessionUpdateCheck(manual: true),
+          onOpenTerms: () {
+            Navigator.of(context).pop();
+            _activateSlot(AppSlot.devices);
+            _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.termsUrl)));
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _toggleFullscreen() async {
@@ -1068,11 +1364,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _takeScreenshot() async {
-    final web = _web;
-    if (web == null) return;
+    final web = _activeWeb;
+    if (web == null) {
+      _snack('当前页面无法截图，请切换到设备、好友或论坛页面。');
+      return;
+    }
     try {
       final bytes = await web.takeScreenshot();
-      if (bytes == null) throw StateError('没截到图');
+      if (bytes == null) throw StateError('截图失败：未获取到画面。');
       final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
       final dir = Directory('${base.path}/screenshots');
       await dir.create(recursive: true);
@@ -1095,9 +1394,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       'QFRemote 安卓版诊断信息',
       '版本：v$_currentVersion（构建日期 $kBuildDate）',
       '系统：${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
-      '服务器探活：${p == null ? '还没测过' : p.describe()}',
+      '服务器连通性检测：${p == null ? '尚未检测' : p.describe()}',
       '整页断线次数：${s?.offlineCount ?? 0}',
-      '看护自动重连次数：${s?.watchdogReconnects ?? 0}',
+      '自动重连次数：${s?.watchdogReconnects ?? 0}',
     ].join('\n');
   }
 
@@ -1142,31 +1441,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        if (_canGoBack) {
-          _web?.goBack();
-        } else {
-          SystemNavigator.pop();
-        }
+        unawaited(_handleSystemBack());
       },
       child: Scaffold(
+        backgroundColor: _palette.pageColor,
         body: SafeArea(
+          // 框架在位时顶/底 inset 由顶栏与标签栏自己处理；无框架（登录页）时整页避让
+          top: !_chromeVisible && !_fullscreen,
+          bottom: !_chromeVisible && !_fullscreen,
           child: Stack(
             children: [
               Column(
                 children: [
-                  if (!_fullscreen) ...[
-                    QfToolbar(
+                  if (!_fullscreen && _chromeVisible) ...[
+                    QfAppHeader(
                       palette: _palette,
-                      canGoBack: _canGoBack,
-                      lastProbe: _lastProbe,
+                      title: _slotTitle,
+                      probeColor: _probeBusy || _lastProbe == null
+                          ? QfPalette.probeBusy
+                          : (_lastProbe!.ok ? QfPalette.probeOk : QfPalette.probeBad),
                       probeBusy: _probeBusy,
                       hasUpdate: _updateEntry != null,
-                      onBack: () => _web?.goBack(),
-                      onRefresh: () => _web?.reload(),
-                      onHome: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl))),
-                      onFriends: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.friendsUrl))),
-                      onForum: _openForum,
-                      onRegister: () => _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.registerUrl))),
                       showAdmin: _isAdmin,
                       onProbeTap: () async {
                         final r = await _runProbe();
@@ -1181,9 +1476,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   ],
                   Expanded(
-                    child: Stack(
+                    child: IndexedStack(
+                      index: _slot.index,
                       children: [
-                        InAppWebView(
+                        // 设备槽：控制台 WebView＋断线/恢复盖（保活，不随切槽销毁）
+                        Stack(
+                          children: [
+                            InAppWebView(
                           initialUrlRequest: URLRequest(url: WebUri(_startUrl)),
                           initialSettings: InAppWebViewSettings(
                             javaScriptEnabled: true,
@@ -1256,25 +1555,91 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _handlePageDownload(request);
                           },
                         ),
-                        if (_offline)
-                          OfflineView(
-                            palette: _palette,
-                            secondsLeft: _offlineSecondsLeft,
-                            onRetryNow: () {
-                              _offlineTimer?.cancel();
-                              _web?.reload();
-                              _scheduleOfflineRetry();
-                            },
-                          ),
-                        if (_splashVisible)
-                          SplashView(
-                            palette: _palette,
-                            version: _currentVersion,
-                            note: _recoveryCover ? '正在恢复登录…' : null,
-                          ),
+                            if (_offline)
+                              OfflineView(
+                                palette: _palette,
+                                secondsLeft: _offlineSecondsLeft,
+                                onRetryNow: () {
+                                  _offlineTimer?.cancel();
+                                  _web?.reload();
+                                  _scheduleOfflineRetry();
+                                },
+                              ),
+                            if (_splashVisible)
+                              SplashView(
+                                palette: _palette,
+                                version: _currentVersion,
+                                note: _recoveryCover ? '正在恢复登录…' : null,
+                              ),
+                          ],
+                        ),
+                        // 好友槽（聊天也在此槽内打开）：空白页起步，登录后预加载
+                        InAppWebView(
+                          initialUrlRequest:
+                              URLRequest(url: WebUri('about:blank')),
+                          initialSettings: _slotWebViewSettings(),
+                          onWebViewCreated: (controller) {
+                            _friendsWeb = controller;
+                            if (_chromeVisible) _maybeLoadSlot(AppSlot.friends);
+                          },
+                          shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onUpdateVisitedHistory: (controller, url, isReload) async {
+                            if (url != null) _friendsCurrentUrl = url.toString();
+                            final can = await controller.canGoBack();
+                            if (mounted) setState(() => _friendsCanGoBack = can);
+                          },
+                          onReceivedServerTrustAuthRequest: _onTrustChallenge,
+                          onDownloadStartRequest: (controller, request) {
+                            _handlePageDownload(request);
+                          },
+                        ),
+                        // 论坛槽：空白页起步，免登桥处理后加载
+                        InAppWebView(
+                          initialUrlRequest:
+                              URLRequest(url: WebUri('about:blank')),
+                          initialSettings: _slotWebViewSettings(),
+                          onWebViewCreated: (controller) {
+                            _forumWeb = controller;
+                            if (_chromeVisible) _maybeLoadSlot(AppSlot.forum);
+                          },
+                          shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onUpdateVisitedHistory: (controller, url, isReload) async {
+                            final can = await controller.canGoBack();
+                            if (mounted) setState(() => _forumCanGoBack = can);
+                          },
+                          onReceivedServerTrustAuthRequest: _onTrustChallenge,
+                          onDownloadStartRequest: (controller, request) {
+                            _handlePageDownload(request);
+                          },
+                        ),
+                        // 我的槽：原生页（样图 m09），常驻保活
+                        MePage(
+                          palette: _palette,
+                          currentVersion: _currentVersion,
+                          hasUpdate: _updateEntry != null,
+                          updateVersion: _updateEntry?.version,
+                          rememberLine: (_settings?.rememberDevice ?? false)
+                              ? '已记住此设备，30 天内不用再登录'
+                              : '未记住此设备，下次打开需要重新登录',
+                          fallbackUser: _savedCreds?.username,
+                          fetchPoints: () => _extService.fetchMe(),
+                          onOpenSettings: _openSettings,
+                          onCheckUpdate: () => _sessionUpdateCheck(manual: true),
+                          onAccountAction: () {
+                            _activateSlot(AppSlot.devices);
+                            _snack('账号设置请在设备页中操作。');
+                          },
+                          onLogout: _manualLogoutFromMenu,
+                        ),
                       ],
                     ),
                   ),
+                  if (!_fullscreen && _chromeVisible)
+                    QfTabBar(
+                      palette: _palette,
+                      active: _slot,
+                      onSelect: _activateSlot,
+                    ),
                 ],
               ),
               if (_fullscreen)

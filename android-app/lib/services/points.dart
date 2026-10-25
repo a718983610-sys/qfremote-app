@@ -11,19 +11,34 @@ class PointsInfo {
   /// 积分（服务器按总时长折算），缺失为 null。
   final int? points;
 
-  const PointsInfo({required this.displayText, required this.points});
+  /// 账号名（「我的」页个人卡用），缺失为 null。
+  final String? user;
+
+  /// 已用天数（「我的」页统计卡用），缺失为 null。
+  final int? daysUsed;
+
+  const PointsInfo({
+    required this.displayText,
+    required this.points,
+    this.user,
+    this.daysUsed,
+  });
 
   /// 纯解析（供自测）：字段缺失/类型不对一律给 null，调用方显示「—」。
   static PointsInfo parse(String body) {
     final root = jsonDecode(body);
     if (root is! Map<String, dynamic>) {
-      throw const FormatException('积分信息格式不对');
+      throw const FormatException('积分信息格式不正确');
     }
     final dt = root['displayText'];
     final p = root['points'];
+    final u = root['user'];
+    final d = root['daysUsed'];
     return PointsInfo(
       displayText: dt is String && dt.isNotEmpty ? dt : null,
       points: p is int ? p : (p is num ? p.toInt() : null),
+      user: u is String && u.isNotEmpty ? u : null,
+      daysUsed: d is int ? d : (d is num ? d.toInt() : null),
     );
   }
 }
