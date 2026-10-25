@@ -51,6 +51,18 @@ void main() {
       expect(decideBackAction(active: AppSlot.devices, activeCanGoBack: false),
           BackAction.exitApp);
     });
+    test('首页槽是根槽（2.3.1）：可退 → 页内后退；不可退 → 退出 App', () {
+      expect(decideBackAction(active: AppSlot.home, activeCanGoBack: true),
+          BackAction.pageBack);
+      expect(decideBackAction(active: AppSlot.home, activeCanGoBack: false),
+          BackAction.exitApp);
+    });
+    test('文件槽：可退 → 页内后退；不可退 → 回设备槽', () {
+      expect(decideBackAction(active: AppSlot.files, activeCanGoBack: true),
+          BackAction.pageBack);
+      expect(decideBackAction(active: AppSlot.files, activeCanGoBack: false),
+          BackAction.toDevices);
+    });
   });
 
   group('槽位加载账本 SlotLoadTracker', () {

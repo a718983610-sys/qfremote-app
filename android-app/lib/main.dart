@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'build_info.dart';
 import 'core/constants.dart';
+import 'core/license.dart';
 import 'core/login_bridge.dart';
 import 'core/session_recovery.dart';
 import 'core/chat_device.dart';
@@ -21,18 +22,23 @@ import 'core/update_policy.dart';
 import 'core/version.dart';
 import 'core/watchdog_core.dart';
 import 'services/credential_store.dart';
+import 'services/device_code.dart';
 import 'services/device_key_vault.dart';
 import 'services/forum_sso.dart';
+import 'services/license_client.dart';
 import 'services/points.dart';
 import 'services/probe.dart';
 import 'services/settings.dart';
 import 'services/updater.dart';
 import 'ui/about.dart';
 import 'ui/force_update.dart';
+import 'ui/license_gate.dart';
+import 'ui/license_section.dart';
 import 'ui/lock.dart';
 import 'ui/overlays.dart';
 import 'ui/frame.dart';
 import 'ui/me_page.dart';
+import 'ui/web_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/theme.dart';
 import 'ui/toolbar.dart';
@@ -188,13 +194,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _forumSso = ForumSso();
 
   // 2.3.0 追加五/六：框架槽位（设备/好友/论坛三 WebView 保活＋我的原生页）。
-  AppSlot _slot = AppSlot.devices;
+  // 2.3.1 阶段 D：底部导航改名改序为 首页/文件/设备/我的，默认落地首页槽；
+  // 好友/论坛槽保留保活（首页长页快速入口与顶栏菜单可达）。
+  AppSlot _slot = AppSlot.home;
   final SlotLoadTracker _slotLoads = SlotLoadTracker();
+  InAppWebViewController? _homeWeb;
+  InAppWebViewController? _filesWeb;
   InAppWebViewController? _friendsWeb;
   InAppWebViewController? _forumWeb;
+  bool _homeCanGoBack = false;
+  bool _filesCanGoBack = false;
   String _friendsCurrentUrl = '';
   bool _friendsCanGoBack = false;
   bool _forumCanGoBack = false;
+
+  // 2.3.1 许可全链（阶段 D）：设备码上报→许可判定→原生拦截面。
+  LicenseClient? _licenseClient;
+  final _deviceCodeStore = DeviceCodeStore();
+  String? _deviceCode;
+
+  /// 非空＝当前落原生许可拦截面（build 直接渲染拦截页，盖住全部槽位）。
+  LicenseDecision? _gateDecision;
+
+  /// 本次控制台会话已跑过许可门检查（每会话只跑一次，防 2 秒探针反复打）。
+  bool _licenseCheckedThisSession = false;
+  bool _licenseCheckBusy = false;
+  bool _licenseErrorSnacked = false;
+
+  /// 本次登录流程内验过的凭据（只在内存，绝不落盘）：拦截面领取转赠时
+  /// 按契约 §7.5.5 由壳随请求带上（用户只粘贴密钥串、不重复输密码）。
+  ({String username, String password})? _gateCreds;
+  String _gateUsername = '';
   bool _chromeVisible = false; // 登录前不显示顶栏/标签（样图 m01 登录页无框架）
   bool _slotsPreloaded = false;
   final _autoLogin = AutoLoginController();
@@ -223,7 +253,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   ExtService get _extService =>
       _ext ??= ExtService(cookieProvider: _consoleCookieHeader);
 
-  String get _currentVersion => _pkg?.version ?? '2.3.0';
+  LicenseClient get _licenseService => _licenseClient ??=
+      LicenseClient(cookieProvider: _consoleCookieHeader);
+
+  String get _currentVersion => _pkg?.version ?? '2.3.1';
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
 
@@ -328,12 +361,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 每 60 秒：App 在前台且控制台已登录（取得到 cookie）才发心跳；
   /// 每 5 拍顺带复查一次站长身份（管理入口显隐）。
+  /// 2.3.1：心跳响应带 forceLogout 信号（契约 §7.5.7，转赠领取后原主人
+  /// 即时下线）时立即执行登出＋落 G1 拦截，不许延迟到下次冷启动。
   Future<void> _heartbeatTick() async {
     if (!mounted || !_foreground) return;
     final cookie = await _consoleCookieHeader();
     if (cookie == null) return;
     _heartbeatTicks++;
-    await _extService.heartbeat();
+    final signal = await _extService.heartbeatSignal();
+    if (signal != null && signal.forceLogout) {
+      await _handleForceLogoutSignal(signal.gateCode ?? 'G1');
+      return;
+    }
     if (_heartbeatTicks % 5 == 1) {
       final admin = await _extService.checkIsAdmin();
       if (mounted && admin != _isAdmin) setState(() => _isAdmin = admin);
@@ -352,12 +391,167 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
   }
 
+  // ---------------- 许可全链（2.3.1 阶段 D） ----------------
+
+  /// 控制台会话建立成功后立即执行（契约 §3 写死时机，先于任何设备连接
+  /// 动作）：上报设备码 → 读许可判定 → 按裁决落原生拦截面。
+  /// 每会话只跑一次；接口失败不拦人，只给一次诚实提示（不许拿假状态冒充）。
+  Future<void> _runLicenseGateCheck() async {
+    if (_licenseCheckedThisSession || _licenseCheckBusy) return;
+    _licenseCheckedThisSession = true;
+    _licenseCheckBusy = true;
+    try {
+      _deviceCode ??= await _deviceCodeStore.getOrCreate();
+      final report = await _licenseService.deviceReport(_deviceCode!);
+      if (!mounted) return;
+      if (report != null) {
+        final action = resolveGateAction(
+          decision: report.decision ??
+              (report.reviewPending
+                  ? const LicenseDecision(allow: false, code: 'DEVICE_REVIEW')
+                  : null),
+          fromDeviceReport: true,
+          reviewPending: report.reviewPending,
+          // 待审与转赠门同走 forceLogout 字段：待审优先落 DEVICE_REVIEW 面
+          forceLogoutSignal:
+              report.deviceForceLogout && !report.reviewPending,
+        );
+        if (await _applyGateAction(action)) return;
+      }
+      final me = await _licenseService.fetchLicenseMe();
+      if (!mounted) return;
+      if (me != null) {
+        if (me.username != null && me.username!.isNotEmpty) {
+          _gateUsername = me.username!;
+        }
+        final action = resolveGateAction(
+          decision: me.decision,
+          forceLogoutSignal: me.forceLogout,
+        );
+        if (await _applyGateAction(action,
+            gateCodeHint: me.gateCode)) return;
+      }
+      if (report == null && me == null && !_licenseErrorSnacked) {
+        _licenseErrorSnacked = true;
+        _snack('许可信息读取失败，请检查网络后重试。');
+      }
+    } catch (_) {
+      // 许可检查本身失败不锁死使用：口径同上，只提示不拦截
+      if (mounted && !_licenseErrorSnacked) {
+        _licenseErrorSnacked = true;
+        _snack('许可信息读取失败，请检查网络后重试。');
+      }
+    } finally {
+      _licenseCheckBusy = false;
+    }
+  }
+
+  /// 执行门裁决。返回 true＝已落拦截/登出态，调用方到此为止。
+  Future<bool> _applyGateAction(GateAction action, {String? gateCodeHint}) async {
+    switch (action.kind) {
+      case GateActionKind.none:
+        return false;
+      case GateActionKind.showGate:
+        if (mounted) setState(() => _gateDecision = action.decision);
+        return true;
+      case GateActionKind.deviceReview:
+        // §7.6：待审期间强制登出该设备会话＋落「设备异常登录」面。
+        // 复用手动退出的清会话收口（停自动恢复），但这不是用户手动退出。
+        final keepCreds = _gateCreds;
+        _noteManualLogout();
+        _gateCreds = keepCreds;
+        if (mounted) {
+          setState(() => _gateDecision = action.decision ??
+              const LicenseDecision(
+                  allow: false, code: 'DEVICE_REVIEW', enforce: true));
+        }
+        return true;
+      case GateActionKind.forceLogoutToGate:
+        await _handleForceLogoutSignal(
+            gateCodeHint ?? action.decision?.code ?? 'G1');
+        return true;
+    }
+  }
+
+  /// forceLogout 即时执行（契约 §7.5.7）：立即登出本端会话并落拦截态，
+  /// 不许延迟到下次冷启动。服务端已同步撤销原会话，本机只做清场＋落面。
+  Future<void> _handleForceLogoutSignal(String gateCode) async {
+    if (!mounted) return;
+    if (_gateDecision?.forceLogout == true) return; // 已在强制下线拦截态
+    final code = gateCode.isNotEmpty ? gateCode : 'G1';
+    // 内存核验凭据保全：落 G1 面后领取转赠还要用（§7.5.5 壳带凭据口径）；
+    // 清掉的是会话与落盘凭据，不含这份仅内存的核验材料。
+    final keepCreds = _gateCreds ??
+        (_savedCreds != null
+            ? (username: _savedCreds!.username, password: _savedCreds!.password)
+            : null);
+    _noteManualLogout();
+    _gateCreds = keepCreds;
+    if (mounted) {
+      setState(() {
+        _gateDecision = LicenseDecision(
+          allow: false,
+          code: code,
+          enforce: true,
+          forceLogout: true,
+          banCode: null,
+        );
+      });
+    }
+  }
+
+  /// 拦截面「重新检查」/购买返回后复查：判定放行（或影子只记录）即消解
+  /// 拦截；仍是 enforce 的未允许判定则换上最新拦截面。
+  Future<void> _recheckLicense() async {
+    final me = await _licenseService.fetchLicenseMe();
+    if (!mounted) return;
+    if (me == null) {
+      _snack('许可信息读取失败，请检查网络后重试。');
+      return;
+    }
+    final action = resolveGateAction(
+      decision: me.decision,
+      forceLogoutSignal: me.forceLogout,
+    );
+    if (action.kind == GateActionKind.none) {
+      setState(() => _gateDecision = null);
+      _licenseCheckedThisSession = false;
+      _snack('状态已更新。');
+    } else if (action.kind == GateActionKind.showGate) {
+      setState(() => _gateDecision = action.decision);
+    }
+  }
+
+  /// 拦截面/「我的」页领取转赠（契约 §7.5.3）：本次登录已验密时由壳带
+  /// 账号＋凭据走无会话入口（只核验不签发），否则走已登录入口。
+  Future<LicenseOpResult?> _claimFromShell(String key) async {
+    final creds = _gateCreds;
+    if (creds != null) {
+      return _licenseService.claimKey(key,
+          username: creds.username, password: creds.password);
+    }
+    return _licenseService.claimKey(key);
+  }
+
+  /// 在壳内打开自有网页（购买/查询/申诉/客服）：先移植会话，再推壳内页。
+  Future<void> _openShellWeb(String title, String url) async {
+    await _transplantSessionToExt();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ShellWebPage(palette: _palette, title: title, url: url),
+      ),
+    );
+  }
+
   /// 打开论坛（2.3.0 追加·单次登录硬门）：论坛服务只认自家会话 cookie，
   /// 没有会话且本机存有凭据时，先用凭据换回论坛会话写入 WebView 再打开，
   /// 用户不再被要求二次登录；换不到就照常打开（论坛页自行处理）。
   // ---------------- 框架槽位（追加五/六） ----------------
 
   InAppWebViewController? get _activeWeb => switch (_slot) {
+        AppSlot.home => _homeWeb,
+        AppSlot.files => _filesWeb,
         AppSlot.devices => _web,
         AppSlot.friends => _friendsWeb,
         AppSlot.forum => _forumWeb,
@@ -365,6 +559,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       };
 
   String get _slotTitle => switch (_slot) {
+        AppSlot.home => '首页',
+        AppSlot.files => '我的文件',
         AppSlot.devices => '我的设备',
         AppSlot.friends => '好友',
         AppSlot.forum => '论坛',
@@ -379,7 +575,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _maybeLoadSlot(AppSlot slot) {
-    if (slot == AppSlot.friends) {
+    if (slot == AppSlot.home) {
+      if (_homeWeb != null && _slotLoads.needsLoad(AppSlot.home)) {
+        _slotLoads.markLoaded(AppSlot.home);
+        unawaited(_ensureHomeLoaded());
+      }
+    } else if (slot == AppSlot.files) {
+      if (_filesWeb != null && _slotLoads.needsLoad(AppSlot.files)) {
+        _slotLoads.markLoaded(AppSlot.files);
+        // 文件槽＝控制台文件管理（本体在控制台页内，壳不另造文件逻辑）
+        _filesWeb?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl)));
+      }
+    } else if (slot == AppSlot.friends) {
       if (_friendsWeb != null && _slotLoads.needsLoad(AppSlot.friends)) {
         _slotLoads.markLoaded(AppSlot.friends);
         _friendsWeb?.loadUrl(
@@ -392,10 +599,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 登录成功后预加载好友/论坛槽（再次点开即达）。
+  /// 把控制台会话 cookie 移植到扩展服务源：安卓登录发生在直连控制台，
+  /// cookie 只在直连源上；扩展服务（新首页/购买/许可页）与积分同口径认
+  /// xid——先把同一组 cookie 种到扩展源，WebView 打开这些页时即同源带上，
+  /// 不再被要求二次登录（与论坛免登桥同一种移植手法）。
+  Future<void> _transplantSessionToExt() async {
+    try {
+      final cookies =
+          await CookieManager.instance().getCookies(url: WebUri(kServerOrigin));
+      final origin = SvcUrls.instance.extOrigin;
+      for (final c in cookies) {
+        final v = c.value.toString();
+        if ((c.name == 'xid' || c.name == 'xid.sig' || c.name == 'qfrem') &&
+            v.isNotEmpty) {
+          await CookieManager.instance().setCookie(
+            url: WebUri(origin),
+            name: c.name,
+            value: v,
+            path: '/',
+          );
+        }
+      }
+    } catch (_) {
+      // 移植失败不挡路：页面打开后由服务端自行走登录/核验
+    }
+  }
+
+  /// 首页槽首次加载：先等服务地址解析＋移植会话，再打开网页新首页正本
+  /// （壳内同框呈现，不整页外跳）。
+  Future<void> _ensureHomeLoaded() async {
+    if (_homeWeb == null) return;
+    await SvcUrls.instance.ensureResolved();
+    await _transplantSessionToExt();
+    if (!mounted) return;
+    _homeWeb?.loadUrl(
+        urlRequest: URLRequest(url: WebUri(SvcUrls.instance.homeUrl)));
+  }
+
+  /// 登录成功后预加载首页/好友/论坛槽（再次点开即达）。
   void _preloadSlots() {
     if (_slotsPreloaded) return;
     _slotsPreloaded = true;
+    _maybeLoadSlot(AppSlot.home);
     _maybeLoadSlot(AppSlot.friends);
     _maybeLoadSlot(AppSlot.forum);
   }
@@ -476,6 +721,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 系统返回键分级：先页内后退 → 再回设备槽 → 最后退出（纯裁决见 slot_nav）。
   Future<void> _handleSystemBack() async {
     final can = switch (_slot) {
+      AppSlot.home => _homeCanGoBack,
+      AppSlot.files => _filesCanGoBack,
       AppSlot.devices => _canGoBack,
       AppSlot.friends => _friendsCanGoBack,
       AppSlot.forum => _forumCanGoBack,
@@ -608,6 +855,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     controller.addJavaScriptHandler(
       handlerName: kHandlerManualLogout,
       callback: (args) => _noteManualLogout(),
+    );
+    // 2.3.1 登录页版式（16:37 定版）：桥注入的「购买密钥/查询密钥」两行
+    // 点击回传——壳内打开 /purchase 或 /license/status，不外跳。
+    controller.addJavaScriptHandler(
+      handlerName: kHandlerLicenseNav,
+      callback: (args) {
+        if (args.isEmpty || args.first is! Map) return;
+        final target = (args.first as Map)['target']?.toString();
+        if (target == 'purchase') {
+          unawaited(_openShellWeb('购买密钥', SvcUrls.instance.purchaseUrl));
+        } else if (target == 'status') {
+          unawaited(
+              _openShellWeb('查询密钥', SvcUrls.instance.licenseStatusUrl));
+        }
+      },
     );
     // 设备钥匙递入走 evaluateJavascript 直调页面钩子（L 线定版契约
     // qfShellDeviceUnlock/qfShellDeviceEnroll，在 _chatTick 里按决策递入），
@@ -790,6 +1052,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (pending != null) {
       _pendingSubmit = null;
       _pendingSubmitAt = null;
+      // 2.3.1：本次登录已验密的凭据只留内存（拦截面领取转赠时壳随请求
+      // 带上，契约 §7.5.5）；落盘口径仍走下面既有的记住密码机制，不另存。
+      _gateCreds = (username: pending.username, password: pending.password);
+      _gateUsername = pending.username;
       final s = _settings;
       if (s != null) {
         await s.setRememberDevice(pending.rememberDevice);
@@ -829,6 +1095,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       setState(() => _chromeVisible = true);
     }
     _preloadSlots();
+    // 2.3.1：会话建立成功后立即跑许可门（§3 时机：先于任何设备连接动作；
+    // 函数内有每会话一次的守卫，探针反复命中不会重复打）
+    unawaited(_runLicenseGateCheck());
     if (mounted && (_recoveryCover || _splashVisible)) {
       setState(() {
         _recoveryCover = false;
@@ -959,11 +1228,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _failureSnackShown = true;
         _snack('自动登录未成功，请重新登录。');
       }
-      // 恢复失败、停在登录页：框架收起并回设备槽（登录页无框架，样图 m01）
+      // 恢复失败、停在登录页：框架收起并回首页槽（登录页无框架，样图 m01）
       if (mounted && _chromeVisible) {
         setState(() {
           _chromeVisible = false;
-          _slot = AppSlot.devices;
+          _slot = AppSlot.home;
         });
       }
       return;
@@ -1026,12 +1295,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _stepWaitUntil = null;
     _failureSnackShown = false;
     debugPrint('QFLOGIN manual logout: clearing auth state');
-    // 框架复位：回设备槽、收起顶栏/标签、槽位账本作废（不残留上个账号页面）
+    // 框架复位：回首页槽、收起顶栏/标签、槽位账本作废（不残留上个账号页面）；
+    // 许可门守卫一并复位，下个会话重新检查。
     _slotsPreloaded = false;
+    _licenseCheckedThisSession = false;
     _slotLoads.invalidateAll();
     if (mounted) {
       setState(() {
-        _slot = AppSlot.devices;
+        _slot = AppSlot.home;
         _chromeVisible = false;
       });
     }
@@ -1059,8 +1330,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await CookieManager.instance().deleteAllCookies();
     } catch (_) {}
-    // 好友/论坛槽页面清空，防止下个账号看到上个账号的保活页
+    // 各 WebView 槽页面清空，防止下个账号看到上个账号的保活页
     try {
+      await _homeWeb?.loadUrl(
+          urlRequest: URLRequest(url: WebUri('about:blank')));
+      await _filesWeb?.loadUrl(
+          urlRequest: URLRequest(url: WebUri('about:blank')));
       await _friendsWeb?.loadUrl(
           urlRequest: URLRequest(url: WebUri('about:blank')));
       await _forumWeb?.loadUrl(
@@ -1071,6 +1346,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 原生菜单「退出账号」：清干净后走服务端登出地址回登录页。
   Future<void> _manualLogoutFromMenu() async {
+    _gateCreds = null;
+    if (_gateDecision != null && mounted) {
+      setState(() => _gateDecision = null);
+    }
     _noteManualLogout();
     await _web?.loadUrl(
         urlRequest: URLRequest(url: WebUri('$kServerOrigin/logout')));
@@ -1350,6 +1629,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       case 'logout':
         _manualLogoutFromMenu();
         break;
+      case 'friends':
+        _activateSlot(AppSlot.friends);
+        break;
+      case 'forum':
+        _activateSlot(AppSlot.forum);
+        break;
       case 'admin':
         _openAdmin();
         break;
@@ -1513,6 +1798,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
+    // 2.3.1 许可拦截面：原生整页盖住全部槽位（文案按 code 取 L 系列正本；
+    // 未知 code 用 loginshim 同款兜底文案，不自编、不放行假状态）。
+    final gate = _gateDecision;
+    if (gate != null) {
+      final copy = gateCopyFor(gate) ??
+          const GateCopy(
+            title: '暂时无法登录',
+            body: '当前状态暂时无法登录，请稍后再试，或咨询智能客服。',
+            primary: GatePrimary.none,
+          );
+      return LicenseGatePage(
+        palette: _palette,
+        username: _gateUsername.isNotEmpty
+            ? _gateUsername
+            : (_savedCreds?.username ?? ''),
+        copy: copy,
+        onClaim: copy.hasClaimBox ? _claimFromShell : null,
+        onPurchase: () async {
+          await _openShellWeb('购买密钥', SvcUrls.instance.purchaseUrl);
+          await _recheckLicense();
+        },
+        onAppeal: () => _openShellWeb('提交申诉',
+            '${SvcUrls.instance.appealUrl}?u=${Uri.encodeQueryComponent(_gateUsername)}'),
+        onSupport: () =>
+            _openShellWeb('智能客服', '${SvcUrls.instance.extOrigin}/support'),
+        onLogout: _manualLogoutFromMenu,
+        onRecheck: _recheckLicense,
+      );
+    }
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -1555,6 +1870,47 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     child: IndexedStack(
                       index: _slot.index,
                       children: [
+                        // 首页槽：网页新首页正本（C-3）壳内同框呈现，空白页
+                        // 起步，会话建立后移植 cookie 再加载（保活）
+                        InAppWebView(
+                          initialUrlRequest:
+                              URLRequest(url: WebUri('about:blank')),
+                          initialSettings: _slotWebViewSettings(),
+                          onWebViewCreated: (controller) {
+                            _homeWeb = controller;
+                            if (_chromeVisible) _maybeLoadSlot(AppSlot.home);
+                          },
+                          shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onCreateWindow: _onCreateWindowInPlace,
+                          onUpdateVisitedHistory: (controller, url, isReload) async {
+                            final can = await controller.canGoBack();
+                            if (mounted) setState(() => _homeCanGoBack = can);
+                          },
+                          onReceivedServerTrustAuthRequest: _onTrustChallenge,
+                          onDownloadStartRequest: (controller, request) {
+                            _handlePageDownload(request);
+                          },
+                        ),
+                        // 文件槽：控制台文件管理（本体在控制台页内）
+                        InAppWebView(
+                          initialUrlRequest:
+                              URLRequest(url: WebUri('about:blank')),
+                          initialSettings: _slotWebViewSettings(),
+                          onWebViewCreated: (controller) {
+                            _filesWeb = controller;
+                            if (_chromeVisible) _maybeLoadSlot(AppSlot.files);
+                          },
+                          shouldOverrideUrlLoading: _slotUrlPolicy,
+                          onCreateWindow: _onCreateWindowInPlace,
+                          onUpdateVisitedHistory: (controller, url, isReload) async {
+                            final can = await controller.canGoBack();
+                            if (mounted) setState(() => _filesCanGoBack = can);
+                          },
+                          onReceivedServerTrustAuthRequest: _onTrustChallenge,
+                          onDownloadStartRequest: (controller, request) {
+                            _handlePageDownload(request);
+                          },
+                        ),
                         // 设备槽：控制台 WebView＋断线/恢复盖（保活，不随切槽销毁）
                         Stack(
                           children: [
@@ -1716,6 +2072,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _snack('账号设置请在设备页中操作。');
                           },
                           onLogout: _manualLogoutFromMenu,
+                          licenseSection: LicenseSection(
+                            palette: _palette,
+                            fetchLicense: () async {
+                              final me =
+                                  await _licenseService.fetchLicenseMe();
+                              // §7.5.7：/me 附带 forceLogout 时立即执行
+                              if (me != null && me.forceLogout) {
+                                unawaited(_handleForceLogoutSignal(
+                                    me.gateCode ?? 'G1'));
+                              }
+                              return me;
+                            },
+                            onBind: (key) async {
+                              _deviceCode ??=
+                                  await _deviceCodeStore.getOrCreate();
+                              return _licenseService.bindKey(
+                                  key, _deviceCode!);
+                            },
+                            onClaim: _claimFromShell,
+                            onPurchase: () => _openShellWeb(
+                                '购买密钥', SvcUrls.instance.purchaseUrl),
+                            onStatusQuery: () => _openShellWeb(
+                                '查询密钥', SvcUrls.instance.licenseStatusUrl),
+                          ),
                         ),
                       ],
                     ),

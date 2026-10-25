@@ -1,11 +1,14 @@
 // App 框架槽位与导航裁决（纯逻辑，可单测；2.3.0 追加五/六）。
 //
-// 框架形态：顶栏＋底部四标签（设备/好友/论坛/我的）。设备、好友、论坛是
-// 三个各自保活的 WebView 槽（IndexedStack 常驻，切标签不重载、不闪白）；
-// 「我的」是原生页，同样常驻保活。系统返回键分级：先页内后退，
-// 再回设备槽，最后才退出 App。
+// 框架形态：顶栏＋底部四标签。2.3.1（阶段 D）按站长效果图与决策记录
+// 改名改序为：首页/文件/设备/我的——首页＝网页新首页正本在壳内同框
+// 呈现的 WebView 槽，文件＝控制台文件管理 WebView 槽，设备＝控制台
+// WebView 槽；好友/论坛降为首页长页快速入口与顶栏菜单可达的保活槽
+// （槽位本体保留，不删功能）。各 WebView 槽 IndexedStack 常驻保活，
+// 切标签不重载、不闪白；「我的」是原生页，同样常驻保活。
+// 系统返回键分级：先页内后退，再回设备槽，最后才退出 App。
 
-enum AppSlot { devices, friends, forum, me }
+enum AppSlot { home, files, devices, friends, forum, me }
 
 /// 返回键动作裁决结果。
 enum BackAction {
@@ -20,13 +23,14 @@ enum BackAction {
 }
 
 /// 系统返回键分级裁决（纯函数）：
-/// - 非设备槽：页内能退先页内退，否则回设备槽；
-/// - 设备槽：页内能退先页内退，否则退出 App。
+/// - 非根槽：页内能退先页内退，否则回设备槽；
+/// - 根槽（首页/设备）：页内能退先页内退，否则退出 App。
+///   首页是 2.3.1 的落地根槽，与设备槽同级，不许返回时被赶去设备槽。
 BackAction decideBackAction({
   required AppSlot active,
   required bool activeCanGoBack,
 }) {
-  if (active != AppSlot.devices) {
+  if (active != AppSlot.devices && active != AppSlot.home) {
     return activeCanGoBack ? BackAction.pageBack : BackAction.toDevices;
   }
   return activeCanGoBack ? BackAction.pageBack : BackAction.exitApp;

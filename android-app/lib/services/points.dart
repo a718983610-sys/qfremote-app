@@ -98,6 +98,28 @@ class ExtService {
     return r != null && r.$1 == 200;
   }
 
+  /// 心跳＋强制下线信号（2.3.1 契约 §7.5.7）：心跳响应顶层带
+  /// forceLogout:true＋gateCode 时，壳须立即登出本机会话并落拦截态。
+  /// 返回 null＝本拍没打通（安静跳过，不当作任何许可结论）。
+  Future<({bool forceLogout, String? gateCode})?> heartbeatSignal() async {
+    final r = await _send('POST', '${urls.pointsApiBase}/api/heartbeat',
+        jsonBody: {'client': 'android'});
+    if (r == null || r.$1 != 200) return null;
+    try {
+      final root = jsonDecode(r.$2);
+      if (root is Map<String, dynamic>) {
+        final gc = root['gateCode'];
+        return (
+          forceLogout: root['forceLogout'] == true,
+          gateCode: gc is String && gc.isNotEmpty ? gc : null,
+        );
+      }
+    } catch (_) {
+      // 响应不是 JSON：只当心跳成功，不解读信号
+    }
+    return (forceLogout: false, gateCode: null);
+  }
+
   /// 我的积分/使用时长：取不到返回 null（关于页显示「—」）。
   Future<PointsInfo?> fetchMe() async {
     final r = await _send('GET', '${urls.pointsApiBase}/api/me');

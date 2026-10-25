@@ -81,6 +81,26 @@ class SvcUrls {
   String adminLoginUrl(String token) =>
       '$adminUrl/login?token=${Uri.encodeQueryComponent(token)}';
 
+  /// 扩展服务同源根（2.3.1 许可/新首页落点）：许可接口、新首页、购买页、
+  /// 状态查询页都挂在扩展服务同一源下（经 nginx 同源 /license/*、/purchase、
+  /// /home），与积分同源——取 pointsUrl 的 origin，不另设地址来源。
+  String get extOrigin => Uri.parse(pointsUrl).origin;
+
+  /// 新版首页（阶段 C-3 网页正本，壳内同框呈现）。
+  String get homeUrl => '$extOrigin/home';
+
+  /// 购买页（真实支付开关关时页面自带正式提示，壳只负责壳内打开）。
+  String get purchaseUrl => '$extOrigin/purchase';
+
+  /// 账户状态查询页（登录页「查询密钥」落点，§十）。
+  String get licenseStatusUrl => '$extOrigin/license/status';
+
+  /// 申诉页（既有 /appeal 通道，全状态可达）。
+  String get appealUrl => '$extOrigin/appeal';
+
+  /// 许可接口基址（/license 前缀下 /api/*）。
+  String get licenseApiBase => '$extOrigin/license';
+
   static bool _usable(String? v) =>
       v != null && v.startsWith('https://') && v.length > 10 && !v.contains(' ');
 

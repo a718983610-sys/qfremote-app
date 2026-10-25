@@ -24,6 +24,12 @@ const String kHandlerLoginSubmit = 'qfLoginSubmit';
 /// JS 处理器名：手动退出回传。
 const String kHandlerManualLogout = 'qfManualLogout';
 
+/// JS 处理器名：登录页许可入口导航（2.3.1 登录页版式 16:37 定版——
+/// 登录/注册区最后一行「购买密钥」黑底白字、其下「查询密钥」蓝色无边框
+/// 文字链；点击经本处理器回原生层，由原生层在壳内打开 /purchase 或
+/// /license/status，不许整页外跳）。回传 {target: 'purchase'|'status'}。
+const String kHandlerLicenseNav = 'qfLicenseNav';
+
 /// 登录页探针结果。
 class LoginProbe {
   /// 'login' = 登录面板可见（掉登录了）；'console' = 已在控制台里；
@@ -200,6 +206,42 @@ String buildLoginBridgeJs({
       anchor.parentNode.insertBefore(tr, anchor.nextSibling);
       rpBox = input;
     }
+  }
+  // 2.3.1 登录页版式（16:37 定版）：登录区最后一行「购买密钥」黑底白字钮，
+  // 其下「查询密钥」蓝色无边框文字链。服务端登录页模板已注入同 id 的两行
+  // （隧道页即用它们），但其相对 href 在直连控制台源上指向本源路径、不可用；
+  // 壳的口径：页面已有这两行时只接管点击（改走原生层壳内打开扩展源的
+  // /purchase 与 /license/status），没有时才补注入同位同式的两行。
+  // 重复注入安全（qfWired / id 守卫）。
+  var srvBuy = document.getElementById('qfBuyKeyRow');
+  var srvQuery = document.getElementById('qfQueryKeyRow');
+  if (srvBuy || srvQuery) {
+    if (srvBuy && !srvBuy.dataset.qfWired) {
+      srvBuy.dataset.qfWired = '1';
+      srvBuy.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'purchase' }); });
+    }
+    if (srvQuery && !srvQuery.dataset.qfWired) {
+      srvQuery.dataset.qfWired = '1';
+      srvQuery.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'status' }); });
+    }
+  } else if (!document.getElementById('qfLicenseRows')) {
+    var lbox = document.createElement('div');
+    lbox.id = 'qfLicenseRows';
+    lbox.style.cssText = 'box-sizing:border-box;width:280px;margin:14px auto 2px auto';
+    var buy = document.createElement('button');
+    buy.type = 'button';
+    buy.id = 'qfBuyKeyRowShell';
+    buy.textContent = '购买密钥';
+    buy.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:#111;color:#fff;border:0;border-radius:9px;padding:11px 0;font-size:15px;cursor:pointer';
+    buy.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'purchase' }); });
+    var query = document.createElement('div');
+    query.id = 'qfQueryKeyRowShell';
+    query.textContent = '查询密钥';
+    query.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0';
+    query.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'status' }); });
+    lbox.appendChild(buy);
+    lbox.appendChild(query);
+    panel.appendChild(lbox);
   }
   if (!FILL || !HAS_SAVED) return 'hooks-only';
   var uEl = document.getElementById('username');

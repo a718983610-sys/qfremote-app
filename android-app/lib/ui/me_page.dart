@@ -21,6 +21,9 @@ class MePage extends StatefulWidget {
   final VoidCallback onAccountAction;
   final VoidCallback onLogout;
 
+  /// 「付费与激活」区（2.3.1 阶段 D 注入；为空时整区不出现）。
+  final Widget? licenseSection;
+
   const MePage({
     super.key,
     required this.palette,
@@ -34,6 +37,7 @@ class MePage extends StatefulWidget {
     required this.onCheckUpdate,
     required this.onAccountAction,
     required this.onLogout,
+    this.licenseSection,
   });
 
   @override
@@ -160,6 +164,10 @@ class _MePageState extends State<MePage> {
                   child: Text('三端时间都算在一起。',
                       style: TextStyle(color: p.onCardDim, fontSize: 11.5)),
                 ),
+                if (widget.licenseSection != null) ...[
+                  _section('付费与激活'),
+                  widget.licenseSection!,
+                ],
                 _section('账号'),
                 _rowCard(
                   title: '修改密码',

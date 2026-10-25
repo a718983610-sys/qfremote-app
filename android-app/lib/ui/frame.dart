@@ -108,6 +108,8 @@ class QfAppHeader extends StatelessWidget {
             itemBuilder: (context) => [
               if (showAdmin)
                 const PopupMenuItem(value: 'admin', child: Text('管理')),
+              const PopupMenuItem(value: 'friends', child: Text('好友')),
+              const PopupMenuItem(value: 'forum', child: Text('论坛')),
               const PopupMenuItem(value: 'refresh', child: Text('刷新')),
               const PopupMenuItem(value: 'fullscreen', child: Text('全屏模式')),
               const PopupMenuItem(value: 'screenshot', child: Text('截图保存')),
@@ -126,7 +128,8 @@ class QfAppHeader extends StatelessWidget {
   }
 }
 
-/// 底部四标签（样图 ptabs）：设备/好友/论坛/我的。
+/// 底部四标签（2.3.1 效果图定版）：首页/文件/设备/我的。
+/// 好友/论坛不在底部导航（降为首页长页快速入口＋顶栏菜单可达，槽位保活不变）。
 class QfTabBar extends StatelessWidget {
   final QfPalette palette;
   final AppSlot active;
@@ -152,9 +155,9 @@ class QfTabBar extends StatelessWidget {
       padding: EdgeInsets.only(bottom: bottomInset),
       child: Row(
         children: [
+          _tab(AppSlot.home, Icons.home_outlined, '首页'),
+          _tab(AppSlot.files, Icons.folder_outlined, '文件'),
           _tab(AppSlot.devices, Icons.monitor_outlined, '设备'),
-          _tab(AppSlot.friends, Icons.people_outline, '好友'),
-          _tab(AppSlot.forum, Icons.forum_outlined, '论坛'),
           _tab(AppSlot.me, Icons.person_outline, '我的'),
         ],
       ),
