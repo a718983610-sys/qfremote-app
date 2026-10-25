@@ -178,7 +178,7 @@ class _LicenseSectionState extends State<LicenseSection> {
                   style: TextStyle(
                       color: p.onCard, fontSize: 15, fontWeight: FontWeight.w700)),
               const SizedBox(height: 4),
-              Text('把密钥粘贴到这里，绑定到本机（一台电脑与一部手机）。',
+              Text('把密钥粘贴到这里，绑定到本机（两台电脑与一部手机）。',
                   style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
               const SizedBox(height: 10),
               _keyRow(

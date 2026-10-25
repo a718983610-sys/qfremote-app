@@ -247,7 +247,7 @@ GateCopy? gateCopyFor(LicenseDecision d) {
           d.trialExpiresMs != null ? formatDateZh(d.trialExpiresMs!) : '';
       return GateCopy(
         title: '试用已到期',
-        body: '您的 3 天免费试用已于 $when 到期。真实付费购买密钥后即可继续使用：一台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
+        body: '您的 3 天免费试用已于 $when 到期。真实付费购买密钥后即可继续使用：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
         primary: GatePrimary.purchase,
         hasClaimBox: true,
         hasTransferGuide: true,
@@ -257,7 +257,7 @@ GateCopy? gateCopyFor(LicenseDecision d) {
           d.keyExpiresMs != null ? formatDateZh(d.keyExpiresMs!) : '';
       return GateCopy(
         title: '密钥已过期',
-        body: '${when.isNotEmpty ? '您的密钥已于 $when 到期' : '您的密钥已到期'}，密钥已收回，当前账号无法登录。如需继续使用，请购买新密钥（可选永久套餐或按天套餐）：一台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
+        body: '${when.isNotEmpty ? '您的密钥已于 $when 到期' : '您的密钥已到期'}，密钥已收回，当前账号无法登录。如需继续使用，请购买新密钥（可选永久套餐或按天套餐）：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
         primary: GatePrimary.purchase,
         hasClaimBox: true,
         hasTransferGuide: true,
@@ -265,7 +265,7 @@ GateCopy? gateCopyFor(LicenseDecision d) {
     case 'G3': // L10（正文逐字不变；另加「申诉换绑设备」入口，§11.9 定版）
       return const GateCopy(
         title: '设备名额已满',
-        body: '本设备尚未绑定密钥。您的密钥已绑定一台电脑与一部手机，如需在本设备使用，请购买新密钥。',
+        body: '本设备尚未绑定密钥。您的密钥已绑定两台电脑与一部手机，如需在本设备使用，请购买新密钥。',
         primary: GatePrimary.purchase,
         hasRebind: true,
       );
