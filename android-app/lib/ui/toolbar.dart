@@ -173,6 +173,7 @@ class QfToolbar extends StatelessWidget {
                   const PopupMenuItem(value: 'screenshot', child: Text('截图保存')),
                   const PopupMenuItem(value: 'checkUpdate', child: Text('检查更新')),
                   const PopupMenuItem(value: 'lock', child: Text('隐私锁')),
+                  const PopupMenuItem(value: 'logout', child: Text('退出账号')),
                   const PopupMenuItem(value: 'about', child: Text('关于')),
                 ],
               ),

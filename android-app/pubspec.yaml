@@ -4,23 +4,25 @@ publish_to: 'none'
 version: 2.2.0+22000
 
 environment:
-  sdk: '>=3.4.0 <4.0.0'
+  sdk: '>=3.8.0 <4.0.0'
   flutter: '>=3.22.0'
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_inappwebview: ^6.1.5
-  shared_preferences: ^2.3.3
-  package_info_plus: ^8.1.2
+  shared_preferences: ^2.5.3
+  package_info_plus: ^10.2.2
   path_provider: ^2.1.5
   crypto: ^3.0.6
-  open_filex: ^4.5.0
+  open_filex: ^5.0.0
+  # 记住账号密码/会话快照的加密落盘：安卓走 Android Keystore 体系
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true

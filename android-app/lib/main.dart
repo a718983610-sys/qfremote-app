@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -10,11 +11,14 @@ import 'package:path_provider/path_provider.dart';
 
 import 'build_info.dart';
 import 'core/constants.dart';
+import 'core/login_bridge.dart';
+import 'core/session_recovery.dart';
 import 'core/svc_urls.dart';
 import 'core/manifest.dart';
 import 'core/update_policy.dart';
 import 'core/version.dart';
 import 'core/watchdog_core.dart';
+import 'services/credential_store.dart';
 import 'services/points.dart';
 import 'services/probe.dart';
 import 'services/settings.dart';
@@ -78,6 +82,21 @@ class _WebViewEvaluator implements WatchdogEvaluator {
   }
 }
 
+/// 一次登录提交的回传（登录桥 JS 在点登录按钮时送回原生层）：
+/// 先挂起，等确认真进了控制台才落盘（密码错了不落，免得存下错密码）。
+class _PendingSubmit {
+  final String username;
+  final String password;
+  final bool rememberDevice;
+  final bool rememberPassword;
+  const _PendingSubmit({
+    required this.username,
+    required this.password,
+    required this.rememberDevice,
+    required this.rememberPassword,
+  });
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -126,6 +145,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _foreground = true;
   bool _isAdmin = false;
 
+  // 2.3.0：自动重新登录＋记住账号密码。
+  // 恢复链：掉登录 → 先塞回会话快照刷新（30 天内有效）→ 再用已存凭据静默
+  // 登录 → 都不行才露登录页提示。恢复全程盖着启动画面，不闪登录页。
+  // 手动退出账号是唯一人工终止：清会话、清凭据、清记住标记，此后不再自动登录。
+  final _credStore = CredentialStore();
+  final _autoLogin = AutoLoginController();
+  SavedCredentials? _savedCreds;
+  SessionSnapshot? _savedSession;
+  Timer? _loginTimer;
+  bool _loginTickBusy = false;
+  String _currentUrl = '';
+  bool _episodeActive = false;
+  bool _recoveryCover = false;
+  DateTime? _stepWaitUntil;
+  bool _injectedThisLoad = false;
+  bool _filledThisLoad = false;
+  bool _failureSnackShown = false;
+  DateTime? _lastSnapshotAt;
+  _PendingSubmit? _pendingSubmit;
+  DateTime? _pendingSubmitAt;
+  bool _pendingSubmitAuto = false;
+  bool _autoSubmitInFlight = false;
+
   ExtService get _extService =>
       _ext ??= ExtService(cookieProvider: _consoleCookieHeader);
 
@@ -152,6 +194,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _offlineTimer?.cancel();
     _probeTimer?.cancel();
     _heartbeatTimer?.cancel();
+    _loginTimer?.cancel();
     super.dispose();
   }
 
@@ -160,6 +203,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _boot() async {
     final settings = await QfSettings.load();
     final pkg = await PackageInfo.fromPlatform();
+    // 2.3.0：先把已存凭据/会话快照/拦截标记读进内存；有恢复的可能时，
+    // 启动画面先盖住，等恢复链裁决完再露页面（不闪登录页）。
+    try {
+      _savedCreds = await _credStore.loadCredentials();
+      _savedSession = await _credStore.loadSession();
+    } catch (_) {
+      _savedCreds = null;
+      _savedSession = null;
+    }
+    _autoLogin.credentialBlocked = settings.credentialBlocked;
+    final canRecover = (_savedCreds != null ||
+            (_savedSession?.isFresh(DateTime.now()) ?? false)) &&
+        (settings.rememberDevice || settings.rememberPassword);
+    if (canRecover) {
+      _episodeActive = true;
+      _recoveryCover = true;
+      _autoLogin.beginEpisode();
+    }
     if (!mounted) return;
     setState(() {
       _settings = settings;
@@ -253,6 +314,366 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     setState(() => _gateDone = true);
+  }
+
+  // ---------------- 自动重新登录＋记住账号密码（2.3.0） ----------------
+
+  /// 登录逻辑只认控制台根页面（同源、根路径）；好友/论坛/注册等页面不介入。
+  bool get _isConsolePage {
+    if (kHasTestUrl) return false;
+    final uri = Uri.tryParse(_currentUrl);
+    if (uri == null) return false;
+    return uri.origin == kServerOrigin &&
+        (uri.path.isEmpty || uri.path == '/');
+  }
+
+  void _startLoginLoop() {
+    _loginTimer?.cancel();
+    _loginTimer =
+        Timer.periodic(const Duration(seconds: 2), (_) => _loginTick());
+  }
+
+  /// 注册登录桥的两个 JS 处理器（登录提交回传 / 手动退出回传）。
+  void _registerLoginHandlers(InAppWebViewController controller) {
+    controller.addJavaScriptHandler(
+      handlerName: kHandlerLoginSubmit,
+      callback: (args) {
+        if (args.isEmpty || args.first is! Map) return;
+        final m = args.first as Map;
+        final u = m['username']?.toString() ?? '';
+        final p = m['password']?.toString() ?? '';
+        if (u.isEmpty || p.isEmpty) return;
+        _pendingSubmit = _PendingSubmit(
+          username: u,
+          password: p,
+          rememberDevice: m['rememberDevice'] == true,
+          rememberPassword: m['rememberPassword'] == true,
+        );
+        _pendingSubmitAt = DateTime.now();
+        _pendingSubmitAuto = _autoSubmitInFlight;
+        debugPrint('QFLOGIN submit captured (auto=$_pendingSubmitAuto)');
+      },
+    );
+    controller.addJavaScriptHandler(
+      handlerName: kHandlerManualLogout,
+      callback: (args) => _noteManualLogout(),
+    );
+  }
+
+  Future<LoginProbe?> _probeLogin() async {
+    final web = _web;
+    if (web == null) return null;
+    try {
+      final r = await web.evaluateJavascript(source: kLoginProbeJs);
+      var s = r?.toString() ?? '';
+      if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+        try {
+          final decoded = jsonDecode(s);
+          if (decoded is String) s = decoded;
+        } catch (_) {
+          return null;
+        }
+      }
+      return LoginProbe.parse(s);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<bool> _evalJsBool(String js) async {
+    final web = _web;
+    if (web == null) return false;
+    try {
+      final r = await web.evaluateJavascript(source: js);
+      return r == true || r?.toString() == 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 往登录页注入登录桥（勾选框＋钩子＋可选回填），重复注入安全。
+  Future<void> _injectBridge({required bool fillSaved}) async {
+    final web = _web;
+    if (web == null) return;
+    final js = buildLoginBridgeJs(
+      savedUsername: _savedCreds?.username,
+      savedPassword: _savedCreds?.password,
+      rememberPasswordChecked: _settings?.rememberPassword ?? false,
+      rememberDeviceChecked: _settings?.rememberDevice ?? false,
+      fillSaved: fillSaved,
+    );
+    try {
+      final r = await web.evaluateJavascript(source: js);
+      debugPrint('QFLOGIN bridge -> $r');
+      if (fillSaved && r?.toString().contains('filled') == true) {
+        _filledThisLoad = true;
+      }
+    } catch (_) {
+      // 页面正在跳转：这一拍算了，下一拍再来
+    }
+  }
+
+  Future<void> _loginTick() async {
+    if (_loginTickBusy || !mounted || _web == null) return;
+    if (!_gateDone || _forceEntry != null || _offline) return;
+    if (!_isConsolePage) return;
+    _loginTickBusy = true;
+    try {
+      final probe = await _probeLogin();
+      if (probe == null || !mounted) return;
+      if (probe.isConsole) {
+        await _onConsoleDetected();
+      } else if (probe.isLogin) {
+        await _onLoginPageDetected();
+      }
+      // unknown：页面还没画完，这一拍不动作
+    } finally {
+      _loginTickBusy = false;
+    }
+  }
+
+  /// 探针确认已在控制台：落盘挂起的登录提交、刷新会话快照、收尾恢复盖子。
+  Future<void> _onConsoleDetected() async {
+    if (!_injectedThisLoad) {
+      await _injectBridge(fillSaved: false);
+      _injectedThisLoad = true;
+    }
+    final pending = _pendingSubmit;
+    if (pending != null) {
+      _pendingSubmit = null;
+      _pendingSubmitAt = null;
+      final s = _settings;
+      if (s != null) {
+        await s.setRememberDevice(pending.rememberDevice);
+        await s.setRememberPassword(pending.rememberPassword);
+      }
+      if (pending.rememberPassword) {
+        try {
+          await _credStore.saveCredentials(pending.username, pending.password);
+          _savedCreds = SavedCredentials(
+              username: pending.username, password: pending.password);
+        } catch (_) {}
+      } else {
+        try {
+          await _credStore.clearCredentials();
+        } catch (_) {}
+        _savedCreds = null;
+      }
+      if (!pending.rememberDevice && !pending.rememberPassword) {
+        // 两个记住都没勾：会话快照也不留（关 App 掉登录是应有之义）
+        try {
+          await _credStore.clearSession();
+        } catch (_) {}
+        _savedSession = null;
+      }
+    }
+    if (_settings?.credentialBlocked ?? false) {
+      await _settings?.setCredentialBlocked(false);
+    }
+    _autoLogin.onLoginSuccess();
+    _episodeActive = false;
+    _stepWaitUntil = null;
+    _failureSnackShown = false;
+    await _maybeSnapshotSession();
+    if (mounted && (_recoveryCover || _splashVisible)) {
+      setState(() {
+        _recoveryCover = false;
+        _splashVisible = false;
+      });
+    }
+  }
+
+  /// 登录成功后摘存会话 cookie（两个记住勾了任一项才摘；5 分钟内不重复摘）。
+  Future<void> _maybeSnapshotSession() async {
+    final s = _settings;
+    if (s == null || (!s.rememberDevice && !s.rememberPassword)) return;
+    final last = _lastSnapshotAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 5)) {
+      return;
+    }
+    try {
+      final cookies =
+          await CookieManager.instance().getCookies(url: WebUri(kServerOrigin));
+      final map = <String, String>{};
+      for (final c in cookies) {
+        if ((c.name == 'xid' || c.name == 'xid.sig' || c.name == 'qfrem') &&
+            c.value.toString().isNotEmpty) {
+          map[c.name] = c.value.toString();
+        }
+      }
+      if ((map['xid'] ?? '').isEmpty) return;
+      final snap = SessionSnapshot(cookies: map, savedAt: DateTime.now());
+      await _credStore.saveSession(snap);
+      _savedSession = snap;
+      _lastSnapshotAt = DateTime.now();
+      debugPrint('QFLOGIN session snapshot saved (${map.keys.join(',')})');
+    } catch (_) {
+      // 摘不到就算了：下次探针再试，不影响使用
+    }
+  }
+
+  /// 探针确认掉回登录页：按恢复链裁决下一步，全程盖住不闪登录页。
+  Future<void> _onLoginPageDetected() async {
+    // 挂起的提交超过 6 秒还没进控制台 = 这次登录没成：丢弃挂起；
+    // 若是自动提交的，置凭据拦截（落盘），防旧密码反复去撞登录冻结。
+    final pendingAt = _pendingSubmitAt;
+    if (_pendingSubmit != null &&
+        pendingAt != null &&
+        DateTime.now().difference(pendingAt) > const Duration(seconds: 6)) {
+      final wasAuto = _pendingSubmitAuto;
+      _pendingSubmit = null;
+      _pendingSubmitAt = null;
+      if (wasAuto) {
+        _autoLogin.credentialBlocked = true;
+        await _settings?.setCredentialBlocked(true);
+        debugPrint('QFLOGIN credential auto-login failed -> blocked');
+      }
+    }
+    // 手动退出后：只保证登录页露出来，绝不恢复
+    if (_autoLogin.suppressedByManualLogout) {
+      if (!_injectedThisLoad) {
+        await _injectBridge(fillSaved: false);
+        _injectedThisLoad = true;
+      }
+      if (mounted && (_recoveryCover || _splashVisible)) {
+        setState(() {
+          _recoveryCover = false;
+          _splashVisible = false;
+        });
+      }
+      return;
+    }
+    if (!_episodeActive) {
+      _episodeActive = true;
+      _autoLogin.beginEpisode();
+    }
+    // 上一步还在等结果（刷新/提交后给页面留时间），盖子保持
+    final wait = _stepWaitUntil;
+    if (wait != null && DateTime.now().isBefore(wait)) {
+      if (mounted && !_recoveryCover) {
+        setState(() {
+          _recoveryCover = true;
+          _splashVisible = true;
+        });
+      }
+      return;
+    }
+    _stepWaitUntil = null;
+    final hasSession = _savedSession?.isFresh(DateTime.now()) ?? false;
+    final hasCreds = _savedCreds != null;
+    final step =
+        _autoLogin.next(hasFreshSession: hasSession, hasCredentials: hasCreds);
+    if (step == RecoveryStep.stop) {
+      // 没得恢复（或已试完）：有凭据就只回填不提交，最后露登录页
+      if (hasCreds && !_filledThisLoad) {
+        await _injectBridge(fillSaved: true);
+      } else if (!_injectedThisLoad) {
+        await _injectBridge(fillSaved: false);
+        _injectedThisLoad = true;
+      }
+      final hadAttempts =
+          _autoLogin.sessionAttempts + _autoLogin.credentialAttempts > 0;
+      _episodeActive = false;
+      if (mounted && (_recoveryCover || _splashVisible)) {
+        setState(() {
+          _recoveryCover = false;
+          _splashVisible = false;
+        });
+      }
+      if (hadAttempts && !_failureSnackShown && mounted) {
+        _failureSnackShown = true;
+        _snack('自动登录没有成功，请重新登录。');
+      }
+      return;
+    }
+    if (mounted && !_recoveryCover) {
+      setState(() {
+        _recoveryCover = true;
+        _splashVisible = true;
+      });
+    }
+    _autoLogin.recordAttempt(step);
+    if (step == RecoveryStep.restoreSession) {
+      debugPrint('QFLOGIN recovery: session restore');
+      await _applySessionSnapshot(_savedSession!);
+      _stepWaitUntil = DateTime.now().add(const Duration(seconds: 6));
+      await _web?.reload();
+    } else if (step == RecoveryStep.credentialLogin) {
+      debugPrint('QFLOGIN recovery: credential silent login');
+      await _injectBridge(fillSaved: true);
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      _autoSubmitInFlight = true;
+      final clicked = await _evalJsBool(kSubmitLoginJs);
+      debugPrint('QFLOGIN silent submit clicked=$clicked');
+      Future<void>.delayed(
+          const Duration(seconds: 2), () => _autoSubmitInFlight = false);
+      _stepWaitUntil = DateTime.now().add(const Duration(seconds: 8));
+    }
+  }
+
+  /// 把会话快照塞回 WebView 的 CookieManager（带回原 30 天到期时间）。
+  Future<void> _applySessionSnapshot(SessionSnapshot snap) async {
+    final cm = CookieManager.instance();
+    final expires = snap.savedAt.add(kSessionLifetime);
+    for (final e in snap.cookies.entries) {
+      try {
+        await cm.setCookie(
+          url: WebUri(kServerOrigin),
+          name: e.key,
+          value: e.value,
+          expiresDate: expires,
+          domain: kServerHost,
+          path: '/',
+          isSecure: true,
+        );
+      } catch (_) {
+        // 单颗塞不回不中断：其余继续，刷新后探针会裁决成败
+      }
+    }
+  }
+
+  /// 手动退出账号（页面内点退出、跳 /logout、原生菜单点退出都汇到这里）：
+  /// 置闸停自动恢复 + 清会话、清凭据、清记住标记。重复调用无副作用。
+  void _noteManualLogout() {
+    if (_autoLogin.suppressedByManualLogout && _savedCreds == null) return;
+    _autoLogin.onManualLogout();
+    _pendingSubmit = null;
+    _pendingSubmitAt = null;
+    _episodeActive = false;
+    _stepWaitUntil = null;
+    _failureSnackShown = false;
+    debugPrint('QFLOGIN manual logout: clearing auth state');
+    unawaited(_clearAuthState());
+    if (mounted && (_recoveryCover || _splashVisible)) {
+      setState(() {
+        _recoveryCover = false;
+        _splashVisible = false;
+      });
+    }
+  }
+
+  Future<void> _clearAuthState() async {
+    try {
+      await _credStore.clearAll();
+    } catch (_) {}
+    _savedCreds = null;
+    _savedSession = null;
+    _lastSnapshotAt = null;
+    try {
+      await _settings?.clearAuthPrefs();
+    } catch (_) {}
+    try {
+      await CookieManager.instance().deleteAllCookies();
+    } catch (_) {}
+  }
+
+  /// 原生菜单「退出账号」：清干净后走服务端登出地址回登录页。
+  Future<void> _manualLogoutFromMenu() async {
+    _noteManualLogout();
+    await _web?.loadUrl(
+        urlRequest: URLRequest(url: WebUri('$kServerOrigin/logout')));
+    if (mounted) _snack('已退出账号');
   }
 
   // ---------------- 探活（状态灯） ----------------
@@ -364,7 +785,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (elapsed < 850) {
           await Future<void>.delayed(Duration(milliseconds: 850 - elapsed));
         }
-        if (mounted) setState(() => _splashVisible = false);
+        if (mounted && !_recoveryCover) setState(() => _splashVisible = false);
       }
       return;
     }
@@ -376,7 +797,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (elapsed < 850) {
         await Future<void>.delayed(Duration(milliseconds: 850 - elapsed));
       }
-      if (mounted) setState(() => _splashVisible = false);
+      // 正在自动恢复登录时不退场：盖住登录页，恢复完（或失败）再由恢复链退
+      if (mounted && !_recoveryCover) setState(() => _splashVisible = false);
     }
     if (!_sessionCheckScheduled) {
       _sessionCheckScheduled = true;
@@ -509,6 +931,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
         );
+        break;
+      case 'logout':
+        _manualLogoutFromMenu();
         break;
       case 'admin':
         _openAdmin();
@@ -666,11 +1091,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           onWebViewCreated: (controller) {
                             _web = controller;
                             _evaluator.controller = controller;
+                            _registerLoginHandlers(controller);
                             _startWatchdog();
+                            _startLoginLoop();
                           },
                           shouldOverrideUrlLoading: (controller, action) async {
                             final url = action.request.url;
                             if (url == null) return NavigationActionPolicy.CANCEL;
+                            // 跳登出地址 = 本人手动退出：先记下，别被自动恢复拉回来
+                            if (url.path == '/logout') _noteManualLogout();
                             if (url.scheme == 'http' || url.scheme == 'https') {
                               return NavigationActionPolicy.ALLOW;
                             }
@@ -678,6 +1107,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           },
                           onLoadStart: (controller, url) {
                             _mainFrameFailed = false;
+                            if (url != null) {
+                              _currentUrl = url.toString();
+                              _injectedThisLoad = false;
+                              _filledThisLoad = false;
+                            }
                           },
                           onLoadStop: (controller, url) => _onPageLoaded(),
                           onReceivedError: (controller, request, error) {
@@ -698,6 +1132,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             );
                           },
                           onUpdateVisitedHistory: (controller, url, isReload) async {
+                            if (url != null) _currentUrl = url.toString();
                             final can = await controller.canGoBack();
                             if (mounted) setState(() => _canGoBack = can);
                           },
@@ -719,7 +1154,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             },
                           ),
                         if (_splashVisible)
-                          SplashView(palette: _palette, version: _currentVersion),
+                          SplashView(
+                            palette: _palette,
+                            version: _currentVersion,
+                            note: _recoveryCover ? '正在恢复登录…' : null,
+                          ),
                       ],
                     ),
                   ),

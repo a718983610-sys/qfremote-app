@@ -7,6 +7,13 @@ class QfSettings {
   static const _kOfflineCount = 'stats_offline_count';
   static const _kWatchdogReconnects = 'stats_watchdog_reconnects';
 
+  // 2.3.0 登录三件：两个勾选的上次选择（只存选择本身，账号密码与会话 cookie
+  // 一律走 Keystore 加密存储，见 credential_store.dart，绝不落到这里的明文区），
+  // 以及「凭据静默登录失败过」的拦截标记（防旧密码反复自动提交撞冻结）。
+  static const _kRememberDevice = 'auth_remember_device';
+  static const _kRememberPassword = 'auth_remember_password';
+  static const _kCredentialBlocked = 'auth_credential_blocked';
+
   final SharedPreferences _prefs;
   QfSettings(this._prefs);
 
@@ -32,4 +39,22 @@ class QfSettings {
   int get watchdogReconnects => _prefs.getInt(_kWatchdogReconnects) ?? 0;
   Future<void> incWatchdogReconnects() =>
       _prefs.setInt(_kWatchdogReconnects, watchdogReconnects + 1);
+
+  bool get rememberDevice => _prefs.getBool(_kRememberDevice) ?? false;
+  Future<void> setRememberDevice(bool v) => _prefs.setBool(_kRememberDevice, v);
+
+  bool get rememberPassword => _prefs.getBool(_kRememberPassword) ?? false;
+  Future<void> setRememberPassword(bool v) =>
+      _prefs.setBool(_kRememberPassword, v);
+
+  bool get credentialBlocked => _prefs.getBool(_kCredentialBlocked) ?? false;
+  Future<void> setCredentialBlocked(bool v) =>
+      _prefs.setBool(_kCredentialBlocked, v);
+
+  /// 手动退出账号：登录相关的选择与标记一次清干净（与凭据存储的 clearAll 配套）。
+  Future<void> clearAuthPrefs() async {
+    await _prefs.remove(_kRememberDevice);
+    await _prefs.remove(_kRememberPassword);
+    await _prefs.remove(_kCredentialBlocked);
+  }
 }

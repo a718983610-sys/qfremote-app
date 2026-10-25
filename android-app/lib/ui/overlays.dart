@@ -7,7 +7,10 @@ import 'theme.dart';
 class SplashView extends StatelessWidget {
   final QfPalette palette;
   final String version;
-  const SplashView({super.key, required this.palette, required this.version});
+
+  /// 附加小字（如自动恢复登录中），为空不显示。
+  final String? note;
+  const SplashView({super.key, required this.palette, required this.version, this.note});
 
   @override
   Widget build(BuildContext context) {
@@ -66,6 +69,16 @@ class SplashView extends StatelessWidget {
                 ),
               ),
             ),
+            if (note != null) ...[
+              const SizedBox(height: 14),
+              Text(
+                note!,
+                style: TextStyle(
+                  color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90),
+                  fontSize: 13,
+                ),
+              ),
+            ],
             const SizedBox(height: 26),
             Text('v$version',
                 style: TextStyle(
