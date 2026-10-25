@@ -5,6 +5,10 @@ name: Android 截图与看护实测
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   shots:
     runs-on: ubuntu-latest
