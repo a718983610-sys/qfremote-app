@@ -156,7 +156,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _loginTimer;
   bool _loginTickBusy = false;
   String _currentUrl = '';
-  bool _episodeActive = false;
+  // 一轮掉登录（episode）的生命周期：一轮只从「新页面加载」或「刚还在控制台、
+  // 现在掉回登录页」的跳变开始；试完（_episodeFinished）就锁死本轮，绝不因为
+  // 探针下一拍又看到登录页就重开一轮——那会让凭据被反复自动提交、撞登录冻结。
+  bool _episodeRunning = false;
+  bool _episodeFinished = false;
+  String _prevProbeState = 'unknown';
   bool _recoveryCover = false;
   DateTime? _stepWaitUntil;
   bool _injectedThisLoad = false;
@@ -217,9 +222,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             (_savedSession?.isFresh(DateTime.now()) ?? false)) &&
         (settings.rememberDevice || settings.rememberPassword);
     if (canRecover) {
-      _episodeActive = true;
+      // 只先盖住；episode 由登录探针在确认掉登录后正式开启
       _recoveryCover = true;
-      _autoLogin.beginEpisode();
     }
     if (!mounted) return;
     setState(() {
@@ -422,11 +426,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final probe = await _probeLogin();
       if (probe == null || !mounted) return;
       if (probe.isConsole) {
+        _prevProbeState = 'console';
         await _onConsoleDetected();
       } else if (probe.isLogin) {
-        await _onLoginPageDetected();
+        final fromConsole = _prevProbeState == 'console';
+        _prevProbeState = 'login';
+        await _onLoginPageDetected(fromConsole: fromConsole);
       }
-      // unknown：页面还没画完，这一拍不动作
+      // unknown：页面还没画完，这一拍不动作、也不覆盖上一个确定状态
     } finally {
       _loginTickBusy = false;
     }
@@ -471,7 +478,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _settings?.setCredentialBlocked(false);
     }
     _autoLogin.onLoginSuccess();
-    _episodeActive = false;
+    _episodeRunning = false;
+    _episodeFinished = false; // 回到控制台：下一次掉登录算新一轮
     _stepWaitUntil = null;
     _failureSnackShown = false;
     await _maybeSnapshotSession();
@@ -514,7 +522,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 探针确认掉回登录页：按恢复链裁决下一步，全程盖住不闪登录页。
-  Future<void> _onLoginPageDetected() async {
+  /// [fromConsole]：上一拍还在控制台、这一拍掉回登录页（同页跳变也算新一轮）。
+  Future<void> _onLoginPageDetected({required bool fromConsole}) async {
     // 挂起的提交超过 6 秒还没进控制台 = 这次登录没成：丢弃挂起；
     // 若是自动提交的，置凭据拦截（落盘），防旧密码反复去撞登录冻结。
     final pendingAt = _pendingSubmitAt;
@@ -544,8 +553,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       return;
     }
-    if (!_episodeActive) {
-      _episodeActive = true;
+    // 新一轮的开始：刚从控制台掉下来，或本页还没跑过一轮。
+    // 本轮已试完（_episodeFinished）时只做回填/装钩子，绝不重开新一轮。
+    if (fromConsole && _episodeFinished) _episodeFinished = false;
+    if (_episodeFinished) {
+      if ((_savedCreds != null) && !_filledThisLoad) {
+        await _injectBridge(fillSaved: true);
+      } else if (!_injectedThisLoad) {
+        await _injectBridge(fillSaved: false);
+        _injectedThisLoad = true;
+      }
+      if (mounted && (_recoveryCover || _splashVisible)) {
+        setState(() {
+          _recoveryCover = false;
+          _splashVisible = false;
+        });
+      }
+      return;
+    }
+    if (!_episodeRunning) {
+      _episodeRunning = true;
       _autoLogin.beginEpisode();
     }
     // 上一步还在等结果（刷新/提交后给页面留时间），盖子保持
@@ -574,7 +601,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       final hadAttempts =
           _autoLogin.sessionAttempts + _autoLogin.credentialAttempts > 0;
-      _episodeActive = false;
+      _episodeRunning = false;
+      _episodeFinished = true; // 本轮锁死：探针再看到登录页也不重开
       if (mounted && (_recoveryCover || _splashVisible)) {
         setState(() {
           _recoveryCover = false;
@@ -640,7 +668,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _autoLogin.onManualLogout();
     _pendingSubmit = null;
     _pendingSubmitAt = null;
-    _episodeActive = false;
+    _episodeRunning = false;
+    _episodeFinished = true; // 退出后停在登录页：不许再开恢复轮
     _stepWaitUntil = null;
     _failureSnackShown = false;
     debugPrint('QFLOGIN manual logout: clearing auth state');
@@ -812,6 +841,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _enterOffline() {
     if (_offline || _forceEntry != null) return;
     _offline = true;
+    // 恢复盖子先放下，让断线卡片露出来；网络恢复、页面重载成功后恢复链会接着跑
+    _recoveryCover = false;
+    _splashVisible = false;
     _settings?.incOfflineCount();
     _offlineIdx = 0;
     _scheduleOfflineRetry();
