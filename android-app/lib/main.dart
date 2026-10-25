@@ -622,7 +622,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           url: WebUri(kServerOrigin),
           name: e.key,
           value: e.value,
-          expiresDate: expires,
+          expiresDate: expires.millisecondsSinceEpoch,
           domain: kServerHost,
           path: '/',
           isSecure: true,

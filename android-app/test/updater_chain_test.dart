@@ -84,7 +84,7 @@ void main() {
     tampered = true;
     final badManifest = await svc.fetchManifest();
     await expectLater(
-      svc.downloadApk(badManifest.android!, dir, (_, __, ___) {}),
+      svc.downloadApk(badManifest.android!, dir, (_, _, _) {}),
       throwsA(isA<FormatException>()),
     );
     final leftovers = await dir.list().toList();
