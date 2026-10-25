@@ -11,6 +11,19 @@ extension QfThemeModeX on QfThemeMode {
       v == 'dark' ? QfThemeMode.dark : QfThemeMode.blue;
 }
 
+/// 初始主题裁决（纯函数）：用户手动选过（偏好非空）永远听用户的；
+/// 从没选过时跟随系统深浅——系统深色用深灰主题，否则品牌蓝。
+/// 系统切换深浅时也按同一口径实时跟随（仅限没手动选过的用户）。
+QfThemeMode resolveThemeMode({
+  String? pref,
+  required Brightness platformBrightness,
+}) {
+  if (pref != null && pref.isNotEmpty) return QfThemeModeX.fromPref(pref);
+  return platformBrightness == Brightness.dark
+      ? QfThemeMode.dark
+      : QfThemeMode.blue;
+}
+
 class QfPalette {
   final QfThemeMode mode;
   const QfPalette(this.mode);

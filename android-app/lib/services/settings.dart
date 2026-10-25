@@ -21,6 +21,12 @@ class QfSettings {
       QfSettings(await SharedPreferences.getInstance());
 
   String get theme => _prefs.getString(_kTheme) ?? 'blue';
+
+  /// 原始主题偏好：没手动选过时为 null（初始主题跟随系统深浅）。
+  String? get themePref => _prefs.getString(_kTheme);
+
+  /// 清除主题偏好（设置页选「跟随系统」时用，回到跟随系统口径）。
+  Future<void> clearTheme() => _prefs.remove(_kTheme);
   Future<void> setTheme(String v) => _prefs.setString(_kTheme, v);
 
   String? get pendingUpdateVersion => _prefs.getString(_kPendingUpdate);

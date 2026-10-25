@@ -66,8 +66,11 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
       canPop: false,
       child: Container(
         color: p.pageColor,
-        child: Center(
-          child: Container(
+        // 安全区＋可滚动：小屏/横屏/长更新说明时卡片不进刘海区、不被手势条压、不溢出
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 28),
             padding: const EdgeInsets.fromLTRB(26, 30, 26, 26),
             decoration: BoxDecoration(
@@ -161,9 +164,11 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                       style: TextStyle(color: p.onCardDim, fontSize: 11.5)),
                 ),
               ],
+              ),
             ),
           ),
         ),
+      ),
       ),
     );
   }
