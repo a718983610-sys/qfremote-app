@@ -23,10 +23,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Flutter 3.47.7（2026-10 最新稳定版，Dart 3.13.5）
+      - name: Flutter 3.47.8（2026-10 最新稳定版，Dart 3.13.7）
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.7'
+          flutter-version: '3.47.8'
           channel: stable
           cache: true
 
