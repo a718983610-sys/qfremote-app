@@ -121,15 +121,16 @@ class _LockPageState extends State<LockPage> {
         _enableError = null;
       });
     } else {
+      final lp = widget.palette;
       final ok = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: QfPalette.hairline)),
-          title: const Text('关闭隐私锁'),
-          content: const Text('关闭隐私锁后，本次密码立即作废。'),
+          backgroundColor: lp.cardColor,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: lp.cardBorder)),
+          title: Text('关闭隐私锁', style: TextStyle(color: lp.onCard)),
+          content: Text('关闭隐私锁后，本次密码立即作废。', style: TextStyle(color: lp.onCard)),
           actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
+            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('取消', style: TextStyle(color: lp.onCardDim))),
             FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('关闭')),
           ],
         ),
@@ -166,7 +167,7 @@ class _LockPageState extends State<LockPage> {
   Future<void> _onReset(LockDevice device) async {
     final result = await showDialog<({String loginPassword, String newPassword})>(
       context: context,
-      builder: (_) => const _ResetDialog(),
+      builder: (_) => _ResetDialog(palette: widget.palette),
     );
     if (result == null || !mounted) return;
     await _run(() async {
@@ -425,7 +426,8 @@ class _LockPageState extends State<LockPage> {
 
 /// 重设对话框：登录密码验密＋新锁密码（两次一致＋预检）。
 class _ResetDialog extends StatefulWidget {
-  const _ResetDialog();
+  final QfPalette palette;
+  const _ResetDialog({required this.palette});
 
   @override
   State<_ResetDialog> createState() => _ResetDialogState();
@@ -464,10 +466,16 @@ class _ResetDialogState extends State<_ResetDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final p = widget.palette;
+    final fieldStyle = TextStyle(color: p.onCard, fontSize: 14);
+    InputDecoration deco(String label) => InputDecoration(
+          labelText: label,
+          labelStyle: TextStyle(color: p.onCardDim),
+        );
     return AlertDialog(
-      backgroundColor: Colors.white,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: QfPalette.hairline)),
-      title: const Text('用登录密码重设'),
+      backgroundColor: p.cardColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: p.cardBorder)),
+      title: Text('用登录密码重设', style: TextStyle(color: p.onCard)),
       content: SingleChildScrollView(
         child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -475,21 +483,24 @@ class _ResetDialogState extends State<_ResetDialog> {
           TextField(
             controller: _login,
             obscureText: true,
-            decoration: const InputDecoration(labelText: '登录密码'),
+            style: fieldStyle,
+            decoration: deco('登录密码'),
           ),
           TextField(
             controller: _first,
             obscureText: true,
-            decoration: const InputDecoration(labelText: '新锁密码'),
+            style: fieldStyle,
+            decoration: deco('新锁密码'),
           ),
           TextField(
             controller: _second,
             obscureText: true,
-            decoration: const InputDecoration(labelText: '请再次输入'),
+            style: fieldStyle,
+            decoration: deco('请再次输入'),
           ),
           if (_error != null) ...[
             const SizedBox(height: 10),
-            Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12.5)),
+            Text(_error!, style: const TextStyle(color: QfPalette.probeBad, fontSize: 12.5)),
           ],
         ],
         ),

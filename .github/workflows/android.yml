@@ -66,6 +66,10 @@ jobs:
         working-directory: android-app
         run: flutter test
 
+      - name: 更新链实测（假清单：全流程＋失败注入）
+        working-directory: android-app
+        run: flutter test test/updater_chain_test.dart --dart-define=QF_CHAIN_TEST=true --dart-define=QF_RELEASE_URL=http://127.0.0.1:18791/release.json
+
       - name: 构建 release APK（专属签名）
         working-directory: android-app
         run: flutter build apk --release

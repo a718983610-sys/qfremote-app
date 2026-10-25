@@ -12,6 +12,18 @@ import 'probe.dart' show trustedHttpClient;
 /// 取服务器 release.json → 用其中 android 条目比版本 → 下载 APK（带进度）
 /// → 自动核对大小与 SHA256 → 对得上才允许打开安装，对不上立刻删文件。
 class UpdateService {
+  /// 等服务器开始回应（响应头）的最长的时间：过了就判失败删文件，
+  /// 不许在「正在下载… 0%」无声挂死（追加十一）。
+  final Duration responseTimeout;
+
+  /// 下载中途无新数据的最长容忍（连接半死判死）。
+  final Duration stallTimeout;
+
+  const UpdateService({
+    this.responseTimeout = const Duration(seconds: 30),
+    this.stallTimeout = const Duration(seconds: 30),
+  });
+
   /// 取清单（8 秒超时）。失败抛异常，调用方安静处理。
   Future<ReleaseManifest> fetchManifest() async {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 8));
@@ -46,7 +58,7 @@ class UpdateService {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 15));
     try {
       final req = await client.getUrl(Uri.parse(entry.url));
-      final res = await req.close();
+      final res = await req.close().timeout(responseTimeout);
       if (res.statusCode != 200) {
         throw HttpException('下载失败：HTTP ${res.statusCode}');
       }
@@ -54,8 +66,9 @@ class UpdateService {
       var received = 0;
       final sink = part.openWrite();
       try {
-        // 30 秒无新数据视为连接已死：抛错删半截文件，不无限挂在「正在下载」
-        await for (final chunk in res.timeout(const Duration(seconds: 30))) {
+        // 无新数据超过 stallTimeout 视为连接已死：抛错删半截文件，
+        // 不无限挂在「正在下载」
+        await for (final chunk in res.timeout(stallTimeout)) {
           received += chunk.length;
           sink.add(chunk);
           onProgress(
