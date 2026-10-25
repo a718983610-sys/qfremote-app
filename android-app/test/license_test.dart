@@ -69,13 +69,20 @@ void main() {
       expect(a.decision!.code, 'G2');
     });
 
-    test('forceLogout 信号优先于一切，落 G1', () {
+    test('forceLogout 信号优先于一切，落面 code 只认信号 gateCode', () {
       final a = resolveGateAction(
         decision: const LicenseDecision(allow: true, code: 'OK'),
         forceLogoutSignal: true,
+        forceLogoutGateCode: 'G1',
       );
       expect(a.kind, GateActionKind.forceLogoutToGate);
       expect(a.decision!.code, 'G1');
+      // 无 gateCode 时默认 G1，不许拿 decision 的 code 冒充
+      final b = resolveGateAction(
+        decision: const LicenseDecision(allow: false, code: 'G5'),
+        forceLogoutSignal: true,
+      );
+      expect(b.decision!.code, 'G1');
     });
 
     test('device-report 的 DEVICE_REVIEW 不经影子门（§7.6）', () {
@@ -354,7 +361,7 @@ void main() {
                 displayStatus: '未激活',
                 slotsPc: 1,
                 slotsMobile: 0,
-                trialExpiresMs: now + 30 * 3600000,
+                trialExpiresMs: now + 26 * 3600000 + 30 * 60000,
                 hasKey: true,
               ),
               onBind: (_) async => null,
@@ -367,7 +374,7 @@ void main() {
       ));
       await tester.pump();
       await tester.pump();
-      expect(find.text('免费试用中 · 剩余 1 天 6 小时'), findsOneWidget);
+      expect(find.text('免费试用中 · 剩余 1 天 2 小时'), findsOneWidget);
       expect(find.text('QFRemote 试用套餐'), findsOneWidget);
       expect(find.text('电脑 1 / 1 · 手机 0 / 1'), findsOneWidget);
       expect(find.text('购买密钥'), findsOneWidget);

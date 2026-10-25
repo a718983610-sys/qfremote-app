@@ -328,14 +328,19 @@ class GateAction {
 GateAction resolveGateAction({
   required LicenseDecision? decision,
   bool forceLogoutSignal = false,
+  String? forceLogoutGateCode,
   bool fromDeviceReport = false,
   bool reviewPending = false,
 }) {
   if (forceLogoutSignal) {
+    // 落面 code 只认信号自带的 gateCode（§7.5.7 恒为 G1），不许拿伴随
+    // decision 的 code 冒充——decision 可能是 OK/其它状态。
+    final code = (forceLogoutGateCode != null && forceLogoutGateCode.isNotEmpty)
+        ? forceLogoutGateCode
+        : 'G1';
     return GateAction(
       GateActionKind.forceLogoutToGate,
-      decision ??
-          const LicenseDecision(allow: false, code: 'G1', forceLogout: true),
+      LicenseDecision(allow: false, code: code, enforce: true, forceLogout: true),
     );
   }
   final d = decision;

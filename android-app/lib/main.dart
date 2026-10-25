@@ -429,8 +429,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final action = resolveGateAction(
           decision: me.decision,
           forceLogoutSignal: me.forceLogout,
+          forceLogoutGateCode: me.gateCode,
         );
-        if (await _applyGateAction(action, gateCodeHint: me.gateCode)) {
+        if (await _applyGateAction(action)) {
           return;
         }
       }
@@ -450,7 +451,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 执行门裁决。返回 true＝已落拦截/登出态，调用方到此为止。
-  Future<bool> _applyGateAction(GateAction action, {String? gateCodeHint}) async {
+  Future<bool> _applyGateAction(GateAction action) async {
     switch (action.kind) {
       case GateActionKind.none:
         return false;
@@ -470,8 +471,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         return true;
       case GateActionKind.forceLogoutToGate:
-        await _handleForceLogoutSignal(
-            gateCodeHint ?? action.decision?.code ?? 'G1');
+        await _handleForceLogoutSignal(action.decision?.code ?? 'G1');
         return true;
     }
   }
@@ -515,6 +515,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final action = resolveGateAction(
       decision: me.decision,
       forceLogoutSignal: me.forceLogout,
+      forceLogoutGateCode: me.gateCode,
     );
     if (action.kind == GateActionKind.none) {
       setState(() => _gateDecision = null);
