@@ -25,6 +25,7 @@ class LicenseDecision {
   final bool forceLogout;
   final int? endsAtMs;
   final int? trialExpiresMs;
+  final int? keyExpiresMs;
   final String? banCode;
 
   const LicenseDecision({
@@ -35,6 +36,7 @@ class LicenseDecision {
     this.forceLogout = false,
     this.endsAtMs,
     this.trialExpiresMs,
+    this.keyExpiresMs,
     this.banCode,
   });
 
@@ -51,6 +53,7 @@ class LicenseDecision {
       forceLogout: v['forceLogout'] == true,
       endsAtMs: asMs(v['endsAt']),
       trialExpiresMs: asMs(v['trialExpiresMs']),
+      keyExpiresMs: asMs(v['keyExpiresMs']),
       banCode: v['banCode'] is String ? v['banCode'] as String : null,
     );
   }
@@ -249,10 +252,12 @@ GateCopy? gateCopyFor(LicenseDecision d) {
         hasClaimBox: true,
         hasTransferGuide: true,
       );
-    case 'G5': // L14（与「试用」严格区分：不得出现试用字样）
-      return const GateCopy(
+    case 'G5': // L14（与「试用」严格区分：不得出现试用字样；裁决批①：过期提示带到期日期）
+      final when =
+          d.keyExpiresMs != null ? formatDateZh(d.keyExpiresMs!) : '';
+      return GateCopy(
         title: '密钥已过期',
-        body: '您的密钥已到期，密钥已收回，当前账号无法登录。如需继续使用，请购买新密钥（可选永久套餐或按天套餐）：一台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
+        body: '${when.isNotEmpty ? '您的密钥已于 $when 到期' : '您的密钥已到期'}，密钥已收回，当前账号无法登录。如需继续使用，请购买新密钥（可选永久套餐或按天套餐）：一台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
         primary: GatePrimary.purchase,
         hasClaimBox: true,
         hasTransferGuide: true,
@@ -369,17 +374,21 @@ class LicenseOpResult {
   final bool ok;
   final String? code;
   final String msg;
-  const LicenseOpResult({required this.ok, this.code, required this.msg});
+  final int? expiredAtMs;
+  const LicenseOpResult(
+      {required this.ok, this.code, required this.msg, this.expiredAtMs});
 
   static LicenseOpResult? tryParse(String body) {
     try {
       final root = jsonDecode(body);
       if (root is! Map<String, dynamic>) return null;
       final msg = root['msg'];
+      final exp = root['expiredAt'];
       return LicenseOpResult(
         ok: root['ok'] == true,
         code: root['code'] is String ? root['code'] as String : null,
         msg: msg is String && msg.isNotEmpty ? msg : '',
+        expiredAtMs: exp is num ? exp.toInt() : null,
       );
     } catch (_) {
       return null;
@@ -389,7 +398,8 @@ class LicenseOpResult {
 
 /// 领取提交后的展示文案（§7.5.5 写死分支）：
 /// - 格式不正确 → L17(d)「密钥格式不正确，请检查后重新输入。」（本地判，不打服务端）；
-/// - KEY_EXPIRED → 「密钥已过期。」（原文，不得改写、不得混入试用字样）；
+/// - KEY_EXPIRED → 服务端带到期日期时「密钥已过期，已于 X 到期。」（裁决批
+///   ①）；未带日期时回落原文「密钥已过期。」，不得混入试用字样；
 /// - 其余 → 服务端回的正式提示原文。
 String claimDisplayText({required String input, LicenseOpResult? result}) {
   if (!isKeyFormatValid(input)) return '密钥格式不正确，请检查后重新输入。';
@@ -399,6 +409,10 @@ String claimDisplayText({required String input, LicenseOpResult? result}) {
         ? result.msg
         : '领取成功，密钥已转入您的账号。登录后在软件端重新绑定即可使用。';
   }
-  if (result.code == 'KEY_EXPIRED') return '密钥已过期。';
+  if (result.code == 'KEY_EXPIRED') {
+    return result.expiredAtMs != null
+        ? '密钥已过期，已于 ${formatDateZh(result.expiredAtMs!)} 到期。'
+        : '密钥已过期。';
+  }
   return result.msg.isNotEmpty ? result.msg : '领取未成功，请核对后重试。';
 }

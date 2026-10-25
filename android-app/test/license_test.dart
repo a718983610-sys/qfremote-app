@@ -132,6 +132,14 @@ void main() {
       expect(c.hasClaimBox, isTrue);
     });
 
+    test('G5 带到期日期（裁决批①）', () {
+      final ms = DateTime(2026, 10, 25).millisecondsSinceEpoch;
+      final c = gateCopyFor(
+          LicenseDecision(allow: false, code: 'G5', keyExpiresMs: ms))!;
+      expect(c.body, contains('您的密钥已于 2026 年 10 月 25 日 到期'));
+      expect(c.body, isNot(contains('试用')));
+    });
+
     test('G3/G4 不带激活框', () {
       expect(
           gateCopyFor(const LicenseDecision(allow: false, code: 'G3'))!
@@ -205,6 +213,19 @@ void main() {
           claimDisplayText(
               input: 'QFR8K-M2X9P-7W4TD-H6N3C-V5YQZ', result: r),
           '密钥已过期。');
+    });
+
+    test('KEY_EXPIRED 带到期日期（裁决批①）', () {
+      final ms = DateTime(2026, 10, 25).millisecondsSinceEpoch;
+      final r =
+          LicenseOpResult(ok: false, code: 'KEY_EXPIRED', msg: '别字', expiredAtMs: ms);
+      expect(
+          claimDisplayText(
+              input: 'QFR8K-M2X9P-7W4TD-H6N3C-V5YQZ', result: r),
+          '密钥已过期，已于 2026 年 10 月 25 日 到期。');
+      final parsed = LicenseOpResult.tryParse(
+          '{"ok":false,"code":"KEY_EXPIRED","expiredAt":$ms}');
+      expect(parsed?.expiredAtMs, ms);
     });
 
     test('成功与其它失败用服务端正式提示', () {
