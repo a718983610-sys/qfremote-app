@@ -377,7 +377,8 @@ void main() {
       expect(find.text('免费试用中 · 剩余 1 天 2 小时'), findsOneWidget);
       expect(find.text('QFRemote 试用套餐'), findsOneWidget);
       expect(find.text('电脑 1 / 1 · 手机 0 / 1'), findsOneWidget);
-      expect(find.text('购买密钥'), findsOneWidget);
+      // 「购买密钥」两处：试用条内钮＋付费区黑底钮（与网页正本同构）
+      expect(find.text('购买密钥'), findsNWidgets(2));
       expect(find.text('查询密钥'), findsOneWidget);
       expect(find.text('绑定本机'), findsOneWidget);
       expect(find.text('领取密钥'), findsOneWidget);
