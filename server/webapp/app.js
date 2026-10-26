@@ -60,23 +60,39 @@ function confirmModal(title, text, okLabel, onOk) {
 }
 
 /* ---------------- 接口层：正式失败提示、失败自动重试一次 ---------------- */
+const API_TIMEOUT_MS = 30000;   // 默认单项上限【施工偏差 D1：DS 稿 12000 → 30000；现行本无超时，截图上传等大 POST 弱网可合法超 12s，关键路径另有显式超时（lockApi 表/raceNodeId），抬高默认值只防回归】
+const API_RETRY_DELAY_MS = 600; // 与原文案一致的退避间隔
 async function api(path, opts) {
   opts = opts || {};
-  const init = { credentials: 'include', method: opts.method || 'GET', headers: {} };
-  if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
-  if (opts.form) { init.headers['Content-Type'] = 'application/x-www-form-urlencoded'; init.body = new URLSearchParams(opts.form).toString(); }
-  if (opts.headers) Object.assign(init.headers, opts.headers);
+  const method = (opts.method || 'GET').toUpperCase();
+  const timeoutMs = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : API_TIMEOUT_MS;
+  // 只对幂等方法自动重试：写操作（启停锁/重置/更新）重试会导致重复投递信封（幂等防呆）
+  const retryable = opts.retry !== undefined ? !!opts.retry : (method === 'GET' || method === 'HEAD');
+  const maxAttempts = retryable ? 2 : 1;
   let lastErr = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const init = { credentials: 'include', method, headers: {} };
+    if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
+    if (opts.form) { init.headers['Content-Type'] = 'application/x-www-form-urlencoded'; init.body = new URLSearchParams(opts.form).toString(); }
+    if (opts.headers) Object.assign(init.headers, opts.headers);
+    const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+    let timer = null;
+    if (ctl) { init.signal = ctl.signal; timer = setTimeout(() => { try { ctl.abort(); } catch (e) {} }, timeoutMs); }
     try {
       const r = await fetch(path, init);
       const text = await r.text();
       let json = null; try { json = JSON.parse(text); } catch (e) { /* 非 JSON 响应按文本处理 */ }
       return { status: r.status, ok: r.ok, json, text };
-    } catch (e) { lastErr = e; await new Promise(r2 => setTimeout(r2, 600)); }
+    } catch (e) {
+      lastErr = (e && e.name === 'AbortError') ? new Error('timeout') : e;
+      if (attempt + 1 < maxAttempts) await new Promise(r2 => setTimeout(r2, API_RETRY_DELAY_MS));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
-  return { status: 0, ok: false, json: null, text: '', networkError: lastErr };
+  return { status: 0, ok: false, json: null, text: '', networkError: lastErr, timeout: !!(lastErr && lastErr.message === 'timeout') };
 }
+
 function stateBox(title, text, retryFn) {
   return `<div class="card"><div class="statebox"><b>${esc(title)}</b><p>${esc(text)}</p>${retryFn ? '<button class="btn sm" data-retry="1">重新加载</button>' : ''}</div></div>`;
 }
@@ -120,9 +136,19 @@ function fmtRemain(expMs) {
    凭控制台会话（xid）鉴权，服务端按账号逐台核对机主；密码只在提交瞬间
    过桥，不存、不记。GET /lock/devices 回 [{id,name,owner,locked,component}]，
    其中 id 为 MeshCentral 节点 id；非机主设备由服务端直接过滤、不下发。 */
+/* 超时口径对齐服务端语义：读路径 8s（服务端冷查 ≤3s，留推进余量）；
+   写路径必须覆盖服务端对账窗口（RECONCILE 30s / UPDATE_RECONCILE 240s）+ 余量，
+   否则客户端先超时、服务端还在对账，会出现「客户端说失败、服务端记成功」。 */
+const LOCK_TIMEOUTS = { '/devices': 8000, '/enable': 45000, '/disable': 45000, '/reset': 45000, '/update': 260000 };
 async function lockApi(method, route, body) {
-  return api('/lock' + route, body !== undefined ? { method, json: body } : { method });
+  const timeoutMs = LOCK_TIMEOUTS[route] || 15000;
+  const opts = { method, timeoutMs };
+  if (body !== undefined) opts.json = body;
+  opts.retry = (method === 'GET' || method === 'HEAD'); // 写路径不自动重试（防重复投递信封）
+  return api('/lock' + route, opts);
 }
+
+
 function validateLockPw(pw) {
   if (typeof pw !== 'string' || pw.length < 4) return '密码至少 4 位，请检查后重试。';
   if (pw.length > 64) return '密码最多 64 位，请检查后重试。';
@@ -134,7 +160,52 @@ function validateLockPw(pw) {
    节点 id 的真实来源有二：①/lock/devices（机主设备，id 即节点 id）；
    ②控制台引擎同源控制通道（/control.ashx，浏览器凭会话自动鉴权，与原生
    控制台同一通道）的 nodes 应答。两者都取不到的设备不冒充、不许发送。 */
+/* ---------------- 设备节点标识（node id）----------------
+   修 C3/C6（原 fetchNodeMap 串行：lockApi 6224ms + fetchControlNodes 618ms，且无单飞）：
+   ① 快源＝/lock/devices（服务端已做缓存/单飞，命中 <1s），先返回、先可用；
+   ② 慢源＝控制通道全量 nodes（补好友共享设备的 id），后台回填同一份缓存，不阻塞导航与面板首屏；
+   ③ 全流程 single-flight；页内缓存 60s 有效（原随页生死且永不刷新）。 */
 let nodeMapCache = null;
+let nodeMapInflight = null;
+let nodeMapSlowInflight = null;
+const NODE_MAP_TTL_MS = 60000;
+const CONTROL_PROBE_MS = 1500;      // 控制通道探测上限（原 6000，与慢源定位一致）
+const NAV_LOOKUP_BUDGET_MS = 900;   // 点按解析 name→id 的硬预算：超时直接回落 CANON 根，不等全量图
+
+function ensureNodeMap() {
+  if (!nodeMapCache) nodeMapCache = { at: 0, byName: new Map(), byId: new Map(), lockDevices: [], lockStatus: 'ok', lockError: '' };
+  return nodeMapCache;
+}
+function applyLockDevices(devices) {
+  const nm = ensureNodeMap();
+  const list = [];
+  (devices || []).forEach(d => {
+    const dev = { id: String(d.id || ''), name: String(d.name || ''), owner: !!d.owner, locked: !!d.locked, component: d.component !== false };
+    if (!dev.id) return;
+    list.push(dev);
+    if (dev.name) nm.byName.set(dev.name, dev.id);
+    nm.byId.set(dev.id, dev.name);
+  });
+  nm.lockDevices = list;
+  nm.lockStatus = 'ok'; nm.lockError = '';
+  nm.at = Date.now();
+  return nm;
+}
+function applyControlNodes(grouped) {
+  const nm = ensureNodeMap();
+  Object.values(grouped || {}).forEach(arr => {
+    (Array.isArray(arr) ? arr : []).forEach(n => {
+      if (!n || !n._id) return;
+      const id = String(n._id);
+      const nmName = String(n.name || n.rname || '');
+      if (nmName && !nm.byName.has(nmName)) nm.byName.set(nmName, id);
+      if (!nm.byId.has(id)) nm.byId.set(id, nmName);
+    });
+  });
+  // [gate2-delta N6] slow fill renews the TTL only when the lock leg is healthy; on failure backdate so retry happens in ~5s
+  nm.at = (nm.lockStatus === 'ok') ? Date.now() : (Date.now() - (NODE_MAP_TTL_MS - 5000));
+  return nm;
+}
 function fetchControlNodes(timeoutMs) {
   return new Promise((resolve) => {
     let done = false;
@@ -144,7 +215,7 @@ function fetchControlNodes(timeoutMs) {
       const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       ws = new WebSocket(proto + location.host + '/control.ashx');
     } catch (e) { resolve({}); return; }
-    const timer = setTimeout(() => finish({}), timeoutMs || 6000);
+    const timer = setTimeout(() => finish({}), timeoutMs || CONTROL_PROBE_MS);
     ws.onopen = () => { try { ws.send(JSON.stringify({ action: 'nodes', responseid: 'qf-nodes-probe' })); } catch (e) { clearTimeout(timer); finish({}); } };
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -154,36 +225,47 @@ function fetchControlNodes(timeoutMs) {
     ws.onclose = () => { clearTimeout(timer); finish({}); };
   });
 }
-async function fetchNodeMap() {
-  if (nodeMapCache) return nodeMapCache;
-  const byName = new Map(), byId = new Map(), lockDevices = [];
-  let lockStatus = 'ok', lockError = '';
-  const lr = await lockApi('GET', '/devices');
-  if (lr.status === 200 && lr.json && Array.isArray(lr.json.devices)) {
-    lr.json.devices.forEach(d => {
-      const dev = { id: String(d.id || ''), name: String(d.name || ''), owner: !!d.owner, locked: !!d.locked, component: d.component !== false };
-      if (!dev.id) return;
-      lockDevices.push(dev);
-      if (dev.name) byName.set(dev.name, dev.id);
-      byId.set(dev.id, dev.name);
-    });
-  } else if (lr.status === 401) { lockStatus = 'needlogin'; lockError = apiErrText(lr, '登录状态已失效，请重新登录后再管理屏幕锁。'); }
-  else if (lr.networkError) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }
-  else { lockStatus = 'unavailable'; lockError = apiErrText(lr, '屏幕锁服务暂未开通网页通道，暂时无法在此管理。请通过软件端管理该设备的屏幕锁。'); }
-  // 控制通道补充全部可见设备（含好友共享）的节点 id；失败不拦锁面板。
-  try {
-    const grouped = await fetchControlNodes(6000);
-    Object.values(grouped || {}).forEach(arr => {
-      (Array.isArray(arr) ? arr : []).forEach(n => {
-        if (!n || !n._id) return;
-        const nm = String(n.name || n.rname || '');
-        if (nm && !byName.has(nm)) byName.set(nm, String(n._id));
-        if (!byId.has(String(n._id))) byId.set(String(n._id), nm);
-      });
-    });
-  } catch (e) { /* 控制通道不可用时以锁桥清单为准 */ }
-  nodeMapCache = { byName, byId, lockDevices, lockStatus, lockError };
-  return nodeMapCache;
+async function fetchNodeMap(opts) {
+  const force = !!(opts && opts.force);
+  if (nodeMapInflight) return nodeMapInflight;                 // single-flight
+  const nm0 = ensureNodeMap();
+  if (!force && nm0.at && (Date.now() - nm0.at) < NODE_MAP_TTL_MS) return nm0;
+  nodeMapInflight = (async () => {
+    let lockStatus = 'ok', lockError = '';
+    try {
+      const lr = await lockApi('GET', '/devices');
+      if (lr.status === 200 && lr.json && Array.isArray(lr.json.devices)) {
+        applyLockDevices(lr.json.devices);
+      } else if (lr.status === 401) { lockStatus = 'needlogin'; lockError = apiErrText(lr, '登录状态已失效，请重新登录后再管理屏幕锁。'); }
+      else if (lr.networkError) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }
+      else { lockStatus = 'unavailable'; lockError = apiErrText(lr, '屏幕锁服务暂未开通网页通道，暂时无法在此管理。请通过软件端管理该设备的屏幕锁。'); }
+    } catch (e) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }
+    const nm = ensureNodeMap();
+    nm.lockStatus = lockStatus; nm.lockError = lockError; nm.at = Date.now();
+    // 慢源不阻塞：后台拉控制通道全量 nodes，回来只回填缓存（供后续导航/共享设备用）
+    if (!nodeMapSlowInflight) {
+      nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)
+        .then((grouped) => { applyControlNodes(grouped); })
+        .catch(() => {})
+        .then(() => { nodeMapSlowInflight = null; });
+    }
+    return nm;
+  })().then((v) => { nodeMapInflight = null; return v; },
+            (e) => { nodeMapInflight = null; throw e; });
+  return nodeMapInflight;
+}
+/* 点按解析：缓存命中同步返回；否则最多等 NAV_LOOKUP_BUDGET_MS 让快源落地，
+   超时按原口径回落 CANON 根（原实现等全量图 7s+，等待零收益）。 */
+function raceNodeId(name, budgetMs) {
+  const hitNow = () => (nodeMapCache && name && nodeMapCache.byName.has(name)) ? nodeMapCache.byName.get(name) : '';
+  const quick = hitNow();
+  if (quick) return Promise.resolve(quick);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (id) => { if (done) return; done = true; clearTimeout(timer); resolve(String(id || '')); };
+    const timer = setTimeout(() => finish(hitNow() || ''), budgetMs || NAV_LOOKUP_BUDGET_MS);
+    fetchNodeMap().then(() => finish(hitNow() || ''), () => finish(hitNow() || ''));
+  });
 }
 function invalidateNodeMap() { nodeMapCache = null; }
 
@@ -698,6 +780,8 @@ Views.home = async function (view) {
     licBox.innerHTML = `<div class="note warn"><b>尚未激活</b>　输入密钥激活后即可使用全部功能；没有密钥可以购买，或用积分兑换。<span style="float:right"><button class="btn sm" data-go="profile">输入密钥激活</button> <button class="btn sm ghost" data-go="purchase">购买密钥</button></span></div>`;
   }
   // 账户安全
+  // 预取：首页即预热 name→id 映射，避免用户点设备时才冷启（手机每次开页都是冷页）
+  fetchNodeMap().catch(() => {});
   const sec = $('#homeSec', view);
   const last = S.stats && S.stats.lastLoginMs ? fmtDate(S.stats.lastLoginMs) : '—';
   sec.innerHTML =
@@ -732,11 +816,40 @@ function rowInfoHtml(icon, t, s) {
 function devRowHtml(d) {
   return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span><span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span><span class="ops">${d.online ? `<button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button>` : '<span class="pill off">设备离线时不可连接</span>'}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
 }
+/* 点按反馈：立即置忙＋一句可见文案（本稿唯一新增可见文案，7 字内）＋6s 兜底恢复。
+   跳转类（远程桌面/终端）走 CANON 导航，页面会离开，无需回收；导航类（文件/详情）
+   走 SPA 内部 navigate，反馈仅作防连点用。 */
 function bindDevRows(view) {
-  view.querySelectorAll('[data-remote]').forEach(el => el.onclick = () => openNativeDesktop(el.getAttribute('data-remote')));
-  view.querySelectorAll('[data-terminal]').forEach(el => el.onclick = () => openNativeTerminal(el.getAttribute('data-terminal')));
-  view.querySelectorAll('[data-files]').forEach(el => el.onclick = () => navigate('files', el.getAttribute('data-files')));
-  view.querySelectorAll('[data-detail]').forEach(el => el.onclick = () => navigate('device', el.getAttribute('data-detail')));
+  const tap = (el, fn, feedback) => {
+    el.onclick = () => {
+      if (el.dataset.busy === '1') return; // 防连点重复跳转
+      el.dataset.busy = '1';
+      let tip = null;
+      if (feedback && el.tagName === 'BUTTON') {
+        el.disabled = true;
+        tip = document.createElement('span');
+        tip.className = 'qftap';
+        tip.textContent = '正在打开…';
+        tip.style.marginLeft = '6px';
+        tip.style.opacity = '0.75';
+        el.appendChild(tip);
+      }
+      const release = () => {
+        el.dataset.busy = '';
+        if (el.tagName === 'BUTTON') el.disabled = false;
+        if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
+      };
+      setTimeout(release, 6000); // 兜底：跳转被拦/失败时恢复可点
+      try {
+        const r = fn();
+        if (r && typeof r.catch === 'function') r.catch(release);
+      } catch (e) { release(); }
+    };
+  };
+  view.querySelectorAll('[data-remote]').forEach(el => tap(el, () => openNativeDesktop(el.getAttribute('data-remote')), true));
+  view.querySelectorAll('[data-terminal]').forEach(el => tap(el, () => openNativeTerminal(el.getAttribute('data-terminal')), true));
+  view.querySelectorAll('[data-files]').forEach(el => tap(el, () => navigate('files', el.getAttribute('data-files')), false));
+  view.querySelectorAll('[data-detail]').forEach(el => tap(el, () => navigate('device', el.getAttribute('data-detail')), false));
 }
 
 /* 原生直达（丙案＋站长 2026-10-26 裁定）：点设备→顶层直达该设备的 MeshCentral
@@ -759,8 +872,8 @@ const websiteNavHtml = (cls) => `<a class="${cls || 'nav'}" href="${QF_WEBSITE_U
 async function openNativeDevice(name, viewmode) {
   let id = '';
   try {
-    const nm = await fetchNodeMap();
-    if (name && nm.byName.has(name)) id = String(nm.byName.get(name) || '').replace(/^node\/\//, '');
+    const raw = await raceNodeId(name, NAV_LOOKUP_BUDGET_MS); // 只等 name→id 一条，不等全量节点图
+    id = String(raw || '').replace(/^node\/\//, ''); // [D5] restore live regex (strip node// fully)
   } catch (e) { /* 取不到节点标识时退回原生设备列表，仍为原生流程 */ }
   let vm = viewmode;
   /* 手机形态（服务端按 UA 下发独立的手机版原生应用，543KB）：其实测冷启 vm11/vm12
@@ -771,6 +884,7 @@ async function openNativeDevice(name, viewmode) {
   const url = id ? (QF_CANON_ORIGIN + '/?node=' + encodeURIComponent(id) + '&viewmode=' + vm) : (QF_CANON_ORIGIN + '/');
   location.assign(url);
 }
+
 function openNativeDesktop(name) { return openNativeDevice(name, 11); }
 function openNativeTerminal(name) { return openNativeDevice(name, 12); }
 
@@ -780,6 +894,8 @@ Views.devices = async function (view) {
     <div class="tabs"><button class="on" data-tab="all">全部设备</button><button data-tab="mine">我的设备</button><button data-tab="shared">好友共享</button></div>
     <div id="devList"><div class="card"><div class="skel" style="height:52px"></div></div></div>
     <div class="note blue">可把文件发送到同账号的另一台设备（单文件上限 200 MB，离线暂存 24 小时）：在「我的文件」页选择「发送文件到其他设备」即可。</div>`;
+  // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染
+  fetchNodeMap().catch(() => {});
   const st = await api('/home/api/stats');
   if (st.status === 200 && st.json && st.json.ok) S.stats = st.json;
   const mine = (S.stats && S.stats.devices) || [];

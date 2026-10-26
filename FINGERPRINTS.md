@@ -53,7 +53,7 @@
 | server/friends/chat/support-faq.json | /opt/qfremote-friends/chat/support-faq.json | `ddedde1af0eec64fb0270df205fbda5b` |
 | server/friends/chat/test-e2e.js | /opt/qfremote-friends/chat/test-e2e.js | `f027a7650394e95ee855fdd71a5a5301` |
 | server/friends/friends.html | /opt/qfremote-friends/friends.html | `df1dae4d733bdea435e05eb045036038` |
-| server/friends/lock-bridge.js | /opt/qfremote-friends/lock-bridge.js | `3f9351316b10b6c2b397319adf2db0ba` |
+| server/friends/lock-bridge.js | /opt/qfremote-friends/lock-bridge.js | `2e7efcbf62c01618de03e601cec81ad5` |
 | server/friends/lock-envelope.js | /opt/qfremote-friends/lock-envelope.js | `533f8000a331c0b63dc260fb0970f860` |
 | server/friends/logout-bridge.html | /opt/qfremote-friends/logout-bridge.html | `806f944a31424d10439ee2cbe20f9d72` |
 | server/friends/qf-wrap.html | /opt/qfremote-friends/qf-wrap.html | `d23be0c21a506e71e02ff14f0b03553f` |
@@ -89,7 +89,7 @@
 | server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
 | server/webapp/app.css | /opt/qfremote-webapp/app.css | `b9c1723087a4a1462c428a659c5ef1df` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `78bca9cbf76cf2cb588f42a6796a3031` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `6ed04073396f02798a016c010aabbaae` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
