@@ -47,7 +47,13 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
 .modal .btns .btn{flex:1}
 .newpass{font-size:19px;font-weight:700;color:#0B2B5B;background:#F4F7FB;border:1px solid #DFE7F2;border-radius:9px;padding:12px;text-align:center;word-break:break-all;margin-top:10px}
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#0B2B5B;color:#fff;font-size:14px;border-radius:9px;padding:11px 18px;display:none;z-index:100;max-width:90vw;text-align:center;line-height:1.6}
-.adminnav{position:sticky;top:0;z-index:60;background:#F4F7FB;padding:8px 0 4px}
+.stickyhead{position:sticky;top:0;z-index:60;background:#F4F7FB}
+.stickyhead .in{max-width:860px;margin:0 auto;padding:10px 14px 2px}
+.topbar{display:flex;align-items:center;gap:8px;padding:0 2px 6px}
+.topbar .ttl{font-size:15px;font-weight:700;color:#0B2B5B}
+.topbar .sp{flex:1}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.adminnav{padding:8px 0 4px}
 .adminnav .nrow{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
 .adminnav a{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid #2470E0;background:#fff;color:#2470E0;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 13px;text-decoration:none}
 .adminnav a.on{background:#2470E0;color:#fff}
@@ -58,11 +64,8 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>QFRemote 站长管理</h1>
-  <p class="sub">这里只给站长本人使用。可以冻结、解封、重置密码、改名、封禁，以及处理登录申诉。</p>
-  <p style="margin:0 2px 16px"><button class="btn ghost" id="btnExtLogout" type="button">退出站长管理</button></p>
-
+<div class="stickyhead"><div class="in">
+  <div class="topbar"><a class="btn ghost" id="btnAdminBack" href="/">← 返回</a><span class="ttl">站长管理</span><span class="sp"></span><button class="btn ghost" id="btnExtLogout" type="button">退出站长管理</button></div>
   <nav class="adminnav"><div class="nrow">
     <a href="#users" data-nav="users">账号列表</a>
     <a href="#license" data-nav="license">密钥发放</a>
@@ -74,6 +77,12 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
     <a href="#support" data-nav="support">客服收件箱<span class="cnt" id="cnt-support" style="display:none"></span></a>
     <a href="#api" data-nav="api">站长 API</a>
   </div></nav>
+  </div></div>
+<div class="wrap">
+  <h1>QFRemote 站长管理</h1>
+  <p class="sub">这里只给站长本人使用。可以冻结、解封、重置密码、改名、封禁，以及处理登录申诉。</p>
+
+
 
   <section class="view" data-view="users">
   <div class="card">
@@ -475,10 +484,23 @@ function loadGenerated(){
         + ' · 状态：' + esc(label[rec.status] || rec.status) + (rec.status === 'claimed' && rec.claimedBy ? '（认领账号：' + esc(rec.claimedBy) + (rec.claimedAt ? ' · ' + esc(fmtTime(rec.claimedAt)) : '') + '）' : '')
         + '<br>' + (rec.str ? esc(rec.str) : esc(rec.masked)) + '</div></div>';
       if (rec.str) h += '<button class="btn ghost" data-gen-copy="' + esc(rec.str) + '">复制</button>';
+      if (rec.status === 'unclaimed') h += '<button class="btn ghost" data-gen-void="' + esc(rec.id) + '" data-gen-label="' + esc(rec.planName) + '">作废</button>';
       return h + '</div>';
     }).join('');
     var btns = document.querySelectorAll('button[data-gen-copy]');
     for (var i = 0; i < btns.length; i++) btns[i].onclick = function(){ copyText(this.getAttribute('data-gen-copy')); };
+    var vbtns = document.querySelectorAll('button[data-gen-void]');
+    for (var j = 0; j < vbtns.length; j++) vbtns[j].onclick = function(){
+      var kid = this.getAttribute('data-gen-void'); var label = this.getAttribute('data-gen-label');
+      showModal('作废生成密钥', '确定作废这把未认领的「' + label + '」生成密钥吗？作废后该串立即失效、永不再用，无法恢复。', { okText: '确认作废', onOk: function(){
+        api('/admin/api/license/void-generated', { keyId: kid }).then(function(r){
+          if (!r.ok) { toast(r.msg || '作废未成功。'); return; }
+          toast(r.msg || '已作废。');
+          loadGenerated();
+          loadLicense();
+        }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
+      }});
+    };
   }).catch(function(){ $('gen-list').innerHTML = '<p class="empty">生成记录加载失败，请刷新页面重试。</p>'; });
 }
 
@@ -615,6 +637,24 @@ function applyView(){
     else window.scrollTo(0, 0);
   }, 0);
 }
+/* 返回与历史口径（P2-028，站长 2026-10-26 13:50 亲报「返回按钮呢」）：切视图只替换
+   当前历史条目、不新增——浏览器后退一次即离开本页，不在各功能页之间打转；
+   「← 返回」优先回进来之前的那一页（同源来路且有历史时走 history.back），
+   无来路记录时回控制台根（冷入口落点按 P2-027 归一到控制台首页）。 */
+var backBtn = $('btnAdminBack');
+if (backBtn) backBtn.addEventListener('click', function(e){
+  e.preventDefault();
+  var sameOriginRef = false;
+  try { sameOriginRef = !!document.referrer && new URL(document.referrer).origin === location.origin; } catch (err) {}
+  if (sameOriginRef && history.length > 1) history.back(); else location.href = '/';
+});
+var navAs = document.querySelectorAll('.adminnav a[data-nav]');
+for (var ni = 0; ni < navAs.length; ni++) navAs[ni].addEventListener('click', function(e){
+  e.preventDefault();
+  var nv = this.getAttribute('data-nav');
+  if (location.hash !== '#' + nv) history.replaceState(null, '', '#' + nv);
+  applyView();
+});
 window.addEventListener('hashchange', applyView);
 applyView();
 </script>

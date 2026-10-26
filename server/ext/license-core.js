@@ -420,6 +420,26 @@ function createLicenseCore(opts) {
         lifecycle: k.lifecycle,
       }));
   }
+  // 生成钥作废（P6-GK2 最小作废面，站长后台生成记录行「作废」钮专用）：
+  // 仅限未认领的生成钥（generatedBy 在册、unbound 且 username 未落定）；
+  // 已认领钥归账号处置面，不走此路；已作废拒绝重复作废。置 revoked 后
+  // 认领侧在生成钥分支以 lifecycle!==unactivated 统一回 KEY_INVALID，
+  // 串哈希留档不变、永不再生成。revokedReason=generated-void 不与封禁
+  // 推翻路径的 permaban/payment-fraud 混淆（revokedBanId 恒 null）。
+  function voidGeneratedKey(keyId, now, meta) {
+    const k = state.keys[keyId];
+    if (!k || !k.generatedBy || !k.unbound || k.username != null) {
+      return { ok: false, code: 'NOT_VOIDABLE', msg: '该密钥不能在此作废：仅未认领的生成密钥可作废，已认领的请走账号处置。' };
+    }
+    if (k.lifecycle === 'revoked') {
+      return { ok: false, code: 'ALREADY_VOIDED', msg: '该生成密钥已作废。' };
+    }
+    const actor = (meta && meta.actor) || 'owner-admin';
+    k.lifecycle = 'revoked'; k.revokedReason = 'generated-void'; k.revokedAt = now; k.revokedBy = actor;
+    appendLine(bansLog, { ev: 'key-generated-voided', keyId: k.id, plan: k.plan, source: k.source, by: actor, at: now });
+    save();
+    return { ok: true, keyId: k.id, maskedKey: maskKey(k.str) };
+  }
   function lazyExpireKeys(username, now) {
     let changed = false;
     for (const k of accountKeys(username)) {
@@ -1347,7 +1367,7 @@ function createLicenseCore(opts) {
   return {
     PLANS, readConfig, save, ensureAccount, accountKeys, activeKeys, effectiveExpiry,
     activeBansFor, activeDeviceBan, applyBan, liftBan, expireBans, syncAccountLinkage,
-    issueKey, generateUnboundKey, listGeneratedKeys, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
+    issueKey, generateUnboundKey, listGeneratedKeys, voidGeneratedKey, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
     createOrder, simPayCallback, buildStatusView, audit, maskKey, state: () => state,
     grantPurchase, initiateTransfer, confirmTransfer, rejectTransfer, cancelTransfer, listTransfers, expireTransfers, transferTtlMs, claimByKeyString, listClaimableTransfers, forceLogoutState, decideDeviceReview, overrideDeviceReview, sealedExpired, markPurged,
     activateKey, primaryKeyOf, expiredText, remainTextForKey,
