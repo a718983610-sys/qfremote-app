@@ -69,8 +69,12 @@ const REMEMBER_TTL_MS = 30 * 24 * 3600 * 1000; // 「记住此设备」：30 天
 const SEARCH_LIMIT_PER_HOUR = 30;
 const REQUEST_LIMIT_PER_DAY = 20;
 const COOLDOWN_MS = 30 * 86400000;
-const GUARD = new Set(['718983610', 'qf-regsvc', 'qf-socialsvc', 'qf-support', 'admin', 'administrator', 'root', 'system']);
+const GUARD = new Set(['qf-regsvc', 'qf-socialsvc', 'qf-locksvc', 'qf-support', 'qf-official', 'admin', 'administrator', 'root', 'system']); // 具名系统账号集合：只挡自动化持有凭据的系统/服务人格与保留名；站长本人不在内（限制不约束本人，2026-10-26 修复：原名单字面含站长号、又漏了 qf-locksvc/qf-official）
 function isGuardName(name) { return GUARD.has(String(name || '').toLowerCase()); }
+// 冻结判定（与 ext 正本同口径，见 qfremote-ext/server.js 冻结谓词）：冻结＝
+// siteadmin 带 LOCKED 32 位，但全权账号（SITEADMIN_FULL）源码豁免锁定、
+// 天生冻不住——裸位判会把全权号误判冻结，好友侧各处一律走本谓词。
+function isFrozenSiteadmin(siteadmin) { const v = siteadmin || 0; return v !== SITEADMIN_FULL && (v & SITEADMIN_LOCKED_BIT) !== 0; }
 const OWNER_ACCOUNT = '718983610'; // 站长本人账号：限制只约束他人、不约束本人（2026-10-25 站长令，好友/聊天校验点对本人放行）
 function isOwnerAccount(name) { return String(name || '').toLowerCase() === OWNER_ACCOUNT; }
 function tierRights(tier) { return tier === 'operate' ? RIGHTS_OPERATE : RIGHTS_VIEW; }
@@ -472,7 +476,7 @@ function main() {
       for (const r of state.requests) { participants.add(r.from); participants.add(r.to); }
       for (const s of state.shares) { participants.add(s.owner); participants.add(s.grantee); }
       for (const name of participants) {
-        if (isGuardName(name)) continue;
+        if (isGuardName(name) || isOwnerAccount(name)) continue;
         const u = users.get(name);
         if (!u) {
           // 账号消失（删号/封号）：回收授予给他的共享，清掉他的关系与申请
@@ -485,7 +489,7 @@ function main() {
           state.requests = state.requests.filter(r => r.from !== name && r.to !== name);
           log({ ev: 'prune-gone-user', user: name });
           changed = true;
-        } else if ((u.siteadmin & SITEADMIN_LOCKED_BIT) !== 0) {
+        } else if (isFrozenSiteadmin(u.siteadmin)) {
           // 被冻结：回收授予给他的全部共享（解冻不自动恢复）
           for (const s of state.shares) {
             if (s.status === 'active' && s.grantee === name) { await revokeShare(s, 'grantee-frozen'); changed = true; }
@@ -681,7 +685,7 @@ function main() {
   // ---- /me 视图 ----
   async function buildMe(me) {
     const users = await listUsers().catch(() => new Map());
-    const alive = (name) => { const u = users.get(name); return !!u && ((u.siteadmin & SITEADMIN_LOCKED_BIT) === 0); };
+    const alive = (name) => { const u = users.get(name); return !!u && !isFrozenSiteadmin(u.siteadmin); };
     const friends = [];
     for (const name of Object.keys(state.friends[me] || {})) {
       if (!alive(name)) continue; // 被冻结/已消失的好友不在各端列表出现（方案口径）
@@ -729,7 +733,6 @@ function main() {
     if (isGuardName(target)) return sendJson(res, 404, { ok: false, msg: '未找到该账号。' });
     const u = await findUser(target);
     if (!u) return sendJson(res, 404, { ok: false, msg: '未找到该账号，请确认账号名完整无误。' });
-    if ((u.siteadmin & SITEADMIN_LOCKED_BIT) !== 0) return sendJson(res, 404, { ok: false, msg: '未找到该账号。' });
     const plan = planRequest(state, me, target, now);
     if (plan.type === 'already-friends') return sendJson(res, 200, { ok: true, msg: '对方已是您的好友。' });
     if (plan.type === 'already-pending') return sendJson(res, 200, { ok: true, msg: '申请已发送，等待对方同意。' });
@@ -801,7 +804,7 @@ function main() {
     const rights = tierRights(tier);
     if (!areFriends(state, me, target)) return sendJson(res, 403, { ok: false, msg: '须先成为好友，才能共享。' });
     const tu = await findUser(target);
-    if (!tu || (tu.siteadmin & SITEADMIN_LOCKED_BIT) !== 0) return sendJson(res, 404, { ok: false, msg: '对方账号当前不可用，无法共享。' });
+    if (!tu || isFrozenSiteadmin(tu.siteadmin)) return sendJson(res, 404, { ok: false, msg: '对方账号当前不可用，无法共享。' });
     let groups = state.onboarded[me] || [];
     if (data.meshid) groups = groups.filter(g => g.meshid === data.meshid);
     if (groups.length === 0) return sendJson(res, 400, { ok: false, msg: '您名下暂无可共享的设备组，请先将设备加入设备组后重试。' });
@@ -1024,4 +1027,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { newState, areFriends, setFriends, unsetFriends, findRequest, getBlock, setBlock, planRequest, requestQuota, searchQuota, sharesBetween, exportPairs, tierRights, isGuardName, GUARD, RIGHTS_VIEW, RIGHTS_OPERATE, COOLDOWN_MS };
+module.exports = { newState, areFriends, setFriends, unsetFriends, findRequest, getBlock, setBlock, planRequest, requestQuota, searchQuota, sharesBetween, exportPairs, tierRights, isGuardName, GUARD, isFrozenSiteadmin, RIGHTS_VIEW, RIGHTS_OPERATE, COOLDOWN_MS };

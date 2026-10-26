@@ -85,7 +85,9 @@ M.setFriends(s, A, B, now); M.setFriends(s, B, C, now);
 const pairs = M.exportPairs(s);
 t('pairs 导出 2 对、排序去重', pairs.length === 2 && pairs[0][0] === A);
 t('客服不在 pairs', !JSON.stringify(pairs).includes('qf-support'));
-t('守护名单含管理员/注册服务/执行账号/客服', M.isGuardName('a718983610@gmail.com') && M.isGuardName('qf-regsvc') && M.isGuardName('qf-socialsvc') && M.isGuardName('qf-support') && M.isGuardName('QF-REGSVC'));
+t('守护名单含系统/服务账号（注册/执行/锁桥/客服/官方）', M.isGuardName('qf-regsvc') && M.isGuardName('qf-socialsvc') && M.isGuardName('qf-locksvc') && M.isGuardName('qf-support') && M.isGuardName('qf-official') && M.isGuardName('QF-REGSVC'));
+t('站长本人不在守护名单（限制不约束本人）', !M.isGuardName('718983610') && !M.isGuardName('a718983610@gmail.com'));
+t('冻结谓词：普通号带 32 位=冻结、全权号不冻、无权号不冻', M.isFrozenSiteadmin(32) === true && M.isFrozenSiteadmin(4294967295) === false && M.isFrozenSiteadmin(0) === false && M.isFrozenSiteadmin(2) === false && M.isFrozenSiteadmin(34) === true);
 t('普通账号不在守护名单', !M.isGuardName(A));
 
 console.log('\n结果：' + pass + ' 过 / ' + fail + ' 挂');

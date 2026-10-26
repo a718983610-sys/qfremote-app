@@ -56,7 +56,7 @@
 | server/friends/lock-envelope.js | /opt/qfremote-friends/lock-envelope.js | `533f8000a331c0b63dc260fb0970f860` |
 | server/friends/logout-bridge.html | /opt/qfremote-friends/logout-bridge.html | `806f944a31424d10439ee2cbe20f9d72` |
 | server/friends/qf-wrap.html | /opt/qfremote-friends/qf-wrap.html | `d23be0c21a506e71e02ff14f0b03553f` |
-| server/friends/server.js | /opt/qfremote-friends/server.js | `251a468cc0bb3fb12f663c980f1ad2e5` |
+| server/friends/server.js | /opt/qfremote-friends/server.js | `9edbadb79585555da8ba884d64494050` |
 | server/friends/support/INTEGRATION.md | /opt/qfremote-friends/support/INTEGRATION.md | `fa296bb20252a0748e1b4085c18be565` |
 | server/friends/support/ai-channel.js | /opt/qfremote-friends/support/ai-channel.js | `5a7a6c400dac441354a6c9b7d6e2e14b` |
 | server/friends/support/build-review.js | /opt/qfremote-friends/support/build-review.js | `f773ed1a5094f78f9de9482a3104e2c3` |
@@ -71,7 +71,7 @@
 | server/friends/support/test-support.js | /opt/qfremote-friends/support/test-support.js | `14db8b856f444c9bf60e61b448b78438` |
 | server/friends/test-lock-bridge.js | /opt/qfremote-friends/test-lock-bridge.js | `22c7ce68b65859eb316c55607cd87658` |
 | server/friends/test-lock-envelope.js | /opt/qfremote-friends/test-lock-envelope.js | `d1648c80a9d158768c1650b5dd37df95` |
-| server/friends/test-logic.js | /opt/qfremote-friends/test-logic.js | `37aa224b07740bf0c39bf76bbc716197` |
+| server/friends/test-logic.js | /opt/qfremote-friends/test-logic.js | `9fd628e36dca83814af1567754f6a4e4` |
 | server/lock/dispatcher-pubkey.txt | /opt/qfremote-lock/dispatcher-pubkey.txt | `40a98d6739fbbacdc19d2198c4b88a14` |
 | server/loginshim/appeal-admin.js | /opt/qfremote-loginshim/appeal-admin.js | `1fa8a05e0835f680b1916b886f90e85c` |
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
