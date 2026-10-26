@@ -722,6 +722,12 @@ Views.home = async function (view) {
 function rowHtml(icon, t, s, go, anchor) {
   return `<button class="row" ${go ? `data-go="${go}"` : ''}${anchor ? ` data-anchor="${anchor}"` : ''}><span class="tile">${ic(icon)}</span><span><b>${esc(t)}</b><small>${esc(s)}</small></span><span class="chev">${ic('chevR')}</span></button>`;
 }
+/* 说明行专用（无落点、无行级操作）：渲染为普通 div、无箭头，避免「带箭头的
+   button 却无点击处理」的死钮外观（P2-036/037/038/039 同族清零口径）。行下方
+   另有真实操作按钮的标签行也用本式，操作仍走各自按钮。 */
+function rowInfoHtml(icon, t, s) {
+  return `<div class="row"><span class="tile">${ic(icon)}</span><span><b>${esc(t)}</b><small>${esc(s)}</small></span></div>`;
+}
 function devRowHtml(d) {
   return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span><span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span><span class="ops">${d.online ? `<button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button>` : '<span class="pill off">设备离线时不可连接</span>'}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
 }
@@ -799,7 +805,7 @@ Views.device = async function (view, name) {
   view.innerHTML = `<h1 class="pt">设备详情 · ${esc(d.name)}</h1><p class="psub"><a data-back>← 返回我的设备</a></p>
     <div class="card"><div class="dev" style="border:none;padding:0"><span class="devic">${ic('monitor')}</span><span><b style="font-size:17px">${esc(d.name)}</b><small>${esc(d.os || '')} · ${d.online ? '在线' : '离线'}</small></span><span class="ops">${d.online ? `<button class="btn" data-remote="${esc(d.name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>'}</span></div></div>
     <div class="grid2"><div class="card"><h3>连接</h3>
-      ${rowHtml('monitor', '远程桌面', '画面与键鼠控制')}${rowHtml('folder', '文件管理', '浏览、上传与下载被控端文件')}${rowHtml('file', '远程终端', '命令行会话')}
+      <button class="row" data-remote="${esc(d.name)}"><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
       <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}">远程终端</button></p></div>
     <div class="card"><h3>设备信息</h3><table>
       <tr><th>系统</th><td>${esc(d.os || '—')}</td></tr><tr><th>分组</th><td>${esc(d.group || '默认分组')}</td></tr>
@@ -1120,7 +1126,7 @@ Views.friends = async function (view) {
           if (r2.json && r2.json.ok) { toast('已共享。', 'ok'); paint(); } else toast((r2.json && r2.json.msg) || '共享未成功，请稍后再试。', 'err');
         } }]);
     });
-    $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'), '')).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
+    $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
     $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
     view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
   };
@@ -1562,7 +1568,7 @@ Views.purchase = async function (view, param, _s, opts) {
         if (act === 'paid') {
           if (guest || S.auth !== 'in') { if (out) out.innerHTML = '<div class="note warn" style="margin-top:12px">下单前请先登录；没有账号可以先注册（注册即开通 3 天免费试用）。</div>'; return; }
           const sub = dr.querySelector('[data-submit]');
-          if (sub) { sub.hidden = false; sub.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+          if (sub) { sub.hidden = false; sub.style.scrollMarginTop = '132px'; sub.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
           return;
         }
         if (act === 'submit') {
@@ -1747,13 +1753,13 @@ Views.points = async function (view) {
     <div class="grid2"><div class="card"><h3>我的积分</h3><div class="stat"><div><b id="pt-balance">${esc(String(balance))}</b><span>当前积分</span></div><div><b>${esc(String(hours))}</b><span>累计在线（小时）</span></div><div><b>${esc(String(todayGranted))} / ${esc(String(todayCap))}</b><span>今日已得 / 上限</span></div></div>
       <p style="color:var(--sub);font-size:13px;margin-top:10px">${esc(j.displayText || '')}</p></div>
     <div class="card"><h3>赚取积分</h3>
-      ${rowHtml('award', '每日签到', checkinDone ? '今日已签到' : '每天签到得 1 分')}
+      ${rowInfoHtml('award', '每日签到', checkinDone ? '今日已签到' : '每天签到得 1 分')}
       <div style="margin:-6px 0 10px 55px"><button class="btn sm" id="pt-sign" ${checkinDone ? 'disabled' : ''}>${checkinDone ? '今日已签到' : '签到'}</button></div>
-      ${rowHtml('refresh', '使用软件计时', '软件与服务器保持在线满 1 小时得 1 分' + (earn.nextPointInSec != null ? '（距下一分约 ' + Math.ceil(Number(earn.nextPointInSec) / 60) + ' 分钟）' : ''))}
+      ${rowInfoHtml('refresh', '使用软件计时', '软件与服务器保持在线满 1 小时得 1 分' + (earn.nextPointInSec != null ? '（距下一分约 ' + Math.ceil(Number(earn.nextPointInSec) / 60) + ' 分钟）' : ''))}
       <div id="pt-out" style="margin-top:10px"></div>
     </div></div>
     <div class="card"><h3>福利中心 · 兑换密钥</h3>
-      ${offers.map(o => `${rowHtml('key', offerName(o), offerCost(o) + ' 分兑换 · 兑换后进入下方待兑换列表')}
+      ${offers.map(o => `${rowInfoHtml('key', offerName(o), offerCost(o) + ' 分兑换 · 兑换后进入下方待兑换列表')}
       <div style="margin:-6px 0 10px 55px"><button class="btn sm ghost" data-redeem="${esc(o.plan)}" data-cost="${esc(String(offerCost(o)))}">兑换${o.plan === 'd7' ? ' 7 日' : ' 1 日'}密钥</button></div>`).join('')}
       <div class="note warn" style="margin-top:12px">积分兑换的密钥为免费来源，不开通网页版；兑换所得为未激活密钥，自兑换激活时刻起计时。</div>
       <div id="wf-out" style="margin-top:10px"></div></div>
@@ -1818,9 +1824,9 @@ Views.profile = async function (view) {
       <tr><th>网页版</th><td>${lic.webEnabled ? '已开通' : '购买付费密钥后开通'}</td></tr>
       ${lic.everBanned ? '<tr><th>标记</th><td>该密钥曾被封禁（申诉恢复后保留此标记，不影响使用）</td></tr>' : ''}
       </table>
-      ${rowHtml('key', '转赠密钥', '付费密钥可转赠一次；对方在查询密钥处复制密钥串后，登录时粘贴领取')}
+      ${rowInfoHtml('key', '转赠密钥', '付费密钥可转赠一次；对方在查询密钥处复制密钥串后，登录时粘贴领取')}
       <div style="margin:-6px 0 10px 55px"><button class="btn sm ghost" id="pf-gift">发起转赠</button> <button class="btn sm grey" id="pf-gift-cancel">撤销待领取转赠</button></div>
-      ${rowHtml('refresh', '申诉换绑设备', '在新设备上提交，审核通过后替换同类旧设备')}
+      ${rowInfoHtml('refresh', '申诉换绑设备', '在新设备上提交，审核通过后替换同类旧设备')}
       <div style="margin:-6px 0 4px 55px"><button class="btn sm ghost" id="pf-rebind">提交换绑申诉</button></div>
     </div></div>
     <div class="card"><h3>账号与安全</h3><div id="pfSec">
