@@ -1860,6 +1860,31 @@ const server = http.createServer(async (req, res) => {
         log({ ev: 'license-issue', target: username, plan, source: body.source, keyId: rec.id });
         return sendJson(res, 200, { ok: true, msg: '密钥已发放到 ' + username + '（' + rec.planName + '，来源：' + (body.source === 'paid' ? '付费购买入账' : '免费发放') + '）。', keyId: rec.id, maskedKey: licMaskKey(rec.str) });
       }
+      // ===== 许可：站长生成不绑账号钥串（站长 2026-10-26 13:54 令）=====
+      // 与「给账号发放」分开：生成钥不绑任何账号，入许可台账为未激活，
+      // 首个经 /license/api/redeem 或 transfer/claim 粘贴兑换的账号即归属。
+      // 套餐仅四档付费档（试用档不生成）；来源必选、无默认，口径同发钥。
+      if (req.method === 'POST' && p === '/admin/api/license/generate') {
+        const body = await readJsonBody(req);
+        const plan = String(body.plan || '');
+        if (!LIC_PLANS[plan] || plan === 'trial') return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '套餐不正确：生成密钥仅支持 1 日、7 日、30 日与永久四档。' });
+        if (body.source !== 'paid' && body.source !== 'free') return sendJson(res, 400, { ok: false, code: 'SOURCE_REQUIRED', msg: '必须选择密钥来源（付费购买入账 / 免费发放），不设默认。' });
+        const rec = lic.generateUnboundKey(plan, body.source, Date.now(), { actor: auth.user });
+        log({ ev: 'license-generate', plan, source: body.source, keyId: rec.id, by: auth.user });
+        return sendJson(res, 200, { ok: true, msg: '已生成 ' + rec.planName + ' 密钥（来源：' + (body.source === 'paid' ? '付费购买入账' : '免费发放') + '），尚未绑定任何账号。', keyId: rec.id, keyStr: rec.str, planName: rec.planName, source: body.source });
+      }
+      if (req.method === 'GET' && p === '/admin/api/license/generated') {
+        return sendJson(res, 200, { ok: true, records: lic.listGeneratedKeys(30) });
+      }
+      // 生成钥作废（P6-GK2）：仅未认领的生成钥可作废，已认领/已作废由
+      // license-core 侧统一拒绝（NOT_VOIDABLE/ALREADY_VOIDED）。
+      if (req.method === 'POST' && p === '/admin/api/license/void-generated') {
+        const body = await readJsonBody(req);
+        const r = lic.voidGeneratedKey(String(body.keyId || ''), Date.now(), { actor: auth.user });
+        if (!r.ok) return sendJson(res, 400, { ok: false, code: r.code, msg: r.msg });
+        log({ ev: 'license-generate-void', keyId: r.keyId, by: auth.user });
+        return sendJson(res, 200, { ok: true, msg: '该生成密钥已作废，串永不再用。', keyId: r.keyId });
+      }
       if (req.method === 'POST' && p === '/admin/api/license/review-decide') {
         const body = await readJsonBody(req);
         // #38：站长改判（override:true）——已裁定的设备异常记录可反向改判，
@@ -1890,7 +1915,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && p === '/admin/api/license/overview') {
         const st = lic.state();
-        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
+        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
       }
       // ===== 截图付款订单审核（#21：站长侧含二审到账核对；一审亦可在此处理） =====
       if (req.method === 'GET' && p === '/admin/api/orders') {
