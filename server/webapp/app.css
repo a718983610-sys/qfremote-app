@@ -208,3 +208,9 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 #burgerBtn{position:relative}
 .fr-cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#D92D20;color:#fff;font-size:11px;font-weight:700;margin-left:8px;vertical-align:middle}
 .fr-cnt[hidden]{display:none}
+
+/* ===== 回归修复 好友页左卡行挤窄 ===== */
+@media (max-width:900px){
+.chatlist .row{flex-wrap:wrap}
+.chatlist .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+}
