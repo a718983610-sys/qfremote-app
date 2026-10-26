@@ -41,7 +41,7 @@
 | server/friends/chat/DESIGN.md | /opt/qfremote-friends/chat/DESIGN.md | `beb5c7c870e019486360165b0595a920` |
 | server/friends/chat/chat-client.js | /opt/qfremote-friends/chat/chat-client.js | `29ea090152d52a66462b686737782ec3` |
 | server/friends/chat/chat-server.js | /opt/qfremote-friends/chat/chat-server.js | `b14a4248e51d532d29ff001e54d0f72a` |
-| server/friends/chat/chat.html | /opt/qfremote-friends/chat/chat.html | `79cfb3d8de65d67c52d4cf724c19e886` |
+| server/friends/chat/chat.html | /opt/qfremote-friends/chat/chat.html | `3f7927b30e399d4a4239f99b3fd30b57` |
 | server/friends/chat/config.sample.json | /opt/qfremote-friends/chat/config.sample.json | `f65f35754ca2c30bb8df3832390fb881` |
 | server/friends/chat/crypto-core.js | /opt/qfremote-friends/chat/crypto-core.js | `d826dd146dae5832b5c4cbe18d7c6805` |
 | server/friends/chat/friends-gate.js | /opt/qfremote-friends/chat/friends-gate.js | `89e38008c72e953297366e9c0f18b907` |
@@ -51,7 +51,7 @@
 | server/friends/chat/qfremote-chat.service.draft | /opt/qfremote-friends/chat/qfremote-chat.service.draft | `7b437bcf00e9c18fb2c8e9cd7d2e0a4d` |
 | server/friends/chat/support-faq.json | /opt/qfremote-friends/chat/support-faq.json | `ddedde1af0eec64fb0270df205fbda5b` |
 | server/friends/chat/test-e2e.js | /opt/qfremote-friends/chat/test-e2e.js | `f027a7650394e95ee855fdd71a5a5301` |
-| server/friends/friends.html | /opt/qfremote-friends/friends.html | `f81dd779a6b7fbeb2ce739d93bec7b6a` |
+| server/friends/friends.html | /opt/qfremote-friends/friends.html | `df1dae4d733bdea435e05eb045036038` |
 | server/friends/lock-bridge.js | /opt/qfremote-friends/lock-bridge.js | `3f9351316b10b6c2b397319adf2db0ba` |
 | server/friends/lock-envelope.js | /opt/qfremote-friends/lock-envelope.js | `533f8000a331c0b63dc260fb0970f860` |
 | server/friends/logout-bridge.html | /opt/qfremote-friends/logout-bridge.html | `806f944a31424d10439ee2cbe20f9d72` |
@@ -82,7 +82,7 @@
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
 | server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
 | server/meshcentral/views/translations/login2_zh-cht.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-cht.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
-| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `d21c18fa43778789b3cee0fa41af0147` |
+| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `e816a2bf3fd2ac6f07387718296e9baa` |
 | server/register/README.md | /opt/qfremote-register/README.md | `527556ba06903beaeb3959cf728ef23f` |
 | server/register/register.html | /opt/qfremote-register/register.html | `4094a720db44d5172feda7cb02fa9f49` |
 | server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |

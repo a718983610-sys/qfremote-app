@@ -193,6 +193,12 @@ server {
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
+    # #33 收口补漏·漏网乙（收编一期备补丁，待批）：隧道源 /login 不再直出 MeshCentral 原生登录页，
+    # 一律回新控制台 SPA 登录（根路径）。8443 直连源 /login 不在此列（正当登录面＋站长例外路径，不动）。
+    location = /login {
+        return 302 /;
+    }
+
     # 新控制台（2.3.1 切换，#32/#33）：根路径只发新控制台壳；其静态资源同目录。
     location = / {
         root /opt/qfremote-webapp;
