@@ -449,6 +449,7 @@ async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
     await api('/logout'); Cache.clear();
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
+    try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
     S.auth = 'out'; S.license = null; S.points = null;
     showAuth('login', { notice: '您已退出登录。' });
   });
@@ -475,9 +476,58 @@ const BTABS = [
   { icon: 'chat', label: '消息', route: 'chat' },
   { icon: 'user', label: '我的', route: 'profile' }
 ];
+/* ===== P7-016 好友申请角标：模块级状态 ===== */
+let friendReqCount = -1;   // -1 未知/隐藏；>=0 最近一次确认的待处理申请数
+let badgeEpoch = 0;        // 角标数据代次，用于丢弃过期回包
+let badgeFlight = null;    // 正在飞行中的请求（并发去重）
+let badgeLastFetch = 0;    // 上次请求结束时间戳（节流）
+const FR_BADGE_TTL = 20000;
+
+/* 按当前 friendReqCount 生成角标 span，供 nav 模板复用 */
+function frBdgHtml() {
+  const n = friendReqCount;
+  return n > 0 ? `<span class="fr-bdg">${n}</span>` : `<span class="fr-bdg" hidden></span>`;
+}
+
+/* 写入角标：先镜像确保，再同步全部 .fr-bdg */
+function setFriendBadge(n) {
+  friendReqCount = n;
+  const burger = $('#burgerBtn');
+  if (burger && !burger.querySelector('.fr-bdg')) {
+    const sp = document.createElement('span');
+    sp.className = 'fr-bdg onbtn';
+    burger.appendChild(sp);
+  }
+  document.querySelectorAll('.fr-bdg').forEach(el => {
+    if (friendReqCount > 0) { el.hidden = false; el.textContent = String(friendReqCount); }
+    else { el.hidden = true; el.textContent = ''; }
+  });
+}
+
+/* 拉取 /api/friends/me 并刷新角标；失败永不改角标 */
+async function refreshFriendBadge(force) {
+  if (badgeFlight) return;                                              // 并发去重（force 同样让位）
+  if (!force && Date.now() - badgeLastFetch < FR_BADGE_TTL) return;     // 20s 节流
+  if (S.auth !== 'in') { setFriendBadge(-1); return; }
+  const flight = { epoch: badgeEpoch };
+  badgeFlight = flight;
+  try {
+    const r = await api('/api/friends/me');
+    if (r.status === 200 && r.json && Array.isArray(r.json.requestsIn)) {
+      if (flight.epoch === badgeEpoch) setFriendBadge(r.json.requestsIn.length);  // epoch 不符丢弃
+    }
+  } catch (e) {
+    /* 失败永不改角标：保留最近已知真值 */
+  } finally {
+    if (badgeFlight === flight) { badgeFlight = null; badgeLastFetch = Date.now(); }
+  }
+}
+
+window.addEventListener('focus', () => { refreshFriendBadge(false).catch(() => {}); });
+
 function navBtn(item, activeRoute, cls) {
   const base = cls === undefined ? 'nav' : cls;
-  return `<button class="${base}${item.route === activeRoute ? ' on' : ''}" data-nav="${item.route}">${ic(item.icon)}<span>${item.label}</span></button>`;
+  return `<button class="${base}${item.route === activeRoute ? ' on' : ''}" data-nav="${item.route}">${ic(item.icon)}<span>${item.label}</span>${item.route === 'friends' ? frBdgHtml() : ''}</button>`;
 }
 function menu34Html(activeRoute, cls) {
   return MENU34.map(i => navBtn(i, activeRoute, cls)).join('') +
@@ -500,12 +550,12 @@ function renderNavs() {
     `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
     `<div class="gtitle">主菜单</div>` + menu34Html(a, 'nav');
   $('#acctMenu').innerHTML = MENU34.map(i =>
-    `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span></a>`).join('') +
+    `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span>${i.route === 'friends' ? frBdgHtml() : ''}</a>`).join('') +
     (S.isAdmin ? `<a data-nav="admin" class="${a === 'admin' ? 'on' : ''}">${ic('gear')}<span>站长管理</span></a>` : '') +
     `<a href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>` +
     `<a data-nav="logout" class="red">${ic('logout')}<span>登出</span></a>`;
   $('#bnav').innerHTML = BTABS.map(i => navBtn(i, a, '')).join('');
-  $('#acctChip').innerHTML = `<span class="uava">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><b>${esc(S.displayName || '')}</b>`;
+  $('#acctChip').innerHTML = `<span class="uava">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><b>${esc(S.displayName || '')}</b>${frBdgHtml()}`;
   document.querySelectorAll('[data-nav]').forEach(el => {
     el.addEventListener('click', () => {
       const r = el.getAttribute('data-nav');
@@ -564,6 +614,7 @@ async function render() {
   try { await fn(view, S.route.param, seq); }
   catch (e) { if (seq === renderSeq) view.innerHTML = stateBox('页面加载失败', '页面组件出现异常，请重新加载。', true), bindRetry(view, render); }
   window.scrollTo(0, 0);
+  refreshFriendBadge(false).catch(() => {});
 }
 window.addEventListener('hashchange', render);
 
@@ -1243,29 +1294,59 @@ Views.remote = async function (view, name) {
 };
 
 /* ================= 好友 ================= */
+let frPaintSeq = 0;   // 好友页 paint 代次，防止旧回包覆盖新渲染
 Views.friends = async function (view) {
   view.innerHTML = `<h1 class="pt">好友</h1><p class="psub">添加好友后，可将自己的设备组共享给对方协助处理。官方客服为系统联系人，不可删除、不参与设备共享。</p>
+    <div class="card"><h3>好友申请 <span class="fr-cnt" id="frReqCnt" hidden></span></h3><div id="frReqs"><div class="skel" style="height:52px"></div></div></div>
     <div class="grid2"><div class="card chatlist"><h3>好友列表</h3><div id="frList"><div class="skel" style="height:52px"></div></div>
       <div class="field" style="margin-top:16px"><label>添加好友（输入对方完整账号）</label><input id="fr-q" placeholder="对方账号"></div>
-      <button class="btn sm" id="fr-add">发送好友申请</button> <span id="fr-msg" style="font-size:13px;color:var(--sub)"></span></div>
+      <button class="btn sm" id="fr-add">发送好友申请</button> <span id="fr-msg" style="font-size:13px;color:var(--sub)"></span>
+      <div id="frOutReq"></div></div>
     <div class="card"><h3>共享给我的设备组</h3><div id="frIn"><div class="skel" style="height:52px"></div></div>
       <h3 style="margin-top:18px">我共享出的</h3><div id="frOut"><div class="skel" style="height:40px"></div></div></div></div>`;
   ensureChatToken(false);
   const paint = async () => {
-    const r = await api('/api/friends/me');
-    if (r.status !== 200 || !r.json) { $('#frList', view).innerHTML = '<div class="statebox"><b>好友服务暂时不可用</b><p>请稍后重新加载。</p></div>'; return; }
-    const j = r.json;
-    const list = $('#frList', view);
-    let h = `<button class="row" data-support="1"><span class="tile">${ic('users')}</span><span><b>官方客服</b><small>智能客服与人工客服的统一入口</small></span><span class="tag">系统</span><span class="chev">${ic('chevR')}</span></button>`;
-    (j.requestsIn || []).forEach(q => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
-    (j.friends || []).forEach(f => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b><small>好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
-    if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
-    list.innerHTML = h;
-    const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
-    list.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-acc'), accept: true } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已同意好友申请。', 'ok'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
-    list.querySelectorAll('[data-rej]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-rej'), accept: false } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已拒绝好友申请。', 'info'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
-    list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); toast('已删除好友。', 'ok'); paint(); }));
-    list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
+    const myPaint = ++frPaintSeq;
+    // 失败分支（catch 与业务失败共用同一渲染，且都不碰角标）
+    const failRender = () => {
+      const l = $('#frList', view); if (l) l.innerHTML = '<div class="statebox"><b>好友服务暂时不可用</b><p>请稍后重新加载。</p></div>';
+      const rq = $('#frReqs', view); if (rq) rq.innerHTML = '<div class="statebox"><b>好友申请暂时无法加载</b><p>请稍后重新加载。</p></div>';
+      const c = $('#frReqCnt', view); if (c) { c.hidden = true; c.textContent = ''; }
+      const o = $('#frOutReq', view); if (o) o.innerHTML = '';
+      const i2 = $('#frIn', view); if (i2) i2.innerHTML = '';
+      const u = $('#frOut', view); if (u) u.innerHTML = '';
+    };
+    try {
+      const r = await api('/api/friends/me');
+      if (myPaint !== frPaintSeq) return;                                // 过期回包直接丢弃
+      if (r.status !== 200 || !r.json || !Array.isArray(r.json.requestsIn)) { failRender(); return; }
+      const j = r.json;
+      const reqN = j.requestsIn.length;
+
+      // ---- 角标与标题计数 ----
+      badgeEpoch++;
+      setFriendBadge(reqN);
+      const cnt = $('#frReqCnt', view);
+      if (cnt) { if (reqN > 0) { cnt.hidden = false; cnt.textContent = String(reqN); } else { cnt.hidden = true; cnt.textContent = ''; } }
+
+      // ---- 好友申请（独立整幅卡）----
+      const reqBox = $('#frReqs', view);
+      let rq = '';
+      j.requestsIn.forEach(q => { rq += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
+      if (!reqN) rq = '<div class="statebox"><b>暂无待处理的好友申请</b><p>有新的好友申请时会显示在这里。</p></div>';
+      reqBox.innerHTML = rq;
+      reqBox.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-acc'), accept: true } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已同意好友申请。', 'ok'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
+      reqBox.querySelectorAll('[data-rej]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-rej'), accept: false } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已拒绝好友申请。', 'info'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
+
+      // ---- 好友列表（删去 requestsIn 段，其余逐字不变）----
+      const list = $('#frList', view);
+      let h = `<button class="row" data-support="1"><span class="tile">${ic('users')}</span><span><b>官方客服</b><small>智能客服与人工客服的统一入口</small></span><span class="tag">系统</span><span class="chev">${ic('chevR')}</span></button>`;
+      (j.friends || []).forEach(f => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b><small>好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
+      if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
+      list.innerHTML = h;
+      const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
+      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); toast('已删除好友。', 'ok'); paint(); }));
+      list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
       const groups = (j.myGroups || []);
       const opts = groups.length ? groups.map(g => `<option value="${esc(g.meshid || g.id || g)}">${esc(g.name || g.meshName || g.meshid || g)}</option>`).join('') : '<option value="">（暂无可共享分组）</option>';
       showModal('共享设备给 ' + b.getAttribute('data-share'),
@@ -1277,9 +1358,20 @@ Views.friends = async function (view) {
           if (r2.json && r2.json.ok) { toast('已共享。', 'ok'); paint(); } else toast((r2.json && r2.json.msg) || '共享未成功，请稍后再试。', 'err');
         } }]);
     });
-    $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
-    $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
-    view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
+
+      // ---- 我发送的申请 ----
+      const outBox = $('#frOutReq', view);
+      outBox.innerHTML = (Array.isArray(j.requestsOut) && j.requestsOut.length)
+        ? `<h3 style="margin-top:18px">我发送的申请</h3>` + j.requestsOut.map(o => `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(o.to || '')}</b></span><span class="tag" style="margin-left:auto">等待对方同意</span></div>`).join('')
+        : '';
+
+      // ---- 共享给我的 / 我共享出的（逐字不变）----
+      $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
+      $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
+      view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
+    } catch (e) {
+      if (myPaint === frPaintSeq) failRender();
+    }
   };
   $('#fr-add', view).onclick = async () => {
     const q = $('#fr-q', view).value.trim(); const msg = $('#fr-msg', view);

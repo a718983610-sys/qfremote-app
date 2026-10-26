@@ -200,3 +200,11 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 .cht-comp textarea{flex:1;border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-3);font:inherit;font-size:var(--fs-14);resize:vertical;min-height:46px;background:#fff;color:var(--text);line-height:var(--lh-body)}
 .cht-comp textarea:focus{outline:none;border-color:var(--brand)}
 .cht-unavail{margin:var(--sp-3) 0}
+
+/* ===== P7-016 好友申请角标 ===== */
+.fr-bdg{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#D92D20;color:#fff;font-size:11px;font-weight:700;margin-left:6px;vertical-align:middle}
+.fr-bdg[hidden]{display:none}
+.fr-bdg.onbtn{position:absolute;top:2px;right:2px;margin-left:0}
+#burgerBtn{position:relative}
+.fr-cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#D92D20;color:#fff;font-size:11px;font-weight:700;margin-left:8px;vertical-align:middle}
+.fr-cnt[hidden]{display:none}
