@@ -26,7 +26,7 @@
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `789621923f1f7ce7309de38caa645d49` |
 | server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
-| server/ext/page.js | /opt/qfremote-ext/page.js | `da8e6ebc9b3c93fc47f45e656bb432d8` |
+| server/ext/page.js | /opt/qfremote-ext/page.js | `9457717fc4089f1bb8b7ac51b86f07ae` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
 | server/ext/server.js | /opt/qfremote-ext/server.js | `91a91dbe0533dfd6316374b0917dd94d` |

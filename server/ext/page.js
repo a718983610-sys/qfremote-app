@@ -62,6 +62,10 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .adminnav a.on .cnt{background:#fff;color:#c0271a}
 .view{display:none}
 .view.on{display:block}
+.foldhead{cursor:pointer}
+.foldhead .foldchev{float:right;font-size:13px;font-weight:400;color:#2470E0}
+.foldbody{display:none}
+.foldbody.open{display:block}
 </style>
 </head>
 <body>
@@ -119,8 +123,8 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
       <div class="newpass" id="gen-str"></div>
       <div style="margin-top:10px"><button class="btn ghost" id="gen-copy" type="button">复制密钥串</button></div>
     </div>
-    <h2 style="margin-top:18px">生成记录</h2>
-    <div id="gen-list"><p class="empty">正在加载…</p></div>
+    <h2 class="foldhead" id="gen-fold-head" style="margin-top:18px">生成记录<span id="gen-count"></span><span class="foldchev">展开 ▾</span></h2>
+    <div id="gen-list" class="foldbody"><p class="empty">正在加载…</p></div>
   </div>
   </section>
 
@@ -411,12 +415,14 @@ function onAppealOverride(){
 function loadLicense(){
   api('/admin/api/license/overview').then(function(r){
     if (!r.ok) { $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; $('lic-bans').innerHTML = ''; $('lic-devices').innerHTML = ''; return; }
-    var h = '';
-    if (!r.keys.length) h += '<p class="empty">暂无密钥记录。</p>';
-    r.keys.slice(-20).reverse().forEach(function(k){
-      h += '<div class="row"><div class="who"><div class="login">' + (k.unbound ? '生成密钥（未绑账号）' : esc(k.username)) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
+    var shownKeys = r.keys.slice(-20).reverse();
+    var kh = '';
+    if (!shownKeys.length) kh = '<p class="empty">暂无密钥记录。</p>';
+    shownKeys.forEach(function(k){
+      kh += '<div class="row"><div class="who"><div class="login">' + (k.unbound ? '生成密钥（未绑账号）' : esc(k.username)) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
     });
-    $('lic-keys').innerHTML = h;
+    $('lic-keys').innerHTML = '<h2 class="foldhead" id="keys-fold-head" style="margin-top:18px">已发放密钥（' + shownKeys.length + ' 条' + (r.keys.length > shownKeys.length ? '，共 ' + r.keys.length + ' 条' : '') + '）<span class="foldchev">展开 ▾</span></h2><div class="foldbody" id="keys-fold-body">' + kh + '</div>';
+    bindFold('keys-fold-head', 'keys-fold-body');
     var hb = '';
     if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ hb += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(b.targetType) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(b.status) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; hb += '</div>'; }); }
     $('lic-bans').innerHTML = hb;
@@ -508,9 +514,26 @@ $('gen-btn').onclick = function(){
   }});
 };
 $('gen-copy').onclick = function(){ var s = $('gen-str').textContent; if (s) copyText(s); };
+/* 长列表默认折叠（站长 2026-10-26 15:38 令）：已发放密钥概览与生成记录只显标题行（含条数），
+   点标题展开/收起；每次进入密钥发放视图都回到折叠态，不记忆上次展开。 */
+function foldSet(head, body, open){
+  if (body) { if (open) body.classList.add('open'); else body.classList.remove('open'); }
+  if (head) { var c = head.querySelector('.foldchev'); if (c) c.textContent = open ? '收起 ▴' : '展开 ▾'; }
+}
+function bindFold(headId, bodyId){
+  var head = $(headId), body = $(bodyId);
+  if (!head || !body) return;
+  head.onclick = function(){ foldSet(head, body, !body.classList.contains('open')); };
+}
+function resetFolds(){
+  foldSet($('keys-fold-head'), $('keys-fold-body'), false);
+  foldSet($('gen-fold-head'), $('gen-list'), false);
+}
+bindFold('gen-fold-head', 'gen-list');
 function loadGenerated(){
   api('/admin/api/license/generated').then(function(r){
     if (!r.ok) { $('gen-list').innerHTML = '<p class="empty">生成记录加载失败。</p>'; return; }
+    $('gen-count').textContent = '（' + r.records.length + ' 条）';
     if (!r.records.length) { $('gen-list').innerHTML = '<p class="empty">还没有生成记录。</p>'; return; }
     var label = { unclaimed: '未认领', claimed: '已认领', voided: '已作废', 'claimed-revoked': '已认领（已回收）', revoked: '已回收' };
     $('gen-list').innerHTML = r.records.map(function(rec){
@@ -667,6 +690,7 @@ function applyView(){
   for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === h) primary = links[k];
   if (!primary) for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === v) primary = links[k];
   for (k = 0; k < links.length; k++) links[k].className = (links[k] === primary ? 'on' : '');
+  if (v === 'license') resetFolds();
   setTimeout(function(){
     if (v === 'bans' && (h === 'devices' || h === 'lic-devices')) { var dh = $('lic-devices-h'); if (dh) dh.scrollIntoView({ block: 'start' }); }
     else if (v === 'license' && h === 'genkey') { var gh = $('genkey-card'); if (gh) gh.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); }
