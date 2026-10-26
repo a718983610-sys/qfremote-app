@@ -1871,10 +1871,10 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
   });
   const cache = Cache.load();
   if (cache && cache.user) {
-    // 进门不挡：先按缓存渲染壳与上次视图，校验在后台进行
+    // 进门不挡：先按缓存渲染壳，校验在后台进行；冷进入恒落首页，不再恢复上次视图（2026-10-26 站长令）
     S.auth = 'in'; S.user = cache.user; S.displayName = cache.displayName || cache.user;
     S.isAdmin = !!cache.isAdmin; S.license = cache.license; S.points = cache.points;
-    if (cache.route && cache.route.name) location.hash = '#' + cache.route.name;
+    location.hash = '#home';
     showShell();
     checkSession(true).then(ok => {
       if (!ok) showAuth('login', { notice: '登录状态已失效，请重新登录。' });

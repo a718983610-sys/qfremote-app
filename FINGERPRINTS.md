@@ -87,7 +87,7 @@
 | server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
 | server/webapp/app.css | /opt/qfremote-webapp/app.css | `13eca30f8b86a37b878800d1a4f4b73b` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `c0c38b4f464b0003452f49b567b5332f` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `80d6ef1ca00521c0d7aa568229d84fb8` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
@@ -97,7 +97,7 @@
 | server/webapp/assets/pay-wechat-6.png | /opt/qfremote-webapp/assets/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/webapp/assets/pay-wechat-9.9.png | /opt/qfremote-webapp/assets/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/webapp/favicon.ico | /opt/qfremote-webapp/favicon.ico | `cfd4ec9c9cd234732a5294b01e33e17f` |
-| server/webapp/index.html | /opt/qfremote-webapp/index.html | `0a917822fb16c7160dcee8b627c43d2a` |
+| server/webapp/index.html | /opt/qfremote-webapp/index.html | `d8836f2ae85f050f900125e906c5d4ac` |
 
 ## 二、Windows 壳（windows/）
 
