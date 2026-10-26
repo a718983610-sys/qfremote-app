@@ -576,11 +576,15 @@ function authTool(root, kind) {
   }
 }
 function statusSummary(j) {
+  /* P2-031：status/query 的状态字段嵌在 view 下（/me 才是平铺），两形状兼容取数 */
+  const v = (j && j.view) || j || {};
   const parts = [];
-  if (j.planName) parts.push('套餐：' + j.planName);
-  if (j.maskedKey) parts.push('密钥：' + j.maskedKey);
-  if (j.displayStatus) parts.push('状态：' + j.displayStatus);
-  if (j.expiresAt || j.keyExpiresMs) parts.push('到期：' + fmtDate(j.expiresAt || j.keyExpiresMs));
+  if (v.planName) parts.push('套餐：' + v.planName);
+  if (v.maskedKey && v.maskedKey !== '—') parts.push('密钥：' + v.maskedKey);
+  if (v.displayStatus) parts.push('状态：' + v.displayStatus);
+  if (v.keyExpiresMs) parts.push('到期：' + fmtDate(v.keyExpiresMs));
+  else if (v.remainText) parts.push('有效期：' + v.remainText);
+  if (typeof v.webEnabled === 'boolean') parts.push('网页版：' + (v.webEnabled ? '已开通' : '未开通'));
   return parts.length ? parts.join(' · ') : '已查询到您的密钥状态。';
 }
 /* 拦截判定：返回 gate 描述或 null（放行进首页） */
@@ -926,7 +930,7 @@ async function initLockPanel(view, deviceName) {
 function mountFileSend(container, opts) {
   opts = opts || {};
   container.innerHTML = `
-    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file"></div>
+    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file"><div class="hint fs-chosen">尚未选择文件</div></div>
     <div class="grid2">
       <div class="field"><label>来源设备</label><select class="fs-from"></select></div>
       <div class="field"><label>目标设备</label><select class="fs-to"></select></div>
@@ -938,6 +942,14 @@ function mountFileSend(container, opts) {
   const fileIn = $('.fs-file', container), fromSel = $('.fs-from', container), toSel = $('.fs-to', container);
   const barWrap = $('.fs-barwrap', container), bar = $('.fs-bar', container), note = $('.fs-note', container);
   const goBtn = $('.fs-go', container), out = $('.fs-out', container);
+  /* P2-029：已选文件回显——选中即在卡内显示文件名（多选显示数量＋首名），清空回落提示文案 */
+  const chosen = $('.fs-chosen', container);
+  const syncChosen = () => {
+    const fs = fileIn.files;
+    if (!fs || !fs.length) { chosen.textContent = '尚未选择文件'; return; }
+    chosen.textContent = fs.length > 1 ? '已选择 ' + fs.length + ' 个文件：' + fs[0].name + ' 等' : '已选择文件：' + fs[0].name;
+  };
+  fileIn.onchange = syncChosen;
   let nm = null, sending = false;
   (async () => {
     nm = await fetchNodeMap();
@@ -953,6 +965,8 @@ function mountFileSend(container, opts) {
       const list = usable.filter(d => nm.byName.get(d.name) !== fromId);
       toSel.innerHTML = list.length ? optHtml(list, '请选择目标设备') : '<option value="">暂无其他可接收的设备</option>';
       if (prev && list.some(d => nm.byName.get(d.name) === prev)) toSel.value = prev;
+      /* P2-030：候选恰一项时默认选中唯一目标（多项不预选、维持点选） */
+      else if (list.length === 1) toSel.value = nm.byName.get(list[0].name);
     };
     fromSel.onchange = syncTo;
     syncTo();
@@ -986,6 +1000,7 @@ function mountFileSend(container, opts) {
         out.innerHTML = `<div class="note ok" style="margin:0">文件已发送到「${esc(toName)}」的待接收列表，有效期至 ${esc(fmtDate(r.json.expiresAt))}。对方下载完成后，本页「我发出的」将显示已送达。</div>`;
         toast('文件已发送。', 'ok');
         fileIn.value = '';
+        syncChosen();
         const cb = container.closest('#view') || document;
         const sentBox = $('#sentList', cb); if (sentBox) loadSentList(cb);
         const inboxBox = $('#inboxList', cb); if (inboxBox) loadInboxList(cb);
