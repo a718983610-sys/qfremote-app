@@ -216,12 +216,18 @@ function createLicenseCore(opts) {
     const plan = PLANS[k.plan];
     return (((plan && plan.days) || 0) + (k.extraDays || 0)) * 86400;
   }
-  // 主密钥选择（裁决批⑤）：永久优先，其次剩余时长最长（未激活未起算＝
-  // Infinity 视为最长），再按创建时间新者优先。供状态视图与 /me 展示。
+  // 主密钥选择（裁决批⑤＋2026-10-26 双钥并存缺陷修复）：先分档——已
+  // 激活优先于未激活（未激活钥不得遮蔽在用权益：未起算钥 effectiveExpiry
+  // ＝Infinity，若不先分档将恒压过正在计时的钥，账号被误呈「未激活」，
+  // 实证见 patrol-20261026/work/dualkey-20261026/DIAGNOSIS.md）；同档内
+  // 永久优先，其次剩余时长最长（未激活未起算＝Infinity 视为最长），再按
+  // 创建时间新者优先。供状态视图与 /me 展示。
   function primaryKeyOf(keys, now) {
     const live = keys.filter((k) => k.lifecycle === 'unactivated' || k.lifecycle === 'activated');
     const pool = live.length ? live : keys;
     return pool.slice().sort((a, b) => {
+      const aa = a.lifecycle === 'activated' ? 1 : 0, ab = b.lifecycle === 'activated' ? 1 : 0;
+      if (aa !== ab) return ab - aa;
       const pa = a.plan === 'permanent' ? 1 : 0, pb = b.plan === 'permanent' ? 1 : 0;
       if (pa !== pb) return pb - pa;
       const ea = effectiveExpiry(a, now), eb = effectiveExpiry(b, now);
@@ -892,7 +898,14 @@ function createLicenseCore(opts) {
     // 按天：在期同账号已有有效按天密钥 → 时长叠加顺延。已激活的顺延到期点
     // （到期点 += N×24h）；未激活未起算的（裁决批⑥）无到期点可延，改为
     // 累计未起算天数 extraDays，激活时一并起算，总时长不变。
-    const activeDaily = activeKeys(username, now).filter((k) => k.plan !== 'permanent' && k.plan !== 'trial').sort((a, b) => effectiveExpiry(b, now) - effectiveExpiry(a, now))[0];
+    // 落点选择（2026-10-26 双钥并存缺陷修复）：先在已激活按天钥中取到期
+    // 最晚者顺延；无在用按天钥时才落未激活钥累计 extraDays。未激活钥
+    // effectiveExpiry＝Infinity，不先分档会把发放误落到未起算钥上（实证：
+    // 站长付费记账发放 +24h 落成免费钥 extraDays、在用付费钥未延时）。
+    const dailyPool = activeKeys(username, now).filter((k) => k.plan !== 'permanent' && k.plan !== 'trial');
+    const activeDaily = dailyPool.filter((k) => k.lifecycle === 'activated').sort((a, b) => effectiveExpiry(b, now) - effectiveExpiry(a, now))[0]
+      || dailyPool.filter((k) => k.lifecycle === 'unactivated').sort((a, b) => a.createdAt - b.createdAt)[0]
+      || null;
     if (activeDaily) {
       if (activeDaily.expiresBaseMs) {
         activeDaily.expiresBaseMs += plan.days * 86400000;
