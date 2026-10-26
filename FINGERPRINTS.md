@@ -22,14 +22,14 @@
 | server/ext/events-core.js | /opt/qfremote-ext/events-core.js | `2924d9ddfda61b4ec83a52e926b0d8a8` |
 | server/ext/files-core.js | /opt/qfremote-ext/files-core.js | `847d4c4ec0be3c42624812be2d3f8ccd` |
 | server/ext/home-page.js | /opt/qfremote-ext/home-page.js | `71ad026f3d1c652a568d0c59737e4f59` |
-| server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `d2918b81d39c4ef545534d35d6d7e86a` |
+| server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `dfcca6cadf907f97e09ea2654d6cc29c` |
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `789621923f1f7ce7309de38caa645d49` |
 | server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
-| server/ext/page.js | /opt/qfremote-ext/page.js | `8bc111aca3536ec335802dd301f31910` |
+| server/ext/page.js | /opt/qfremote-ext/page.js | `da8e6ebc9b3c93fc47f45e656bb432d8` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `dcd284a04dec9fc545682e15f97e68ac` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `91a91dbe0533dfd6316374b0917dd94d` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |

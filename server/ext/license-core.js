@@ -450,6 +450,77 @@ function createLicenseCore(opts) {
     save();
     return { ok: true, keyId: k.id, maskedKey: maskKey(k.str) };
   }
+  // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令，站长后台「账号
+  // 列表」行内「收回密钥」专用）：把账号名下全部在效密钥（unactivated/
+  // activated）一次性置 revoked，revokedReason='admin-reclaim'。
+  // 字段口径复用 applyBan 永封回收支（剩余秒数快照＋timing exhausted）
+  // 与 voidGeneratedKey（revokedAt/revokedBy 落账＋bansLog 台账行）。
+  // 与永封回收的分歧三处（DESIGN.md 三）：①覆盖全部套餐含永久与试用
+  // （无封禁兜底，不全收账号回不到未激活态）；②显式清空绑定槽位并在
+  // 回执/台账留释放数（永封保留 slots 是给 liftBan 恢复保真，本路无
+  // 恢复路径，保留只会让状态视图把已释放名额继续报成占用）；③结构性
+  // 不可恢复——liftBan 恢复支只认 revokedReason∈{permaban,
+  // payment-fraud} 且 revokedBanId===ban.id，本路 reason 不同且
+  // revokedBanId 恒 null，任何现行解封/改判/申诉路径都碰不到。
+  // 该钥名下 pending 转赠（含待领取）随钥死同步以 endTransfer 终结
+  // （与 expireTransfers 对死钥的终态同款）。不建封禁记录、不动账号
+  // 维试用窗（acct.trial）、不碰 keyStrHashes（退役串归档永不再生成）。
+  function reclaimAccountKeys(username, now, meta) {
+    const acct = state.accounts[username];
+    if (!acct) return { ok: false, code: 'ACCOUNT_NOT_FOUND', msg: '该账号没有许可记录，无需收回。' };
+    const actor = (meta && meta.actor) || 'owner-admin';
+    // 先落到期（与 evaluate/buildStatusView 的读时落账同口径）：已过期未落账的钥
+    // 不算在效，收回范围与 activeKeys 的在效判定对齐（DeepSeek 门二确信缺陷 #3 整改）。
+    lazyExpireKeys(username, now);
+    expireDeadPausedKeys(username, now); // 暂停态死钥同批落账（门二复核 S1 整改）
+    const targets = accountKeys(username).filter((k) => k.lifecycle === 'unactivated' || k.lifecycle === 'activated');
+    if (!targets.length) return { ok: false, code: 'NO_LIVE_KEYS', msg: '该账号名下没有可收回的密钥。' };
+    const reclaimed = [];
+    for (const k of targets) {
+      const releasedSlots = { pc: slotCount(k, 'pc'), mobile: slotCount(k, 'mobile') };
+      // 永久钥无期限，快照记 null 而非 0 秒（DeepSeek 门二存疑 D2 核实成立后整改）；
+      // 其余按既有两分支（已定到期点的算剩余秒、未起算的算未起算余量）。
+      k.remainingSecAtRecycle = (PLANS[k.plan] && PLANS[k.plan].days)
+        ? (k.expiresBaseMs
+          ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
+          : unstartedRemainingSec(k))
+        : null;
+      k.recycledWhileUnactivated = (k.activatedAt == null);
+      const wasLifecycle = k.lifecycle;
+      k.lifecycle = 'revoked'; k.revokedReason = 'admin-reclaim'; k.revokedBanId = null;
+      k.revokedAt = now; k.revokedBy = actor; k.timing = 'exhausted'; k.pauseStartMs = null;
+      k.slots = { pc: [], mobile: null };
+      for (const t of state.transfers) {
+        if (t.status === 'pending' && t.keyId === k.id) endTransfer(t, 'key-expired', 'key-reclaimed', now);
+      }
+      reclaimed.push({
+        keyId: k.id, maskedKey: maskKey(k.str), plan: k.plan, planName: k.planName,
+        source: k.source, wasLifecycle, releasedSlots, remainingSec: k.remainingSecAtRecycle,
+      });
+    }
+    // 台账汇总释放数与回执同源（逐钥 releasedSlots 之和），兑现设计 §一
+    // 「释放数写进回执与台账」（写码参与对照 C-05 采纳；§四清单已回填）。
+    const releasedTotal = reclaimed.reduce((a, x) => ({ pc: a.pc + x.releasedSlots.pc, mobile: a.mobile + x.releasedSlots.mobile }), { pc: 0, mobile: 0 });
+    appendLine(bansLog, { ev: 'key-admin-reclaimed', username, keyIds: reclaimed.map((r) => r.keyId), plans: reclaimed.map((r) => r.plan), releasedSlots: releasedTotal, by: actor, at: now });
+    save();
+    return { ok: true, username, reclaimed };
+  }
+  // 暂停态死钥落账：冻结/封禁的联动暂停（syncAccountLinkage）不先落到期，
+  // 钥在名义到期之后才被暂停时，到期点滑动公式下其剩余恒 ≤0、永不复活；
+  // lazyExpireKeys 按既有语义整体跳过 paused，此形态由本函数在本批收回/
+  // 预览口径内单独落为 expired，保证列表计数/preview/core 三处一致
+  // （DeepSeek 门二复核存疑 S1 核实成立后整改）。健康暂停钥的
+  // effectiveExpiry 恒 >now，永不被此函数触碰。
+  function expireDeadPausedKeys(username, now) {
+    let changed = false;
+    for (const k of accountKeys(username)) {
+      if ((k.lifecycle === 'unactivated' || k.lifecycle === 'activated') && k.timing === 'paused' && effectiveExpiry(k, now) <= now) {
+        k.lifecycle = 'expired'; k.timing = 'exhausted'; k.pauseStartMs = null; changed = true;
+        appendLine(bansLog, { ev: 'key-expired', keyId: k.id, username, at: now });
+      }
+    }
+    if (changed) save();
+  }
   function lazyExpireKeys(username, now) {
     let changed = false;
     for (const k of accountKeys(username)) {
@@ -1392,7 +1463,7 @@ function createLicenseCore(opts) {
   return {
     PLANS, readConfig, save, ensureAccount, accountKeys, activeKeys, effectiveExpiry,
     activeBansFor, activeDeviceBan, applyBan, liftBan, expireBans, syncAccountLinkage,
-    issueKey, generateUnboundKey, listGeneratedKeys, voidGeneratedKey, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
+    issueKey, generateUnboundKey, listGeneratedKeys, voidGeneratedKey, reclaimAccountKeys, lazyExpireKeys, expireDeadPausedKeys, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
     createOrder, simPayCallback, buildStatusView, audit, maskKey, state: () => state,
     grantPurchase, initiateTransfer, confirmTransfer, rejectTransfer, cancelTransfer, listTransfers, expireTransfers, transferTtlMs, claimByKeyString, listClaimableTransfers, forceLogoutState, decideDeviceReview, overrideDeviceReview, sealedExpired, markPurged,
     activateKey, primaryKeyOf, expiredText, remainTextForKey,

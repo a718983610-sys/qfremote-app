@@ -42,6 +42,7 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
 .modal{background:#fff;border-radius:14px;max-width:92vw;width:440px;padding:22px 20px}
 .modal h3{margin:0 0 8px;font-size:16px;color:#0B2B5B}
 .modal p{font-size:14px;line-height:1.8;color:#33465e;margin:6px 0}
+#m-text{white-space:pre-line}
 .modal input{box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:11px;font-size:15px;margin-top:8px;min-height:44px}
 .modal .btns{display:flex;gap:8px;margin-top:16px}
 .modal .btns .btn{flex:1}
@@ -249,6 +250,9 @@ function userRow(u){
     else btns += '<button class="btn ghost" data-act="freeze" data-u="' + esc(u.login) + '">冻结</button>';
     btns += '<button class="btn ghost" data-act="resetpass" data-u="' + esc(u.login) + '">重置密码</button>';
     btns += '<button class="btn ghost" data-act="rename" data-u="' + esc(u.login) + '">改名</button>';
+    // P6-GK3：收回密钥（不可恢复，危险钮）；名下无在效钥时置灰（服务端 liveKeyCount）
+    if (u.liveKeyCount > 0) btns += '<button class="btn danger" data-act="reclaim" data-u="' + esc(u.login) + '">收回密钥</button>';
+    else btns += '<button class="btn ghost" disabled>收回密钥</button>';
     btns += '<button class="btn danger" data-act="ban" data-u="' + esc(u.login) + '">封禁</button>';
   }
   return '<div class="row' + (u.isOwner ? ' owner-row' : '') + '"><div class="who"><div class="login">' + esc(u.login) + '</div>'
@@ -276,6 +280,33 @@ function onUserAction(){
         doOp('/admin/api/rename', { username: u, newName: nn });
       }
     });
+    return;
+  }
+  if (act === 'reclaim') {
+    // P6-GK3：先拉名下密钥清单，确认框逐把列明再确认（不可恢复，全程留痕）
+    api('/admin/api/license/reclaim-preview', { username: u }).then(function(r){
+      if (!r.ok) { showModal('操作未成功', r.msg || '读取密钥列表失败，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); return; }
+      var live = r.keys.filter(function(k){ return k.reclaimable; });
+      if (!live.length) { showModal('收回密钥', '「' + u + '」名下当前没有可收回的密钥。', { okText: '知道了', cancelText: '关闭' }); loadUsers(); return; }
+      var lines = live.map(function(k, i){
+        var s = (i + 1) + '. ' + k.masked + ' · ' + k.planName + ' · 来源：' + (k.source === 'paid' ? '付费购买入账' : '免费发放') + ' · ' + k.statusText;
+        if (k.expiresMs) s += '\\n    到期：' + fmtTime(k.expiresMs);
+        else if (k.remainText) s += '\\n    ' + k.remainText;
+        if (k.slots && (k.slots.pc || k.slots.mobile)) s += '\\n    已绑定：电脑 ' + k.slots.pc + ' 台、手机 ' + k.slots.mobile + ' 台（收回后全部释放）';
+        return s;
+      });
+      var dead = r.keys.length - live.length;
+      var text = '将收回「' + u + '」名下的全部密钥（共 ' + live.length + ' 把）：\\n' + lines.join('\\n')
+        + (dead ? '\\n（另有 ' + dead + ' 把密钥已失效，不在本次收回范围。）' : '')
+        + '\\n\\n收回后：以上密钥立即失效，绑定的设备名额全部释放，网页版随之关闭，账号回到未激活状态。\\n收回不可恢复，密钥串将归档、永不再用。账号本身不会被冻结，仍可登录并重新购买。';
+      showModal('收回密钥', text, { okText: '确认收回', onOk: function(){
+        api('/admin/api/license/reclaim', { username: u }).then(function(r2){
+          if (!r2.ok) { showModal('操作未成功', r2.msg || '收回未成功，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); return; }
+          toast(r2.msg || '已收回。');
+          loadUsers(); loadLicense();
+        }).catch(function(){ showModal('操作未成功', '网络连接异常，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); });
+      }});
+    }).catch(function(){ showModal('操作未成功', '网络连接异常，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); });
     return;
   }
   var titles = { freeze: '冻结账号', unfreeze: '解封账号', resetpass: '重置密码', ban: '封禁账号' };

@@ -609,6 +609,8 @@ function buildUsersList() {
       renameCount: e.renameCount || 0,
       banned: e.banned === true,
       exists: true,
+      // P6-GK3：「收回密钥」行内钮的置灰判定（名下在效钥数，含未激活）
+      liveKeyCount: lic.activeKeys(login, Date.now()).length,
     });
   }
   // 台账里已封号/已删除、库里已无记录的账号也列出来（封禁状态才看得见）
@@ -627,6 +629,7 @@ function buildUsersList() {
       renameCount: e.renameCount || 0,
       banned: e.banned === true,
       exists: false,
+      liveKeyCount: lic.activeKeys(key, Date.now()).length,
     });
   }
   users.sort((a, b) => (b.isOwner - a.isOwner) || (b.exists - a.exists) || a.login.localeCompare(b.login));
@@ -2026,6 +2029,54 @@ const server = http.createServer(async (req, res) => {
         if (!r.ok) return sendJson(res, 400, { ok: false, code: r.code, msg: r.msg });
         log({ ev: 'license-generate-void', keyId: r.keyId, by: auth.user });
         return sendJson(res, 200, { ok: true, msg: '该生成密钥已作废，串永不再用。', keyId: r.keyId });
+      }
+      // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令）：「账号列表」
+      // 行内「收回密钥」——preview 只读列名下全部密钥供确认框逐把呈现；
+      // reclaim 执行收回（license-core reclaimAccountKeys，revokedReason
+      // =admin-reclaim，不可恢复、不建封禁、不停服、账号仍可登录）。
+      // 护栏与 /admin/api 账号操作链同款（存在性＋adminGuardCheck）。
+      if (req.method === 'POST' && p === '/admin/api/license/reclaim-preview') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const now = Date.now();
+        lic.lazyExpireKeys(username, now); // 与收回本体同口径先落到期，reclaimable 判定才与在效一致（门二 #3 整改）
+        lic.expireDeadPausedKeys(username, now); // 暂停态死钥同批落账（门二复核 S1 整改）
+        const statusText = { unactivated: '未激活', activated: '已激活', expired: '已过期', revoked: '已收回' };
+        const slotPc = (k) => (k.slots && Array.isArray(k.slots.pc) ? k.slots.pc.filter(Boolean).length : (k.slots && k.slots.pc ? 1 : 0));
+        const raw = lic.accountKeys(username).slice().sort((a, b) => {
+          const la = (a.lifecycle === 'unactivated' || a.lifecycle === 'activated') ? 0 : 1;
+          const lb = (b.lifecycle === 'unactivated' || b.lifecycle === 'activated') ? 0 : 1;
+          return la - lb || (b.createdAt - a.createdAt);
+        });
+        const keys = raw.map((k) => ({
+          keyId: k.id, masked: licMaskKey(k.str), plan: k.plan, planName: k.planName,
+          source: k.source, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
+          expiresMs: k.expiresBaseMs ? lic.effectiveExpiry(k, now) : null,
+          remainText: lic.remainTextForKey(k, now),
+          slots: { pc: slotPc(k), mobile: k.slots && k.slots.mobile ? 1 : 0 },
+          reclaimable: k.lifecycle === 'unactivated' || k.lifecycle === 'activated',
+        }));
+        return sendJson(res, 200, { ok: true, username, liveCount: keys.filter((k) => k.reclaimable).length, keys });
+      }
+      if (req.method === 'POST' && p === '/admin/api/license/reclaim') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const r = lic.reclaimAccountKeys(username, Date.now(), { actor: auth.user });
+        if (!r.ok) return sendJson(res, 400, { ok: false, code: r.code, msg: r.msg });
+        log({ ev: 'admin-reclaim-keys', target: username, keyIds: r.reclaimed.map((x) => x.keyId), by: auth.user });
+        return sendJson(res, 200, { ok: true, msg: '已收回「' + username + '」名下的 ' + r.reclaimed.length + ' 把密钥，立即失效，账号回到未激活状态。', reclaimed: r.reclaimed });
       }
       if (req.method === 'POST' && p === '/admin/api/license/review-decide') {
         const body = await readJsonBody(req);
