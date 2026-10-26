@@ -102,6 +102,13 @@ try {
   const _instantMod = require('./instant-review');
   instantReview = _instantMod.createInstantReview({ payOrders, reviewEvents, lic, log, licDir: LIC_DIR, extDir: process.env.QFEXT_DIR || '/opt/qfremote-ext' });
 } catch (e) { log({ ev: 'instant-review-unavailable', err: String(e && e.message || e) }); }
+// 付款截图订单号自动识别（提交前回填专用）：A1 隔离同秒审——require/实例化失败降级为 null，
+// 识别端点恒回 found:false 静默回落手输；识别结果不落单、不参与审核裁定（设计：patrol-20261026/work/ocr-orderno-20261026/DESIGN.md）
+let orderOcr = null;
+try {
+  const _ocrMod = require('./ocr-core');
+  orderOcr = _ocrMod.createOrderOcr({ payOrders, log, extDir: process.env.QFEXT_DIR || '/opt/qfremote-ext' });
+} catch (e) { log({ ev: 'order-ocr-unavailable', err: String(e && e.message || e) }); }
 const fileStage = createFilesCore({ dir: LIC_DIR, lic, log });
 const EXT_ASSETS_DIR = process.env.QFEXT_ASSETS_DIR || '/opt/qfremote-ext/assets';
 
@@ -314,6 +321,86 @@ async function mcForceCloseUserSessions(username) {
       return { pushed: true, detail: unlockRes.ok ? 'closed-and-restored' : 'closed-restore-unconfirmed' };
     } finally { try { ws.close(); } catch (e) {} }
   } catch (e) { return { pushed: false, detail: 'error:' + String((e && e.message) || e) }; }
+}
+// 在线改锁定 bit（免停服窗）：经服务账号 WS 直接 edituser 置/清 siteadmin
+// 第 32 位，MeshCentral 进程内即时生效（登录校验读进程内用户对象），
+// 不停服务、不掉任何人的远程会话。口径与 mcdb freeze/unfreeze 对齐：
+// 全权账号不动 siteadmin（冻结态只记台账）；护栏同 guardCheck/
+// adminGuardCheck。台账 history 由本进程按 mcdb 同形状补记
+// （qf-account-ledger.json 只有 mcdb 与本服务写，MC 本体不用此文件）。
+function noteLedgerLock(username, locking, by) {
+  try {
+    const ledger = loadLedger();
+    const e = ledger.accounts[username] || (ledger.accounts[username] = { originalName: username, label: '', template: '', createdAt: null, renameCount: 0, history: [], deleted: false, provenance: 'no-ledger-entry' });
+    e.frozen = locking;
+    e.history = e.history || [];
+    e.history.push({ ev: locking ? 'freeze' : 'unfreeze', at: new Date().toISOString(), by });
+    const tmp = LEDGER_FILE + '.tmp-ext';
+    fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
+    fs.renameSync(tmp, LEDGER_FILE);
+    try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
+  } catch (e) { log({ ev: 'ledger-lock-note-error', target: username, err: String(e && e.message) }); }
+}
+async function liveSetLockBit(username, locking, opts) {
+  opts = opts || {};
+  try {
+    const docs = loadDb(); const user = findDbUser(docs, username);
+    if (!user) return { ok: false, detail: 'user-not-found' };
+    const guard = opts.adminOverride ? adminGuardCheck(user, username) : guardCheck(user, username);
+    if (guard) return { ok: false, detail: 'guarded' };
+    const by = opts.adminOverride ? 'ext-live-override' : 'ext-live';
+    if ((user.siteadmin || 0) === SITEADMIN_FULL) {
+      const led = loadLedger(); const e0 = led.accounts[username];
+      const frozenNow = !!(e0 && e0.frozen === true);
+      if (locking === frozenNow) return { ok: true, detail: 'already-in-state' };
+      noteLedgerLock(username, locking, by);
+      return { ok: true, detail: 'ledger-only-fullrights' };
+    }
+    let svcCfg = {};
+    try { svcCfg = JSON.parse(fs.readFileSync('/opt/qfremote-register/config.json', 'utf8')); } catch (e) { return { ok: false, detail: 'svc-config-unavailable' }; }
+    const svcUser = svcCfg.svcUser || svcCfg.serviceUser, svcPass = svcCfg.svcPass || svcCfg.servicePass;
+    if (!svcUser || !svcPass) return { ok: false, detail: 'svc-creds-unavailable' };
+    const WebSocket = loadWebSocket();
+    const auth = Buffer.from(String(svcUser)).toString('base64') + ',' + Buffer.from(String(svcPass)).toString('base64');
+    const sess = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(MC_URL, { rejectUnauthorized: false, headers: { 'x-meshauth': auth } });
+      const t = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('timeout')); }, 8000);
+      ws.on('message', (d) => { try { const m = JSON.parse(d.toString()); if (m.action === 'userinfo') { clearTimeout(t); resolve({ ws }); } } catch (e) {} });
+      ws.on('error', () => { clearTimeout(t); reject(new Error('err')); });
+      ws.on('close', () => { clearTimeout(t); reject(new Error('close')); });
+    });
+    const ws = sess.ws;
+    const cmd = (command, pred) => new Promise((resolve) => {
+      const t = setTimeout(() => resolve({ ok: false, error: 'timeout' }), 8000);
+      const on = (d) => { try { const m = JSON.parse(d.toString()); if (pred(m)) { clearTimeout(t); try { ws.off('message', on); } catch (e) {} resolve({ ok: true, msg: m }); } } catch (e) {} };
+      ws.on('message', on);
+      try { ws.send(JSON.stringify(command)); } catch (e) { clearTimeout(t); resolve({ ok: false, error: 'send' }); }
+    });
+    try {
+      const usersRes = await cmd({ action: 'users', responseid: 'qf-livebit-users' }, (m) => m.action === 'users' && Array.isArray(m.users));
+      if (!usersRes.ok) return { ok: false, detail: 'users-cmd-failed' };
+      const u = usersRes.msg.users.find((x) => x.name && x.name.toLowerCase() === username);
+      if (!u) return { ok: false, detail: 'user-not-found-ws' };
+      const curWs = u.siteadmin || 0;
+      if (curWs === SITEADMIN_FULL) return { ok: false, detail: 'fullrights-ws' };
+      const target = locking ? (curWs | SITEADMIN_LOCKED_BIT) : (curWs & ~SITEADMIN_LOCKED_BIT);
+      if (target === curWs) { noteLedgerLock(username, locking, by); return { ok: true, detail: 'already-in-state' }; }
+      const r = await cmd({ action: 'edituser', userid: u._id, siteadmin: target, responseid: 'qf-livebit-set' }, (m) => m.responseid === 'qf-livebit-set');
+      if (!r.ok) return { ok: false, detail: 'edituser-failed' };
+      noteLedgerLock(username, locking, by);
+      return { ok: true, detail: 'live-bit-set' };
+    } finally { try { ws.close(); } catch (e) {} }
+  } catch (e) { return { ok: false, detail: 'error:' + String((e && e.message) || e) }; }
+}
+// 锁定 bit 统一入口：先走在线通道（即时、无停服窗），失败才回落 mcdb
+// 停服窗（既有 enqueueOp 串行队列与恢复兜底不变）。
+async function setLockBit(username, locking, opts) {
+  opts = opts || {};
+  const live = await liveSetLockBit(username, locking, opts);
+  if (live.ok) { log({ ev: 'lockbit-live', target: username, locking, detail: live.detail }); return { ok: true, msg: locking ? '已冻结（在线即时生效）。' : '已解冻（在线即时生效）。', via: 'live' }; }
+  log({ ev: 'lockbit-live-fallback', target: username, locking, detail: live.detail });
+  const out = await enqueueOp(() => runMcdbOp(locking ? 'freeze' : 'unfreeze', String(username).toLowerCase(), opts.adminOverride ? { adminOverride: true } : undefined));
+  return Object.assign({}, out, { via: 'mcdb' });
 }
 // 领取成功后的强制下线执行（三路同步落地，结果只写服务日志与响应，
 // 许可台账的完整事件已由许可核心在领取落盘时记下，不在此另起事件）：
@@ -748,19 +835,31 @@ function licEnforce(cfg, username) { return !cfg.shadow || cfg.testUsers.include
 async function licLockAccount(username) {
   try {
     const docs = loadDb(); const user = findDbUser(docs, username);
-    if (!user || guardCheck(user, username)) return;
-    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) return;
-    await enqueueOp(() => runMcdbOp('freeze', String(username).toLowerCase()));
-  } catch (e) { log({ ev: 'lic-lock-error', target: username, err: String(e && e.message) }); }
+    if (!user || guardCheck(user, username)) return { state: 'guarded' };
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) return { state: 'already-locked' };
+    const out = await setLockBit(String(username).toLowerCase(), true, {});
+    return out && out.ok ? { state: 'locked', via: out.via } : { state: 'failed', detail: (out && out.msg) || '' };
+  } catch (e) { log({ ev: 'lic-lock-error', target: username, err: String(e && e.message) }); return { state: 'failed', detail: String(e && e.message) }; }
 }
+// 返回值如实回显解锁结果（旧调用方忽略返回值不受影响）：解封类入口必须
+// 据此组装提示，不许在解锁未成时宣称「已解封」（2026-10-26 站长亲报缺陷）。
 async function licUnlockAccount(username) {
   try {
-    if (lic.activeBansFor(username, Date.now()).length) return;
+    if (lic.activeBansFor(username, Date.now()).length) return { state: 'still-banned' };
     const docs = loadDb(); const user = findDbUser(docs, username);
-    if (!user || guardCheck(user, username)) return;
-    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) === 0) return;
-    await enqueueOp(() => runMcdbOp('unfreeze', String(username).toLowerCase()));
-  } catch (e) { log({ ev: 'lic-unlock-error', target: username, err: String(e && e.message) }); }
+    if (!user || guardCheck(user, username)) return { state: 'guarded' };
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) === 0) return { state: 'already-unlocked' };
+    const out = await setLockBit(String(username).toLowerCase(), false, {});
+    return out && out.ok ? { state: 'unlocked', via: out.via } : { state: 'failed', detail: (out && out.msg) || '' };
+  } catch (e) { log({ ev: 'lic-unlock-error', target: username, err: String(e && e.message) }); return { state: 'failed', detail: String(e && e.message) }; }
+}
+// 全量解封（解封口径统一）：解掉该账号全部生效中的封禁记录（永久含恢复
+// 被回收密钥），供各解封入口共用——任一入口点「解封」即全解，不再出现
+// 「解了一条、账号仍封禁」（2026-10-26 站长亲报缺陷根因）。
+function liftAllActiveBans(username, actor) {
+  const lifted = [];
+  for (const b of lic.activeBansFor(username, Date.now())) { lic.liftBan(b, Date.now(), { by: actor, restoreKeys: true }); lifted.push(b.id); }
+  return lifted;
 }
 // #38 站长改判预备（仅 decideAppeal 在「已裁定 + actor=owner + override」时调用）：
 // 返回 'FRESH'＝申诉已重置为待审、由正常流程按本次结论重新裁决；返回
@@ -1599,11 +1698,17 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && p === '/license/api/pay/orders') {
         return sendJson(res, 200, { ok: true, orders: payOrders.listUser(auth.user, now) });
       }
-      const paySubM = p.match(/^\/license\/api\/pay\/orders\/([^/]+)\/(continue|cancel|delete|submit)$/);
+      const paySubM = p.match(/^\/license\/api\/pay\/orders\/([^/]+)\/(continue|cancel|delete|submit|recognize)$/);
       if (req.method === 'POST' && paySubM) {
         const oid = decodeURIComponent(paySubM[1]); const act = paySubM[2];
-        const body = await readJsonBody(req, act === 'submit' ? BODY_LIMIT_SHOT : undefined);
-        if (body && body.__tooLarge) { log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: 'PAYLOAD_TOO_LARGE' }); return sendJson(res, 200, { ok: false, code: 'PAYLOAD_TOO_LARGE', msg: '截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。' }); }
+        const body = await readJsonBody(req, (act === 'submit' || act === 'recognize') ? BODY_LIMIT_SHOT : undefined);
+        if (body && body.__tooLarge) { log({ ev: act === 'recognize' ? 'pay-ocr' : 'pay-order-submit-failed', orderId: oid, target: auth.user, code: 'PAYLOAD_TOO_LARGE' }); return sendJson(res, 200, { ok: false, code: 'PAYLOAD_TOO_LARGE', msg: '截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。' }); }
+        if (act === 'recognize') {
+          // 提交前识别订单号回填：仅回填、不落单、不裁定；模块降级/异常时恒回 found:false 静默回落手输
+          if (!orderOcr) return sendJson(res, 200, { ok: true, found: false });
+          const out = await orderOcr.recognize(auth.user, oid, body ? body.imageBase64 : '', now);
+          return sendJson(res, 200, out);
+        }
         if (act === 'continue') { const out = payOrders.switchMethod(auth.user, oid, body.method ? String(body.method) : '', now); return sendJson(res, 200, out); }
         if (act === 'cancel') return sendJson(res, 200, payOrders.cancelOrder(auth.user, oid, now));
         if (act === 'delete') return sendJson(res, 200, payOrders.deleteOrder(auth.user, oid, now));
@@ -1946,9 +2051,18 @@ const server = http.createServer(async (req, res) => {
         if (!ban) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '封禁记录不存在。' });
         if (ban.status !== 'active') return sendJson(res, 409, { ok: false, code: 'BAD_STATE', msg: '该封禁当前不是生效状态，无需解封。' });
         lic.liftBan(ban, Date.now(), { by: auth.user, restoreKeys: true });
-        if (ban.targetType === 'account') await licUnlockAccount(ban.target);
-        log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user });
-        return sendJson(res, 200, { ok: true, msg: '已解封：' + ban.target + '（关联回收密钥已按规恢复）。' });
+        let extraLifted = [];
+        let unlock = null;
+        if (ban.targetType === 'account') {
+          extraLifted = liftAllActiveBans(ban.target, auth.user);
+          unlock = await licUnlockAccount(ban.target);
+        }
+        log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user, extraLifted, unlock: unlock && unlock.state });
+        let msg = '已解封：' + ban.target + '（关联回收密钥已按规恢复）。';
+        if (extraLifted.length) msg += '另同步解除了该账号其他 ' + extraLifted.length + ' 条生效中的封禁。';
+        if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
+        else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
+        return sendJson(res, 200, { ok: true, msg });
       }
       if (req.method === 'GET' && p === '/admin/api/license/overview') {
         const st = lic.state();
@@ -2055,19 +2169,28 @@ const server = http.createServer(async (req, res) => {
         if (action === 'unfreeze' && !isFrozen) return sendJson(res, 200, { ok: true, msg: '账号未冻结，未操作：' + username });
         // 【C-2 重点变更】B9 人工封号改「封禁」（#30 用词定版，原内部称谓「封存」）：不再删号。封禁＝mcdb 冻结（禁用）
         // ＋统一台账永久封禁（B9，数据保留、可申诉）；旧 mcdb ban（删除）下线。
+        if (action === 'ban' && lic.activeBansFor(username.toLowerCase(), Date.now()).some((b) => b.code === 'B9' && b.permanent)) {
+          return sendJson(res, 200, { ok: true, msg: '账号已是封禁状态，未重复操作：' + username });
+        }
         if (action === 'ban') {
-          const out2 = await enqueueOp(() => runMcdbOp('freeze', username.toLowerCase(), { adminOverride: true }));
+          const out2 = await setLockBit(username.toLowerCase(), true, { adminOverride: true });
           if (!out2.ok) return sendJson(res, 400, out2);
           lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B9', permanent: true, actor: auth.user, evidence: 'admin-seal' }, Date.now());
           log({ ev: 'admin-seal', target: username });
           return sendJson(res, 200, { ok: true, msg: '账号已封禁（禁用＋数据保留＋可申诉，未删除）：' + username, probeBefore: out2.probeBefore, probeAfter: out2.probeAfter });
         }
-        const out = await enqueueOp(() => runMcdbOp(action, username.toLowerCase(), { adminOverride: true }));
+        const out = action === 'resetpass'
+          ? await enqueueOp(() => runMcdbOp('resetpass', username.toLowerCase(), { adminOverride: true }))
+          : await setLockBit(username.toLowerCase(), action === 'freeze', { adminOverride: true });
         if (out.ok && action === 'freeze') {
           lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B8', permanent: false, endsAt: null, actor: auth.user, evidence: 'admin-freeze' }, Date.now());
         }
+        let unfreezeLifted = [];
         if (out.ok && action === 'unfreeze') {
-          for (const b of lic.activeBansFor(username.toLowerCase(), Date.now()).filter((b) => b.code === 'B8')) lic.liftBan(b, Date.now(), { by: auth.user });
+          unfreezeLifted = liftAllActiveBans(username.toLowerCase(), auth.user);
+        }
+        if (out.ok && action === 'unfreeze' && unfreezeLifted.length) {
+          return sendJson(res, 200, Object.assign({}, out, { msg: (out.msg || '操作完成。') + '已同步解除该账号全部 ' + unfreezeLifted.length + ' 条生效中的封禁（含永久封禁），账号恢复正常。' }));
         }
         return sendJson(res, out.ok ? 200 : 400, out);
       }
