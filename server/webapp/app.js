@@ -1463,6 +1463,7 @@ Views.purchase = async function (view, param, _s, opts) {
         <img src="${esc(pay.exampleUrl || '/license/assets/pay-example.jpg')}" alt="账单详情截图示例" style="display:block;max-width:250px;width:100%;margin:0 auto 12px;border:1px solid var(--line);border-radius:10px" onerror="this.style.display='none'">
         <div class="field"><label>订单号</label><input data-ono maxlength="64" placeholder="请填写截图中的完整订单号"></div>
         <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png"></div>
+        <div data-ocr hidden style="margin:2px 0 10px"></div>
         <button class="btn block" data-act="submit">提交审核</button>
         <div data-subout style="margin-top:12px"></div>
       </div>`;
@@ -1472,6 +1473,56 @@ Views.purchase = async function (view, param, _s, opts) {
 
   function bindDrawerOps(planId) {
     const dr = drawerEl(planId); if (!dr) return;
+    // 截图订单号自动识别（选图即触发，仅回填、不拦提交；失败静默回落手输。文案 WEB-0398~0403）
+    const ocrFileEl = dr.querySelector('[data-shot]');
+    const ocrOnoEl = dr.querySelector('[data-ono]');
+    const ocrBox = dr.querySelector('[data-ocr]');
+    let ocrInvalidate = null; // 门一 S9：提交动作经此作废在飞识别（下方提交分支调用）
+    if (ocrFileEl && ocrOnoEl && ocrBox && !guest) {
+      let ocrSeq = 0;
+      let ocrTimer = null;
+      const OCR_TIMEOUT_MS = 14000; // 门一 D5：客户端本地超时（13–15s 档），超时置未认出文案并作废在飞响应
+      const normOno = (s) => String(s == null ? '' : s).normalize('NFKC').replace(/\s+/g, ''); // 门一 S8：与服务端 A12 同口径（NFKC＋去空白）后再比较
+      const ocrHint = (t) => { ocrBox.hidden = false; ocrBox.innerHTML = `<p style="font-size:13px;color:var(--sub);margin:0">${esc(t)}</p>`; };
+      const ocrClearTimer = () => { if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; } };
+      ocrInvalidate = () => { ocrSeq++; ocrClearTimer(); ocrBox.hidden = true; ocrBox.innerHTML = ''; };
+      ocrFileEl.addEventListener('change', async () => {
+        const my = ++ocrSeq;
+        ocrClearTimer();
+        const f = ocrFileEl.files ? ocrFileEl.files[0] : null;
+        const st = byPlan[planId];
+        if (!f || !st || !st.order) { ocrBox.hidden = true; ocrBox.innerHTML = ''; return; }
+        ocrHint('正在识别订单号…');
+        ocrTimer = setTimeout(() => {
+          ocrTimer = null;
+          if (my !== ocrSeq) return;
+          ocrSeq++; // 本地超时作废在飞：迟到响应不得再回填
+          ocrHint('未能识别订单号，请手动填写。');
+        }, OCR_TIMEOUT_MS);
+        let j = null;
+        try {
+          const b64 = await readFileBase64(f);
+          const r = await api('/license/api/pay/orders/' + encodeURIComponent(st.order.id) + '/recognize', { method: 'POST', json: { imageBase64: b64 } });
+          j = r && r.json ? r.json : null;
+        } catch (e) { j = null; }
+        if (my !== ocrSeq) return; // 已重选图/已提交/已超时，旧响应作废
+        ocrClearTimer();
+        if (j && j.ok === false && j.code === 'PAYLOAD_TOO_LARGE') {
+          // 门一 D3：超限单独同句提示（与提交侧同文案），不走静默回落；其余 ok:false 码维持静默
+          ocrHint(j.msg || '截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。');
+        } else if (j && j.ok && j.found && j.orderNo) {
+          const cur = ocrOnoEl.value;
+          if (!normOno(cur)) { ocrOnoEl.value = j.orderNo; ocrHint('已自动识别订单号，请核对无误后提交。'); }
+          else if (normOno(cur) === j.orderNo) { ocrHint('识别结果与您填写的订单号一致。'); }
+          else {
+            ocrBox.hidden = false;
+            ocrBox.innerHTML = `<p style="font-size:13px;color:var(--sub);margin:0 0 8px">您填写的订单号与识别结果不一致。</p><button type="button" class="btn sm ghost" data-ocruse>识别到订单号（尾号 ${esc(j.tail4 || String(j.orderNo).slice(-4))}），点击使用识别结果</button>`;
+            const useBtn = ocrBox.querySelector('[data-ocruse]');
+            if (useBtn) useBtn.onclick = () => { ocrOnoEl.value = j.orderNo; ocrHint('已自动识别订单号，请核对无误后提交。'); };
+          }
+        } else { ocrHint('未能识别订单号，请手动填写。'); }
+      });
+    }
     dr.querySelectorAll('[data-zoom]').forEach(z => {
       z.onclick = (e) => {
         e.stopPropagation(); // 放大热区与卡片切换热区分离：点码只放大，不触发支付方式切换
@@ -1515,6 +1566,7 @@ Views.purchase = async function (view, param, _s, opts) {
           return;
         }
         if (act === 'submit') {
+          if (ocrInvalidate) ocrInvalidate(); // 门一 S9：提交后在飞识别一律作废，迟到响应不得回填
           const subout = dr.querySelector('[data-subout]');
           const onoEl = dr.querySelector('[data-ono]');
           const fileEl = dr.querySelector('[data-shot]');
