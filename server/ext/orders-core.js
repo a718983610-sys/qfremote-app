@@ -357,11 +357,30 @@ function createOrdersCore(deps) {
     // 密钥原文下发口径：仅本单买家本人的订单视图（listUser 按会话账号过滤、
     // 后台 listRecent 为站长侧），且钥须仍归属买家本人、未被回收。
     let keyStr = null;
+    // 发放形态判定（显示层分流，台账实有字段为据）：
+    // - grantsByOrder[o.id].stacked 为 FIX-B1-4 后发放的权威标记；
+    // - 存量无发放记录时以钥的 orderId（issueKey 落的发放单）判定：本单即
+    //   发放单＝新发，本单指向他人发放的既有钥＝叠加并入。
+    // 叠加单与原单共用同一把钥是定版口径（时长并入），不是重复发钥；
+    // 但卡面必须明示并入形态，不得再以「本单密钥」呈现（站长 2026-10-26
+    // 14:50 亲报误读事故）。
+    let keyForm = null, keyMasked = null, keyActivated = null, keyExpiresMs = null;
     if (delivered) {
       try {
         const st = lic.state();
         const k = st && st.keys ? st.keys[o.keyId] : null;
-        if (k && k.username === o.username && k.lifecycle !== 'revoked') keyStr = k.str || null;
+        if (k && k.username === o.username && k.lifecycle !== 'revoked') {
+          keyStr = k.str || null;
+          if (keyStr) {
+            const gbo = st.grantsByOrder ? st.grantsByOrder[o.id] : null;
+            const stacked = gbo ? !!gbo.stacked : (k.orderId !== o.id);
+            keyForm = stacked ? 'stacked' : 'new';
+            keyMasked = lic.maskKey(k.str);
+            keyActivated = k.lifecycle === 'activated';
+            const exp = lic.effectiveExpiry(k, now);
+            keyExpiresMs = (typeof exp === 'number' && isFinite(exp)) ? exp : null;
+          }
+        }
       } catch (e) {}
     }
     return {
@@ -370,7 +389,7 @@ function createOrdersCore(deps) {
       createdAt: o.createdAt, payDeadline: o.payDeadline,
       remainingSec: o.status === 'pending_pay' ? Math.max(0, Math.floor((o.payDeadline - now) / 1000)) : null,
       submittedAt: o.submittedAt, orderNo: o.orderNo, keyId: o.keyId,
-      keyStr, canViewKey: !!keyStr,
+      keyStr, canViewKey: !!keyStr, keyForm, keyMasked, keyActivated, keyExpiresMs,
       canDelete: (o.status === 'cancelled' || o.status === 'completed' || o.status === 'rejected') && !o.deletedByUser,
       canCancel: o.status === 'pending_pay',
       canContinue: o.status === 'pending_pay',

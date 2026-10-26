@@ -1603,8 +1603,11 @@ Views.orders = async function (view) {
       </div>
       ${o.status === 'pending_pay' ? `<p style="color:var(--sub);font-size:13.5px;margin-top:10px">剩余支付时间：<b>${fmtSecText(o.remainingSec)}</b>（到期自动取消）</p>` : ''}
       ${o.status === 'reviewing' && !o.canViewKey ? '<p style="color:var(--sub);font-size:13.5px;margin-top:10px">正在审核，审核通过后可在此查看并复制密钥，粘贴激活后即可使用。待审核订单不可取消或删除。</p>' : ''}
-      ${o.status === 'reviewing' && o.canViewKey ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">审核通过：密钥已发放到本账号。点下方「查看密钥」复制完整密钥，粘贴激活后开始使用；本站订单将在站长确认到账后转为已完成。</p>' : ''}
-      ${o.status === 'completed' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">已完成：密钥已发放到本账号，可在下方查看密钥，或在「我的」查看密钥状态。</p>' : ''}
+      ${o.status === 'reviewing' && o.canViewKey && o.keyForm !== 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">审核通过：密钥已发放到本账号。点下方「查看密钥」复制完整密钥，粘贴激活后开始使用；本站订单将在站长确认到账后转为已完成。</p>' : ''}
+      ${o.status === 'reviewing' && o.canViewKey && o.keyForm === 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">审核通过：本单为叠加购买，所购时长已并入你的密钥，无需再次激活；本站订单将在站长确认到账后转为已完成。</p>' : ''}
+      ${o.status === 'completed' && o.keyForm !== 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">已完成：密钥已发放到本账号，可在下方查看密钥，或在「我的」查看密钥状态。</p>' : ''}
+      ${o.status === 'completed' && o.keyForm === 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">已完成：本单为叠加购买，所购时长已并入你的密钥。可在下方查看既有密钥，或在「我的」查看密钥状态。</p>' : ''}
+      ${o.canViewKey && o.keyForm === 'stacked' ? `<p style="color:var(--sub);font-size:13.5px;margin-top:10px">本单为叠加购买，时长已并入你的密钥${o.keyMasked ? '（' + esc(o.keyMasked) + '）' : ''}${o.keyActivated && o.keyExpiresMs ? '，并入后到期时间：' + esc(fmtDate(o.keyExpiresMs)) : ''}${o.keyActivated === false ? '，该密钥尚未激活，激活时累计时长一并起算' : ''}。</p>` : ''}
       ${o.status === 'cancelled' ? '<p style="color:var(--sub);font-size:13.5px;margin-top:10px">订单已取消。</p>' : ''}
       ${o.status === 'rejected' ? '<p style="color:var(--err);font-size:13.5px;margin-top:10px">审核未通过。如有疑问，请联系智能客服处理。</p>' : ''}
       <p style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
@@ -1613,7 +1616,8 @@ Views.orders = async function (view) {
         ${o.canCancel ? `<button class="btn sm grey" data-cancel="${esc(o.id)}">取消订单</button>` : ''}
         ${o.canDelete ? `<button class="btn sm danger" data-del="${esc(o.id)}">删除</button>` : ''}
       </p>
-      ${o.canViewKey && o.keyStr ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok" style="margin:0"><div style="font-size:13px;color:var(--sub);margin-bottom:6px">本单密钥（完整串）</div><b style="user-select:all;word-break:break-all;font-size:16px;letter-spacing:.5px">${esc(o.keyStr)}</b><p style="margin-top:10px"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p><p style="color:var(--sub);font-size:12.5px;margin-top:8px">复制后到登录激活提示或「兑换 KEY」处粘贴即可激活，激活后开始计时。</p></div></div>` : ''}
+      ${o.canViewKey && o.keyStr && o.keyForm !== 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok" style="margin:0"><div style="font-size:13px;color:var(--sub);margin-bottom:6px">本单密钥（完整串）</div><b style="user-select:all;word-break:break-all;font-size:16px;letter-spacing:.5px">${esc(o.keyStr)}</b><p style="margin-top:10px"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p><p style="color:var(--sub);font-size:12.5px;margin-top:8px">复制后到登录激活提示或「兑换 KEY」处粘贴即可激活，激活后开始计时。</p></div></div>` : ''}
+      ${o.canViewKey && o.keyStr && o.keyForm === 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok" style="margin:0"><div style="font-size:13px;color:var(--sub);margin-bottom:6px">既有密钥（完整串）</div><b style="user-select:all;word-break:break-all;font-size:16px;letter-spacing:.5px">${esc(o.keyStr)}</b><p style="margin-top:10px"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p>${o.keyActivated ? '<p style="color:var(--sub);font-size:12.5px;margin-top:8px">该密钥已激活，正在计时，无需再次粘贴激活。</p>' : '<p style="color:var(--sub);font-size:12.5px;margin-top:8px">该密钥尚未激活。复制后到登录激活提示或「兑换 KEY」处粘贴激活，本单时长已并入，激活时一并起算。</p>'}</div></div>` : ''}
     </div>`).join('');
   box.querySelectorAll('[data-viewkey]').forEach(el => el.onclick = () => {
     const id = el.getAttribute('data-viewkey');
@@ -1635,7 +1639,9 @@ Views.orders = async function (view) {
       try { okCopy = document.execCommand('copy'); } catch (e) {}
       ta.remove();
     }
-    toast(okCopy ? '密钥已复制，去粘贴激活吧。' : '复制失败，请展开密钥后长按手动复制。', okCopy ? 'ok' : 'warn');
+    if (!okCopy) toast('复制失败，请展开密钥后长按手动复制。', 'warn');
+    else if (o.keyForm === 'stacked' && o.keyActivated) toast('密钥已复制。该密钥已激活，无需再次粘贴激活。', 'ok');
+    else toast('密钥已复制，去粘贴激活吧。', 'ok');
   });
   box.querySelectorAll('[data-cont]').forEach(el => el.onclick = () => navigate('purchase', el.getAttribute('data-cont')));
   box.querySelectorAll('[data-cancel]').forEach(el => el.onclick = () => {

@@ -24,7 +24,7 @@
 | server/ext/home-page.js | /opt/qfremote-ext/home-page.js | `71ad026f3d1c652a568d0c59737e4f59` |
 | server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `d2918b81d39c4ef545534d35d6d7e86a` |
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `78009b67a760e3b05449255c8f327e80` |
-| server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `6e6b18ec7d329b3eaae0c7f51cd55527` |
+| server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
 | server/ext/page.js | /opt/qfremote-ext/page.js | `2c669993b28a935c9252ebc76c8e6a52` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
@@ -88,7 +88,7 @@
 | server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
 | server/webapp/app.css | /opt/qfremote-webapp/app.css | `113d50fcb60ceff858ff1c9b8c4d8dac` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `bb80fc9eabd9499a76942f8c27b9b710` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `3aa01c3cdeccc622436b11d0b5013502` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
@@ -98,7 +98,7 @@
 | server/webapp/assets/pay-wechat-6.png | /opt/qfremote-webapp/assets/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/webapp/assets/pay-wechat-9.9.png | /opt/qfremote-webapp/assets/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/webapp/favicon.ico | /opt/qfremote-webapp/favicon.ico | `cfd4ec9c9cd234732a5294b01e33e17f` |
-| server/webapp/index.html | /opt/qfremote-webapp/index.html | `43357275263927dd5e98b2a623e7d77c` |
+| server/webapp/index.html | /opt/qfremote-webapp/index.html | `ad3dc859a404998d7bc1c71677085962` |
 
 ## 二、Windows 壳（windows/）
 
