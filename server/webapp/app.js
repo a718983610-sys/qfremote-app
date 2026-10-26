@@ -1267,7 +1267,7 @@ Views.support = async function (view, _p, _s, opts) {
   const renderReplies = (replies) => {
     (replies || []).forEach(rp => {
       if (typeof rp === 'string') addMsg('cs', rp, false);
-      else { if (rp.text) addMsg('cs', rp.text, false); if (rp.picks) setPicks(rp.picks); if (rp.follow && rp.follow.type === 'verify') renderVerify(); }
+      else { if (rp.text) addMsg('cs', rp.text, false); if (rp.picks) setPicks(rp.picks); if (rp.options) setPicks(rp.options); if (rp.kind === 'verify-required' || (rp.follow && rp.follow.type === 'verify')) renderVerify(); }
     });
   };
   const renderVerify = () => {
@@ -1278,9 +1278,23 @@ Views.support = async function (view, _p, _s, opts) {
     msgs.appendChild(d);
     $('#sv-b', d).onclick = async () => {
       const r = await api('/support/api/verify', { method: 'POST', json: { session: token, account: $('#sv-u', d).value.trim(), password: $('#sv-p', d).value } });
-      if (r.json && r.json.text) addMsg('cs', r.json.text, false);
-      else addMsg('cs', '核验未通过，请核对账号与密码后重试。', false);
-      d.remove();
+      const j = (r && r.json) || {};
+      if (j.ok) {
+        // 核对通过：撤表单并回读引擎随核验返回的状态答复（follow），与独立
+        // 客服页同一口径；此前这里不读 follow、且把成功也误报「核验未通过」。
+        d.remove();
+        addMsg('cs', '身份核对已通过，下面按您的账号状态答复。', false);
+        if (j.follow) renderReplies(j.follow);
+      } else if (j.text) {
+        d.remove();
+        addMsg('cs', j.text, false);
+      } else if (j.reason === 'unavailable') {
+        addMsg('cs', '身份核对暂时不可用，无法查询账号状态。您可以先按通用指引处理，或回复「转人工」由人工协助。', false);
+      } else if (j.reason === 'locked') {
+        addMsg('cs', '核对次数过多，已暂时锁定，请一小时后再试；着急处理可回复「转人工」。', false);
+      } else {
+        addMsg('cs', '核验未通过，请核对账号与密码后重试。', false);
+      }
     };
   };
   const send = async (text, pick) => {

@@ -174,23 +174,48 @@ function createEngine(deps) {
     if (session.history.length > HISTORY_MAX) session.history = session.history.slice(-HISTORY_MAX);
   }
 
+  // 许可状态（与 /license/api/me 同一事实源：license-core 写入的状态镜像，
+  // 含 displayStatus 与 activeBanCode）。读不到/无记录 → null，调用方回落旧源。
+  function licenseStateOf(account) {
+    if (!providers.getLicenseState) return Promise.resolve(null);
+    return providers.getLicenseState(account)
+      .then(s => (s && s.available && s.found) ? s : null)
+      .catch(() => null);
+  }
+
   function factsFor(kind, account) {
     // 只查本人：account 必须由调用方按身份判定后传入（会话用户或已核对账号）
     if (kind === 'freeze') {
-      return Promise.all([providers.getFreeze(account), providers.getAppeal(account)]).then(([f, a]) => {
-        if (!f.available && !a.available) return null;
+      return Promise.all([providers.getFreeze(account), providers.getAppeal(account), licenseStateOf(account)]).then(([f, a, lic]) => {
+        if (!f.available && !a.available && !lic) return null;
         const parts = [];
-        if (f.available) parts.push(f.frozen ? ('当前状态：今日已冻结（今日密码输错 ' + f.fails + ' 次），冻结至今天结束，次日零点自动解除') : ('当前状态：今日未冻结（今日密码输错 ' + (f.fails || 0) + ' 次）'));
+        if (lic && lic.activeBanCode) {
+          // 许可台账有生效中的封禁/冻结（站长冻结、梯度冻结、封禁）时以许可
+          // 状态为准：登录垫片只记 B1 当日输错冻结，拿它的「未冻结」覆盖
+          // 许可处置会误报（P7-012 同族防线）。文案用 /me 同源 displayStatus。
+          parts.push('当前状态：' + (lic.displayStatus || '账号受限'));
+        } else if (f.available) {
+          parts.push(f.frozen ? ('当前状态：今日已冻结（今日密码输错 ' + f.fails + ' 次），冻结至今天结束，次日零点自动解除') : ('当前状态：今日未冻结（今日密码输错 ' + (f.fails || 0) + ' 次）'));
+        }
         if (a.available) parts.push(a.status ? ('申诉状态：' + ({ pending: '审核中', approved: '已通过', rejected: '已驳回' }[a.status] || a.status)) : '申诉状态：暂无申诉记录');
+        if (!parts.length) return null;
         return parts.join('；');
       });
     }
     if (kind === 'appeal') {
-      return Promise.all([providers.getBan(account), providers.getAppeal(account)]).then(([b, a]) => {
-        if (!b.available && !a.available) return null;
+      return Promise.all([providers.getBan(account), providers.getAppeal(account), licenseStateOf(account)]).then(([b, a, lic]) => {
+        if (!b.available && !a.available && !lic) return null;
         const parts = [];
-        if (b.available) parts.push(b.banned ? '当前状态：账号为封禁状态' : '当前状态：账号未被封禁');
+        if (lic) {
+          // P7-012：封禁真值在许可台账（activeBan），旧 getBan 读的账号账本
+          // 不含此维度，曾把限时封禁误报「未被封禁」。状态文案直接用
+          // license-core 的 displayStatus（与 /me 逐字同源），不自编措辞。
+          parts.push('当前状态：' + (lic.displayStatus || (lic.activeBanCode ? '已封禁' : '正常')));
+        } else if (b.available) {
+          parts.push(b.banned ? '当前状态：账号为封禁状态' : '当前状态：账号未被封禁');
+        }
         if (a.available) parts.push(a.status ? ('申诉/留言处理状态：' + ({ pending: '审核中', approved: '已通过', rejected: '已驳回' }[a.status] || a.status)) : '申诉状态：暂无申诉记录');
+        if (!parts.length) return null;
         return parts.join('；');
       });
     }
@@ -511,8 +536,16 @@ function createEngine(deps) {
     return { ok: true, follow };
   }
 
+  // 开场快捷提问（P7-013）：与独立客服页写死的开场 chips 同一组，保证
+  // 两张客服面同一组入口；形状 {id,label}，前端点选即按 pick 走 handlePick。
+  const WELCOME_PICKS = [
+    { id: 'F05', label: '账号被冻结了' },
+    { id: 'S01', label: '连不上自己的电脑' },
+    { id: 'F04', label: '忘记密码' },
+    { id: 'handoff', label: '转人工客服' }
+  ];
   function welcome(session) {
-    return reply('welcome', sysText('G01', session.tone));
+    return reply('welcome', sysText('G01', session.tone), { picks: WELCOME_PICKS.map(p => ({ id: p.id, label: p.label })) });
   }
 
   return { handleText, handlePick, verifyIdentity, welcome, newSession, rankEntries };
