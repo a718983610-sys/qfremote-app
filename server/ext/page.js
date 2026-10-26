@@ -104,7 +104,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
     <button class="btn" id="lic-issue-btn" type="button">发放密钥</button></div>
     <div id="lic-keys"><p class="empty">正在加载许可概览…</p></div>
   </div>
-  <div class="card">
+  <div class="card" id="genkey-card">
     <h2>生成密钥（不绑账号）</h2>
     <p class="hint">生成一把不绑定任何账号的密钥串：选套餐、选来源后点「生成密钥」，把完整串复制给对方即可。对方在「我的账户 · 兑换 KEY」处粘贴，或在登录拦截页粘贴提交，首个兑换的账号即为归属，兑换当时开始计时。来源口径与上方发放一致，必须选：付费购买入账＝开通网页版；免费发放＝不开通网页版。此处不设默认，选错会影响对方网页权益。</p>
     <div class="row"><div class="who"><div class="meta">套餐</div><select id="gen-plan" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
@@ -624,7 +624,7 @@ loadAssistantApi();
 /* 分视图路由（站长 2026-10-26 13:25 令：功能拆开，一个页面只放一个功能）：
    hash 决定当前视图，刷新与直达都落在本视图；兼容旧锚点——控制台内嵌站长页
    跳转所用的 #users / #lic-user / #lic-overview / #payOrders / #appeals 在此映射。 */
-var VIEW_ALIAS = { 'users': 'users', 'license': 'license', 'lic-user': 'license', 'lic-plan': 'license', 'orders': 'orders', 'payOrders': 'orders', 'appeals': 'appeals', 'appeals-done': 'appeals', 'rebind': 'rebind', 'bans': 'bans', 'lic-overview': 'bans', 'devices': 'bans', 'lic-devices': 'bans', 'support': 'support', 'supportInbox': 'support', 'api': 'api', 'assistantApi': 'api' };
+var VIEW_ALIAS = { 'users': 'users', 'license': 'license', 'lic-user': 'license', 'lic-plan': 'license', 'genkey': 'license', 'orders': 'orders', 'payOrders': 'orders', 'appeals': 'appeals', 'appeals-done': 'appeals', 'rebind': 'rebind', 'bans': 'bans', 'lic-overview': 'bans', 'devices': 'bans', 'lic-devices': 'bans', 'support': 'support', 'supportInbox': 'support', 'api': 'api', 'assistantApi': 'api' };
 function applyView(){
   var h = (location.hash || '').replace(/^#/, '');
   var v = VIEW_ALIAS[h] || 'users';
@@ -637,6 +637,7 @@ function applyView(){
   for (k = 0; k < links.length; k++) links[k].className = (links[k] === primary ? 'on' : '');
   setTimeout(function(){
     if (v === 'bans' && (h === 'devices' || h === 'lic-devices')) { var dh = $('lic-devices-h'); if (dh) dh.scrollIntoView({ block: 'start' }); }
+    else if (v === 'license' && h === 'genkey') { var gh = $('genkey-card'); if (gh) gh.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); }
     else window.scrollTo(0, 0);
   }, 0);
 }
