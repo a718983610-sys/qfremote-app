@@ -811,7 +811,12 @@ function postInternalJson(urlStr, obj, timeoutMs) {
     const isHttps = u.protocol === 'https:';
     const rq = (isHttps ? https : http).request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST', timeout: timeoutMs || 5000, rejectUnauthorized: false,
       headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, 'x-qf-internal-secret': LIC_SECRET } }, (rs) => {
-      let b = ''; rs.on('data', (c) => { b += c; if (b.length > 200000) rq.destroy(); });
+      let b = '';
+      rs.on('data', (c) => {
+        b += c;
+        // S2 根修：超限时先给出明确答复再断开，避免调用方拿不到结果只能等到超时
+        if (b.length > 200000) { resolve({ ok: false, code: 'TOO_BIG' }); try { rq.destroy(); } catch (e) {} }
+      });
       rs.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch (e) { resolve({ ok: false, code: 'BAD_JSON', status: rs.statusCode }); } });
     });
     rq.on('timeout', () => { rq.destroy(); resolve({ ok: false, code: 'TIMEOUT' }); });
@@ -821,6 +826,78 @@ function postInternalJson(urlStr, obj, timeoutMs) {
 }
 const FORUM_INTERNAL_BASE = process.env.QFEXT_FORUM_URL || 'http://127.0.0.1:8446';
 const SOCIAL_INTERNAL_BASE = process.env.QFEXT_SOCIAL_URL || 'https://127.0.0.1:8445'; // 好友服务为本机自签 HTTPS（与 nginx proxy_ssl_verify off 同口径）
+
+// ---- B 设计 4.2 探测引擎：refId 前缀强绑定（B1）、超时双保险（B2）、连续失败熔断（B2）----
+const PROBE_REF_RE = /^(post|reply):/;
+let probeFailStreak = 0;     // 连续「非 ok:true」答复计数
+let probeBreakerUntil = 0;   // 熔断窗口截止时刻（毫秒）
+
+// 外层兜底：无论被等待的 Promise 是否落地，到点最多等到 ms 毫秒（超时给 null，由调用方按失败处理）
+function probeRace(p, ms) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, Math.max(1, ms));
+    Promise.resolve(p).then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve(null); } }
+    );
+  });
+}
+
+async function probeForumExistsGone(refId) {
+  const rid = String(refId || '');
+  if (!PROBE_REF_RE.test(rid)) return false;              // B1：无 post:/reply: 前缀一律不探测
+  const kind = rid.startsWith('reply:') ? 'reply' : 'post';
+  if (Date.now() < probeBreakerUntil) return false;       // B2：熔断窗口内直接放弃，不发请求
+  const out = await probeRace(postInternalJson(FORUM_INTERNAL_BASE + '/api/forum/internal/exists', { kind, id: rid }, 1500), 2000);
+  if (!out || out.ok !== true) {                          // 超时/传输失败/坏响应/服务异常：一律不销
+    // 门二 F6：只有传输/超时/服务未就绪类（无答复或带 code）计入熔断；论坛业务性 ok:false（无 code，如 400 参数）是确定答复，不计
+    if (!out || out.code) {
+      probeFailStreak += 1;
+      if (probeFailStreak >= 3) { probeBreakerUntil = Date.now() + 30000; probeFailStreak = 0; }
+    }
+    return false;
+  }
+  probeFailStreak = 0;
+  return out.exists === false;                            // 双绑：ok===true 且 exists===false 才算「确定不存在」
+}
+
+// 挂点甲/乙共用：pending forum 事件内容已删则销账，返回 resolve 结果（null 表示未销账/非目标事件）
+const probeInFlight = new Set(); // 门二 F5：在途探测去重（按 refId），防并发/连刷放大
+async function autoCloseForumEvent(ev) {
+  if (!ev || ev.status !== 'pending' || ev.type !== 'forum') return null;
+  if (probeInFlight.has(ev.refId)) return null;
+  probeInFlight.add(ev.refId);
+  try {
+    const gone = await probeForumExistsGone(ev.refId);
+    if (!gone) return null;
+    // 并发安全：resolve 只翻仍为 pending 的事件，第二个探测者拿到 null，不会重复写
+    const rec = reviewEvents.resolve('forum', ev.refId, '系统（自动销账）', '内容已删除，自动销账');
+    if (rec) log({ ev: 'assistant-event-auto-closed', reason: 'content-gone', refId: ev.refId, eventId: ev.id });
+    return rec || null;
+  } finally {
+    probeInFlight.delete(ev.refId);
+  }
+}
+
+// 挂点甲用：单页仅探测前 20 条 pending forum，并发≤4，单请求总预算 4000ms，超预算的剩余事件跳过
+async function autoSweepForumEvents(events) {
+  const targets = (Array.isArray(events) ? events : []).filter((e) => e && e.status === 'pending' && e.type === 'forum').slice(0, 20);
+  if (!targets.length) return;
+  const deadline = Date.now() + 4000;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const remain = deadline - Date.now();
+      if (remain <= 0) return;
+      const ev = targets[cursor++];
+      await probeRace(autoCloseForumEvent(ev), remain);   // 单条超出剩余预算即放弃等待（后台落地无害）
+    }
+  };
+  const lanes = [];
+  for (let i = 0; i < Math.min(4, targets.length); i += 1) lanes.push(worker());
+  await Promise.all(lanes);
+}
 
 // ---------- 许可：内网鉴权 / 执法判定 / 申诉裁决（双通道同台账） ----------
 function startOfNextDayMs(now) {
@@ -1126,13 +1203,22 @@ const server = http.createServer(async (req, res) => {
       if (!reviewEvents.verifyToken(tok)) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
       const nowA = Date.now();
       if (req.method === 'GET' && p === '/assistant-api/events') {
-        const out = reviewEvents.list(u.searchParams.get('after') || 0, { type: u.searchParams.get('type') || '', status: u.searchParams.get('status') || '', limit: u.searchParams.get('limit') || 50 });
+        const evStatus = u.searchParams.get('status') || '';
+        const out = reviewEvents.list(u.searchParams.get('after') || 0, { type: u.searchParams.get('type') || '', status: evStatus, limit: u.searchParams.get('limit') || 50 });
+        // 挂点甲（B 设计 4.2/B5）：拉取即校验，本页 pending forum 内容已删则销账；nextCursor 沿用 list 原值不跳号
+        await autoSweepForumEvents(out.events);
+        if (evStatus === 'pending' && Array.isArray(out.events)) out.events = out.events.filter((e) => e && e.status === 'pending');
         return sendJson(res, 200, Object.assign({ ok: true }, out));
       }
       const evDetailM = p.match(/^\/assistant-api\/events\/(\d+)$/);
       if (req.method === 'GET' && evDetailM) {
-        const ev = reviewEvents.getById(Number(evDetailM[1]));
+        let ev = reviewEvents.getById(Number(evDetailM[1]));
         if (!ev) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        // 挂点乙（B 设计 4.2）：详情拉取即校验，销账则以更新后的事件返回
+        if (ev.status === 'pending' && ev.type === 'forum') {
+          const closed = await autoCloseForumEvent(ev);
+          if (closed) ev = reviewEvents.getById(ev.id) || closed;
+        }
         const detail = { ok: true, event: ev };
         if (ev.type === 'order') {
           const o = payOrders.getRaw(ev.refId);
@@ -1214,9 +1300,21 @@ const server = http.createServer(async (req, res) => {
           // kind 缺省时从 refId 前缀推导（事件 refId 形如 post:p12 / reply:r34，自带类型）：
           // 否则回复类裁定会被论坛内网口默认按 post 查库、误报「内容不存在」（P8 巡查 F-003）。
           const kindFromRef = refId.startsWith('reply:') ? 'reply' : (refId.startsWith('post:') ? 'post' : '');
-          const out = await postInternalJson(FORUM_INTERNAL_BASE + '/api/forum/internal/review', { kind: String(body.kind || '') || kindFromRef, id: refId, action, actor: ACTOR }, 8000);
+          const kindUsed = String(body.kind || '') || kindFromRef;
+          const out = await postInternalJson(FORUM_INTERNAL_BASE + '/api/forum/internal/review', { kind: kindUsed, id: refId, action, actor: ACTOR }, 8000);
           if (out && out.ok) reviewEvents.resolve('forum', refId, ACTOR, action);
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok) });
+          // 挂点丙（B 设计 4.2/B1/B6）：论坛权威查实「内容不存在。」（无传输 code）且 kind 双绑一致 → 自动销账。
+          // 内容已由 review 服务端查库确认，此处直接 resolve，不再补探 exists；resolve 返回 null 说明已被他人销账/非 pending，落回原路径。
+          let autoClosed = false;
+          if (out && out.ok === false && !out.code && out.msg === '内容不存在。' && kindUsed === kindFromRef && /^(post|reply):/.test(String(refId || ''))) {
+            const rec = reviewEvents.resolve('forum', refId, '系统（自动销账）', '内容已删除，自动销账');
+            if (rec) {
+              autoClosed = true;
+              log({ ev: 'assistant-event-auto-closed', reason: 'content-gone', refId, eventId: rec.id });
+            }
+          }
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok), autoClosed });
+          if (autoClosed) return sendJson(res, 200, { ok: true, autoClosed: true, code: 'CONTENT_GONE', msg: '内容已删除，事件已自动销账。' });
           return sendJson(res, out && out.ok ? 200 : 409, out || { ok: false });
         }
         if (type === 'support') {
