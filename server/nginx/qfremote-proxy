@@ -1,0 +1,234 @@
+# QFRemote 临时通道本机反代：只听回环，cloudflared 快速隧道只对它开口。
+# / 及全部路径 -> MeshCentral 控制台(8443)；/register 与 /api/register -> 注册服务(8444)。
+# 记住此设备（控制台面）：带 qfrem=1 标记的请求改走登录垫片(8450)通用转发，
+# 由垫片在回程给会话 cookie(xid) 续上 30 天有效期，防被控制台后续响应冲成会话级；
+# 无标记的请求维持直达 MeshCentral(8443) 现行行为。
+map $cookie_qfrem $qf_console_upstream {
+    default https://127.0.0.1:8443;
+    "1"     http://127.0.0.1:8450;
+}
+
+server {
+    listen 127.0.0.1:8080;
+    server_name _;
+
+    client_max_body_size 512m;
+    absolute_redirect off; # P2-010（2026-10-26 巡查）：收口 return 302 一律相对路径，防经隧道生成 http://域名:8080 死链
+
+    location = /register {
+        if ($http_sec_fetch_dest = "document") { return 302 /; }
+        proxy_pass https://127.0.0.1:8444;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location = /api/register {
+        proxy_pass https://127.0.0.1:8444;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+
+    # 好友一期：页面 /friends + 接口 /api/friends -> 好友服务(8445)
+    location = /friends {
+        if ($http_sec_fetch_dest = "document") { return 302 /#friends; }
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /api/friends {
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 聊天二期：页面 /chat + 全部子路径 -> 好友服务(8445，聊天已合入同一进程)
+    location = /chat {
+        if ($http_sec_fetch_dest = "document") { return 302 /#chat; }
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /chat/ {
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 安装包直下：/dl/<文件名.exe|.apk> -> 更新源官方覆盖目录里的同名文件
+    location ~* ^/dl/([^/]+\.(exe|apk|zip|txt))$ {
+        proxy_pass https://127.0.0.1:8443/$1;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+
+
+    # 官网留言自家通道：POST /api/feedback -> 论坛服务进程内的留言模块(8446)
+    location = /api/feedback {
+        proxy_pass http://127.0.0.1:8446;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 论坛一期：页面 /forum + 接口 /api/forum -> 论坛服务(8446, 本机明文)
+    location = /forum {
+        if ($http_sec_fetch_dest = "document") { return 302 /#forum; }
+        proxy_pass http://127.0.0.1:8446;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /api/forum {
+        proxy_pass http://127.0.0.1:8446;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 登录冻结申诉：页面 /appeal 与子路径 -> 登录垫片(8450)
+    location = /appeal {
+        proxy_pass http://127.0.0.1:8450;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /appeal/ {
+        proxy_pass http://127.0.0.1:8450;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 记住此设备：勾选「记住此设备」后的登录提交走自家登录垫片(8450)，其余登录原样
+    location = /qf-login {
+        proxy_pass http://127.0.0.1:8450;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 扩展服务（2.2.0）：站长管理 /admin + 积分 /points -> qfremote-ext(8448, 本机明文)
+    location = /admin {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+
+    # 新版首页（2.3.1 C-3）：页面 /home + 接口 /home/api -> qfremote-ext(8448)
+    location = /home {
+        if ($http_sec_fetch_dest = "document") { return 302 /; }
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /home/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location = /purchase {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+    location = /license/status {
+        if ($http_sec_fetch_dest = "document") { return 302 /; }
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 站长 API（助手事件接口，#22/#31；高频只读轮询，不挂限流）
+    location /assistant-api/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location = /license/rebind {
+        if ($http_sec_fetch_dest = "document") { return 302 /; }
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /license/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+    location = /points {
+        if ($http_sec_fetch_dest = "document") { return 302 /#points; }
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /points/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+# 智能客服：页面 /support + 接口 /support/api -> 好友服务(8445)
+    location = /support {
+        if ($http_sec_fetch_dest = "document") { return 302 /#support; }
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /support/ {
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /support/api/ {
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 隐私锁面板（2.3.2）：/lock/* -> 好友服务(8445)内的锁桥；proxy_pass 不带 URI 段以保留 /lock/ 前缀
+    location /lock/ {
+        proxy_pass https://127.0.0.1:8445;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 新控制台（2.3.1 切换，#32/#33）：根路径只发新控制台壳；其静态资源同目录。
+    location = / {
+        root /opt/qfremote-webapp;
+        try_files /index.html =404;
+        add_header Cache-Control "no-store";
+    }
+
+    location = /app.js {
+        root /opt/qfremote-webapp;
+        add_header Cache-Control "no-store";
+    }
+
+    location = /app.css {
+        root /opt/qfremote-webapp;
+        add_header Cache-Control "no-store";
+    }
+
+    location /assets/ {
+        root /opt/qfremote-webapp;
+    }
+
+    # 远控入口收口（2026-10-26 丙案）：旧 iframe 挂载点废止，顶层 302 到 CANON 原生入口，
+    # 查询参数原样保留（深链 node/viewmode 不丢）。回滚＝恢复 bak-20261026-rescue2-pre302 后 reload。
+    location = /console-engine {
+        return 302 https://54.248.9.192:8443/$is_args$args;
+    }
+
+    location / {
+        proxy_pass $qf_console_upstream;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+}

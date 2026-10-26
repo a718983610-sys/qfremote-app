@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QFRemote</title>
+<style>
+  :root{
+    --bg:#F4F7FB; --card:#ffffff; --ink:#1F2D47; --muted:#5F7089; --faint:#93A3B8;
+    --line:#DFE7F2; --brand:#2470E0; --brand-dark:#0B2B5B; --brand-soft:#EAF1FD; --hover:#F2F7FF;
+    --bar-h:52px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#10141C; --card:#22262E; --ink:#E9EEF6; --muted:#9AA7BC; --line:#333B48; --brand-soft:#1C2A44; --hover:#262B34; }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; height:100%; }
+  body { background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  .bar { height:var(--bar-h); flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:0 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  .back { display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 14px; border:1px solid var(--line); border-radius:9px; background:var(--card); color:var(--ink); font-size:14px; font-weight:600; cursor:pointer; text-decoration:none; white-space:nowrap; }
+  .back:hover { border-color:var(--brand); color:var(--brand); }
+  .tabs { display:flex; gap:4px; margin-left:6px; }
+  .tab { height:36px; padding:0 16px; border:1px solid transparent; border-radius:9px; background:transparent; color:var(--muted); font-size:14.5px; font-weight:600; cursor:pointer; font-family:inherit; white-space:nowrap; }
+  .tab:hover { background:var(--hover); color:var(--ink); }
+  .tab.on { background:var(--brand-soft); color:var(--brand); border-color:var(--line); }
+  .brand { margin-left:auto; font-weight:700; font-size:15px; color:var(--muted); white-space:nowrap; }
+  .frame-wrap { flex:1; position:relative; min-height:0; }
+  iframe { position:absolute; inset:0; width:100%; height:100%; border:0; background:var(--bg); display:none; }
+  iframe.on { display:block; }
+  .note { position:absolute; left:50%; top:70px; transform:translateX(-50%); color:var(--muted); font-size:14px; display:none; }
+  @media (max-width:640px){ .brand{ display:none; } .tab{ padding:0 11px; } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <a class="back" href="/" title="返回设备列表">&#8592; 设备列表</a>
+  <nav class="tabs">
+    <button class="tab" data-t="friends">好友</button>
+    <button class="tab" data-t="chat">聊天</button>
+    <button class="tab" data-t="forum">论坛</button>
+  </nav>
+  <span class="brand">QFRemote</span>
+</header>
+<div class="frame-wrap" id="wrap">
+  <div class="note" id="note">正在加载…</div>
+</div>
+<script>
+/* QFRemote 网页版同框包装页（2.3.0 M 线）
+   控制台内点「好友／论坛」进入本页：自有顶栏（返回设备列表＋三页签）
+   保持在位，目标页在下方 iframe 内打开，不新开标签页、不整页跳转。
+   三个 iframe 各建一次后保活在本页内，页签切换只显隐、不重载。
+   目标地址解析（不写死隧道域名）：
+   - 隧道源控制台：好友/聊天/论坛与控制台同源，直接用相对路径，
+     隧道域名轮换不影响（nginx 按路径反代）；
+   - 直连源控制台（IP:8443）：好友/聊天走同主机 8445 直连（会话
+     cookie 按主机携带，单点登录成立）；论坛只在隧道源上，地址从
+     官网 product.json 的 web.forumUrl 实时解析，并缓存最近一次
+     成功值供下次兜底，缓存再无才退回同源相对路径。 */
+(function () {
+  'use strict';
+  var PRODUCT_JSON = 'https://a718983610-sys.github.io/qfremote-website/product.json';
+  var DIRECT_SOCIAL = 'https://54.248.9.192:8445';
+  var frames = {};   // t -> iframe（建一次保活）
+  var targets = {};  // t -> url（解析完成后填充）
+  var current = null;
+
+  function isIpHost() { return /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname); }
+  function qParam(name) {
+    try { return new URLSearchParams(location.search).get(name); } catch (e) { return null; }
+  }
+  function cacheGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function cacheSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  var onSocial = location.port === '8445'; // 包装页由好友服务（8445）托管
+  var forumBase = '';    // 论坛源基址（跨源时解析，如 https://<隧道>/forum 的上级）
+  var forumCross = false; // 论坛与本页不同源时为 true
+
+  function resolveTargets(done) {
+    if (!isIpHost() && !onSocial) {
+      targets = { friends: '/friends', chat: '/chat', forum: '/forum' };
+      return done();
+    }
+    // 直连源：好友/聊天在同主机 8445（本页若就长在 8445 上即同源相对
+    // 路径）；论坛只在隧道源，跨源打开，地址实时解析。
+    targets = {
+      friends: onSocial ? '/friends' : DIRECT_SOCIAL + '/friends',
+      chat: onSocial ? '/chat' : DIRECT_SOCIAL + '/chat',
+      forum: cacheGet('qfWrapForumUrl') || '/forum'
+    };
+    forumCross = true;
+    var cached = cacheGet('qfWrapForumUrl');
+    if (cached) forumBase = cached.replace(/\/forum\/?$/, '');
+    fetch(PRODUCT_JSON, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var u = j && j.web && j.web.forumUrl;
+        if (u) { targets.forum = u; forumBase = u.replace(/\/forum\/?$/, ''); cacheSet('qfWrapForumUrl', u); }
+        done();
+      })
+      .catch(function () { done(); });
+  }
+
+  // 跨源论坛静默登录（2.3.0 M2 线补洞）：论坛源与控制台源不一致时，
+  // 先取一次性令牌（60 秒单次），再让 iframe 走 sso-login 换论坛会话。
+  // 取令牌两路：①直连论坛源（credentials，论坛已对自家来源放行 CORS；
+  // 浏览器能带上可验证的控制台会话时走通）②好友服务令牌中转（同主机
+  // 请求天然带控制台会话，好友服务把整份 Cookie 转发给论坛验真）。
+  // 两路都失败才退回论坛页本身（显示登录表单，与旧行为一致）。
+  function forumToken() {
+    var direct = forumBase
+      ? fetch(forumBase + '/api/forum/sso-token', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (j) { return (j && j.ok && j.token) ? j.token : ''; })
+          .catch(function () { return ''; })
+      : Promise.resolve('');
+    return direct.then(function (tok) {
+      if (tok) return tok;
+      var relayOrigin = onSocial ? location.origin : DIRECT_SOCIAL;
+      return fetch(relayOrigin + '/api/friends/forum-sso-token', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) { return (j && j.ok && j.token) ? j.token : ''; })
+        .catch(function () { return ''; });
+    });
+  }
+
+  function createFrame(t, src) {
+    var f = document.createElement('iframe');
+    f.setAttribute('title', 'QFRemote ' + t);
+    f.src = src;
+    document.getElementById('note').style.display = 'block';
+    f.addEventListener('load', function () { document.getElementById('note').style.display = 'none'; });
+    document.getElementById('wrap').appendChild(f);
+    frames[t] = f;
+    Object.keys(frames).forEach(function (k) { frames[k].classList.toggle('on', k === current); });
+    pushLogoutEpoch();
+  }
+
+  function activate(t) {
+    if (!targets[t]) t = 'friends';
+    current = t;
+    document.querySelectorAll('.tab').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-t') === t); });
+    document.title = 'QFRemote · ' + ({ friends: '好友', chat: '聊天', forum: '论坛' })[t];
+    if (!frames[t]) {
+      if (t === 'forum' && forumCross && forumBase) {
+        document.getElementById('note').style.display = 'block';
+        var raced = Promise.race([
+          forumToken(),
+          new Promise(function (res) { setTimeout(function () { res(''); }, 7000); })
+        ]);
+        raced.then(function (tok) {
+          if (frames.forum) return;
+          createFrame('forum', tok ? (forumBase + '/api/forum/sso-login?token=' + encodeURIComponent(tok)) : targets.forum);
+        });
+      } else {
+        createFrame(t, targets[t]);
+      }
+    }
+    Object.keys(frames).forEach(function (k) { frames[k].classList.toggle('on', k === t); });
+    try { history.replaceState(null, '', location.pathname + '?t=' + t); } catch (e) {}
+  }
+
+  document.querySelectorAll('.tab').forEach(function (b) {
+    b.addEventListener('click', function () { activate(b.getAttribute('data-t')); });
+  });
+
+  // 共享退出纪元桥（正式退出登录）：控制台源的 qfLogoutEpoch 送进论坛
+  // iframe（论坛源），论坛页据此自终止会话。论坛 iframe 建好与每次
+  // storage 变化时各送一次，目标源按 iframe 的 src 源精确投递。
+  function pushLogoutEpoch() {
+    var epoch = 0;
+    try { epoch = +localStorage.getItem('qfLogoutEpoch') || 0; } catch (e) {}
+    if (!epoch) return;
+    var f = frames.forum;
+    if (!f || !f.contentWindow) return;
+    var origin = '';
+    try { origin = new URL(f.src).origin; } catch (e) {}
+    if (origin) { try { f.contentWindow.postMessage({ type: 'qf-logout-epoch', epoch: epoch }, origin); } catch (e) {} }
+  }
+  window.addEventListener('storage', function (ev) { if (ev.key === 'qfLogoutEpoch') pushLogoutEpoch(); });
+  setInterval(pushLogoutEpoch, 3000);
+
+  if (onSocial) {
+    // 长在 8445 上时「返回设备列表」要回控制台（8443），不是好友服务根路径
+    var back = document.querySelector('.back');
+    if (back) back.setAttribute('href', 'https://' + location.hostname + ':8443/');
+  }
+
+  resolveTargets(function () { activate(qParam('t') || 'friends'); });
+})();
+</script>
+</body>
+</html>

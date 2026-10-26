@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; }
+  body {
+    --bg:#f4f7fb; --card:#ffffff; --line:#dfe7f2; --fg:#1f2d47; --sub:#6b7a90;
+    --brand:#2470e0; --brand-press:#1b5dc4; --sel-bg:#eaf2fd; --btn-line:#c9d6ea;
+    background:var(--bg); color:var(--fg); box-sizing:border-box;
+    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    padding:20px 24px 28px;
+    -webkit-user-select:none; user-select:none;
+  }
+  html[data-theme="dark"] body {
+    --bg:#22242a; --card:#22262e; --line:rgba(255,255,255,.10); --fg:#eceff3;
+    --sub:rgba(228,232,238,.60); --sel-bg:#2b3648; --btn-line:rgba(255,255,255,.18);
+  }
+  .head { display:flex; align-items:center; gap:12px; margin-bottom:4px; }
+  h1 { font-size:20px; font-weight:600; margin:0; letter-spacing:.3px; }
+  .count { font-size:13px; color:var(--sub); }
+  .spacer { flex:1; }
+  button {
+    appearance:none; border-radius:10px; cursor:pointer; font-family:inherit;
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    transition: background .13s ease, border-color .13s ease;
+  }
+  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
+  button:disabled { opacity:.45; cursor:default; }
+  .btn-refresh {
+    height:34px; padding:0 14px; font-size:13.5px;
+    background:var(--card); color:var(--brand); border:1px solid var(--btn-line);
+  }
+  .btn-refresh:hover { background:var(--sel-bg); }
+  .group-title { font-size:13px; color:var(--sub); margin:18px 0 10px; letter-spacing:.4px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
+  .card {
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:14px 16px; cursor:pointer; box-sizing:border-box;
+  }
+  .card:hover { border-color:var(--brand); }
+  .card.sel { border-color:var(--brand); background:var(--sel-bg); }
+  .card .row1 { display:flex; align-items:center; gap:8px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#b9c2cf; flex:none; }
+  .dot.on { background:#1db954; }
+  .card .nm { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .meta { font-size:12.5px; color:var(--sub); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .st { font-size:12.5px; color:var(--sub); margin-top:2px; }
+  .detail {
+    margin-top:18px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; padding:16px 18px; display:none;
+  }
+  .detail.show { display:block; }
+  .detail .dnm { font-size:16px; font-weight:600; }
+  .detail .dmeta { font-size:13px; color:var(--sub); margin-top:5px; }
+  .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .btn-primary {
+    height:38px; padding:0 22px; font-size:14.5px; font-weight:600;
+    background:var(--brand); color:#fff; border:1px solid var(--brand);
+  }
+  .btn-primary:hover { background:var(--brand-press); border-color:var(--brand-press); }
+  .btn-secondary {
+    height:38px; padding:0 18px; font-size:14.5px;
+    background:var(--card); color:var(--fg); border:1px solid var(--btn-line);
+  }
+  .btn-secondary:hover { background:var(--sel-bg); }
+  .offnote { font-size:13px; color:var(--sub); margin-top:10px; display:none; }
+  .offnote.show { display:block; }
+  .statebox {
+    margin-top:26px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; padding:26px 20px; text-align:center; display:none;
+  }
+  .statebox.show { display:block; }
+  .statebox .t { font-size:15px; font-weight:600; }
+  .statebox .d { font-size:13.5px; color:var(--sub); margin-top:8px; line-height:1.6; }
+  .statebox button { margin-top:14px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>我的设备</h1>
+    <span class="count" id="count"></span>
+    <span class="spacer"></span>
+    <button class="btn-refresh" id="refreshBtn">刷新</button>
+  </div>
+
+  <div id="groups"></div>
+
+  <div class="detail" id="detail">
+    <div class="dnm" id="dName"></div>
+    <div class="dmeta" id="dMeta"></div>
+    <div class="actions">
+      <button class="btn-primary" id="actConnect">连接</button>
+      <button class="btn-secondary" id="actFiles">文件管理</button>
+      <button class="btn-secondary" id="actTerminal">终端</button>
+    </div>
+    <div class="offnote" id="offNote">这台设备当前不在线，上线后即可连接。</div>
+  </div>
+
+  <div class="statebox" id="stateBox">
+    <div class="t" id="stateTitle">正在读取设备列表…</div>
+    <div class="d" id="stateDesc"></div>
+    <button class="btn-refresh" id="retryBtn" style="display:none;">重新读取</button>
+  </div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  if (q.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+
+  const els = {
+    groups: document.getElementById('groups'),
+    count: document.getElementById('count'),
+    detail: document.getElementById('detail'),
+    dName: document.getElementById('dName'),
+    dMeta: document.getElementById('dMeta'),
+    offNote: document.getElementById('offNote'),
+    stateBox: document.getElementById('stateBox'),
+    stateTitle: document.getElementById('stateTitle'),
+    stateDesc: document.getElementById('stateDesc'),
+    retryBtn: document.getElementById('retryBtn'),
+    actConnect: document.getElementById('actConnect'),
+    actFiles: document.getElementById('actFiles'),
+    actTerminal: document.getElementById('actTerminal')
+  };
+  let model = null;
+  let selectedId = '';
+
+  function findDevice(id) {
+    if (!model) return null;
+    for (const g of model.groups) for (const d of g.devices) if (d.id === id) return d;
+    return null;
+  }
+  function showState(title, desc, retry) {
+    els.stateTitle.textContent = title;
+    els.stateDesc.textContent = desc || '';
+    els.retryBtn.style.display = retry ? '' : 'none';
+    els.stateBox.classList.add('show');
+  }
+  function hideState() { els.stateBox.classList.remove('show'); }
+
+  function render() {
+    els.groups.innerHTML = '';
+    if (!model) return;
+    els.count.textContent = model.total ? ('共 ' + model.total + ' 台 · 在线 ' + model.onlineCount + ' 台') : '';
+    for (const g of model.groups) {
+      if (!g.devices.length) continue;
+      const gt = document.createElement('div');
+      gt.className = 'group-title';
+      gt.textContent = g.name || '我的设备';
+      els.groups.appendChild(gt);
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      for (const d of g.devices) {
+        const card = document.createElement('div');
+        card.className = 'card' + (d.id === selectedId ? ' sel' : '');
+        card.dataset.nodeId = d.id;
+        const row1 = document.createElement('div'); row1.className = 'row1';
+        const dot = document.createElement('span'); dot.className = 'dot' + (d.online ? ' on' : '');
+        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = d.name || d.id;
+        row1.appendChild(dot); row1.appendChild(nm);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.textContent = d.host || d.desc || '';
+        const st = document.createElement('div'); st.className = 'st';
+        st.textContent = d.online ? '在线' : '离线';
+        card.appendChild(row1); card.appendChild(meta); card.appendChild(st);
+        card.addEventListener('click', () => { selectedId = d.id; render(); });
+        grid.appendChild(card);
+      }
+      els.groups.appendChild(grid);
+    }
+    const sel = findDevice(selectedId);
+    els.detail.classList.toggle('show', !!sel);
+    if (sel) {
+      els.dName.textContent = sel.name || sel.id;
+      const bits = [];
+      if (sel.host) bits.push('主机 ' + sel.host);
+      if (sel.desc) bits.push(sel.desc);
+      bits.push(sel.online ? '在线' : '离线');
+      els.dMeta.textContent = bits.join(' · ');
+      els.actConnect.disabled = !sel.online;
+      els.actFiles.disabled = !sel.online;
+      els.actTerminal.disabled = !sel.online;
+      els.offNote.classList.toggle('show', !sel.online);
+    }
+  }
+
+  async function load() {
+    hideState();
+    showState('正在读取设备列表…', '', false);
+    let res = null;
+    try { res = await qfDevices.list(); } catch (e) { res = null; }
+    if (!res || !res.ok || !res.model) {
+      model = null; render(); hideState();
+      showState('没能读取到设备列表', '可能是网络暂时不通，或登录状态已失效。请检查网络后重试；若刚退出过登录，请先回到控制台重新登录。', true);
+      return;
+    }
+    model = res.model;
+    if (selectedId && !findDevice(selectedId)) selectedId = '';
+    hideState();
+    if (!model.total) showState('还没有可显示的设备', '被控电脑装好 QFRemote 并上线后，会出现在这台列表里。', true);
+    render();
+  }
+
+  document.getElementById('refreshBtn').addEventListener('click', load);
+  els.retryBtn.addEventListener('click', load);
+  function openMode(mode) {
+    const sel = findDevice(selectedId);
+    if (!sel || !sel.online) return;
+    qfDevices.open(sel.id, sel.name || sel.id, mode);
+  }
+  els.actConnect.addEventListener('click', () => openMode('desktop'));
+  els.actFiles.addEventListener('click', () => openMode('files'));
+  els.actTerminal.addEventListener('click', () => openMode('terminal'));
+
+  if (window.qfDevices) {
+    qfDevices.onReset(() => { selectedId = ''; model = null; render(); load(); });
+    qfDevices.onTheme((t) => {
+      if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+      else delete document.documentElement.dataset.theme;
+    });
+    load().catch(() => {
+      showState('设备页没有准备好', '请点「重新读取」再试一次；若反复出现，请重启软件。', true);
+    });
+  }
+</script>
+</body>
+</html>

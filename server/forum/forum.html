@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QFRemote 论坛</title>
+<style>
+  :root{
+    --bg:#F4F7FB; --card:#ffffff; --ink:#1F2D47; --muted:#5F7089; --faint:#93A3B8;
+    --line:#DFE7F2; --line-soft:#EAF0F8; --brand:#2470E0; --brand-dark:#0D3170;
+    --brand-soft:#EAF1FD; --hover:#F2F7FF; --bar-bg:#ffffff; --field:#ffffff;
+    --danger:#D92D20; --danger-soft:#FDECEA; --ok:#12753C; --ok-soft:#E7F8EE;
+    --warn:#9A6206; --warn-soft:#FFF4E0;
+    --topbar-h:52px; --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#10141C; --card:#22262E; --ink:#E9EEF6; --muted:#9AA7BC; --faint:#77839A;
+      --line:#333B48; --line-soft:#2B3038; --brand-soft:#1C2A44; --hover:#262B34;
+      --bar-bg:#171B23; --field:#2B3038;
+      --danger:#FF9D8F; --danger-soft:#3A2320; --ok:#5EEAA0; --ok-soft:#173527;
+      --warn:#E8C97A; --warn-soft:#33301C;
+    }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; min-height:100%; }
+  body { background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased; }
+  a { color:var(--brand); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  button { font:inherit; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:not-allowed; }
+  ::placeholder { color:var(--faint); }
+  .hidden { display:none !important; }
+
+  .appbar { position:fixed; inset:0 0 auto 0; height:var(--topbar-h); display:flex; align-items:center; gap:12px; padding:0 16px; background:var(--bar-bg); border-bottom:1px solid var(--line); z-index:40; }
+  .brandmark { display:flex; align-items:center; gap:9px; font-weight:700; font-size:17px; white-space:nowrap; color:var(--ink); }
+  .brandmark:hover { text-decoration:none; }
+  .brand-logo { width:30px; height:30px; border-radius:8px; overflow:hidden; flex:0 0 auto; display:inline-flex; } .brand-logo svg { width:100%; height:100%; display:block; }
+  .topnav { display:flex; gap:2px; margin-left:8px; }
+  .topnav a { padding:7px 12px; border-radius:8px; color:var(--muted); font-size:14.5px; font-weight:500; white-space:nowrap; transition:background .15s, color .15s; }
+  .topnav a:hover { color:var(--ink); background:var(--hover); text-decoration:none; }
+  .topnav a.active { color:var(--brand); background:var(--brand-soft); font-weight:600; }
+  .site-pill { margin-left:auto; flex:0 0 auto; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:999px; padding:6px 14px; font-size:13.5px; white-space:nowrap; transition:border-color .15s, color .15s; }
+  .site-pill:hover { border-color:var(--brand); color:var(--brand); text-decoration:none; }
+  .tabbar { display:none; }
+
+  .wrap { width:100%; max-width:860px; margin:0 auto; padding:calc(var(--topbar-h) + 20px) 16px 40px; }
+  .head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; padding:0 2px; }
+  .tt .nm { font-size:22px; font-weight:700; letter-spacing:.2px; color:var(--ink); }
+  .tt .ds { font-size:13px; color:var(--muted); margin-top:2px; }
+  .me { margin-left:auto; font-size:13.5px; color:var(--muted); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px; margin-bottom:14px; }
+  #listCard { background:transparent; border:none; padding:0; }
+  .boards { display:flex; gap:8px; flex-wrap:wrap; position:sticky; top:calc(var(--topbar-h) + 8px); z-index:20; margin:0 0 12px; padding:6px 0; background:var(--bg); }
+  .board { border:1px solid var(--line); background:var(--card); padding:7px 15px; border-radius:999px; font-size:14.5px; color:var(--muted); font-weight:500; font-family:inherit; cursor:pointer; transition:background .15s, color .15s, border-color .15s; }
+  .board:hover { color:var(--ink); border-color:#B9CBEF; }
+  .board.on { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; }
+  .board .cnt { opacity:.75; font-size:12px; margin-left:4px; }
+  .boarddesc { font-size:13px; color:var(--muted); margin:0 2px 12px; line-height:1.6; }
+  .post { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px 18px; margin-bottom:10px; cursor:pointer; transition:border-color .15s, background .15s; display:flex; align-items:center; gap:13px; }
+  .post:active { background:var(--hover); }
+  .post .main { flex:1; min-width:0; }
+  .post .rp { margin-left:auto; text-align:center; flex:none; padding-left:8px; }
+  .post .rp .n { font-size:17px; font-weight:700; color:var(--ink); line-height:1.2; }
+  .post .rp .w { font-size:12px; color:var(--faint); }
+  .post:hover { border-color:#B9CBEF; }
+  .post .t { font-size:16.5px; font-weight:650; color:var(--ink); line-height:1.45; letter-spacing:.1px; }
+  .post .meta, .meta { font-size:12.5px; color:var(--faint); margin-top:6px; line-height:1.6; }
+  .post .b { font-size:14px; color:var(--muted); margin-top:5px; line-height:1.6; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .body-full { font-size:15px; line-height:1.8; white-space:pre-wrap; word-break:break-word; margin-top:10px; color:var(--ink); }
+  .reply { background:var(--card); border:1px solid var(--line-soft); border-radius:12px; padding:13px 15px; margin-bottom:10px; }
+  .reply .b { white-space:pre-wrap; word-break:break-word; }
+  .tag { display:inline-block; border-radius:6px; padding:1px 7px; font-size:12px; background:var(--brand-soft); color:var(--muted); font-weight:500; margin-left:8px; vertical-align:2px; }
+  .tag.off { background:#FF8A1E; color:#fff; font-weight:600; }
+  .sortbar { display:flex; gap:8px; align-items:center; margin:0 2px 10px; font-size:13px; color:var(--muted); }
+  .tag.pend { background:var(--warn-soft); color:var(--warn); }
+  .tag.rej { background:var(--danger-soft); color:var(--danger); }
+  .tag.hid { background:var(--brand-soft); color:var(--muted); }
+  label { display:block; font-size:13.5px; color:var(--muted); font-weight:500; margin:14px 2px 6px; }
+  label:first-of-type { margin-top:0; }
+  input, textarea, select { width:100%; padding:0 13px; height:48px; font-size:16px; font-family:inherit; color:var(--ink); border:1px solid var(--line); border-radius:10px; background:var(--field); outline:none; transition:border-color .15s, box-shadow .15s; }
+  textarea { height:auto; min-height:110px; padding:11px 13px; resize:vertical; line-height:1.6; font-size:15px; }
+  input:focus, textarea:focus, select:focus { border-color:var(--brand); box-shadow:0 0 0 3px rgba(36,112,224,.13); }
+  .btn { border:1px solid var(--brand); cursor:pointer; font-family:inherit; font-size:15px; font-weight:600; color:#fff; height:44px; padding:0 22px; border-radius:10px; background:var(--brand); transition:filter .15s; }
+  .btn:hover { filter:brightness(1.06); }
+  .btn:disabled { opacity:.55; cursor:default; }
+  .btn.small { height:34px; padding:0 14px; font-size:13px; border-radius:8px; }
+  .btn.ghost { background:var(--card); border:1px solid var(--line); color:var(--ink); font-weight:500; }
+  .btn.ghost:hover { border-color:#B9CBEF; background:var(--hover); filter:none; }
+  .btn.danger { background:#D93025; border-color:#B3261E; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .res { margin-top:12px; font-size:13.5px; line-height:1.7; min-height:22px; }
+  .res .ok { color:var(--ok); font-weight:600; }
+  .res .bad { color:var(--danger); font-weight:600; }
+  .link { color:var(--brand); cursor:pointer; text-decoration:none; }
+  .link:hover { text-decoration:underline; }
+  .mini { font-size:12.5px; color:var(--faint); cursor:pointer; }
+  .hint { color:var(--faint) !important; }
+  .foot { margin-top:18px; text-align:center; font-size:12.5px; line-height:1.8; color:var(--faint); }
+  .foot a { color:var(--brand); }
+  h3.sec { margin:6px 0 10px; font-size:16px; font-weight:700; color:var(--ink); }
+
+  @media (max-width:959px){
+    .topnav { display:none; }
+    .tabbar { display:flex; position:fixed; left:0; right:0; bottom:0; z-index:45; background:var(--bar-bg); border-top:1px solid var(--line); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); }
+    .tabbar a { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; color:var(--faint); font-size:11px; padding:4px 0 2px; border-radius:10px; }
+    .tabbar a svg { width:23px; height:23px; }
+    .tabbar a:hover { text-decoration:none; }
+    .tabbar a.active { color:var(--brand); font-weight:600; }
+    .wrap { padding-bottom:96px; }
+  }
+
+  @media (max-width:560px){
+    .wrap { padding-left:12px; padding-right:12px; }
+    .post .t { font-size:16px; }
+    .post { padding:14px; }
+    .card { padding:17px; }
+    .btn { width:100%; }
+    .btn.small { width:auto; }
+    .boards { top:calc(var(--topbar-h) + 4px); }
+    .brandmark { font-size:16.5px; }
+  }
+</style>
+</head>
+<body>
+<header class="appbar"><a class="brandmark" href="/friends"><span class="brand-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"> <defs> <linearGradient id="tilegrad" x1="0" y1="0" x2="1" y2="1"> <stop offset="0" stop-color="#0D3170"/><stop offset="1" stop-color="#081F47"/> </linearGradient> <linearGradient id="qfgrad" x1="0" y1="0" x2="1" y2="1"> <stop offset="0" stop-color="#3F8CFF"/><stop offset="1" stop-color="#2470E0"/> </linearGradient> </defs> <rect x="0" y="0" rx="241" fill="url(#tilegrad)"/> <g transform="translate(61.4,61.4) scale(3.7547)"> <path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="url(#qfgrad)" stroke-width="25" stroke-linecap="round"/> <circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/> </g> </svg></span><span>QFRemote</span></a><nav class="topnav"><a href="/friends">好友</a><a href="/chat">聊天</a><a href="/forum" class="active">论坛</a></nav><a class="site-pill" href="https://a718983610-sys.github.io/qfremote-website/" target="_blank" rel="noopener">官网</a></header>
+<div class="wrap">
+  <div class="head">
+    <div class="tt">
+      <div class="nm">QFRemote 论坛</div>
+      <div class="ds">使用求助、建议与反馈、官方公告</div>
+    </div>
+    <div class="me" id="meBox"></div>
+  </div>
+
+  <!-- 登录卡 -->
+  <div class="card hidden" id="loginCard">
+    <label for="fUser">账号</label>
+    <input id="fUser" autocomplete="username" autocapitalize="none" placeholder="请输入您的 QFRemote 账号">
+    <label for="fPw">密码</label>
+    <input id="fPw" type="password" autocomplete="current-password" placeholder="账号密码">
+    <label style="display:block;margin-top:12px;font-size:13px;cursor:pointer"><input type="checkbox" id="fRemember" style="vertical-align:-2px"> 记住此设备</label>
+    <button class="btn" id="loginBtn" style="margin-top:16px">登录</button>
+    <div class="res" id="loginRes"></div>
+    <div class="hint" style="font-size:12px;color:#a9c6f5">没有账号？请先 <a class="link" href="/register">注册</a>。游客无需登录即可浏览帖子。</div>
+  </div>
+
+  <!-- 板块与列表 -->
+  <div class="card" id="listCard">
+    <div class="boards" id="boards"></div>
+    <div class="boarddesc" id="boardDesc"></div>
+    <div class="sortbar" id="sortBar"><span>排序</span><button class="board on" data-sort="latest">最新</button><button class="board" data-sort="hot">热门</button></div>
+    <div id="postList"></div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn small ghost" id="prevPage">上一页</button>
+      <button class="btn small ghost" id="nextPage">下一页</button>
+      <span class="mini" id="pageInfo"></span>
+    </div>
+  </div>
+
+  <!-- 发帖 -->
+  <div class="card hidden" id="newCard">
+    <h3 class="sec">发新帖</h3>
+    <label for="nTitle">标题（最多 80 字）</label>
+    <input id="nTitle" maxlength="80" placeholder="请用一句话概括问题">
+    <label for="nBody">正文（最多 5000 字）</label>
+    <textarea id="nBody" maxlength="5000" placeholder="请说明具体情况：设备型号、问题现象、已尝试的处理办法"></textarea>
+    <button class="btn" id="postBtn" style="margin-top:16px">发布</button>
+    <div class="res" id="postRes"></div>
+  </div>
+
+  <!-- 详情 -->
+  <div class="card hidden" id="detailCard">
+    <div class="mini" id="backBtn">← 返回列表</div>
+    <div id="detailBody"></div>
+    <div id="replyList"></div>
+    <div id="replyBox">
+      <label for="rBody">写回复（最多 2000 字）</label>
+      <textarea id="rBody" maxlength="2000" style="min-height:80px"></textarea>
+      <button class="btn" id="replyBtn" style="margin-top:12px">回复</button>
+      <div class="res" id="replyRes"></div>
+    </div>
+  </div>
+
+  <!-- 我的帖子 -->
+  <div class="card hidden" id="myCard">
+    <h3 class="sec">我的帖子与回复</h3>
+    <div id="myStats" class="meta" style="margin-bottom:6px"></div>
+    <label for="nickInput">论坛昵称（可选，最多 20 个字，须通过内容审核；清空并保存即恢复账号名显示）</label>
+    <div class="row">
+      <input id="nickInput" maxlength="20" placeholder="设置后，论坛中将以昵称显示" style="flex:1;min-width:200px;width:auto">
+      <button class="btn small ghost" id="nickBtn">保存昵称</button>
+    </div>
+    <div class="res" id="nickRes"></div>
+    <div id="myList"></div>
+  </div>
+
+  <!-- 作者主页 -->
+  <div class="card hidden" id="authorCard">
+    <div class="mini" id="authorBack">← 返回列表</div>
+    <div id="authorBody" style="margin-top:8px"></div>
+    <div id="authorPosts" style="margin-top:12px"></div>
+  </div>
+
+  <!-- 站长复核面 -->
+  <div class="card hidden" id="adminCard">
+    <h3 class="sec">站长复核队列</h3>
+    <div id="adminBody"></div>
+    <h3 class="sec">审核日志（最近 100 条）</h3>
+    <div class="row"><button class="btn small ghost" id="modlogBtn">加载审核日志</button></div>
+    <div id="modlogBody" style="margin-top:10px"></div>
+  </div>
+
+  <div class="foot">
+    账号本人事项（改名、改密、冻结、封禁、申诉）请勿在论坛公开讨论，请联系好友列表中的「官方客服」，或前往
+    <a href="https://a718983610-sys.github.io/qfremote-website/" target="_blank" rel="noopener">官网留言</a>。<br>
+    请友善发帖。广告引流、违规交易、违法内容将被直接驳回，判定有误可申诉。
+  </div>
+</div>
+
+<script>
+var API = 'api/forum';
+var me = null, boards = [], curBoard = 'general', page = 1, curPost = null, sortMode = 'latest';
+
+// 作者展示：昵称（无昵称时为账号名）＋官方标记；点击进入作者主页
+function authorHtml(x) {
+  return '<span class="link" data-author="' + esc(x.author) + '">' + esc(x.authorName || x.author) + '</span>' + (x.authorOfficial ? '<span class="tag off">官方</span>' : '');
+}
+function wireAuthors(root) {
+  (root || document).querySelectorAll('[data-author]').forEach(function (n) {
+    n.onclick = function (ev) { if (ev) ev.stopPropagation(); showAuthor(n.dataset.author); };
+  });
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function fmt(t) { return new Date(t).toLocaleString('zh-CN', { hour12: false }); }
+async function api(path, opts) {
+  var r = await fetch(API + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+  return r.json();
+}
+function statusTag(p) {
+  var s = '';
+  if (p.status === 'pending') s += '<span class="tag pend">待审核</span>';
+  if (p.status === 'rejected') s += '<span class="tag rej">已驳回' + (p.reviewCategory ? '：' + esc(p.reviewCategory) : '') + '</span>';
+  if (p.banHidden) s += '<span class="tag hid">暂不可见</span>';
+  return s;
+}
+
+// 发帖框显隐与服务端权限同口径：公告板块仅官方（站长或官方号）能发帖，
+// 其余登录用户在该板块不展示发帖框（服务端闸门仍在，此处只管呈现）。
+function canPostHere() { return !!me && (curBoard !== 'announcements' || me.isAdmin || me.official); }
+function syncNewCard() { document.getElementById('newCard').classList.toggle('hidden', !canPostHere()); }
+
+async function loadMe() {
+  var d = await api('/me');
+  if (!d.user) {
+    // 已登录软件/控制台时凭控制台会话直接进，不再输第二次密码；
+    // 没有控制台会话（或已手动退出论坛）就安静停在未登录态。
+    try {
+      var s = await api('/sso', { method: 'POST', body: '{}' });
+      if (s && s.ok) d = await api('/me');
+    } catch (e) { /* 保持未登录态 */ }
+  }
+  me = d.user ? d : null;
+  var box = document.getElementById('meBox');
+  if (me) {
+    box.innerHTML = '<span>已登录：' + esc(me.displayName || me.user) + (me.official ? '<span class="tag off">官方</span>' : '') + (me.isAdmin ? '（站长）' : '') + '</span>' +
+      (me.muted ? '<span class="tag rej">论坛禁言中</span>' : '') +
+      '<button class="btn small ghost" id="myBtn">我的帖子</button>' +
+      (me.isAdmin ? '<button class="btn small ghost" id="admBtn">复核队列</button>' : '') +
+      '<button class="btn small ghost" id="outBtn">退出</button>';
+    document.getElementById('outBtn').onclick = async function () { await api('/logout', { method: 'POST', body: '{}' }); location.reload(); };
+    document.getElementById('myBtn').onclick = showMy;
+    if (me.isAdmin) document.getElementById('admBtn').onclick = showAdmin;
+    document.getElementById('loginCard').classList.add('hidden');
+    syncNewCard();
+  } else {
+    box.innerHTML = '<button class="btn small" id="showLogin">登录后发帖</button>';
+    document.getElementById('showLogin').onclick = function () { document.getElementById('loginCard').classList.toggle('hidden'); };
+    document.getElementById('newCard').classList.add('hidden');
+  }
+}
+
+async function loadBoards() {
+  var d = await api('/boards');
+  boards = d.boards || [];
+  var el = document.getElementById('boards');
+  el.innerHTML = boards.map(function (b) {
+    return '<button class="board' + (b.key === curBoard ? ' on' : '') + '" data-k="' + b.key + '">' + esc(b.name) + '<span class="cnt">' + b.count + '</span></button>';
+  }).join('');
+  el.querySelectorAll('.board').forEach(function (btn) {
+    btn.onclick = function () { curBoard = btn.dataset.k; page = 1; loadBoards(); loadPosts(); };
+  });
+  var cur = boards.filter(function (b) { return b.key === curBoard; })[0];
+  document.getElementById('boardDesc').textContent = cur ? cur.desc : '';
+  syncNewCard();
+}
+
+async function loadPosts() {
+  var d = await api('/posts?board=' + encodeURIComponent(curBoard) + '&page=' + page + (sortMode === 'hot' ? '&sort=hot' : ''));
+  var el = document.getElementById('postList');
+  if (!d.posts || !d.posts.length) { el.innerHTML = '<div class="meta" style="padding:14px 2px">本板块暂无帖子。</div>'; }
+  else el.innerHTML = d.posts.map(function (p) {
+    return '<div class="post" data-id="' + p.id + '"><div class="main"><div class="t">' + esc(p.title) + statusTag(p) + '</div>' +
+      '<div class="meta">' + authorHtml(p) + ' · ' + fmt(p.createdAt) + ' · 浏览 ' + p.views + ' · 赞 ' + p.likes + '</div>' +
+      '<div class="b">' + esc(p.body.slice(0, 120)) + (p.body.length > 120 ? '…' : '') + '</div></div>' +
+      '<div class="rp"><div class="n">' + p.replyCount + '</div><div class="w">回复</div></div></div>';
+  }).join('');
+  el.querySelectorAll('.post').forEach(function (node) { node.onclick = function () { openPost(node.dataset.id); }; });
+  wireAuthors(el);
+  document.getElementById('pageInfo').textContent = '第 ' + page + ' 页 / 共 ' + (d.total || 0) + ' 帖';
+}
+
+async function openPost(id) {
+  var d = await api('/posts/' + id);
+  if (!d.ok) { alert(d.msg || '帖子打开失败，请重试。'); return; }
+  curPost = d.post;
+  document.getElementById('listCard').classList.add('hidden');
+  document.getElementById('newCard').classList.add('hidden');
+  document.getElementById('authorCard').classList.add('hidden');
+  document.getElementById('detailCard').classList.remove('hidden');
+  var p = d.post;
+  document.getElementById('detailBody').innerHTML =
+    '<div class="t" style="font-size:19px;font-weight:700;line-height:1.5">' + esc(p.title) + statusTag(p) + '</div>' +
+    '<div class="meta">' + authorHtml(p) + ' · ' + fmt(p.createdAt) + ' · 浏览 ' + p.views + '</div>' +
+    '<div class="body-full">' + esc(p.body) + '</div>' +
+    '<div class="row" style="margin-top:12px"><button class="btn small ghost" id="likeBtn">👍 ' + p.likes + (p.liked ? '（已赞）' : '') + '</button>' +
+    '<button class="btn small ghost" id="shareBtn">分享 ' + (p.shares || 0) + '</button>' +
+    (me && p.mine ? '<button class="btn small ghost" id="delPostBtn">删除</button>' : '') +
+    (me && !p.mine ? '<span class="mini" id="repPost">举报</span>' : '') + '</div>';
+  wireAuthors(document.getElementById('detailBody'));
+  document.getElementById('likeBtn').onclick = async function () {
+    if (!me) { alert('请先登录后再点赞。'); return; }
+    var r = await api('/posts/' + id + '/like', { method: 'POST', body: '{}' });
+    if (r.ok) openPost(id); else alert(r.msg);
+  };
+  document.getElementById('shareBtn').onclick = async function () {
+    var r = await api('/posts/' + id + '/share', { method: 'POST', body: '{}' });
+    var url = location.origin + location.pathname + '?post=' + id;
+    var copied = false;
+    try { await navigator.clipboard.writeText(url); copied = true; } catch (e) { window.prompt('请复制以下链接：', url); copied = true; }
+    if (r && r.ok) this.textContent = '分享 ' + r.shares + (copied ? '（链接已复制）' : '');
+  };
+  var dpb = document.getElementById('delPostBtn');
+  if (dpb) dpb.onclick = async function () {
+    if (!confirm('确定要删除这篇帖子吗？删除后无法恢复。')) return;
+    var r = await api('/posts/' + id + '/delete-own', { method: 'POST', body: '{}' });
+    if (r.ok) backToList(); else alert(r.msg || '删除失败，请重试。');
+  };
+  var rp = document.getElementById('repPost');
+  if (rp) rp.onclick = async function () { var r = await api('/report', { method: 'POST', body: JSON.stringify({ type: 'post', id: id }) }); alert(r.msg || '举报已提交。'); };
+  document.getElementById('replyList').innerHTML = (d.replies || []).map(function (r) {
+    return '<div class="reply"><div class="meta">' + authorHtml(r) + ' · ' + fmt(r.createdAt) + statusTag(r) +
+      (me && !r.mine ? ' · <span class="mini" data-rep="' + r.id + '">举报</span>' : '') +
+      (me && r.mine ? ' · <span class="mini" data-delrep="' + r.id + '">删除</span>' : '') + '</div>' +
+      '<div class="b" style="font-size:14.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;margin-top:4px">' + esc(r.body) + '</div></div>';
+  }).join('');
+  wireAuthors(document.getElementById('replyList'));
+  document.querySelectorAll('[data-rep]').forEach(function (n) {
+    n.onclick = async function () { var r = await api('/report', { method: 'POST', body: JSON.stringify({ type: 'reply', id: n.dataset.rep }) }); alert(r.msg || '举报已提交。'); };
+  });
+  document.querySelectorAll('[data-delrep]').forEach(function (n) {
+    n.onclick = async function () {
+      if (!confirm('确定要删除这条回复吗？删除后无法恢复。')) return;
+      var r = await api('/replies/' + n.dataset.delrep + '/delete-own', { method: 'POST', body: '{}' });
+      if (r.ok) openPost(id); else alert(r.msg || '删除失败，请重试。');
+    };
+  });
+  document.getElementById('replyBox').style.display = me ? '' : 'none';
+}
+
+function backToList() {
+  document.getElementById('detailCard').classList.add('hidden');
+  document.getElementById('authorCard').classList.add('hidden');
+  document.getElementById('listCard').classList.remove('hidden');
+  syncNewCard();
+  loadBoards(); loadPosts();
+}
+
+async function showAuthor(account) {
+  var d = await api('/users/' + encodeURIComponent(account));
+  if (!d.ok) { alert(d.msg || '作者主页打开失败，请重试。'); return; }
+  var usr = d.user;
+  document.getElementById('authorBody').innerHTML =
+    '<div class="t" style="font-size:18px;font-weight:700">' + esc(usr.name) + (usr.official ? '<span class="tag off">官方</span>' : '') + '</div>' +
+    '<div class="meta">账号 ' + esc(usr.account) + (usr.joinedAt ? ' · 注册于 ' + fmt(usr.joinedAt) : '') + '</div>' +
+    '<div class="meta">帖子 ' + usr.stats.posts + ' · 回复 ' + usr.stats.replies + ' · 获赞 ' + usr.stats.likesReceived + ' · 总浏览 ' + usr.stats.viewsReceived + '</div>';
+  var el = document.getElementById('authorPosts');
+  el.innerHTML = (d.posts || []).length ? (d.posts || []).map(function (p) {
+    return '<div class="post" data-id="' + p.id + '"><div class="t">' + esc(p.title) + '</div>' +
+      '<div class="meta">' + fmt(p.createdAt) + ' · 回复 ' + p.replyCount + ' · 浏览 ' + p.views + ' · 赞 ' + p.likes + ' · 分享 ' + (p.shares || 0) + '</div>' +
+      '<div class="b">' + esc(p.body.slice(0, 120)) + (p.body.length > 120 ? '…' : '') + '</div></div>';
+  }).join('') : '<div class="meta" style="padding:10px 2px">暂无公开发布的帖子。</div>';
+  el.querySelectorAll('.post').forEach(function (n) { n.onclick = function () { openPost(n.dataset.id); }; });
+  document.getElementById('listCard').classList.add('hidden');
+  document.getElementById('newCard').classList.add('hidden');
+  document.getElementById('detailCard').classList.add('hidden');
+  document.getElementById('authorCard').classList.remove('hidden');
+  window.scrollTo(0, 0);
+}
+
+async function showMy() {
+  var d = await api('/my');
+  document.getElementById('myStats').textContent = d.stats ? ('帖子 ' + d.stats.posts + ' · 回复 ' + d.stats.replies + ' · 获赞 ' + d.stats.likesReceived + ' · 总浏览 ' + d.stats.viewsReceived) : '';
+  var ni = document.getElementById('nickInput');
+  if (ni && me) ni.value = me.nickname || '';
+  var el = document.getElementById('myList');
+  var html = (d.posts || []).map(function (p) {
+    return '<div class="post" data-id="' + p.id + '"><div class="t">' + esc(p.title) + statusTag(p) + '</div><div class="meta">' + fmt(p.createdAt) + (p.status === 'pending' ? ' · 已提交，审核通过后显示' : '') + (p.status === 'rejected' ? ' · 未通过审核：内容涉及违规类别。如认为判定有误，可通过页脚所列渠道申诉' : '') + ' · <span class="mini" data-delpost="' + p.id + '">删除</span></div></div>';
+  }).join('');
+  html += (d.replies || []).map(function (r) {
+    var head = r.postGone ? '原帖已删除' : ('回复《<span class="link" data-open="' + r.postId + '">' + esc(r.postTitle || '') + '</span>》');
+    return '<div class="reply"><div class="meta">' + head + ' · ' + fmt(r.createdAt) + statusTag(r) + ' · <span class="mini" data-delrep2="' + r.id + '">删除</span></div><div class="b">' + esc(r.body.slice(0, 100)) + '</div></div>';
+  }).join('');
+  el.innerHTML = html || '<div class="meta">您尚未发布过帖子。</div>';
+  el.querySelectorAll('.post').forEach(function (n) { n.onclick = function () { openPost(n.dataset.id); }; });
+  el.querySelectorAll('[data-open]').forEach(function (n) { n.onclick = function () { openPost(n.dataset.open); }; });
+  el.querySelectorAll('[data-delpost]').forEach(function (n) {
+    n.onclick = async function (ev) {
+      ev.stopPropagation();
+      if (!confirm('确定要删除这篇帖子吗？删除后无法恢复。')) return;
+      var r = await api('/posts/' + n.dataset.delpost + '/delete-own', { method: 'POST', body: '{}' });
+      if (r.ok) { showMy(); loadBoards(); loadPosts(); } else alert(r.msg || '删除失败，请重试。');
+    };
+  });
+  el.querySelectorAll('[data-delrep2]').forEach(function (n) {
+    n.onclick = async function () {
+      if (!confirm('确定要删除这条回复吗？删除后无法恢复。')) return;
+      var r = await api('/replies/' + n.dataset.delrep2 + '/delete-own', { method: 'POST', body: '{}' });
+      if (r.ok) showMy(); else alert(r.msg || '删除失败，请重试。');
+    };
+  });
+  document.getElementById('myCard').classList.toggle('hidden');
+}
+
+async function showAdmin() {
+  var d = await api('/admin/queue');
+  var el = document.getElementById('adminBody');
+  function item(x, type) {
+    return '<div class="reply"><div class="meta">' + type + ' · ' + esc(x.author) + ' · ' + fmt(x.createdAt) + ' · 举报 ' + (x.reports || 0) + ' · 机审：' + esc(x.reviewDetail || '') + '</div>' +
+      (x.title ? '<div class="t">' + esc(x.title) + '</div>' : '') + '<div class="b">' + esc(x.body) + '</div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn small" data-ok="' + type + ':' + x.id + '">通过</button>' +
+      '<button class="btn small danger" data-no="' + type + ':' + x.id + '">驳回</button></div></div>';
+  }
+  var html = '<h3 class="sec">待审帖子（' + (d.pendingPosts || []).length + '）</h3>' + (d.pendingPosts || []).map(function (x) { return item(x, 'post'); }).join('');
+  html += '<h3 class="sec">待审回复（' + (d.pendingReplies || []).length + '）</h3>' + (d.pendingReplies || []).map(function (x) { return item(x, 'reply'); }).join('');
+  html += '<h3 class="sec">封禁连带不可见（' + (d.banHidden || []).length + '）</h3>' + (d.banHidden || []).map(function (x) {
+    return '<div class="reply"><div class="meta">' + x.type + ' · ' + esc(x.author) + '</div><div class="b">' + esc((x.title ? x.title + ' ' : '') + x.body) + '</div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn small" data-restore="' + x.type + ':' + x.id + '">恢复显示</button></div></div>';
+  }).join('');
+  html += '<h3 class="sec">禁言中（' + (d.muted || []).length + '）</h3>' + (d.muted || []).map(function (m) {
+    return '<div class="reply"><div class="meta">' + esc(m.user) + ' · 30 天驳回 ' + m.rejects30d + ' 次 · ' + (m.permanent ? '永久' : '到 ' + fmt(m.until)) + '</div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn small ghost" data-unmute="' + esc(m.user) + '">解除禁言</button></div></div>';
+  }).join('');
+  el.innerHTML = html || '<div class="meta">队列为空。</div>';
+  el.querySelectorAll('[data-ok]').forEach(function (b) { b.onclick = async function () { var p = b.dataset.ok.split(':'); await api('/admin/review', { method: 'POST', body: JSON.stringify({ type: p[0], id: p[1], decision: 'approve' }) }); showAdmin(); }; });
+  el.querySelectorAll('[data-no]').forEach(function (b) { b.onclick = async function () { var p = b.dataset.no.split(':'); await api('/admin/review', { method: 'POST', body: JSON.stringify({ type: p[0], id: p[1], decision: 'reject' }) }); showAdmin(); }; });
+  el.querySelectorAll('[data-restore]').forEach(function (b) { b.onclick = async function () { var p = b.dataset.restore.split(':'); await api('/admin/restore', { method: 'POST', body: JSON.stringify({ type: p[0], id: p[1] }) }); showAdmin(); }; });
+  el.querySelectorAll('[data-unmute]').forEach(function (b) { b.onclick = async function () { await api('/admin/mute', { method: 'POST', body: JSON.stringify({ username: b.dataset.unmute, mode: 'clear' }) }); showAdmin(); }; });
+  document.getElementById('adminCard').classList.toggle('hidden');
+}
+
+document.getElementById('backBtn').onclick = backToList;
+document.getElementById('authorBack').onclick = backToList;
+document.querySelectorAll('#sortBar .board').forEach(function (b) {
+  b.onclick = function () {
+    sortMode = b.dataset.sort;
+    document.querySelectorAll('#sortBar .board').forEach(function (x) { x.classList.toggle('on', x === b); });
+    page = 1; loadPosts();
+  };
+});
+document.getElementById('nickBtn').onclick = async function () {
+  var res = document.getElementById('nickRes');
+  var r = await api('/profile', { method: 'POST', body: JSON.stringify({ nickname: document.getElementById('nickInput').value }) });
+  if (r.ok) { res.innerHTML = '<span class="ok">' + esc(r.msg) + '</span>'; loadMe(); }
+  else res.innerHTML = '<span class="bad">' + esc(r.msg || '保存失败，请重试。') + '</span>';
+};
+document.getElementById('modlogBtn').onclick = async function () {
+  var d = await api('/admin/modlog?page=1&pageSize=100');
+  var el = document.getElementById('modlogBody');
+  if (!d.ok) { el.innerHTML = '<div class="meta">' + esc(d.msg || '日志加载失败，请重试。') + '</div>'; return; }
+  el.innerHTML = (d.entries || []).map(function (e) {
+    return '<div class="reply"><div class="meta">' + esc(e.at || '') + ' · ' + esc(e.actor || '') + ' · ' + esc(e.action || '') +
+      (e.targetId ? ' · ' + esc(e.targetType || '') + ' ' + esc(e.targetId) : '') + (e.author ? ' · 作者 ' + esc(e.author) : '') + (e.category ? ' · 类别 ' + esc(e.category) : '') + '</div>' +
+      (e.snapshot ? '<div class="b">' + esc(e.snapshot) + '</div>' : '') + (e.detail ? '<div class="meta">' + esc(e.detail) + '</div>' : '') + '</div>';
+  }).join('') || '<div class="meta">暂无日志。</div>';
+};
+document.getElementById('prevPage').onclick = function () { if (page > 1) { page--; loadPosts(); } };
+document.getElementById('nextPage').onclick = function () { page++; loadPosts(); };
+document.getElementById('loginBtn').onclick = async function () {
+  var u = document.getElementById('fUser').value.trim().toLowerCase();
+  var pw = document.getElementById('fPw').value;
+  var res = document.getElementById('loginRes');
+  var r = await api('/login', { method: 'POST', body: JSON.stringify({ username: u, password: pw, remember: document.getElementById('fRemember').checked }) });
+  if (r.ok) { res.innerHTML = '<span class="ok">登录成功。</span>'; loadMe(); }
+  else res.innerHTML = '<span class="bad">' + esc(r.msg || '登录失败，请核对账号和密码。') + '</span>';
+};
+document.getElementById('postBtn').onclick = async function () {
+  var res = document.getElementById('postRes');
+  var r = await api('/posts', { method: 'POST', body: JSON.stringify({ board: curBoard, title: document.getElementById('nTitle').value, body: document.getElementById('nBody').value }) });
+  if (r.ok) {
+    res.innerHTML = '<span class="ok">' + esc(r.msg) + '</span>';
+    document.getElementById('nTitle').value = ''; document.getElementById('nBody').value = '';
+    loadBoards(); loadPosts();
+  } else res.innerHTML = '<span class="bad">' + esc(r.msg || '发布失败，请重试。') + '</span>';
+};
+document.getElementById('replyBtn').onclick = async function () {
+  if (!curPost) return;
+  var res = document.getElementById('replyRes');
+  var r = await api('/posts/' + curPost.id + '/replies', { method: 'POST', body: JSON.stringify({ body: document.getElementById('rBody').value }) });
+  if (r.ok) { res.innerHTML = '<span class="ok">' + esc(r.msg) + '</span>'; document.getElementById('rBody').value = ''; openPost(curPost.id); }
+  else res.innerHTML = '<span class="bad">' + esc(r.msg || '回复失败，请重试。') + '</span>';
+};
+
+// 共享退出纪元兜底（2.3.0 正式退出登录）：控制台退出时在其源落
+// qfLogoutEpoch；本页与控制台同源（隧道源）时可直接读到；被包装页
+// 内嵌（直连源控制台）时由包装页 postMessage 送达。纪元比本页已确认
+// 的新、且本页处于登录态 → 调自己的退出端点落为未登录态并刷新。
+(function () {
+  var ACK = 'qfForumEpochAck';
+  function applyEpoch(epoch) {
+    epoch = +epoch || 0;
+    if (!epoch) return;
+    var ack = 0;
+    try { ack = +localStorage.getItem(ACK) || 0; } catch (e) {}
+    if (epoch <= ack) return;
+    try { localStorage.setItem(ACK, String(epoch)); } catch (e) {}
+    api('/me').then(function (j) {
+      if (j && j.user) {
+        fetch(API + '/logout', { method: 'POST', credentials: 'same-origin' }).then(function () { location.reload(); }).catch(function () {});
+      }
+    }).catch(function () {});
+  }
+  try { applyEpoch(localStorage.getItem('qfLogoutEpoch')); } catch (e) {}
+  window.addEventListener('message', function (ev) {
+    if (ev.data && ev.data.type === 'qf-logout-epoch') {
+      try { localStorage.setItem('qfLogoutEpoch', String(ev.data.epoch || '')); } catch (e) {}
+      applyEpoch(ev.data.epoch);
+    }
+  });
+})();
+
+loadMe(); loadBoards(); loadPosts();
+// 分享深链：?post=p数字 直接打开对应帖子
+var qPost = new URLSearchParams(location.search).get('post');
+if (qPost && /^p\d+$/.test(qPost)) openPost(qPost);
+</script>
+<nav class="tabbar"><a href="/friends"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.4"/><path d="M3.5 19.5c.7-3.2 2.9-5 5.5-5s4.8 1.8 5.5 5"/><circle cx="17.2" cy="9.5" r="2.5"/><path d="M16 14.7c2.1.3 3.9 1.9 4.5 4.8"/></svg>好友</a><a href="/chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/></svg>聊天</a><a href="/forum" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h4.5"/></svg>论坛</a></nav>
+</body>
+</html>

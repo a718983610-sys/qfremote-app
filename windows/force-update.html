@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    display:flex; flex-direction:column;
+  }
+  html[data-theme="dark"] body {
+    background: #17181c; color:#eceff3;
+  }
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:24px 26px 0; }
+  .tile {
+    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    box-sizing:border-box;
+  }
+  html[data-theme="dark"] .tile { background:#ffffff; }
+  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
+  .tt { margin-left:14px; padding-top:5px; }
+  .tt .nm { font-size:20px; font-weight:600; letter-spacing:.8px; line-height:1.1; }
+  .tt .ds { font-size:12px; color:#6b7a90; margin-top:5px; }
+  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .card {
+    margin:20px 26px 0; padding:16px 18px;
+    background: #ffffff;
+    border: 1px solid #dfe7f2; border-radius:14px;
+  }
+  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
+  .vrow { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:700; color:#1f2d47; }
+  html[data-theme="dark"] .vrow { color:#eceff3; }
+  .vrow .arr { color:#f58a0c; font-weight:700; }
+  .vrow .to { color:#f58a0c; }
+  .notes { margin-top:11px; font-size:13.5px; line-height:1.7; color:#1f2d47; white-space:pre-wrap; }
+  html[data-theme="dark"] .notes { color:#c9cdd4; }
+  .bar { display:none; height:9px; border-radius:99px; margin:18px 26px 0;
+    background: #dfe7f2; overflow:hidden; }
+  .bar.show { display:block; }
+  .bar i { display:block; height:100%; width:0%; border-radius:99px;
+    background: #2470e0; transition: width .2s ease; }
+  html[data-theme="dark"] .bar { background: rgba(255,255,255,.16); }
+  .res { margin:15px 26px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center;
+    color:#6b7a90; font-variant-numeric: tabular-nums; }
+  html[data-theme="dark"] .res { color:#a7adb8; }
+  .res .ok { color:#128a43; font-weight:600; }
+  .res .bad { color:#d3382c; font-weight:600; }
+  html[data-theme="dark"] .res .ok { color:#5eeaa0; }
+  html[data-theme="dark"] .res .bad { color:#ff9d8f; }
+  .act { padding:0 26px; margin-top:16px; }
+  .btn {
+    width:100%; border:none; cursor:pointer; font-family:inherit;
+    font-size:15px; font-weight:600; color:#fff; letter-spacing:1px;
+    padding:13px 0; border-radius:12px;
+    background: #2470e0;
+    transition: filter .15s ease, transform .05s ease, opacity .15s;
+  }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity:.55; cursor:default; transform:none; filter:none; }
+  .act2 { display:flex; justify-content:center; padding:0 26px; margin-top:10px; }
+  .btn2 { background:none; border:none; color:#2470E0; font-size:13px; cursor:pointer; text-decoration:underline; padding:4px 8px; }
+  .btn2:hover { filter:brightness(1.15); }
+  .hidden { display:none !important; }
+  .foot { margin-top:auto; padding:0 26px 16px; text-align:center;
+    font-size:11.5px; line-height:1.6; color:rgba(107,122,144,.75); }
+  html[data-theme="dark"] .foot { color:rgba(167,173,184,.55); }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
+    <div class="tt">
+      <div class="nm">需要先更新</div>
+      <div class="ds">QFRemote 发现新版本，先更新再使用</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="vrow"><span id="vFrom">当前版本 —</span><span class="arr">→</span><span class="to" id="vTo">新版本 —</span></div>
+    <div class="notes" id="vNotes"></div>
+  </div>
+
+  <div class="bar" id="bar"><i id="fill"></i></div>
+  <div class="res" id="res"></div>
+  <div class="act"><button class="btn" id="forceBtn">立即更新</button></div>
+  <div class="act2"><button class="btn2 hidden" id="releaseBtn">下载失败？先进入软件，下次再更新</button></div>
+
+  <div class="foot">更新完成后才能继续使用 QFRemote；若下载失败，可先进入软件，下次打开时再更新。<br>下载后自动核对完整性（SHA256），通过后才可安装。</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  function applyTheme(t) {
+    if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+  }
+  applyTheme(q.get('t') || 'blue');
+  const fromV = q.get('from') || '—';
+  const toV = q.get('to') || '—';
+  document.getElementById('vFrom').textContent = '当前版本 v' + fromV;
+  document.getElementById('vTo').textContent = '新版本 v' + toV;
+  document.getElementById('vNotes').textContent = q.get('notes') || '';
+
+  const res = document.getElementById('res');
+  const bar = document.getElementById('bar');
+  const fill = document.getElementById('fill');
+  const btn = document.getElementById('forceBtn');
+  function fmtSize(n) {
+    if (!n && n !== 0) return '';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+    return n + ' B';
+  }
+  const sizeTxt = q.get('size') ? '（安装包 ' + fmtSize(parseInt(q.get('size'), 10)) + '）' : '';
+  res.textContent = '点「立即更新」下载新版本' + sizeTxt + '；安装完成后重新打开即为新版本。';
+
+  let phase = 'ready';
+  function render(s) {
+    if (!s) return;
+    phase = s.phase;
+    if (s.phase === 'downloading') {
+      btn.disabled = true; btn.textContent = '正在下载…';
+      bar.classList.add('show');
+    } else if (s.phase === 'downloaded') {
+      btn.disabled = false; btn.textContent = '安装更新并重启';
+      fill.style.width = '100%';
+      res.innerHTML = '<span class="ok">下载完成，完整性核对通过</span>（SHA256 一致）。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹；安装完成后重新打开 QFRemote 即为新版本。';
+    } else if (s.phase === 'installing') {
+      btn.disabled = true; btn.textContent = '正在安装…';
+      fill.style.width = '100%';
+      res.textContent = '正在安装更新，软件即将重启；安装完成后重新打开 QFRemote 即为新版本。';
+    } else if (s.phase === 'failed') {
+      btn.disabled = false; btn.textContent = '重新下载';
+      res.innerHTML = '<span class="bad">下载失败</span>：' + (s.error || '未知原因') + '请点「重新下载」重试；也可以先进入软件，下次打开时再更新。';
+      document.getElementById('releaseBtn').classList.remove('hidden');
+    }
+    if (s.phase !== 'failed') document.getElementById('releaseBtn').classList.add('hidden');
+  }
+  document.getElementById('releaseBtn').addEventListener('click', () => { if (window.qfForce && qfForce.release) qfForce.release(); });
+  qfForce.onState(render);
+  qfForce.getState().then(render).catch(() => {});
+  qfForce.onProgress((p) => {
+    if (p.percent != null) {
+      fill.style.width = p.percent + '%';
+      res.textContent = '正在下载更新包… ' + p.percent + '%（' + fmtSize(p.received) + (p.total ? ' / ' + fmtSize(p.total) : '') + '）';
+    } else {
+      res.textContent = '正在下载更新包… 已下载 ' + fmtSize(p.received);
+    }
+  });
+  btn.addEventListener('click', () => {
+    if (phase === 'downloaded') { qfForce.openInstaller(); return; }
+    btn.disabled = true; btn.textContent = '正在下载…';
+    bar.classList.add('show'); fill.style.width = '0%';
+    res.textContent = '正在下载更新包…';
+    qfForce.download();
+  });
+  // 这一页没有关闭按钮、正常路径没有跳过：Esc 不关窗；唯一出口是下载失败后的「先进入软件」（站长 2026-10-25 令：异常必须放行）
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.preventDefault(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+#
+# QFRemote 友聊模块的 systemd 单元草稿。合入一期好友服务后，聊天路由挂进
+# 同一进程，本单元可能不再需要；若最终独立部署，再按 register-svc 的
+# qfremote-register.service 同款式定稿（专用用户、开机自启、崩溃自拉）。
+[Unit]
+Description=QFRemote Chat (E2E) — DRAFT, pending phase-1 merge
+After=network.target meshcentral.service
+
+[Service]
+Type=simple
+User=qfsocial
+WorkingDirectory=/opt/qfremote-social/chat
+Environment=QFCHAT_CONFIG=/opt/qfremote-social/chat/config.json
+ExecStart=/usr/bin/node /opt/qfremote-social/chat/chat-server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

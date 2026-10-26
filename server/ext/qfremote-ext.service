@@ -1,0 +1,17 @@
+[Unit]
+Description=QFRemote Extension Service (points + admin, 2.2.0)
+After=network.target meshcentral.service
+Wants=meshcentral.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/qfremote-ext
+ExecStart=/usr/bin/node /opt/qfremote-ext/server.js
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

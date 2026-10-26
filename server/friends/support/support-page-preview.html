@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>官方客服 · 页面预览（阶段二样图，非上线页）</title>
+<style>
+  /* 按《QFRemote 网页设计系统 v1》令牌：好友/聊天页家族同一套色板与圆角语言 */
+  :root{
+    --brand-grad:linear-gradient(180deg,#3F8CFF,#2470E0);
+    --deep:#0B2B5B; --bg1:#EDF3FD; --bg2:#FFFFFF; --card:#FFFFFF;
+    --ink:#243B5E; --sub:#6B7A90; --line:#D7E1F2; --orange:#FF8A1E;
+    --ok-ink:#12753C; --ok-bg:#E7F8EE;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --deep:#EAF1FD; --bg1:#10141C; --bg2:#171B23; --card:#22262E;
+      --ink:#EDF2F9; --sub:#9AA7BC; --line:#3A4150; --ok-ink:#5EEAA0; --ok-bg:#173527; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    background:linear-gradient(180deg,var(--bg1),var(--bg2));color:var(--ink);min-height:100vh}
+  .wrap{max-width:760px;margin:0 auto;padding:18px 16px 40px}
+  .head{display:flex;align-items:center;gap:12px;padding:6px 2px 14px}
+  .mark{width:42px;height:42px;border-radius:12px;background:var(--brand-grad);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px}
+  .head h1{font-size:19px;margin:0;color:var(--deep)}
+  .head p{margin:2px 0 0;font-size:12.5px;color:var(--sub)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:18px;
+    box-shadow:0 12px 40px rgba(13,49,112,.12);margin-bottom:14px}
+  .disclosure{font-size:13.5px;line-height:1.75;color:var(--ink);
+    border-left:4px solid var(--orange);padding:10px 14px;background:rgba(255,138,30,.07);border-radius:8px}
+  .msg{display:flex;gap:10px;margin:14px 0}
+  .avatar{flex:0 0 34px;width:34px;height:34px;border-radius:10px;background:var(--brand-grad);
+    color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+  .avatar.human{background:#5B7BA5}
+  .bubble{border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;line-height:1.75;max-width:88%}
+  .name{font-size:12px;color:var(--sub);margin-bottom:4px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .chip{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;
+    padding:8px 14px;font-size:13.5px;cursor:pointer;min-height:40px}
+  .chip.primary{background:var(--brand-grad);color:#fff;border:none}
+  .verify h2,.handoff h2{font-size:15.5px;margin:0 0 8px;color:var(--deep)}
+  .verify p,.handoff p{font-size:13.5px;color:var(--sub);line-height:1.7;margin:0 0 12px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:13.5px;font-weight:600;margin-bottom:6px}
+  .field input{width:100%;height:48px;border:1px solid var(--line);border-radius:12px;padding:0 14px;
+    font-size:16px;background:transparent;color:var(--ink)}
+  .btn{width:100%;height:50px;border:none;border-radius:12px;background:var(--brand-grad);color:#fff;
+    font-size:15.5px;font-weight:700;cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+  .tag{display:inline-block;font-size:12px;color:var(--ok-ink);background:var(--ok-bg);
+    border-radius:999px;padding:3px 10px;margin-left:8px}
+  .note{font-size:12.5px;color:var(--sub);line-height:1.7}
+  .inputbar{display:flex;gap:10px}
+  .inputbar input{flex:1;height:50px;border:1px solid var(--line);border-radius:12px;padding:0 14px;font-size:16px;background:transparent;color:var(--ink)}
+  .inputbar button{width:96px;height:50px;border:none;border-radius:12px;background:var(--brand-grad);color:#fff;font-size:15px;font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="mark">Q</div>
+    <div>
+      <h1>官方客服</h1>
+      <p>智能客服先行接待 · 好友列表置顶入口（样式预览）</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="disclosure">本会话为官方客服会话，由智能客服系统先行接待。本会话不使用与好友聊天相同的加密方式，对话内容仅用于客服处理与问题跟进；您与好友之间的聊天经加密传输与保存，聊天钥匙由您的登录状态保管，不受影响。未登录咨询时，请勿在对话中发送密码等敏感信息。</div>
+
+    <div class="msg">
+      <div class="avatar">智</div>
+      <div class="bubble">
+        <div class="name">智能客服</div>
+        您好，这里是 QFRemote 官方客服，由智能客服系统先行接待。您可以直接输入遇到的问题；涉及您本人账号状态的问题，我会核对您的账号后答复。如需人工服务，可回复「转人工」。
+        <div class="chips">
+          <button class="chip">账号被冻结了</button>
+          <button class="chip">连不上自己的电脑</button>
+          <button class="chip">忘记密码</button>
+          <button class="chip">转人工客服</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="msg">
+      <div class="avatar human">人</div>
+      <div class="bubble">
+        <div class="name">人工客服<span class="tag">已转人工</span></div>
+        您好，您的工单已收到，正在处理。处理结果将回复在本会话中。
+      </div>
+    </div>
+
+    <div class="inputbar">
+      <input placeholder="请输入您遇到的问题">
+      <button>发送</button>
+    </div>
+    <p class="note">默认正式表述；回复「说人话」可切换为通俗说法，本会话内保持。</p>
+  </div>
+
+  <div class="card verify">
+    <h2>查询本人账号状态 · 身份核对</h2>
+    <p>您当前未登录。查询冻结原因与到期、申诉进度等本人状态前，请先核对身份。核对仅用于本次查询，不签发登录。</p>
+    <div class="field"><label>账号</label><input placeholder="请输入要查询的账号"></div>
+    <div class="field"><label>注册联系邮箱</label><input placeholder="请输入注册时填写的联系邮箱"></div>
+    <button class="btn">核对并查询</button>
+  </div>
+
+  <div class="card handoff">
+    <h2>转人工客服</h2>
+    <p>首次申请将先给出对应的自助处理路径；仍未解决时再次申请即可转交。未登录转人工必须留下联系邮箱。</p>
+    <button class="btn ghost">申请转人工</button>
+  </div>
+
+  <p class="note">本页为阶段二页面样图预览（静态），用于三端客服页改造时统一版式；正式页面由客服会话模块驱动。未登录入口将同步出现在登录页、注册页、冻结提示处与申诉页（见 INTEGRATION.md 部署清单）。</p>
+</div>
+</body>
+</html>

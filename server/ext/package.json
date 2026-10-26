@@ -1,0 +1,1 @@
+{"description":"QFRemote extension service: points + owner admin (new service, touches no existing files)","main":"server.js","name":"qfremote-ext","private":true,"scripts":{"start":"node server.js","test":"node test-points.js"},"version":"2.2.0"}

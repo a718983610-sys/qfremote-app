@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QFRemote 好友</title>
+<style>
+  :root{
+    /* 设计令牌与定版样图对齐（design-samples-20261025/src/style.css 冻结令牌） */
+    --bg:#F4F7FB; --card:#ffffff; --ink:#1F2D47; --muted:#6B7A90; --faint:#93A3B8;
+    --line:#DFE7F2; --line-soft:#EAF0F8; --brand:#2470E0; --brand-dark:#1B5CC4; --deep:#0B2B5B;
+    --brand-soft:#E3EEFC; --hover:#F2F7FF; --bar-bg:#ffffff; --field:#ffffff;
+    --orange:#FF8A1E; --green:#1FA97A; --gray-dot:#B9C6D8;
+    --hl-border:#BFD6F6; --hl-bg:#F7FBFF; --org-bg:#FFF1E2; --org-ink:#D96F06;
+    --danger:#D92D20; --danger-soft:#FDECEA; --ok:#12753C; --ok-soft:#E7F8EE;
+    --topbar-h:52px; --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#10141C; --card:#22262E; --ink:#E9EEF6; --muted:#9AA7BC; --faint:#77839A;
+      --line:#333B48; --line-soft:#2B3038; --brand-soft:#1C2A44; --hover:#262B34;
+      --bar-bg:#171B23; --field:#2B3038; --hl-border:#2E4A73; --hl-bg:#1A2436;
+      --org-bg:#3A2C17; --org-ink:#F0B269; --gray-dot:#5A6B84;
+      --danger:#FF9D8F; --danger-soft:#3A2320; --ok:#5EEAA0; --ok-soft:#173527;
+    }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; }
+  body { background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased; }
+  a { color:var(--brand); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  button { font:inherit; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:not-allowed; }
+  ::placeholder { color:var(--faint); }
+  .hidden { display:none !important; }
+
+  .appbar { position:fixed; inset:0 0 auto 0; height:var(--topbar-h); display:flex; align-items:center; gap:12px; padding:0 16px; background:var(--bar-bg); border-bottom:1px solid var(--line); z-index:40; }
+  .brandmark { display:flex; align-items:center; gap:9px; font-weight:700; font-size:17px; white-space:nowrap; color:var(--ink); }
+  .brandmark:hover { text-decoration:none; }
+  .brand-logo { width:30px; height:30px; border-radius:8px; overflow:hidden; flex:0 0 auto; display:inline-flex; } .brand-logo svg { width:100%; height:100%; display:block; }
+  .topnav { display:flex; gap:2px; margin-left:8px; }
+  .topnav a { padding:7px 12px; border-radius:8px; color:var(--muted); font-size:14.5px; font-weight:500; white-space:nowrap; transition:background .15s, color .15s; }
+  .topnav a:hover { color:var(--ink); background:var(--hover); text-decoration:none; }
+  .topnav a.active { color:var(--brand); background:var(--brand-soft); font-weight:600; }
+  .site-pill { margin-left:auto; flex:0 0 auto; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:999px; padding:6px 14px; font-size:13.5px; white-space:nowrap; transition:border-color .15s, color .15s; }
+  .site-pill:hover { border-color:var(--brand); color:var(--brand); text-decoration:none; }
+  .tabbar { display:none; }
+
+  .wrap { width:100%; max-width:860px; margin:0 auto; padding:calc(var(--topbar-h) + 20px) 16px 40px; }
+  .pagehead { padding:2px 2px 16px; }
+  .pagehead h1 { margin:0; font-size:22px; font-weight:700; letter-spacing:.2px; color:var(--ink); }
+  .pagehead .ds { margin-top:4px; font-size:13.5px; color:var(--muted); line-height:1.6; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px; margin-bottom:14px; text-align:left; }
+  .card h2 { margin:0 0 6px; font-size:16px; font-weight:700; color:var(--ink); }
+  .card .sub { font-size:13.5px; color:var(--muted); line-height:1.6; }
+  .field { margin-top:14px; }
+  label { display:block; font-size:13.5px; font-weight:500; color:var(--muted); margin:0 0 6px; }
+  .remember { display:inline-flex; align-items:center; gap:8px; font-size:13.5px; font-weight:400; color:var(--muted); cursor:pointer; margin:0; min-height:28px; }
+  input[type="checkbox"] { width:18px; height:18px; flex:0 0 auto; margin:0; accent-color:var(--brand); cursor:pointer; }
+  input, select { width:100%; height:48px; padding:0 13px; font-size:16px; font-family:inherit; color:var(--ink); background:var(--field); border:1px solid var(--line); border-radius:10px; outline:none; transition:border-color .15s, box-shadow .15s; }
+  input:focus, select:focus { border-color:var(--brand); box-shadow:0 0 0 3px rgba(36,112,224,.13); }
+  .btn { width:100%; height:48px; margin-top:16px; border:1px solid var(--brand); cursor:pointer; font-family:inherit; font-size:15.5px; font-weight:600; color:#fff; padding:0 18px; border-radius:12px; background:var(--brand); transition:filter .15s, background .15s, transform .05s; }
+  .btn:hover { filter:brightness(1.06); }
+  .btn:active { background:var(--brand-dark); border-color:var(--brand-dark); transform:translateY(1px); }
+  .btn:disabled { opacity:.55; cursor:default; }
+  .mini { min-height:34px; padding:5px 13px; border-radius:9px; border:1px solid var(--line); background:var(--card); color:var(--brand); font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:border-color .15s, background .15s, transform .05s; white-space:nowrap; }
+  .mini:hover { border-color:#B9CBEF; background:var(--hover); }
+  .mini:active { transform:scale(.97); }
+  .mini.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  .mini.primary:active { background:var(--brand-dark); }
+  .mini.danger { color:var(--danger); }
+  .mini.danger:hover { background:var(--danger-soft); border-color:#F2C1C1; }
+  .mini:disabled { opacity:.55; cursor:default; }
+  /* 样图组件：官方标签、字母头像、状态细条、分区标题、骨架态 */
+  .tag { display:inline-flex; align-items:center; height:20px; padding:0 7px; border-radius:6px; font-size:11.5px; font-weight:700; white-space:nowrap; vertical-align:2px; }
+  .tag.org { background:var(--org-bg); color:var(--org-ink); }
+  .avatar2 { width:46px; height:46px; border-radius:50%; flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:17px; text-transform:uppercase; position:relative; }
+  .avatar2.deep { background:var(--deep); }
+  .avatar2.deep::after { content:""; position:absolute; right:1px; bottom:2px; width:9px; height:9px; border-radius:50%; background:var(--orange); border:2px solid var(--card); }
+  .who-col { display:flex; flex-direction:column; min-width:0; }
+  .ss { font-size:13px; color:var(--muted); margin-top:2px; display:flex; gap:6px; align-items:center; line-height:1.5; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .dot.g { background:var(--green); } .dot.gr { background:var(--gray-dot); }
+  .sec-h { font-size:13px !important; color:var(--muted) !important; font-weight:600 !important; letter-spacing:.4px; margin:20px 2px 0 !important; }
+  .seccard { background:transparent; border:none; padding:0; }
+  .seccard .empty { background:var(--card); border:1px solid var(--line); border-radius:14px; margin-top:11px; }
+  .hlcard { border-color:var(--hl-border); background:var(--hl-bg); }
+  .skl { border-radius:14px; border:1px solid var(--line); background:var(--card); padding:15px 18px; margin-top:11px; display:flex; gap:13px; align-items:center; }
+  .skl .b { height:12px; border-radius:6px; background:linear-gradient(90deg, var(--line-soft) 25%, var(--hover) 50%, var(--line-soft) 75%); background-size:200% 100%; animation:qfskl 1.2s infinite; }
+  .skl .av { width:46px; height:46px; border-radius:50%; flex:none; }
+  @keyframes qfskl { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  a.mini { display:inline-flex; align-items:center; text-decoration:none; }
+  .topbar { display:flex; align-items:center; padding:2px 2px 14px; margin-bottom:2px; }
+  .topbar .me { font-weight:600; color:var(--ink); font-size:15px; word-break:break-all; }
+  .topbar .mini:first-of-type { margin-left:auto; }
+  .topbar .mini { margin-left:8px; }
+  .row { display:flex; align-items:center; gap:13px; padding:15px 18px; flex-wrap:wrap; background:var(--card); border:1px solid var(--line); border-radius:14px; margin-top:11px; }
+  .card .row { background:transparent; border:none; border-radius:0; margin-top:0; padding:12px 4px; border-top:1px solid var(--line-soft); }
+  .card .row:first-of-type { border-top:none; }
+  .row .who { font-weight:600; color:var(--ink); font-size:16px; word-break:break-all; display:flex; align-items:center; gap:8px; }
+  .row .meta { font-size:12.5px; color:var(--faint); width:100%; line-height:1.6; }
+  .row .acts { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .row select { width:auto; height:34px; font-size:13.5px; padding:0 8px; }
+  .empty { color:var(--faint); text-align:center; padding:20px 10px; font-size:14px; line-height:1.7; }
+  .res { display:none; margin-top:14px; padding:11px 13px; border-radius:10px; font-size:13.5px; line-height:1.6; text-align:center; border:1px solid transparent; }
+  .res.show { display:block; }
+  .res.ok { background:var(--ok-soft); border-color:#BFE6CF; color:var(--ok); }
+  .res.bad { background:var(--danger-soft); border-color:#F2C1C1; color:var(--danger); }
+  .foot { margin-top:2px; text-align:center; font-size:12.5px; line-height:1.8; color:var(--faint); }
+
+  @media (max-width:959px){
+    .topnav { display:none; }
+    .tabbar { display:flex; position:fixed; left:0; right:0; bottom:0; z-index:45; background:var(--bar-bg); border-top:1px solid var(--line); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); }
+    .tabbar a { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; color:var(--faint); font-size:11px; padding:4px 0 2px; border-radius:10px; }
+    .tabbar a svg { width:23px; height:23px; }
+    .tabbar a:hover { text-decoration:none; }
+    .tabbar a.active { color:var(--brand); font-weight:600; }
+    .wrap { padding-bottom:96px; }
+  }
+
+  @media (max-width:560px){
+    /* 手机口径与样图 m.css 组件对齐：卡片内边距、行卡、mini 尺寸 */
+    .wrap { padding-left:12px; padding-right:12px; }
+    .card { padding:15px 16px; }
+    .pagehead h1 { font-size:21px; }
+    .brandmark { font-size:16.5px; }
+    .row { padding:14px 15px; gap:11px; }
+    .mini { min-height:32px; border-radius:8px; font-size:13px; padding:4px 11px; }
+    .avatar2 { width:44px; height:44px; font-size:16px; }
+    .btn { height:50px; border-radius:12px; }
+  }
+</style>
+</head>
+<body>
+<header class="appbar"><a class="brandmark" href="/friends"><span class="brand-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"> <defs> <linearGradient id="tilegrad" x1="0" y1="0" x2="1" y2="1"> <stop offset="0" stop-color="#0D3170"/><stop offset="1" stop-color="#081F47"/> </linearGradient> <linearGradient id="qfgrad" x1="0" y1="0" x2="1" y2="1"> <stop offset="0" stop-color="#3F8CFF"/><stop offset="1" stop-color="#2470E0"/> </linearGradient> </defs> <rect x="0" y="0" rx="241" fill="url(#tilegrad)"/> <g transform="translate(61.4,61.4) scale(3.7547)"> <path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="url(#qfgrad)" stroke-width="25" stroke-linecap="round"/> <circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/> </g> </svg></span><span>QFRemote</span></a><nav class="topnav"><a href="/friends" class="active">好友</a><a href="/chat">聊天</a><a href="https://bookmarks-hunting-rendering-atlas.trycloudflare.com/forum" data-qflink="forum">论坛</a></nav><a class="site-pill" href="https://a718983610-sys.github.io/qfremote-website/" target="_blank" rel="noopener">官网</a></header>
+<div class="wrap">
+  <div class="pagehead">
+    <h1>QFRemote 好友</h1>
+    <div class="ds">添加好友，将自己的电脑共享给对方协助处理</div>
+  </div>
+
+  <!-- 登录（默认隐藏：已有登录态时由脚本直接进入主界面，不出现密码框；
+       确认无会话后才显示本卡片，即无登录态访问的正常登录入口） -->
+  <div class="card hidden" id="loginCard">
+    <h2>登录</h2>
+    <div class="sub">请使用您的 QFRemote 账号和密码登录，与软件内登录方式相同。</div>
+    <div class="field">
+      <label for="fUser">账号</label>
+      <input id="fUser" autocomplete="username" autocapitalize="none" placeholder="请输入您的账号名">
+    </div>
+    <div class="field">
+      <label for="fPw">密码</label>
+      <input id="fPw" type="password" autocomplete="current-password" placeholder="请输入您的密码">
+    </div>
+    <div class="field">
+      <label class="remember"><input type="checkbox" id="fRemember"> 记住此设备</label>
+    </div>
+    <button class="btn" id="btnLogin">登录</button>
+    <div class="res" id="loginRes"></div>
+    <div class="sub" style="margin-top:10px">没有账号？<a href="https://bookmarks-hunting-rendering-atlas.trycloudflare.com/register" data-qflink="register">注册新账号</a></div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main" class="hidden">
+    <div class="topbar">
+      <span class="me" id="meName"></span>
+      <a class="mini" href="/chat" style="text-decoration:none; display:inline-flex; align-items:center;">好友聊天</a>
+      <button class="mini" id="btnLogout">退出登录</button>
+    </div>
+
+    <div class="card hlcard">
+      <h2>官方客服 <span class="tag org">官方</span></h2>
+      <div class="sub">官方客服由智能客服先行接待，可自助解答常见问题，也可以转人工客服。原官方客服会话记录在聊天页保留只读查看。</div>
+      <button class="btn" id="btnSupport" type="button">进入智能客服</button>
+    </div>
+
+    <div class="card">
+      <h2>加好友</h2>
+      <div class="sub">输入对方完整账号名搜索，发送申请后须经对方同意，才能成为好友。</div>
+      <div class="field">
+        <input id="fSearch" autocapitalize="none" placeholder="请输入对方的完整账号名">
+      </div>
+      <button class="btn" id="btnSearch">搜索</button>
+      <div class="res" id="searchRes"></div>
+      <div id="searchHit"></div>
+    </div>
+
+    <div class="seccard" id="reqCard">
+      <h2 class="sec-h">收到的申请</h2>
+      <div id="reqInList"></div>
+      <h2 class="sec-h">我发出的申请</h2>
+      <div id="reqOutList"></div>
+    </div>
+
+    <div class="seccard">
+      <h2 class="sec-h">我的好友</h2>
+      <div class="sub" style="margin:6px 2px 0">共享需单独开启：「只看」对方只能查看屏幕；「能操作」对方能远程操作协助。共享可随时收回。</div>
+      <div id="friendList"><div class="skl"><span class="b av"></span><span style="flex:1"><span class="b" style="display:block;width:38%"></span><span class="b" style="display:block;width:62%;margin-top:8px"></span></span></div></div>
+    </div>
+
+    <div class="card">
+      <h2>共享给我的电脑</h2>
+      <div id="shareInList"></div>
+      <h2 style="margin-top:18px;">共享记录</h2>
+      <div class="sub">共享与收回的记录可在此查询。</div>
+      <div id="recordList"></div>
+    </div>
+  </div>
+
+  <div class="foot">成为好友不会自动共享电脑，共享须您主动开启。<br>对方被冻结或封禁时，共享自动收回；解冻后不自动恢复，需重新共享。</div>
+</div>
+
+<script>
+  var API = '/api/friends';
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
+  function showRes(el, msg, ok) { el.className = 'res show ' + (ok ? 'ok' : 'bad'); el.textContent = msg; }
+  function hideRes(el) { el.className = 'res'; el.textContent = ''; }
+  async function api(path, body) {
+    var opt = { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' } };
+    if (body) opt.body = JSON.stringify(body);
+    var r = await fetch(API + path, opt);
+    var d = {};
+    try { d = await r.json(); } catch (e) {}
+    if (r.status === 401 && path !== '/login' && !$('main').classList.contains('hidden')) { location.reload(); throw new Error('未登录'); }
+    return d;
+  }
+
+  // 样图口径的字母头像：颜色按账号名稳定取色（纯呈现，不参与任何逻辑）
+  var AV_PALETTE = ['#3E6FB4', '#5B83B8', '#7A93B5', '#4E7396', '#6B8CAE'];
+  function avatarHtml(name) {
+    var h = 0; var s = String(name || '?');
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return '<span class="avatar2" style="background:' + AV_PALETTE[h % AV_PALETTE.length] + '">' + esc(s.slice(0, 1)) + '</span>';
+  }
+
+  var meData = null;
+  async function refresh() {
+    var d = await api('/me');
+    if (!d.ok) return;
+    meData = d;
+    $('loginCard').classList.add('hidden');
+    $('main').classList.remove('hidden');
+    $('meName').textContent = '我的账号：' + d.user;
+    renderRequests(d); renderFriends(d); renderShares(d);
+  }
+  function renderRequests(d) {
+    var rin = $('reqInList'), rout = $('reqOutList');
+    rin.innerHTML = d.requestsIn.length ? '' : '<div class="empty">目前没有收到的申请。</div>';
+    d.requestsIn.forEach(function (r) {
+      var row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = avatarHtml(r.from) + '<span class="who-col"><span class="who">' + esc(r.from) + '</span><span class="ss">申请添加您为好友</span></span>' +
+        '<span class="acts">' +
+        '<button class="mini primary" data-act="accept">同意</button>' +
+        '<button class="mini" data-act="reject">拒绝</button>' +
+        '<button class="mini danger" data-act="reject-never">拒绝并不再接收</button></span>';
+      row.querySelectorAll('button').forEach(function (b) {
+        b.addEventListener('click', async function () {
+          b.disabled = true;
+          var act = b.getAttribute('data-act');
+          var res = await api('/respond', { username: r.from, accept: act === 'accept', never: act === 'reject-never' });
+          alert(res.msg || (res.ok ? '操作成功。' : '操作未成功，请重试。'));
+          refresh();
+        });
+      });
+      rin.appendChild(row);
+    });
+    rout.innerHTML = d.requestsOut.length ? '' : '<div class="empty">目前没有待同意的申请。</div>';
+    d.requestsOut.forEach(function (r) {
+      var row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = avatarHtml(r.to) + '<span class="who-col"><span class="who">' + esc(r.to) + '</span><span class="ss">等待对方同意</span></span>';
+      rout.appendChild(row);
+    });
+  }
+  function renderFriends(d) {
+    var box = $('friendList');
+    box.innerHTML = d.friends.length ? '' : '<div class="empty">暂无好友，可通过上方搜索添加。</div>';
+    var outByGrantee = {};
+    d.sharesOut.forEach(function (s) { outByGrantee[s.grantee] = s; });
+    d.friends.forEach(function (f) {
+      var shared = outByGrantee[f.name];
+      var row = document.createElement('div'); row.className = 'row';
+      var acts = '';
+      if (shared) {
+        acts = '<span class="acts"><button class="mini" data-act="unshare">收回共享</button></span>';
+      } else {
+        acts = '<span class="acts"><select data-role="tier"><option value="view">只看</option><option value="operate">能操作</option></select>' +
+          '<button class="mini primary" data-act="share">共享我的电脑</button></span>';
+      }
+      acts += '<span class="acts"><button class="mini danger" data-act="remove">删除好友</button></span>';
+      var ssLine = shared
+        ? '<span class="ss"><span class="dot g"></span>已共享：设备组「' + esc(shared.meshName || '') + '」（' + (shared.tier === 'operate' ? '能操作' : '只看') + '）</span>'
+        : '<span class="ss"><span class="dot gr"></span>未共享设备</span>';
+      row.innerHTML = avatarHtml(f.name) + '<span class="who-col"><span class="who">' + esc(f.name) + '</span>' + ssLine + '</span>' + acts;
+      row.querySelectorAll('button').forEach(function (b) {
+        b.addEventListener('click', async function () {
+          var act = b.getAttribute('data-act');
+          if (act === 'remove' && !confirm('确定删除好友 ' + f.name + ' 吗？删除后，双方之间的共享将全部收回。')) return;
+          b.disabled = true;
+          var res;
+          if (act === 'share') { var sel = row.querySelector('[data-role="tier"]'); res = await api('/share', { username: f.name, tier: sel ? sel.value : 'view' }); }
+          else if (act === 'unshare') res = await api('/unshare', { username: f.name });
+          else res = await api('/remove', { username: f.name });
+          alert(res.msg || (res.ok ? '操作成功。' : '操作未成功，请重试。'));
+          refresh();
+        });
+      });
+      box.appendChild(row);
+    });
+  }
+  function renderShares(d) {
+    var box = $('shareInList');
+    box.innerHTML = d.sharesIn.length ? '' : '<div class="empty">暂无。好友将电脑共享给您后会显示在此处，您打开软件即可查看并连接。</div>';
+    d.sharesIn.forEach(function (s) {
+      var row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = avatarHtml(s.owner) + '<span class="who-col"><span class="who">' + esc(s.owner) + '</span><span class="ss">设备组「' + esc(s.meshName) + '」· ' + (s.tier === 'operate' ? '能操作' : '只看') + '</span></span>';
+      box.appendChild(row);
+    });
+    var rec = $('recordList');
+    rec.innerHTML = d.records.length ? '' : '<div class="empty">暂无记录。</div>';
+    d.records.forEach(function (s) {
+      var row = document.createElement('div'); row.className = 'row';
+      var line = esc(s.owner) + ' 把「' + esc(s.meshName) + '」共享给 ' + esc(s.grantee) + '（' + (s.tier === 'operate' ? '能操作' : '只看') + '）';
+      var meta = s.status === 'active' ? '正在生效 · ' + esc(s.grantedAt || '') : '已收回 · ' + esc(s.revokedAt || '');
+      row.innerHTML = '<span class="meta">' + line + '<br>' + meta + '</span>';
+      rec.appendChild(row);
+    });
+  }
+
+  $('btnLogin').addEventListener('click', async function () {
+    var btn = this; btn.disabled = true; btn.textContent = '正在登录…';
+    hideRes($('loginRes'));
+    try {
+      var d = await api('/login', { username: $('fUser').value, password: $('fPw').value, remember: $('fRemember').checked });
+      if (d.ok) { $('fPw').value = ''; await refresh(); }
+      else showRes($('loginRes'), d.msg || '登录失败，请检查账号和密码后重试。', false);
+    } catch (e) { showRes($('loginRes'), '无法连接服务器，请检查网络后重试。', false); }
+    btn.disabled = false; btn.textContent = '登录';
+  });
+  $('btnLogout').addEventListener('click', async function () { await api('/logout', {}); location.reload(); });
+  $('btnSupport').addEventListener('click', function () { location.href = '/support'; });
+  $('btnSearch').addEventListener('click', async function () {
+    var name = $('fSearch').value.trim().toLowerCase();
+    hideRes($('searchRes')); $('searchHit').innerHTML = '';
+    if (!name) { showRes($('searchRes'), '请先输入对方完整的账号名。', false); return; }
+    var d = await api('/search', { username: name });
+    if (!d.ok) { showRes($('searchRes'), d.msg || '搜索失败，请重试。', false); return; }
+    if (!d.found) { showRes($('searchRes'), '未找到该账号，请确认账号名完整无误。', false); return; }
+    var rel = d.relation;
+    var hit = document.createElement('div'); hit.className = 'row';
+    if (rel === 'self') hit.innerHTML = avatarHtml(d.name) + '<span class="who">' + esc(d.name) + '</span><span class="meta">该账号为您本人。</span>';
+    else if (rel === 'friend') hit.innerHTML = avatarHtml(d.name) + '<span class="who">' + esc(d.name) + '</span><span class="meta">对方已是您的好友。</span>';
+    else if (rel === 'pending-out') hit.innerHTML = avatarHtml(d.name) + '<span class="who">' + esc(d.name) + '</span><span class="meta">申请已发送，等待对方同意。</span>';
+    else if (rel === 'pending-in') hit.innerHTML = avatarHtml(d.name) + '<span class="who">' + esc(d.name) + '</span><span class="meta">对方已向您发送申请，请在下方「收到的申请」中处理。</span>';
+    else {
+      hit.innerHTML = avatarHtml(d.name) + '<span class="who">' + esc(d.name) + '</span><span class="acts"><button class="mini primary" id="btnAdd">加为好友</button></span>';
+      hit.querySelector('#btnAdd').addEventListener('click', async function () {
+        this.disabled = true;
+        var r = await api('/request', { username: d.name });
+        showRes($('searchRes'), r.msg || (r.ok ? '申请已发送。' : '申请发送失败，请重试。'), !!r.ok);
+        refresh();
+      });
+    }
+    $('searchHit').appendChild(hit);
+  });
+
+  // 已有会话就直接进主界面；确认没有会话才显示登录卡片（无登录态的
+  // 裸访问回到登录入口，属正常口径，不属于二次登录拦截）
+  api('/me').then(function (d) {
+    if (d && d.ok) refresh();
+    else $('loginCard').classList.remove('hidden');
+  }).catch(function () { $('loginCard').classList.remove('hidden'); });
+</script>
+<nav class="tabbar"><a href="/friends" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.4"/><path d="M3.5 19.5c.7-3.2 2.9-5 5.5-5s4.8 1.8 5.5 5"/><circle cx="17.2" cy="9.5" r="2.5"/><path d="M16 14.7c2.1.3 3.9 1.9 4.5 4.8"/></svg>好友</a><a href="/chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/></svg>聊天</a><a href="https://bookmarks-hunting-rendering-atlas.trycloudflare.com/forum" data-qflink="forum"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h4.5"/></svg>论坛</a></nav>
+
+<script>
+/* 服务地址运行时解析（照控制台皮肤既有做法，2026-10-25）：官网 product.json 是服务地址的正本，
+   拉到就用它刷新互链地址；拉不到保留页面里的写死兜底地址，不影响使用。 */
+(function () {
+  var MAP = { forum: 'forumUrl', register: 'registerUrl', friends: 'friendsUrl', login: 'loginUrl' };
+  fetch('https://a718983610-sys.github.io/qfremote-website/product.json', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      var web = (j && j.web) || {};
+      document.querySelectorAll('[data-qflink]').forEach(function (a) {
+        var u = web[MAP[a.getAttribute('data-qflink')]];
+        if (u) a.setAttribute('href', u);
+      });
+    })
+    .catch(function () {});
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+{
+  "name": "qfremote",
+  "version": "2.3.2",
+  "description": "QFRemote 远程控制 — Windows 控制端",
+  "main": "main.js",
+  "author": "QFRemote",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dist": "electron-builder --win nsis",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.qfremote.desktop",
+    "artifactName": "QFRemote-Setup-v${version}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "installer-launch.js",
+      "client-version.js",
+      "svc-urls.js",
+      "views.js",
+      "update.js",
+      "watchdog.js",
+      "lock.js",
+      "creds.js",
+      "autologin.js",
+      "device-key.js",
+      "license.js",
+      "device-code.js",
+      "license-gate.html",
+      "license-gate-preload.js",
+      "devices.js",
+      "devices.html",
+      "devices-preload.js",
+      "session-bar.html",
+      "session-bar-preload.js",
+      "ext-bar.html",
+      "ext-bar-preload.js",
+      "lock.html",
+      "lock-preload.js",
+      "toolbar.html",
+      "toolbar-preload.js",
+      "about.html",
+      "about-preload.js",
+      "force-update.html",
+      "force-preload.js",
+      "build-info.json",
+      "splash.html",
+      "loading.html",
+      "offline.html",
+      "build/icon.png",
+      "package.json"
+    ],
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "oneClick": false,
+      "perMachine": false,
+      "shortcutName": "QFRemote",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "productName": "QFRemote",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "nsis"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body { overflow-y:auto; }
+  .upd { display:none; margin:14px 22px 0; padding:12px 16px; border-radius:14px;
+    background: #eef3fb;
+    border:1px solid #dfe7f2; }
+  .upd.show { display:block; }
+  .upd .uv { font-size:15px; font-weight:700; color:#1f2d47; }
+  .upd .un { font-size:12.5px; line-height:1.65; color:#1f2d47; margin-top:5px; white-space:pre-wrap; }
+  html[data-theme="dark"] .upd { background: #22262e; border-color: rgba(255,255,255,.09); }
+  html[data-theme="dark"] .upd .uv { color:#eceff3; }
+  html[data-theme="dark"] .upd .un { color:#c9cdd4; }
+  .bar { display:none; height:9px; border-radius:99px; margin-top:11px;
+    background: rgba(36,112,224,.15); overflow:hidden; }
+  .bar.show { display:block; }
+  .bar i { display:block; height:100%; width:0%; border-radius:99px;
+    background: #2470e0; transition: width .2s ease; }
+  html[data-theme="dark"] .bar { background: rgba(255,255,255,.14); }
+  .urow { display:flex; gap:9px; }
+  .urow .btn { flex:1; }
+  .btn.ghost { background: #ffffff; color:#2470e0;
+    border:1px solid #c9d6ea; box-shadow:none; }
+  .btn.ghost:hover { filter:none; background:#eef3fb; }
+  .btn.ghost:active { background:#e1ecfc; }
+  .btn.danger { background:#ffffff; color:#c92a2a; border:1px solid #f0c4c4; }
+  .btn.danger:hover { filter:none; background:#fdf1f1; }
+  .btn.danger:active { background:#fbe3e3; }
+  html[data-theme="dark"] .btn.danger { background:#2b2f36; color:#ff9c9c; border-color:#5a3535; }
+  html[data-theme="dark"] .btn.danger:hover { background:#3a3238; }
+  html[data-theme="dark"] .btn.ghost { background: #2b2f36; color:#eceff3;
+    border-color: rgba(255,255,255,.16); }
+  html[data-theme="dark"] .btn.ghost:hover { background:#32363f; }
+  html[data-theme="dark"] .btn.ghost:active { background:#3a3f49; }
+  .keys { margin:14px 22px 0; padding:4px 16px; border-radius:14px;
+    background: #ffffff;
+    border:1px solid #dfe7f2; font-size:12.5px; }
+  html[data-theme="dark"] .keys { background: #22262e; border-color: rgba(255,255,255,.08); }
+  .keys .kr { display:flex; justify-content:space-between; padding:6.5px 0;
+    border-bottom:1px solid #dfe7f2; }
+  html[data-theme="dark"] .keys .kr { border-bottom-color: rgba(255,255,255,.08); }
+  .keys .kr:last-child { border-bottom:none; }
+  .keys .kk { color:#6b7a90; } html[data-theme="dark"] .keys .kk { color:#9aa1ab; }
+  .keys .kv { font-weight:600; font-variant-numeric: tabular-nums; color:#1f2d47; }
+  html[data-theme="dark"] .keys .kv { color:#eceff3; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    display:flex; flex-direction:column;
+  }
+  html[data-theme="dark"] body {
+    background: #17181c; color:#eceff3;
+  }
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:20px 22px 0; }
+  .tile {
+    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    box-sizing:border-box;
+  }
+  html[data-theme="dark"] .tile { background:#ffffff; }
+  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
+  .tt { margin-left:14px; padding-top:5px; }
+  .tt .nm { font-size:20px; font-weight:600; letter-spacing:.8px; line-height:1.1; }
+  .tt .ds { font-size:12px; color:#6b7a90; margin-top:5px; }
+  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .x {
+    -webkit-app-region: no-drag; margin-left:auto; appearance:none; border:none; cursor:pointer;
+    background:transparent; color:#6b7a90; width:30px; height:30px; border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    transition: background .13s ease, color .13s ease;
+  }
+  .x:hover { background:#d3382c; color:#fff; }
+  .x svg { width:14px; height:14px; }
+  .card {
+    margin:18px 22px 0; padding:6px 18px;
+    background: #ffffff;
+    border:1px solid #dfe7f2; border-radius:14px;
+  }
+  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:10.5px 0;
+    border-bottom:1px solid #dfe7f2; font-size:13.5px; }
+  html[data-theme="dark"] .row { border-bottom-color: rgba(255,255,255,.08); }
+  .row:last-child { border-bottom:none; }
+  .row .k { color:#6b7a90; }
+  html[data-theme="dark"] .row .k { color:#9aa1ab; }
+  .row .v { font-weight:600; font-variant-numeric: tabular-nums; color:#1f2d47; }
+  html[data-theme="dark"] .row .v { color:#eceff3; }
+  .chk { padding:0 22px; margin-top:18px; }
+  .btn {
+    width:100%; border:none; cursor:pointer; font-family:inherit;
+    font-size:14.5px; font-weight:600; color:#fff; letter-spacing:1px;
+    padding:11.5px 0; border-radius:12px;
+    background: #2470e0;
+    transition: filter .15s ease, transform .05s ease, opacity .15s;
+  }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity:.55; cursor:default; transform:none; filter:none; }
+  .res { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center;
+    color:#6b7a90; font-variant-numeric: tabular-nums; }
+  /* 防文字被压（M2 弹窗普查修复）：body 是定高弹性列，区块默认可压缩——
+     .res 的 min-height 会顶掉自动最小高，两行提示时被压成一行、溢出文字被
+     下面的版本框盖住（实测下载失败/完成文案第二行被截）。各区块一律不许
+     压缩，内容超高时走 body 既有的纵向滚动。 */
+  .head, .card, .chk, .res, .upd, .keys, .foot { flex-shrink:0; }
+  html[data-theme="dark"] .res { color:#a7adb8; }
+  .res .ok { color:#128a43; font-weight:600; }
+  .res .bad { color:#d3382c; font-weight:600; }
+  html[data-theme="dark"] .res .ok { color:#5eeaa0; }
+  html[data-theme="dark"] .res .bad { color:#ff9d8f; }
+  .foot { margin-top:auto; padding:0 22px 15px; text-align:center;
+    font-size:11.5px; color:rgba(107,122,144,.75); }
+  html[data-theme="dark"] .foot { color:rgba(167,173,184,.55); }
+  #licBindInput, #licClaimInput { background:#ffffff; color:#1f2d47; }
+  html[data-theme="dark"] #licBindInput, html[data-theme="dark"] #licClaimInput { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16) !important; }
+  #licBindInput:focus-visible, #licClaimInput:focus-visible, #licQueryBtn:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
+  #licBuyBtn:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
+  ::-webkit-scrollbar { width:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:#c9d6ea; border-radius:6px; border:2px solid #f4f7fb; }
+  html[data-theme="dark"] ::-webkit-scrollbar-thumb { background:#3a3f49; border-color:#17181c; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
+    <div class="tt">
+      <div class="nm">QFRemote</div>
+      <div class="ds">远程控制 · 电脑控制端</div>
+    </div>
+    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="k">版本</span><span class="v" id="rVer">—</span></div>
+    <div class="row"><span class="k">构建日期</span><span class="v" id="rDate">—</span></div>
+    <div class="row"><span class="k">服务器地址</span><span class="v" id="rUrl">—</span></div>
+    <div class="row"><span class="k">使用时长</span><span class="v" id="rDuration">—</span></div>
+    <div class="row"><span class="k">我的积分</span><span class="v" id="rPoints">—</span></div>
+  </div>
+
+  <div class="chk"><button class="btn" id="check">检查服务器状态</button></div>
+  <div class="res" id="res"></div>
+
+  <!-- 付费与激活（2.3.1）：数据与 /license/api/me 同源，取不到显示诚实错误态 -->
+  <div class="card" id="licTrial" style="display:none;">
+    <div class="row"><span class="v" id="licTrialText"></span></div>
+    <div class="row"><span class="k" style="line-height:1.6;">试用结束后，电脑与手机需使用激活密钥继续使用；购买密钥后，网页版免费开通，可在任意设备登录使用。</span></div>
+  </div>
+  <div class="card" id="licCard">
+    <div class="row"><span class="k">当前套餐</span><span class="v" id="licPlan">—</span></div>
+    <div class="row"><span class="k">账户状态</span><span class="v" id="licStatus">—</span></div>
+    <div class="row"><span class="k">密钥</span><span class="v" id="licKey">—</span></div>
+    <div class="row"><span class="k">剩余时长</span><span class="v" id="licRemain">—</span></div>
+    <div class="row"><span class="k">设备名额</span><span class="v" id="licSlots">—</span></div>
+    <div class="row"><span class="k">网页版权益</span><span class="v" id="licWeb">—</span></div>
+  </div>
+  <div class="res" id="licErr" style="display:none;">许可信息读取失败，请检查网络后重试。<br><button class="btn ghost" id="licRetry" style="width:auto;padding:7px 22px;margin-top:8px;">重试</button></div>
+  <div class="keys">
+    <div id="licBindBlock">
+    <div class="kr"><span class="kk" style="line-height:1.65;">输入密钥激活：把密钥粘贴到这里，绑定到本机（两台电脑与一部手机）。</span></div>
+    <div style="display:flex;gap:9px;padding:10px 0 4px;">
+      <input id="licBindInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:13.5px;padding:10px 12px;border-radius:10px;border:1px solid #c9d6ea;text-transform:uppercase;">
+      <button class="btn" id="licBindBtn" style="width:auto;padding:10px 18px;">绑定本机</button>
+    </div>
+    <div class="res" id="licBindOut" style="margin:6px 0 4px;text-align:left;"></div>
+    </div>
+    <div class="kr"><span class="kk" style="line-height:1.65;">领取转赠密钥：如有人向您转赠密钥，先在登录页点「查询密钥」，凭账号和密码核验后复制完整密钥串，再粘贴到这里领取。领取成功后密钥即转入您的账号，原主人一侧同时失效。</span></div>
+    <div style="display:flex;gap:9px;padding:10px 0 4px;">
+      <input id="licClaimInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:13.5px;padding:10px 12px;border-radius:10px;border:1px solid #c9d6ea;text-transform:uppercase;">
+      <button class="btn" id="licClaimBtn" style="width:auto;padding:10px 18px;">领取密钥</button>
+    </div>
+    <div class="res" id="licClaimOut" style="margin:6px 0 4px;text-align:left;"></div>
+  </div>
+  <div class="chk"><button class="btn" id="licBuyBtn" style="background:#111111;">购买密钥</button></div>
+  <div style="text-align:center;"><button id="licQueryBtn" style="appearance:none;background:none;border:none;cursor:pointer;font-family:inherit;font-size:14.5px;color:#2470e0;padding:10px 12px;">查询密钥</button></div>
+
+  <div class="chk urow">
+    <button class="btn" id="checkUpd">检查更新</button>
+    <button class="btn ghost" id="copyDiag">复制诊断信息</button>
+  </div>
+  <div class="chk"><button class="btn ghost" id="openReg">注册新账号</button></div>
+  <div class="chk"><button class="btn danger" id="logoutBtn">退出登录</button></div>
+  <div class="res" id="updRes"></div>
+
+  <div class="upd" id="updBox">
+    <div class="uv" id="updVer">发现新版本</div>
+    <div class="un" id="updNotes"></div>
+    <div class="bar" id="updBar"><i id="updFill"></i></div>
+    <div class="urow" style="margin-top:11px;">
+      <button class="btn" id="dlUpdate">下载更新</button>
+      <button class="btn" id="openInst" style="display:none;">安装更新并重启</button>
+    </div>
+  </div>
+
+  <div class="keys">
+    <div class="kr"><span class="kk" style="line-height:1.65;">更新规则：使用中发现新版本只提醒、不打断；下次打开软件时，先完成更新安装再进入。如打开时无法连接服务器，照常放行使用。</span></div>
+  </div>
+
+  <div class="keys">
+    <div class="kr"><span class="kk">刷新页面</span><span class="kv">F5</span></div>
+    <div class="kr"><span class="kk">截图</span><span class="kv">F9</span></div>
+    <div class="kr"><span class="kk">窗口置顶</span><span class="kv">F10</span></div>
+    <div class="kr"><span class="kk">全屏</span><span class="kv">F11</span></div>
+    <div class="kr"><span class="kk">缩放页面</span><span class="kv">Ctrl + 加 / 减 / 0</span></div>
+  </div>
+
+  <div class="foot">QFRemote 远程控制</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  function applyTheme(t) {
+    if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+  }
+  applyTheme(q.get('t') || 'blue');
+  document.getElementById('rVer').textContent = 'v' + (q.get('v') || '—');
+  document.getElementById('rDate').textContent = q.get('d') || '—';
+  document.getElementById('rUrl').textContent = (q.get('u') || '').replace(/\/$/, '');
+
+  document.getElementById('close').addEventListener('click', () => qfAbout.close());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') qfAbout.close(); });
+  qfAbout.onTheme(applyTheme);
+
+  const btn = document.getElementById('check');
+  const res = document.getElementById('res');
+  function fmtTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    res.textContent = '正在检测服务器…';
+    try {
+      const p = await qfAbout.check();
+      if (p && p.ok) {
+        res.innerHTML = '<span class="ok">服务器可达</span>　' + p.detail +
+          '（' + fmtTime(p.at) + '，用时 ' + p.ms + ' 毫秒）';
+      } else if (p) {
+        res.innerHTML = '<span class="bad">服务器不可达</span>　' + p.detail +
+          '（' + fmtTime(p.at) + '）';
+      } else {
+        res.textContent = '检测未返回结果，请重试。';
+      }
+    } catch (e) {
+      res.textContent = '检测失败：' + e.message;
+    }
+    btn.disabled = false;
+  });
+
+  // ---------- 软件内更新（v1.0.3） ----------
+  const updRes = document.getElementById('updRes');
+  const updBox = document.getElementById('updBox');
+  const updVer = document.getElementById('updVer');
+  const updNotes = document.getElementById('updNotes');
+  const updBar = document.getElementById('updBar');
+  const updFill = document.getElementById('updFill');
+  const dlBtn = document.getElementById('dlUpdate');
+  const openBtn = document.getElementById('openInst');
+  const chkUpdBtn = document.getElementById('checkUpd');
+  function fmtSize(n) {
+    if (!n && n !== 0) return '';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+    return n + ' B';
+  }
+  function renderUpdate(s) {
+    if (!s) return;
+    if (s.phase === 'checking') { updRes.textContent = '正在检查更新…'; return; }
+    if (s.phase === 'latest') { updRes.textContent = '当前已是最新版本，无需更新。'; updBox.classList.remove('show'); return; }
+    if (s.phase === 'error') { updRes.textContent = '本次未能完成更新检查（网络或服务器原因），请稍后再试。'; return; }
+    if (s.manifest && (s.phase === 'available' || s.phase === 'downloading' || s.phase === 'downloaded' || s.phase === 'download-failed' || s.phase === 'installing')) {
+      updBox.classList.add('show');
+      updVer.textContent = '发现新版本 v' + s.manifest.version + (s.manifest.size ? '（' + fmtSize(s.manifest.size) + '）' : '');
+      updNotes.textContent = s.manifest.notes || '';
+      if (s.phase === 'downloading') {
+        dlBtn.style.display = ''; dlBtn.disabled = true; dlBtn.textContent = '正在下载…';
+        openBtn.style.display = 'none';
+        updBar.classList.add('show');
+        if (s.percent != null) updFill.style.width = s.percent + '%';
+        if (!/正在下载/.test(updRes.textContent)) updRes.textContent = '正在下载更新包…' + (s.percent != null ? ' ' + s.percent + '%' : '');
+      } else if (s.phase === 'available') {
+        updRes.textContent = '';
+        dlBtn.style.display = ''; dlBtn.disabled = false; dlBtn.textContent = '下载更新';
+        openBtn.style.display = 'none'; updBar.classList.remove('show'); updFill.style.width = '0%';
+      } else if (s.phase === 'downloaded') {
+        updRes.innerHTML = '<span class="ok">下载完成，完整性核对通过</span>（SHA256 一致），可进行安装。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹。';
+        dlBtn.style.display = 'none'; openBtn.style.display = ''; openBtn.disabled = false; openBtn.textContent = '安装更新并重启';
+        updFill.style.width = '100%';
+      } else if (s.phase === 'installing') {
+        updRes.textContent = '正在安装更新，软件即将重启；安装完成后重新打开即为新版本。';
+        dlBtn.style.display = 'none'; openBtn.style.display = ''; openBtn.disabled = true; openBtn.textContent = '正在安装…';
+        updBar.classList.add('show'); updFill.style.width = '100%';
+      } else if (s.phase === 'download-failed') {
+        updRes.innerHTML = '<span class="bad">下载失败</span>：' + (s.error || '未知原因') + '请再次点「下载更新」重试。';
+        dlBtn.style.display = ''; dlBtn.disabled = false; dlBtn.textContent = '重新下载';
+        openBtn.style.display = 'none';
+      }
+    }
+  }
+  qfAbout.onUpdateState(renderUpdate);
+  qfAbout.getUpdateState().then(renderUpdate).catch(() => {});
+  chkUpdBtn.addEventListener('click', async () => {
+    chkUpdBtn.disabled = true;
+    try { renderUpdate(await qfAbout.checkUpdate()); } catch (e) { /* 主进程保证不抛到这里 */ }
+    chkUpdBtn.disabled = false;
+  });
+  dlBtn.addEventListener('click', () => {
+    dlBtn.disabled = true; dlBtn.textContent = '正在下载…';
+    updBar.classList.add('show'); updFill.style.width = '0%';
+    updRes.textContent = '正在下载更新包…';
+    qfAbout.downloadUpdate();
+  });
+  qfAbout.onUpdateProgress((p) => {
+    if (p.percent != null) {
+      updFill.style.width = p.percent + '%';
+      updRes.textContent = '正在下载更新包… ' + p.percent + '%（' + fmtSize(p.received) + (p.total ? ' / ' + fmtSize(p.total) : '') + '）';
+    } else {
+      updRes.textContent = '正在下载更新包… 已下载 ' + fmtSize(p.received);
+    }
+  });
+  openBtn.addEventListener('click', () => qfAbout.openInstaller());
+
+  // ---------- 使用时长与积分（v2.2.0，取不到显示「—」不报错） ----------
+  if (qfAbout.getPoints) {
+    qfAbout.getPoints().then((p) => {
+      if (!p) return;
+      if (p.displayText) document.getElementById('rDuration').textContent = p.displayText;
+      if (p.points !== null && p.points !== undefined) document.getElementById('rPoints').textContent = p.points + ' 分';
+    }).catch(() => {});
+  }
+
+  // ---------- 付费与激活（2.3.1，与网页正本同源展示） ----------
+  const licErr = document.getElementById('licErr');
+  function applyLicenseEntryMode(mode) {
+    const bindBlock = document.getElementById('licBindBlock');
+    const buyBtn = document.getElementById('licBuyBtn');
+    if (mode === 'permanent') {
+      if (bindBlock) bindBlock.style.display = 'none';
+      if (buyBtn) buyBtn.style.display = 'none';
+    } else if (mode === 'timed') {
+      if (bindBlock) bindBlock.style.display = 'none';
+      if (buyBtn) { buyBtn.style.display = ''; buyBtn.textContent = '购买叠加'; }
+    } else {
+      if (bindBlock) bindBlock.style.display = '';
+      if (buyBtn) { buyBtn.style.display = ''; buyBtn.textContent = '购买密钥'; }
+    }
+  }
+  function renderLicense(me) {
+    if (!me) {
+      licErr.style.display = '';
+      document.getElementById('licPlan').textContent = '—';
+      document.getElementById('licStatus').textContent = '—';
+      document.getElementById('licKey').textContent = '—';
+      document.getElementById('licRemain').textContent = '—';
+      document.getElementById('licSlots').textContent = '—';
+      document.getElementById('licWeb').textContent = '—';
+      document.getElementById('licTrial').style.display = 'none';
+      applyLicenseEntryMode('inactive');
+      return;
+    }
+    licErr.style.display = 'none';
+    applyLicenseEntryMode(me.entryMode || 'inactive');
+    document.getElementById('licPlan').textContent = me.planName || '—';
+    document.getElementById('licStatus').textContent = me.displayStatus || '—';
+    document.getElementById('licKey').textContent = me.maskedKey || '—';
+    document.getElementById('licRemain').textContent = me.remainText || '—';
+    document.getElementById('licSlots').textContent = '电脑 ' + (me.slotsPc || 0) + ' / ' + (me.slotsPcMax != null ? me.slotsPcMax : 2) + ' · 手机 ' + (me.slotsMobile || 0) + ' / ' + (me.slotsMobileMax != null ? me.slotsMobileMax : 1);
+    document.getElementById('licWeb').textContent = me.webEnabled ? '已开通' : '未开通（真实付费购买后开通）';
+    const trial = document.getElementById('licTrial');
+    if (me.trialText) { document.getElementById('licTrialText').textContent = me.trialText; trial.style.display = ''; }
+    else trial.style.display = 'none';
+  }
+  async function loadLicense() {
+    if (!qfAbout.getLicense) return;
+    try { renderLicense(await qfAbout.getLicense()); } catch (e) { renderLicense(null); }
+  }
+  loadLicense();
+  document.getElementById('licRetry').addEventListener('click', loadLicense);
+  let licBindBusy = false;
+  document.getElementById('licBindBtn').addEventListener('click', async () => {
+    if (licBindBusy) return;
+    const input = document.getElementById('licBindInput');
+    const out = document.getElementById('licBindOut');
+    licBindBusy = true;
+    try {
+      const r = await qfAbout.bindLicense(input.value);
+      out.textContent = r && r.display ? r.display : '网络异常，请稍后再试。';
+      if (r && r.ok) { input.value = ''; loadLicense(); }
+    } catch (e) { out.textContent = '网络异常，请稍后再试。'; }
+    licBindBusy = false;
+  });
+  let licClaimBusy = false;
+  document.getElementById('licClaimBtn').addEventListener('click', async () => {
+    if (licClaimBusy) return;
+    const input = document.getElementById('licClaimInput');
+    const out = document.getElementById('licClaimOut');
+    licClaimBusy = true;
+    try {
+      const r = await qfAbout.claimLicense(input.value);
+      out.textContent = r && r.display ? r.display : '网络异常，请稍后再试。';
+      if (r && r.ok) { input.value = ''; loadLicense(); }
+    } catch (e) { out.textContent = '网络异常，请稍后再试。'; }
+    licClaimBusy = false;
+  });
+  // 16:37 定版：购买密钥黑底白字（上方按钮）、其下查询密钥蓝字无边框，均壳内打开
+  document.getElementById('licBuyBtn').addEventListener('click', () => qfAbout.openLicense('purchase'));
+  document.getElementById('licQueryBtn').addEventListener('click', () => qfAbout.openLicense('status'));
+
+  // ---------- 注册新账号（2.3.1 起改壳内打开，不再跳外部浏览器） ----------
+  document.getElementById('openReg').addEventListener('click', () => qfAbout.openRegister());
+  // 正式退出登录：确认与级联终止都在主进程（qf-logout-request），
+  // 确认通过后本窗由主进程关闭；取消则什么都不发生。
+  document.getElementById('logoutBtn').addEventListener('click', async () => {
+    try { await qfAbout.requestLogout(); } catch (e) { /* ignore */ }
+  });
+
+  // ---------- 诊断信息一键复制 ----------
+  const diagBtn = document.getElementById('copyDiag');
+  diagBtn.addEventListener('click', async () => {
+    try {
+      await qfAbout.copyDiagnostics();
+      const old = diagBtn.textContent;
+      diagBtn.textContent = '已复制，可直接粘贴';
+      setTimeout(() => { diagBtn.textContent = old; }, 2200);
+    } catch (e) {
+      updRes.textContent = '复制失败：' + e.message;
+    }
+  });
+</script>
+</body>
+</html>

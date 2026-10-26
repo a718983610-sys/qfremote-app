@@ -1,0 +1,2043 @@
+'use strict';
+/*
+ * QFRemote 扩展服务（qfremote-ext，2.2.0 新服务，零改动旧文件）
+ * ================================================================
+ * 监听 127.0.0.1:8448（只经 nginx 本机反代对外），systemd 以 root 运行
+ * （要调 systemctl / mcdb / appeal-admin）。数据只落在自家 data/ 目录。
+ *
+ * 两摊功能：
+ *  1) 积分 /points/api：心跳计账（服务器时钟、账号级去重）＋ me 查询。
+ *  2) 站长管理 /admin + /admin/api：仅站长账号（登录名是站长邮箱且
+ *     siteadmin 全权）可用。冻结/解封/封号/重置密码走既有停服窗序列
+ *     （串行队列：探活 → 停服 → mcdb → 交还属主 → 启服 → 探活），
+ *     改名走 rename-account.sh --admin-override，申诉走 appeal-admin.js。
+ *     重置密码的新密码只在本次响应里回显一次，不落日志、不落文件。
+ *
+ * 会话校验照好友服务现行做法（控制 WS 校验）：拿控制台会话 cookie
+ * （xid / xid.sig）开一条到 MeshCentral 控制通道的 WS 连接，收到服务
+ * 器下发的 userinfo 才算验真；本站不另存任何账号密码。
+ * 另有一次性令牌：POST /points/api/sso-token（带有效控制台会话）发
+ * 60 秒单次令牌，GET /admin/login?token= 换发本站会话 cookie
+ * （qfr_ext，30 天，HttpOnly），供隧道源打开管理页时用。
+ * /admin 与 /points/api 也直接接受手动附带的控制台 cookie（App 主
+ * 进程就是这样调的）。
+ *
+ * Node 无第三方依赖；WS 客户端照好友服务口径取 MeshCentral 自带模块
+ * /opt/meshcentral/node_modules/ws（服务器 Node v20、ws 8.21.1 已核）。
+ */
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const pointsCore = require('./points-core');
+const { adminPageHtml } = require('./page');
+// ===== 许可核心（阶段 C-2）：单一数据源 /opt/qfremote-license/，本进程为唯一写者 =====
+let _licCoreMod, _licPagesMod;
+try { _licCoreMod = require('./license-core'); _licPagesMod = require('./license-pages'); }
+catch (e) { _licCoreMod = require('../license-svc/license-core'); _licPagesMod = require('../license-svc/license-pages'); }
+const { createLicenseCore, PLANS: LIC_PLANS, maskKey: licMaskKey } = _licCoreMod;
+const { purchasePageHtml, statusPageHtml, rebindPageHtml, ordersPageHtml, welfarePageHtml } = _licPagesMod;
+// ===== 2.3.1 新增服务端模块（#21 订单 / #22+#31 事件 / #25 文件发送） =====
+let _ordersMod, _eventsMod, _filesMod;
+try { _ordersMod = require('./orders-core'); _eventsMod = require('./events-core'); _filesMod = require('./files-core'); }
+catch (e) { _ordersMod = require('../ext-svc/orders-core'); _eventsMod = require('../ext-svc/events-core'); _filesMod = require('../ext-svc/files-core'); }
+const { createOrdersCore } = _ordersMod;
+const { createEventsCore } = _eventsMod;
+const { createFilesCore } = _filesMod;
+let _homePageMod = null;
+try { _homePageMod = require('./home-page'); } catch (e) { try { _homePageMod = require('../ext-svc/home-page'); } catch (e2) {} }
+const homePageHtml = _homePageMod ? _homePageMod.homePageHtml : null;
+const LIC_DIR = process.env.QFLIC_DIR || '/opt/qfremote-license';
+const lic = createLicenseCore({ dir: LIC_DIR });
+const LIC_SECRET_FILE = path.join(LIC_DIR, 'internal.secret');
+let LIC_SECRET = '';
+try { LIC_SECRET = fs.readFileSync(LIC_SECRET_FILE, 'utf8').trim(); } catch (e) {}
+if (!LIC_SECRET) {
+  LIC_SECRET = crypto.randomBytes(32).toString('hex');
+  try { fs.mkdirSync(LIC_DIR, { recursive: true }); fs.writeFileSync(LIC_SECRET_FILE, LIC_SECRET, { mode: 0o640 }); } catch (e) { log({ ev: 'lic-secret-error', err: String(e && e.message) }); }
+}
+let passmod = null;
+try { passmod = require('/opt/meshcentral/node_modules/meshcentral/pass.js'); } catch (e) {}
+function verifyAccountPassword(username, password) {
+  return new Promise((resolve) => {
+    if (!passmod || !password) return resolve(false);
+    let user = null;
+    try { user = findDbUser(loadDb(), username); } catch (e) {}
+    if (!user || !user.salt || !user.hash) return resolve(false);
+    try { passmod.hash(String(password), user.salt, (err, hash) => resolve(!err && hash === user.hash), null); }
+    catch (e) { resolve(false); }
+  });
+}
+function accountEmail(username) {
+  try { const u = findDbUser(loadDb(), username); if (u && u.email) return String(u.email).toLowerCase(); } catch (e) {}
+  return lic.getContact(username);
+}
+// 账号存在性（以控制台账号库为准；转赠发起校验受赠账号用，裁决批④）
+function accountExists(username) {
+  try { return !!findDbUser(loadDb(), username); } catch (e) { return false; }
+}
+
+// ---------- 配置（环境变量可覆盖，默认即生产路径） ----------
+const BIND = process.env.QFEXT_BIND || '127.0.0.1';
+const PORT = parseInt(process.env.QFEXT_PORT || '8448', 10);
+const MC_URL = process.env.QFEXT_MC_URL || 'wss://127.0.0.1:8443/control.ashx';
+const DATA_DIR = process.env.QFEXT_DATA_DIR || '/opt/qfremote-ext/data';
+const POINTS_FILE = path.join(DATA_DIR, 'points.json');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const MC_DATA_DIR = process.env.QFEXT_MC_DATA_DIR || '/opt/meshcentral/meshcentral-data';
+const DB_FILE = process.env.QFEXT_DB_FILE || path.join(MC_DATA_DIR, 'meshcentral.db');
+const LEDGER_FILE = process.env.QFEXT_LEDGER_FILE || path.join(MC_DATA_DIR, 'qf-account-ledger.json');
+const APPEALS_FILE = process.env.QFEXT_APPEALS_FILE || '/opt/qfremote-loginshim/data/appeals.json';
+const APPEAL_ADMIN = process.env.QFEXT_APPEAL_ADMIN || '/opt/qfremote-loginshim/appeal-admin.js';
+const MCDB = process.env.QFEXT_MCDB || '/opt/meshcentral/account-kit/mcdb.js';
+const RENAME_SH = process.env.QFEXT_RENAME_SH || '/opt/meshcentral/account-kit/rename-account.sh';
+
+const payOrders = createOrdersCore({ dir: LIC_DIR, lic, log });
+const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt' });
+const fileStage = createFilesCore({ dir: LIC_DIR, lic, log });
+const EXT_ASSETS_DIR = process.env.QFEXT_ASSETS_DIR || '/opt/qfremote-ext/assets';
+
+// ===== 互联窗观察（2.3.2 线 D，决策 #42）：只记录、不拒服 =====
+// 客户端（2.3.2 起）在自家 API 请求上带 x-qf-client-version 头。本服务
+// 在 /license/api/ 入口只做观察记录：带头才往独立只追加文件记一行
+// {ts, username, version, path}；绝不写许可状态文件（单写者纪律不破——
+// 本文件不是许可状态）、不改变任何接口行为与返回。username 只取已解析
+// 出的会话身份，取不到记 null，绝不为记日志额外做校验或读请求体。
+const CLIENT_VERSIONS_FILE = process.env.QFEXT_CLIENT_VERSIONS_FILE || path.join(LIC_DIR, 'client-versions.jsonl');
+function recordClientVersion(req, p, username) {
+  try {
+    const v = req.headers['x-qf-client-version'];
+    if (typeof v !== 'string' || !v.trim()) return;
+    const line = JSON.stringify({ ts: new Date().toISOString(), username: username || null, version: v.trim().slice(0, 32), path: String(p || '') }) + '\n';
+    fs.appendFileSync(CLIENT_VERSIONS_FILE, line, { mode: 0o600 });
+  } catch (e) { try { log({ ev: 'client-version-log-error', err: String(e && e.message) }); } catch (e2) {} }
+}
+
+const ADMIN_EMAIL = '718983610';
+const SITEADMIN_FULL = 4294967295;
+const SITEADMIN_LOCKED_BIT = 32;
+const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // 本站会话 30 天
+const SSO_TOKEN_TTL_MS = 60 * 1000;           // 一次性令牌 60 秒
+const ACCOUNT_RE = /^[A-Za-z0-9@._+\-]{1,80}$/;
+
+function log(obj) {
+  try { console.log(JSON.stringify(Object.assign({ at: new Date().toISOString(), svc: 'qfremote-ext' }, obj))); } catch (e) {}
+}
+
+// ---------- WS 客户端（照好友服务 loadWebSocket 口径） ----------
+let _WebSocket = null;
+function loadWebSocket() {
+  if (_WebSocket) return _WebSocket;
+  try { _WebSocket = require('/opt/meshcentral/node_modules/ws'); }
+  catch (e) { _WebSocket = require('ws'); }
+  return _WebSocket;
+}
+
+// ---------- 控制台会话校验（照好友服务 mcConnectCookie 同一机制） ----------
+// 以控制台会话 cookie 开控制通道：认证成功服务器主动下发 userinfo，
+// 收到才算验真；cookie 无效/过期/被冻结都会被直接关连接。
+// 会话绑 IP 的转发修复与好友服务同口径（2.3.0 H 线，原理见好友服务
+// server.js 的 sessionIpFromCookie 注释）：候选 = 会话自带 IP → 请求来源
+// IP → 无转发原样，被秒拒才换下一个，超时不叠试。
+function sessionIpFromCookie(cookieHeader) {
+  try {
+    const jar = {};
+    String(cookieHeader || '').split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim(); });
+    if (!jar.xid) return null;
+    const obj = JSON.parse(Buffer.from(String(jar.xid), 'base64').toString('utf8'));
+    const ip = obj && obj.ip;
+    if (typeof ip === 'string' && ip.length <= 64 && /^[0-9a-fA-F.:%[\]]+$/.test(ip)) return ip;
+  } catch (e) { /* 解不出就走后备候选 */ }
+  return null;
+}
+function mcConnectCookieOnce(cookieHeader, timeoutMs, fwdIp) {
+  return new Promise((resolve, reject) => {
+    let WebSocket;
+    try { WebSocket = loadWebSocket(); } catch (e) { reject(new Error('ws-unavailable')); return; }
+    const headers = { Cookie: cookieHeader, Origin: 'https://127.0.0.1:8443' };
+    if (fwdIp) headers['X-Forwarded-For'] = fwdIp;
+    const ws = new WebSocket(MC_URL, { rejectUnauthorized: false, headers });
+    let done = false;
+    const timer = setTimeout(() => finish(new Error('mc-connect-timeout')), timeoutMs || 8000);
+    function finish(err, sess) { if (done) return; done = true; clearTimeout(timer); if (err) { try { ws.close(); } catch (e) {} reject(err); } else resolve(sess); }
+    const sess = { ws, userinfo: null };
+    ws.on('message', (data) => {
+      let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
+      if (m && m.action === 'userinfo' && m.userinfo) { sess.userinfo = m.userinfo; finish(null, sess); return; }
+      // 服务器对无效/伪造会话立刻回 action=close（实测 0.06 秒）：认这个信号
+      // 秒拒，不再干等超时——这正是「验真超时」现象的根源修复。
+      if (m && m.action === 'close') finish(new Error('mc-session-rejected'));
+    });
+    ws.on('error', () => finish(new Error('mc-conn-error')));
+    ws.on('close', () => finish(new Error('mc-auth-failed')));
+  });
+}
+async function mcConnectCookie(cookieHeader, timeoutMs, extraIps) {
+  const candidates = [];
+  const sip = sessionIpFromCookie(cookieHeader);
+  if (sip) candidates.push(sip);
+  for (const ip of (extraIps || [])) { if (ip && !candidates.includes(ip)) candidates.push(ip); }
+  candidates.push(null);
+  let lastErr = new Error('mc-auth-failed');
+  for (const ip of candidates) {
+    try { return await mcConnectCookieOnce(cookieHeader, timeoutMs, ip); }
+    catch (e) { lastErr = e; if (e && e.message === 'mc-connect-timeout') break; }
+  }
+  throw lastErr;
+}
+// 请求来源 IP（与好友服务 clientIp 同口径：本机回环来的才认 X-Forwarded-For）
+function clientIpFromReq(req) {
+  const remote = (req.socket && req.socket.remoteAddress) || '';
+  if ((remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') && req.headers['x-forwarded-for']) {
+    return String(req.headers['x-forwarded-for']).split(',')[0].trim();
+  }
+  return remote.replace(/^::ffff:/, '');
+}
+
+function parseCookies(req) {
+  const out = {};
+  String(req.headers.cookie || '').split(';').forEach((p) => {
+    const i = p.indexOf('=');
+    if (i > 0) out[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return out;
+}
+
+// 校验缓存：sha256(xid) -> {at, user, siteadmin}（30 秒，照好友服务口径，防心跳连打反复开通道）
+// 最终机制（2026-10-25 定形，证据见 2.2.0 扩展线回报）：
+//  控制 WS 校验为唯一判据——userinfo 到达即认；服务器对无效会话回的
+//  action=close 消息同样立即判拒（旧代码不认它、干等超时，是「验真超时」
+//  的根源）；真超时再重试一次防偶发。HTTP 侧无可用的会话预言机（定制
+//  登录页使 GET / 恒回登录页、/terms 三态一致、userimage.ashx 双向 404、
+//  会话签名密钥每启动随机生成不可本地验签），故不设 HTTP 备用路径；
+//  结构修法（config 固定 sessionKey 后可本地验签）已上报总装裁定。
+const validateCache = new Map();
+// ---------- 已撤销 xid（17:29 领取后原主人网页会话即时失效） ----------
+// 转赠领取落盘后，原主人当时已知的控制台 xid 哈希全部登记撤销（落盘，
+// 有效期 30 天＝xid 最长寿命）：此后这些 xid 在本站一切接口验真直接拒，
+// 与 MeshCentral 在线 WS 的 close 推送（executeClaimForceLogout 内）双路
+// 落地。新登录产生的新 xid 不在撤销名单——而新登录本身会被许可门按
+// G1 拦截，不会形成可用会话。
+const REVOKED_XID_FILE = path.join(DATA_DIR, 'revoked-xid.json');
+let revokedXids = {}; // sha256(xid.sig) -> {user, at, exp}
+try { const v = JSON.parse(fs.readFileSync(REVOKED_XID_FILE, 'utf8')); if (v && typeof v === 'object') revokedXids = v; } catch (e) {}
+function saveRevokedXids() {
+  try {
+    const now = Date.now();
+    for (const k of Object.keys(revokedXids)) if (revokedXids[k].exp <= now) delete revokedXids[k];
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(REVOKED_XID_FILE + '.tmp', JSON.stringify(revokedXids), { mode: 0o600 });
+    fs.renameSync(REVOKED_XID_FILE + '.tmp', REVOKED_XID_FILE);
+  } catch (e) { log({ ev: 'revoked-xid-save-error', err: String(e && e.message) }); }
+}
+function revokeXidsForUser(user) {
+  let n = 0;
+  const now = Date.now();
+  for (const [hash, hit] of validateCache.entries()) {
+    if (hit && hit.user === user) { revokedXids[hash] = { user, at: now, exp: now + SESSION_TTL_MS }; validateCache.delete(hash); n += 1; }
+  }
+  if (n) saveRevokedXids();
+  return n;
+}
+// 经服务账号官方 WS 通道即时关闭某用户的全部在线会话：对目标做一轮
+// 「置锁定 bit → 立即恢复原值」的 edituser——MeshCentral 在置锁定 bit 的
+// 同一处理里向该用户全部 wssessions 下发 'close'（删会话＋关 WS，
+// meshuser.js edituser 分支既有行为），恢复原值不改变其账号权限位。
+// 站长/全权/服务账号与已锁定账号一律跳过（护栏同 guardCheck 口径）。
+async function mcForceCloseUserSessions(username) {
+  try {
+    if (username === ADMIN_EMAIL) return { pushed: false, detail: 'skipped-guarded-admin' };
+    let svcCfg = {};
+    try { svcCfg = JSON.parse(fs.readFileSync('/opt/qfremote-register/config.json', 'utf8')); } catch (e) { return { pushed: false, detail: 'svc-config-unavailable' }; }
+    const svcUser = svcCfg.svcUser || svcCfg.serviceUser, svcPass = svcCfg.svcPass || svcCfg.servicePass;
+    if (!svcUser || !svcPass) return { pushed: false, detail: 'svc-creds-unavailable' };
+    const WebSocket = loadWebSocket();
+    const auth = Buffer.from(String(svcUser)).toString('base64') + ',' + Buffer.from(String(svcPass)).toString('base64');
+    const sess = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(MC_URL, { rejectUnauthorized: false, headers: { 'x-meshauth': auth } });
+      const t = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('timeout')); }, 8000);
+      ws.on('message', (d) => { try { const m = JSON.parse(d.toString()); if (m.action === 'userinfo') { clearTimeout(t); resolve({ ws }); } } catch (e) {} });
+      ws.on('error', () => { clearTimeout(t); reject(new Error('err')); });
+      ws.on('close', () => { clearTimeout(t); reject(new Error('close')); });
+    });
+    const ws = sess.ws;
+    const cmd = (command, pred) => new Promise((resolve) => {
+      const t = setTimeout(() => resolve({ ok: false, error: 'timeout' }), 8000);
+      const on = (d) => { try { const m = JSON.parse(d.toString()); if (pred(m)) { clearTimeout(t); try { ws.off('message', on); } catch (e) {} resolve({ ok: true, msg: m }); } } catch (e) {} };
+      ws.on('message', on);
+      try { ws.send(JSON.stringify(command)); } catch (e) { clearTimeout(t); resolve({ ok: false, error: 'send' }); }
+    });
+    try {
+      const usersRes = await cmd({ action: 'users', responseid: 'qf-force-users' }, (m) => m.action === 'users' && Array.isArray(m.users));
+      if (!usersRes.ok) return { pushed: false, detail: 'users-cmd-failed' };
+      const u = usersRes.msg.users.find((x) => x.name && x.name.toLowerCase() === username);
+      if (!u) return { pushed: false, detail: 'user-not-found' };
+      const cur = u.siteadmin || 0;
+      if (cur === SITEADMIN_FULL) return { pushed: false, detail: 'skipped-guarded-admin' };
+      if (cur & SITEADMIN_LOCKED_BIT) return { pushed: true, detail: 'already-locked' };
+      const lockRes = await cmd({ action: 'edituser', userid: u._id, siteadmin: (cur | SITEADMIN_LOCKED_BIT), responseid: 'qf-force-lock' }, (m) => m.responseid === 'qf-force-lock');
+      if (!lockRes.ok) return { pushed: false, detail: 'lock-cmd-failed' };
+      let unlockRes = await cmd({ action: 'edituser', userid: u._id, siteadmin: cur, responseid: 'qf-force-unlock' }, (m) => m.responseid === 'qf-force-unlock');
+      if (!unlockRes.ok) unlockRes = await cmd({ action: 'edituser', userid: u._id, siteadmin: cur, responseid: 'qf-force-unlock2' }, (m) => m.responseid === 'qf-force-unlock2');
+      return { pushed: true, detail: unlockRes.ok ? 'closed-and-restored' : 'closed-restore-unconfirmed' };
+    } finally { try { ws.close(); } catch (e) {} }
+  } catch (e) { return { pushed: false, detail: 'error:' + String((e && e.message) || e) }; }
+}
+// 领取成功后的强制下线执行（三路同步落地，结果只写服务日志与响应，
+// 许可台账的完整事件已由许可核心在领取落盘时记下，不在此另起事件）：
+async function executeClaimForceLogout(fromUser) {
+  const summary = { target: fromUser, at: Date.now(), gateAfter: 'G1' };
+  summary.revokedXids = revokeXidsForUser(fromUser);
+  let cleared = 0;
+  for (const h of Object.keys(sessions)) { if (sessions[h].user === fromUser) { delete sessions[h]; cleared += 1; } }
+  if (cleared) saveSessions();
+  summary.extSessionsCleared = cleared;
+  summary.webPush = await mcForceCloseUserSessions(fromUser);
+  summary.softwareSignal = 'forceLogout flag via login-check/device-report/points-heartbeat (transferOutGate)';
+  log({ ev: 'transfer-force-logout', target: fromUser, revokedXids: summary.revokedXids, extSessionsCleared: cleared, webPush: summary.webPush });
+  return summary;
+}
+
+async function validateConsoleCookie(cookieHeader, clientIpHint) {
+  if (!cookieHeader) return null;
+  // 只摘 xid / xid.sig（照好友服务 trySso 的拼法，不把其他 cookie 带给控制通道）
+  const jar = {};
+  String(cookieHeader).split(';').forEach((p) => {
+    const i = p.indexOf('=');
+    if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  if (!jar.xid) return null;
+  // 缓存键必须带签名：只按 xid 做键时，一个同 xid 无签名的请求会把无效
+  // 结果缓存住、连带拒绝随后带签名的真请求（2026-10-25 验收实测踩中）。
+  const key = crypto.createHash('sha256').update(String(jar.xid) + '.' + String(jar['xid.sig'] || '')).digest('hex');
+  // 已撤销的 xid（17:29 领取后原主人会话）直接拒，不走缓存、不开通道
+  const rv = revokedXids[key];
+  if (rv && rv.exp > Date.now()) return null;
+  const hit = validateCache.get(key);
+  if (hit && Date.now() - hit.at < 30000) return hit.user ? { user: hit.user, siteadmin: hit.siteadmin } : null;
+  const parts = ['xid=' + jar.xid];
+  if (jar['xid.sig']) parts.push('xid.sig=' + jar['xid.sig']);
+  const cookieStr = parts.join('; ');
+  let out = null;
+  for (let attempt = 0; attempt < 2 && !out; attempt++) {
+    let sess = null;
+    try {
+      sess = await mcConnectCookie(cookieStr, 8000, [clientIpHint]);
+      const info = sess.userinfo || {};
+      const user = String(info._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
+      if (user) out = { user, siteadmin: info.siteadmin || 0 };
+    } catch (e) {
+      if (e && e.message === 'mc-session-rejected') break; // 明确拒绝不再重试
+    } finally { if (sess) { try { sess.ws.close(); } catch (e) {} } }
+  }
+  validateCache.set(key, { at: Date.now(), user: out ? out.user : null, siteadmin: out ? out.siteadmin : 0 });
+  return out;
+}
+
+// ---------- 本站会话（qfr_ext，落盘，重启不丢） ----------
+let sessions = {}; // sha256(token) -> {user, siteadmin, exp}
+try { const v = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8')); if (v && typeof v === 'object') sessions = v; } catch (e) {}
+function saveSessions() {
+  try {
+    const now = Date.now();
+    for (const k of Object.keys(sessions)) if (sessions[k].exp <= now) delete sessions[k];
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SESSIONS_FILE + '.tmp', JSON.stringify(sessions), { mode: 0o600 });
+    fs.renameSync(SESSIONS_FILE + '.tmp', SESSIONS_FILE);
+  } catch (e) { log({ ev: 'sessions-save-error', err: String(e && e.message) }); }
+}
+// ---------- QFClash 内嵌登录记录（2.0.3 更新 3） ----------
+// 登录垫片在带 qfr_src=qfclash 标记的 /qf-login 成功时经内网接口记一笔；
+// 个人中心「登录设备」据此显示「在QFClash应用登录中」＋登录时间，下线时
+// 标记 revoked 并经 mcForceCloseUserSessions 终止该账号控制台会话。
+const QFCLASH_LOGINS_FILE = path.join(DATA_DIR, 'qfclash-logins.json');
+let qfclashLogins = [];
+try { const v = JSON.parse(fs.readFileSync(QFCLASH_LOGINS_FILE, 'utf8')); if (Array.isArray(v)) qfclashLogins = v; } catch (e) {}
+function saveQfclashLogins() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(QFCLASH_LOGINS_FILE + '.tmp', JSON.stringify(qfclashLogins), { mode: 0o600 });
+    fs.renameSync(QFCLASH_LOGINS_FILE + '.tmp', QFCLASH_LOGINS_FILE);
+  } catch (e) { log({ ev: 'qfclash-logins-save-error', err: String(e && e.message) }); }
+}
+function noteQfclashLogin(user, ua) {
+  qfclashLogins.push({ id: crypto.randomBytes(8).toString('hex'), user, at: Date.now(), ua: String(ua || '').slice(0, 120), revokedAt: 0 });
+  const mine = qfclashLogins.filter((r) => r.user === user);
+  if (mine.length > 20) {
+    const drop = mine.slice(0, mine.length - 20).map((r) => r.id);
+    qfclashLogins = qfclashLogins.filter((r) => !drop.includes(r.id));
+  }
+  saveQfclashLogins();
+}
+function issueSession(res, auth) {
+  const tok = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.createHash('sha256').update(tok).digest('hex');
+  sessions[hash] = { user: auth.user, siteadmin: auth.siteadmin, exp: Date.now() + SESSION_TTL_MS };
+  saveSessions();
+  // 新发本站会话时一并清掉「手动退出」标记（退出只终止当次，重新进入即恢复）。
+  res.setHeader('Set-Cookie', [
+    'qfr_ext=' + tok + '; Path=/; Max-Age=' + Math.floor(SESSION_TTL_MS / 1000) + '; HttpOnly; SameSite=Lax; Secure',
+    'qfr_ext_out=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure'
+  ]);
+}
+// —— 手动退出标记（2.3.0 退出语义统一）——
+// 本站会话之外，本服务还接受控制台会话 cookie 直接鉴权（resolveAuth）：
+// 手动退出后若不拦这一路，页面一刷新就又以站长身份进来了。标记值 =
+// 当时控制台会话 xid 的哈希：同一控制台会话内生效；控制台重新登录换
+// 新会话后自动失效；从软件里重新打开管理页（一次性令牌换会话）时清除。
+function xidHashFromReq(req) {
+  const jar = parseCookies(req);
+  if (!jar.xid) return '';
+  return crypto.createHash('sha256').update(String(jar.xid) + '.' + String(jar['xid.sig'] || '')).digest('hex');
+}
+function extSsoSuppressed(req) {
+  const jar = parseCookies(req);
+  if (!jar.qfr_ext_out) return false;
+  if (!jar.xid) return true;
+  return jar.qfr_ext_out === xidHashFromReq(req);
+}
+function destroySession(req, res) {
+  const tok = parseCookies(req).qfr_ext;
+  if (tok) {
+    const hash = crypto.createHash('sha256').update(tok).digest('hex');
+    if (sessions[hash]) { delete sessions[hash]; saveSessions(); }
+  }
+  res.setHeader('Set-Cookie', [
+    'qfr_ext=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure',
+    'qfr_ext_out=' + (xidHashFromReq(req) || '1') + '; Path=/; Max-Age=' + Math.floor(SESSION_TTL_MS / 1000) + '; HttpOnly; SameSite=Lax; Secure'
+  ]);
+}
+function sessionAuth(req) {
+  const tok = parseCookies(req).qfr_ext;
+  if (!tok) return null;
+  const hash = crypto.createHash('sha256').update(tok).digest('hex');
+  const s = sessions[hash];
+  if (!s) return null;
+  if (Date.now() > s.exp) { delete sessions[hash]; saveSessions(); return null; }
+  return { user: s.user, siteadmin: s.siteadmin };
+}
+
+// 一次性令牌（内存，60 秒，单次使用）
+const ssoTokens = new Map(); // token -> {user, siteadmin, exp}
+
+// 统一鉴权：先本站会话，再手动附带的控制台 cookie
+async function resolveAuth(req) {
+  const s = sessionAuth(req);
+  if (s) return s;
+  if (extSsoSuppressed(req)) return null; // 已手动退出：同一控制台会话内不再自动鉴权带回
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader && /(?:^|;\s*)xid=/.test(cookieHeader)) {
+    return await validateConsoleCookie(cookieHeader, clientIpFromReq(req));
+  }
+  return null;
+}
+
+function isAdmin(auth) {
+  return !!auth && auth.user === ADMIN_EMAIL && auth.siteadmin === SITEADMIN_FULL;
+}
+
+// ---------- 积分数据（data/points.json，原子写） ----------
+let pointsData = { users: {} };
+try { const v = JSON.parse(fs.readFileSync(POINTS_FILE, 'utf8')); if (v && v.users) pointsData = v; } catch (e) {}
+function savePoints() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(POINTS_FILE + '.tmp', JSON.stringify(pointsData, null, 1), { mode: 0o600 });
+  fs.renameSync(POINTS_FILE + '.tmp', POINTS_FILE);
+}
+
+// ---------- 账号库只读解析（照 mcdb.js 的 loadDb 做法） ----------
+function loadDb() {
+  const docs = new Map();
+  const lines = fs.readFileSync(DB_FILE, 'utf8').split('\n');
+  for (const line of lines) {
+    const s = line.trim();
+    if (!s) continue;
+    let doc;
+    try { doc = JSON.parse(s); } catch (e) { continue; }
+    if (!doc || typeof doc._id !== 'string') continue;
+    if (doc.$$deleted) docs.delete(doc._id); else docs.set(doc._id, doc);
+  }
+  return docs;
+}
+function loadLedger() {
+  try { const v = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8')); if (v && v.accounts) return v; } catch (e) {}
+  return { accounts: {} };
+}
+function buildUsersList() {
+  const docs = loadDb();
+  const ledger = loadLedger();
+  const users = [];
+  const seen = new Set();
+  for (const d of docs.values()) {
+    if (!d._id || !d._id.startsWith('user/')) continue;
+    if (d.type && d.type !== 'user') continue;
+    const login = d._id.replace(/^user\/[^/]*\//, '').toLowerCase();
+    if (!login) continue;
+    seen.add(login);
+    const e = ledger.accounts[login] || {};
+    users.push({
+      login,
+      displayName: d.realname || d.name || '',
+      siteadmin: d.siteadmin || 0,
+      // 冻结 = siteadmin 第 32 位；全权账号被源码豁免锁定，天生冻不住，不标冻结
+      frozen: (d.siteadmin || 0) !== SITEADMIN_FULL && ((d.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0,
+      isOwner: login === ADMIN_EMAIL,
+      label: e.label || '',
+      template: e.template || '',
+      renameCount: e.renameCount || 0,
+      banned: e.banned === true,
+      exists: true,
+    });
+  }
+  // 台账里已封号/已删除、库里已无记录的账号也列出来（封禁状态才看得见）
+  for (const key of Object.keys(ledger.accounts)) {
+    const e = ledger.accounts[key] || {};
+    if (seen.has(key)) continue;
+    if (!e.banned && !e.deleted) continue;
+    users.push({
+      login: key,
+      displayName: e.label || '',
+      siteadmin: 0,
+      frozen: e.frozen === true,
+      isOwner: key === ADMIN_EMAIL,
+      label: e.label || '',
+      template: e.template || '',
+      renameCount: e.renameCount || 0,
+      banned: e.banned === true,
+      exists: false,
+    });
+  }
+  users.sort((a, b) => (b.isOwner - a.isOwner) || (b.exists - a.exists) || a.login.localeCompare(b.login));
+  return users;
+}
+function findDbUser(docs, name) {
+  return docs.get('user//' + String(name).toLowerCase()) || null;
+}
+// 与 mcdb guardNotAdmin 同口径的预检（拒绝时不进停服窗，服务不受影响）
+// 注意：guardCheck 同时被 licLockAccount/licUnlockAccount 等自动执法联动复用，
+// 那条链的「护栏」口径不变——自动流程永远不碰站长/服务/全权账号。
+function guardCheck(user, name) {
+  const n = String(name).toLowerCase();
+  if (n === ADMIN_EMAIL) return '拒绝：站长管理员账号永不触碰。';
+  if (n === 'qf-regsvc') return '拒绝：qf-regsvc 是注册服务的专用服务账号，永不触碰。';
+  if (n === 'qf-socialsvc') return '拒绝：qf-socialsvc 是好友服务的执行账号，永不触碰。';
+  if (user && user.siteadmin === SITEADMIN_FULL) return '拒绝：目标是全权管理员账号（siteadmin=4294967295），永不触碰。';
+  return null;
+}
+// #38（2026-10-25 23:41 站长令）：站长后台人工操作专用预检。本函数只被
+// /admin/api 的账号操作入口调用（调用点已先过 isAdmin，即操作人必为站长
+// 本人）——站长对包括自己账号在内的任何普通账号都可操作，只剩两个真服
+// 务账号（qf-regsvc / qf-socialsvc）继续拒绝：它们是程序运行身份，不是
+// 「对站长设限」。mcdb 侧靠 --admin-override 同口径放行（服务号仍拒）。
+function adminGuardCheck(user, name) {
+  const n = String(name).toLowerCase();
+  if (n === 'qf-regsvc') return '拒绝：qf-regsvc 是注册服务的专用服务账号，永不触碰。';
+  if (n === 'qf-socialsvc') return '拒绝：qf-socialsvc 是好友服务的执行账号，永不触碰。';
+  return null;
+}
+
+// ---------- 外部命令（全部 execFile 参数数组，无 shell 拼接） ----------
+function runCmd(file, args, timeoutMs) {
+  return new Promise((resolve) => {
+    execFile(file, args, { timeout: timeoutMs || 60000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || ''), err: err ? String(err.message || err) : '' });
+    });
+  });
+}
+function probe8443() {
+  return new Promise((resolve) => {
+    const req = https.get({ hostname: '127.0.0.1', port: 8443, path: '/', rejectUnauthorized: false, timeout: 3000 }, (r) => {
+      r.resume();
+      resolve(r.statusCode || 0);
+    });
+    req.on('timeout', () => { req.destroy(); resolve(0); });
+    req.on('error', () => resolve(0));
+  });
+}
+async function waitRecovered() {
+  for (let i = 0; i < 30; i++) {
+    const code = await probe8443();
+    if (code === 200) return 200;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return await probe8443();
+}
+function lastLine(text) {
+  const lines = String(text || '').split('\n').map((s) => s.trim()).filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : '';
+}
+
+// ---------- 管理操作（串行队列，一次只跑一个停服窗） ----------
+let opChain = Promise.resolve();
+function enqueueOp(fn) {
+  const run = opChain.then(fn, fn);
+  opChain = run.then(() => {}, () => {});
+  return run;
+}
+
+async function runMcdbOp(action, target, opts) {
+  // action: freeze|unfreeze|ban|resetpass —— 既有规矩的停服窗序列
+  // opts.adminOverride（#38）：仅站长后台人工操作入口可传，mcdb 收到
+  // --admin-override 后放行站长/全权目标（服务账号仍拒）；自动执法联动
+  // （licLockAccount 等）与保留期清除一律不传，口径不变。
+  const probeBefore = await probe8443();
+  let started = false;
+  try {
+    await runCmd('systemctl', ['stop', 'qfremote-healthcheck.timer'], 20000);
+    await runCmd('systemctl', ['stop', 'meshcentral'], 60000);
+    const mcdbArgs = [action, target];
+    if (opts && opts.adminOverride) mcdbArgs.push('--admin-override');
+    const r = await runCmd('sudo', ['-n', 'node', MCDB].concat(mcdbArgs), 90000);
+    // 交还属主：数据目录下全部 *.db ＋ 台账（照包装脚本口径）
+    try {
+      const files = fs.readdirSync(MC_DATA_DIR).filter((f) => f.endsWith('.db')).map((f) => path.join(MC_DATA_DIR, f));
+      if (fs.existsSync(LEDGER_FILE)) files.push(LEDGER_FILE);
+      if (files.length) await runCmd('chown', ['meshcentral:meshcentral'].concat(files), 20000);
+    } catch (e) { /* 交不回去不拦正事，mcdb 自己也会 chownBack */ }
+    await runCmd('systemctl', ['start', 'meshcentral'], 60000);
+    started = true;
+    await runCmd('systemctl', ['start', 'qfremote-healthcheck.timer'], 20000);
+    const probeAfter = await waitRecovered();
+    if (r.code !== 0) {
+      const msg = lastLine(r.stderr) || lastLine(r.stdout) || '操作未成功，请稍后再试。';
+      log({ ev: 'admin-op', action, target, ok: false, code: r.code, probeBefore, probeAfter });
+      return { ok: false, msg, probeBefore, probeAfter };
+    }
+    if (action === 'resetpass') {
+      let newPassword = '';
+      try { newPassword = JSON.parse(lastLine(r.stdout)).newPassword || ''; } catch (e) {}
+      if (!newPassword) {
+        log({ ev: 'admin-op', action, target, ok: false, code: 'nopass', probeBefore, probeAfter });
+        return { ok: false, msg: '密码重置结果异常，请到服务器人工确认后再试。', probeBefore, probeAfter };
+      }
+      // 新密码只回显在本次响应里；日志只记动作/目标/成败
+      log({ ev: 'admin-op', action, target, ok: true, probeBefore, probeAfter });
+      return { ok: true, msg: '密码已重置，请将新密码转发给对方；对方登录后可自行修改。', newPassword, probeBefore, probeAfter };
+    }
+    const msg = lastLine(r.stdout) || '操作完成。';
+    log({ ev: 'admin-op', action, target, ok: true, probeBefore, probeAfter });
+    return { ok: true, msg, probeBefore, probeAfter };
+  } finally {
+    if (!started) {
+      // 兜底：任何一步没走完都把服务拉回来
+      await runCmd('systemctl', ['start', 'meshcentral'], 60000).catch(() => {});
+      await runCmd('systemctl', ['start', 'qfremote-healthcheck.timer'], 20000).catch(() => {});
+    }
+  }
+}
+
+async function runRenameOp(oldName, newName) {
+  const probeBefore = await probe8443();
+  const r = await runCmd('/bin/bash', [RENAME_SH, oldName, newName, '--admin-override'], 150000);
+  const probeAfter = await probe8443();
+  if (r.code !== 0) {
+    const msg = lastLine(r.stderr) || lastLine(r.stdout) || '改名未成功，请稍后再试。';
+    log({ ev: 'admin-op', action: 'rename', target: oldName, ok: false, code: r.code, probeBefore, probeAfter });
+    return { ok: false, msg, probeBefore, probeAfter };
+  }
+  log({ ev: 'admin-op', action: 'rename', target: oldName, ok: true, probeBefore, probeAfter });
+  return { ok: true, msg: '改名完成：' + oldName + ' 已改为 ' + newName + '，对方用新名字和原密码登录。', probeBefore, probeAfter };
+}
+
+// ---------- HTTP 工具 ----------
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) });
+  res.end(body);
+}
+function sendHtml(res, code, html) {
+  const body = Buffer.from(html, 'utf8');
+  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': body.length, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  res.end(body);
+}
+const BODY_LIMIT_DEFAULT = 65536;
+const BODY_LIMIT_SHOT = 12 * 1024 * 1024; // 付款截图提交：8MB 图片 base64 约 10.7MB + JSON 包装（2026-10-26 热修：原 64KB 上限＋destroy 掐断是真机大图提交必挂的根因）
+const BODY_LIMIT_FILE = 288 * 1024 * 1024; // 设备间文件发送（#25）：单文件上限 200MB、base64 约 267MB + JSON 包装；须 > 默认 64KB，否则请求体被吞、toNode 读空误报「请选择要发送到的设备。」（2026-10-26 巡查 P2-003 实锤）
+function readJsonBody(req, maxBytes) {
+  const limit = (typeof maxBytes === 'number' && maxBytes > 0) ? Math.floor(maxBytes) : BODY_LIMIT_DEFAULT;
+  return new Promise((resolve) => {
+    const chunks = [];
+    let total = 0, tooLarge = false, done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > limit) { tooLarge = true; return; } // 超限只停止累积、继续收完（drain），绝不销毁连接，保证能回明确 JSON 错误
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (tooLarge) { try { log({ ev: 'body-too-large', limit, total, url: String(req.url || '').slice(0, 80) }); } catch (e) {} return finish({ __tooLarge: true }); }
+      try { finish(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { finish({}); }
+    });
+    req.on('close', () => finish({}));
+    req.on('error', () => finish({}));
+  });
+}
+function forbiddenPage(res) {
+  sendHtml(res, 403, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无法打开 · QFRemote</title>'
+    + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#0B2B5B;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#43536a}</style></head>'
+    + '<body><div class="wrap"><div class="card"><h1>本页面仅站长可打开</h1><p>请先使用站长账号登录 QFRemote，再从软件中打开站长管理页。普通账号没有此权限。</p></div></div></body></html>');
+}
+
+// ---------- 跨服务内网调用（论坛/客服裁定回写，#22/#31：复用对方既有裁定入口） ----------
+function postInternalJson(urlStr, obj, timeoutMs) {
+  return new Promise((resolve) => {
+    let u; try { u = new URL(urlStr); } catch (e) { return resolve({ ok: false, code: 'BAD_URL' }); }
+    const data = Buffer.from(JSON.stringify(obj || {}));
+    const isHttps = u.protocol === 'https:';
+    const rq = (isHttps ? https : http).request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST', timeout: timeoutMs || 5000, rejectUnauthorized: false,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, 'x-qf-internal-secret': LIC_SECRET } }, (rs) => {
+      let b = ''; rs.on('data', (c) => { b += c; if (b.length > 200000) rq.destroy(); });
+      rs.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch (e) { resolve({ ok: false, code: 'BAD_JSON', status: rs.statusCode }); } });
+    });
+    rq.on('timeout', () => { rq.destroy(); resolve({ ok: false, code: 'TIMEOUT' }); });
+    rq.on('error', (e) => resolve({ ok: false, code: 'NET', msg: String(e && e.message) }));
+    rq.write(data); rq.end();
+  });
+}
+const FORUM_INTERNAL_BASE = process.env.QFEXT_FORUM_URL || 'http://127.0.0.1:8446';
+const SOCIAL_INTERNAL_BASE = process.env.QFEXT_SOCIAL_URL || 'https://127.0.0.1:8445'; // 好友服务为本机自签 HTTPS（与 nginx proxy_ssl_verify off 同口径）
+
+// ---------- 许可：内网鉴权 / 执法判定 / 申诉裁决（双通道同台账） ----------
+function startOfNextDayMs(now) {
+  const dk = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
+  return Date.parse(dk + 'T00:00:00+08:00') + 86400000;
+}
+function isInternal(req) {
+  const remote = (req.socket && req.socket.remoteAddress) || '';
+  const loop = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  return loop && LIC_SECRET && req.headers['x-qf-internal-secret'] === LIC_SECRET;
+}
+function licEnforce(cfg, username) { return !cfg.shadow || cfg.testUsers.includes(String(username || '').toLowerCase()); }
+// 执法联动：被统一台账封禁/冻结的账号同步 mcdb 冻结（MeshCentral 层硬拦），
+// 解封联动解冻。guardCheck 拒绝的对象（站长/服务账号）跳过 mcdb 层，许可门仍生效。
+async function licLockAccount(username) {
+  try {
+    const docs = loadDb(); const user = findDbUser(docs, username);
+    if (!user || guardCheck(user, username)) return;
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) return;
+    await enqueueOp(() => runMcdbOp('freeze', String(username).toLowerCase()));
+  } catch (e) { log({ ev: 'lic-lock-error', target: username, err: String(e && e.message) }); }
+}
+async function licUnlockAccount(username) {
+  try {
+    if (lic.activeBansFor(username, Date.now()).length) return;
+    const docs = loadDb(); const user = findDbUser(docs, username);
+    if (!user || guardCheck(user, username)) return;
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) === 0) return;
+    await enqueueOp(() => runMcdbOp('unfreeze', String(username).toLowerCase()));
+  } catch (e) { log({ ev: 'lic-unlock-error', target: username, err: String(e && e.message) }); }
+}
+// #38 站长改判预备（仅 decideAppeal 在「已裁定 + actor=owner + override」时调用）：
+// 返回 'FRESH'＝申诉已重置为待审、由正常流程按本次结论重新裁决；返回
+// {handled:true,...}＝改判已当场办结（调用方负责落盘/销账/联动锁定）；
+// 返回 {code,msg}＝此情形不支持改判。助手通道永不走此路径。
+function prepareAppealOverride(a, decision, reason, extra, now) {
+  if (!Array.isArray(a.overrideHistory)) a.overrideHistory = [];
+  const hist = { at: new Date(now).toISOString(), by: 'owner', prevStatus: a.status, prevDecision: a.decisionKind || null, newDecision: decision };
+  if (a.type === 'rebind') {
+    if (a.status === 'approved' && decision === 'reject') {
+      // 已通过的换绑改判驳回：先把槽位换回旧设备（执行失败则不落改判）
+      if (!reason) return { code: 'VALIDATION', msg: '改判驳回须写明原因。' };
+      const oldHash = a.rebindExec && a.rebindExec.oldDeviceCode;
+      if (!oldHash) return { code: 'OVERRIDE_NOT_APPLICABLE', msg: '原换绑记录缺少旧设备信息，无法回滚换绑。' };
+      const exec = lic.executeRebindByHash({ username: String(a.username || '').toLowerCase(), platform: a.platform, newDeviceCodeHash: oldHash, appealId: a.id, actor: 'owner-override' }, now);
+      if (!exec.ok) return { code: 'OVERRIDE_EXEC_FAILED', msg: '换绑回滚执行被拒：' + (exec.msg || '') };
+      a.status = 'rejected'; a.reason = String(reason).slice(0, 500); a.decidedAt = new Date(now).toISOString(); a.decidedBy = 'owner'; a.decisionKind = 'override-reject';
+      a.rebindExec = { slot: exec.slot, keyId: exec.keyId, oldDeviceCode: exec.oldDeviceCode || null, newDeviceCodeHash: exec.newDeviceCodeHash || oldHash, alreadyBound: !!exec.alreadyBound, at: now, rollback: true };
+      a.overrideHistory.push(hist);
+      return { handled: true, kind: 'rebind-rollback', msg: '改判完成：换绑已回滚到原设备，申诉改为驳回。' };
+    }
+    if (a.status === 'rejected') { a.status = 'pending'; a.overrideHistory.push(hist); return 'FRESH'; }
+    return { code: 'OVERRIDE_NOT_APPLICABLE', msg: '该换绑申诉当前情形不支持此改判。' };
+  }
+  if (!a.banId && !a.reasonCode) return { code: 'OVERRIDE_NOT_APPLICABLE', msg: 'B1 冻结申诉走既有改密闭环，不支持在此改判。' };
+  const oldBan = a.banId ? lic.getBan(a.banId) : null;
+  if (!oldBan) return { code: 'OVERRIDE_NOT_APPLICABLE', msg: '原封禁记录不存在，改判无对象。' };
+  if (oldBan.status === 'active') { a.status = 'pending'; a.overrideHistory.push(hist); return 'FRESH'; }
+  // 原封禁已解除（原结论为通过/部分解除）：仅支持改判驳回＝按原剩余时长恢复封禁
+  if (decision !== 'reject') return { code: 'OVERRIDE_NOT_APPLICABLE', msg: '原封禁已解除，此情形改判仅支持恢复封禁（结论＝驳回）。' };
+  if (!reason) return { code: 'VALIDATION', msg: '改判驳回须写明原因。' };
+  let newBan;
+  if (oldBan.permanent) {
+    newBan = lic.applyBan({ targetType: oldBan.targetType, target: oldBan.target, code: oldBan.code, permanent: true, actor: 'owner-override', evidence: 'appeal-override ' + a.id }, now);
+  } else {
+    const remaining = (oldBan.endsAt || 0) - (oldBan.liftedAt ? Number(oldBan.liftedAt) : now);
+    if (!oldBan.endsAt || remaining <= 0) return { code: 'OVERRIDE_NOT_APPLICABLE', msg: '原封禁期限已经过，改判无对象。' };
+    newBan = lic.applyBan({ targetType: oldBan.targetType, target: oldBan.target, code: oldBan.code, permanent: false, endsAt: now + remaining, actor: 'owner-override', evidence: 'appeal-override ' + a.id }, now);
+  }
+  if (!newBan || !newBan.id) return { code: 'OVERRIDE_EXEC_FAILED', msg: '恢复封禁未成功。' };
+  a.banId = newBan.id; a.status = 'rejected'; a.reason = String(reason).slice(0, 500); a.decidedAt = new Date(now).toISOString(); a.decidedBy = 'owner'; a.decisionKind = 'override-reject';
+  a.overrideHistory.push(hist);
+  return { handled: true, kind: 'ban-restore', msg: '改判完成：封禁已恢复，申诉改为驳回。', lockUser: oldBan.targetType === 'account' };
+}
+// 申诉裁决（站长后台与助手代审共用同一入口，§6.4 防双判：非 pending 直接拒；
+// #38 例外：站长本人带 override:true 可改判，见 prepareAppealOverride）
+let appealDecideChain = Promise.resolve();
+function decideAppealLocked(fn) { const run = appealDecideChain.then(fn, fn); appealDecideChain = run.then(() => {}, () => {}); return run; }
+async function decideAppeal(appealId, decision, reason, actor, extra) {
+  return decideAppealLocked(async () => {
+    let data = { appeals: [] };
+    try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); if (v && Array.isArray(v.appeals)) { v.appeals = v.appeals.filter((x) => x && typeof x === 'object'); data = v; } } catch (e) {}
+    const a = data.appeals.find((x) => x.id === appealId);
+    if (!a) return { ok: false, code: 'NOT_FOUND', msg: '申诉不存在。' };
+    const now = Date.now();
+    if (a.status !== 'pending') {
+      // #38：站长改判——仅 actor=owner 且请求显式带 override:true 才进入；
+      // 其余一切调用（含助手接口）维持防双判原口径。
+      if (actor === 'owner' && extra && extra.override === true) {
+        const ov = prepareAppealOverride(a, decision, reason, extra, now);
+        if (ov === 'FRESH') { /* 已重置待审，继续走下方正常裁决流程 */ }
+        else if (ov && ov.handled) {
+          try {
+            const tmp = APPEALS_FILE + '.tmp-lic'; fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(tmp, APPEALS_FILE);
+            try { const st = fs.statSync(path.dirname(APPEALS_FILE)); fs.chownSync(APPEALS_FILE, st.uid, st.gid); } catch (e) {}
+          } catch (e) { return { ok: false, code: 'IO', msg: '申诉结论落盘失败。' }; }
+          if (ov.lockUser && a.username) await licLockAccount(String(a.username).toLowerCase());
+          log({ ev: 'appeal-override', appealId: a.id, decision, actor, target: a.username, kind: ov.kind });
+          reviewEvents.resolve('appeal', a.id, actor, 'override-' + decision);
+          return { ok: true, msg: ov.msg, override: true };
+        } else {
+          return { ok: false, code: (ov && ov.code) || 'OVERRIDE_NOT_APPLICABLE', msg: (ov && ov.msg) || '该申诉当前情形不支持改判。' };
+        }
+      } else {
+        return { ok: false, code: 'ALREADY_DECIDED', msg: '该申诉已由另一通道处理。', decidedStatus: a.status };
+      }
+    }
+    const isB1 = !a.banId && !a.reasonCode;
+    if (isB1) return { ok: false, code: 'LEGACY_B1', msg: 'B1 冻结申诉走既有改密闭环（appeal-admin approve/reject）。' };
+    // ===== 换绑申诉裁决（§11.9）：与封禁申诉同队列同台账、同一防双判；
+    // 通过即同事务真实执行换绑（人工裁决补救通道，不随影子模式打折）。
+    // 执行被拒（新设备码为封禁设备码等）时不落结论：回写审核备注留痕、
+    // 申诉保持待审，裁决人可改判驳回或待情形变化后重试。 =====
+    if (a.type === 'rebind') {
+      if (decision === 'reject') {
+        if (!reason) return { ok: false, code: 'VALIDATION', msg: '驳回须写明原因。' };
+        a.status = 'rejected'; a.reason = String(reason).slice(0, 500); a.decidedAt = new Date(now).toISOString(); a.decidedBy = actor;
+      } else if (decision === 'approve') {
+        // 申诉台账存设备码哈希（与许可槽位同口径），执行走核心哈希入口。
+        const exec = lic.executeRebindByHash({ username: String(a.username || '').toLowerCase(), platform: a.platform, newDeviceCodeHash: a.newDeviceCodeHash, appealId: a.id, actor }, now);
+        if (!exec.ok) {
+          a.executionNote = '执行被拒（' + (exec.code || 'ERROR') + '）：' + (exec.msg || '');
+          a.executionAttempts = (Array.isArray(a.executionAttempts) ? a.executionAttempts : []).concat([{ at: now, by: actor, code: exec.code || 'ERROR' }]).slice(-10);
+          try {
+            const tmp2 = APPEALS_FILE + '.tmp-lic'; fs.writeFileSync(tmp2, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(tmp2, APPEALS_FILE);
+            try { const st2 = fs.statSync(path.dirname(APPEALS_FILE)); fs.chownSync(APPEALS_FILE, st2.uid, st2.gid); } catch (e) {}
+          } catch (e) {}
+          log({ ev: 'rebind-exec-rejected', appealId: a.id, code: exec.code, actor, target: a.username });
+          return { ok: false, code: exec.code || 'REBIND_EXEC_FAILED', msg: '换绑执行被拒：' + (exec.msg || '') + '审核备注已回写，申诉保持待审。' };
+        }
+        a.status = 'approved'; a.decidedAt = new Date(now).toISOString(); a.decidedBy = actor; a.decisionKind = 'approve';
+        a.rebindExec = { slot: exec.slot, keyId: exec.keyId, oldDeviceCode: exec.oldDeviceCode || a.oldDeviceCode || null, newDeviceCodeHash: exec.newDeviceCodeHash || a.newDeviceCodeHash, alreadyBound: !!exec.alreadyBound, at: now };
+        delete a.executionNote;
+      } else return { ok: false, code: 'VALIDATION', msg: '换绑申诉结论只支持通过或驳回。' };
+      try {
+        const tmp = APPEALS_FILE + '.tmp-lic'; fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(tmp, APPEALS_FILE);
+        try { const st = fs.statSync(path.dirname(APPEALS_FILE)); fs.chownSync(APPEALS_FILE, st.uid, st.gid); } catch (e) {}
+      } catch (e) { return { ok: false, code: 'IO', msg: '申诉结论落盘失败。' }; }
+      log({ ev: 'appeal-decided', appealId: a.id, decision, actor, target: a.username, kind: 'rebind' });
+      reviewEvents.resolve('rebind', a.id, actor, decision);
+      return { ok: true, msg: decision === 'approve' ? '换绑已执行：同类旧设备已解绑、新设备已绑入。' : '换绑申诉已驳回。' };
+    }
+    if (decision === 'reject') {
+      if (!reason) return { ok: false, code: 'VALIDATION', msg: '驳回须写明原因。' };
+      a.status = 'rejected'; a.reason = String(reason).slice(0, 500); a.decidedAt = new Date(now).toISOString(); a.decidedBy = actor;
+    } else if (decision === 'approve' || decision === 'partial' || decision === 'reduce') {
+      a.status = 'approved'; a.decidedAt = new Date(now).toISOString(); a.decidedBy = actor;
+      if (decision === 'reduce' && a.banId && extra && extra.newEndsAt) lic.adjustBanEnds(a.banId, Number(extra.newEndsAt), now);
+      if ((decision === 'approve' || decision === 'partial') && a.banId) {
+        const ban = lic.getBan(a.banId);
+        if (ban && ban.status === 'active') lic.liftBan(ban, now, { by: actor, appealId: a.id, restoreKeys: decision === 'approve' });
+        else if (ban && ban.status !== 'active') { /* 已到期/已解除：结论照常生效 */ }
+      }
+      a.decisionKind = decision;
+    } else return { ok: false, code: 'VALIDATION', msg: '结论类型不正确。' };
+    try {
+      const tmp = APPEALS_FILE + '.tmp-lic'; fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(tmp, APPEALS_FILE);
+      try { const st = fs.statSync(path.dirname(APPEALS_FILE)); fs.chownSync(APPEALS_FILE, st.uid, st.gid); } catch (e) {}
+    } catch (e) { return { ok: false, code: 'IO', msg: '申诉结论落盘失败。' }; }
+    if (decision !== 'reject' && a.username) await licUnlockAccount(String(a.username).toLowerCase());
+    log({ ev: 'appeal-decided', appealId: a.id, decision, actor, target: a.username });
+    reviewEvents.resolve('appeal', a.id, actor, decision);
+    return { ok: true, msg: '申诉结论已生效并回写台账。' };
+  });
+}
+// 状态查询核验/验密限流（内存计数 + 审计留痕 R-06）
+const licVerifyState = new Map(); // key -> {fails, lockedUntil}
+function licVerifyHit(mapKey, ok) {
+  const now = Date.now();
+  let s = licVerifyState.get(mapKey);
+  if (!s) { s = { fails: 0, lockedUntil: 0 }; licVerifyState.set(mapKey, s); }
+  if (s.lockedUntil > now) return { locked: true, until: s.lockedUntil };
+  if (ok) { s.fails = 0; return { locked: false }; }
+  s.fails += 1;
+  if (s.fails >= 5) { s.lockedUntil = now + 3600000; s.fails = 0; return { locked: true, until: s.lockedUntil }; }
+  return { locked: false };
+}
+function licVerifyLocked(mapKey) {
+  const s = licVerifyState.get(mapKey);
+  return !!(s && s.lockedUntil > Date.now());
+}
+
+// ---------- 首页使用统计（阶段 C-3）：全部真实数据，拿不到给 null ----------
+// 设备与在线状态：借请求自带的控制台会话开控制通道发 nodes 请求
+// （MeshCentral meshuser.js 的 nodes 动作回带 conn 位：&1＝代理在线），
+// 这与网页控制台自身取设备列表是同一条真实路径，不是数据库猜测。
+// R4 口径：会话验真/取数都走 mcConnectCookie 的候选 IP 链（xid 内登录
+// IP 优先 → XFF 还原的请求 IP → 无转发），与既有小服务完全一致。
+function mcFetchNodes(cookieHeader, clientIpHint) {
+  return new Promise(async (resolve) => {
+    const jar = {};
+    String(cookieHeader || '').split(';').forEach((part) => { const i = part.indexOf('='); if (i > 0) jar[part.slice(0, i).trim()] = part.slice(i + 1).trim(); });
+    if (!jar.xid) return resolve(null);
+    const parts = ['xid=' + jar.xid]; if (jar['xid.sig']) parts.push('xid.sig=' + jar['xid.sig']);
+    let sess = null;
+    try { sess = await mcConnectCookie(parts.join('; '), 8000, [clientIpHint]); }
+    catch (e) { return resolve(null); }
+    const rid = 'qfhome' + Date.now();
+    let done = false;
+    const timer = setTimeout(() => finish(null), 8000);
+    function finish(v) { if (done) return; done = true; clearTimeout(timer); try { sess.ws.close(); } catch (e) {} resolve(v); }
+    sess.ws.on('message', (data) => {
+      let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
+      if (m && m.action === 'nodes' && m.responseid === rid) finish(m.nodes || {});
+    });
+    sess.ws.on('error', () => finish(null));
+    sess.ws.on('close', () => finish(null));
+    try { sess.ws.send(JSON.stringify({ action: 'nodes', responseid: rid })); } catch (e) { finish(null); }
+  });
+}
+const MC_FILES_DIR = process.env.QFEXT_MC_FILES_DIR || '/opt/meshcentral/meshcentral-files';
+function userStorageBytes(username) {
+  // MeshCentral 个人文件按 user/<域>/<账号> 目录存放；目录不存在＝无文件
+  // 数据可统计，返回 null 让前端显示诚实空状态，绝不编造容量数字。
+  try {
+    const cands = [path.join(MC_FILES_DIR, 'user', '', username), path.join(MC_FILES_DIR, username)];
+    for (const dir of cands) {
+      if (!fs.existsSync(dir)) continue;
+      let total = 0;
+      const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const fp = path.join(d, e.name); if (e.isDirectory()) walk(fp); else { try { total += fs.statSync(fp).size; } catch (err) {} } } };
+      walk(dir);
+      return total;
+    }
+  } catch (e) {}
+  return null;
+}
+async function buildHomeStats(req, auth) {
+  const now = Date.now();
+  const docs = (() => { try { return loadDb(); } catch (e) { return new Map(); } })();
+  const userDoc = findDbUser(docs, auth.user);
+  const meshNames = {};
+  for (const d of docs.values()) if (d && d.type === 'mesh') meshNames[d._id] = d.name || '';
+  const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req));
+  let devices = null, groups = null, onlineCount = null;
+  if (nodesByMesh) {
+    devices = []; groups = []; let online = 0;
+    for (const meshid of Object.keys(nodesByMesh)) {
+      const gname = meshNames[meshid] || '';
+      if (gname && !groups.includes(gname)) groups.push(gname);
+      for (const n of (nodesByMesh[meshid] || [])) {
+        const on = ((n.conn || 0) & 1) !== 0;
+        if (on) online += 1;
+        // 只回名称/系统/分组/在线：不回 host/ip 等地址字段（公开面红线）
+        devices.push({ name: n.name || n.rname || '', os: n.osdesc || '', group: gname, online: on });
+      }
+    }
+    onlineCount = online;
+  }
+  // 最近登录：账号库 user 文档 login 字段（秒级，MeshCentral 登录时回写）
+  const lastLoginMs = userDoc && userDoc.login ? Number(userDoc.login) * (Number(userDoc.login) < 1e12 ? 1000 : 1) : null;
+  return {
+    ok: true, user: auth.user,
+    displayName: (userDoc && (userDoc.realname || userDoc.name)) || auth.user,
+    isAdmin: isAdmin(auth),
+    devices, groups, onlineCount,
+    deviceCount: devices ? devices.length : null,
+    storageBytes: userStorageBytes(auth.user),
+    lastLoginMs,
+  };
+}
+
+// ---------- 路由 ----------
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    const p = u.pathname;
+
+    if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
+
+    // ===== 站长 API · 事件内网推送（各服务把新待审事项推进统一事件队列，#22/#31） =====
+    if (p.startsWith('/internal/events/')) {
+      if (!isInternal(req)) return sendJson(res, 403, { ok: false, code: 'INTERNAL_AUTH' });
+      const body = await readJsonBody(req);
+      if (req.method === 'POST' && p === '/internal/events/push') {
+        const ev = reviewEvents.enqueue(String(body.type || ''), String(body.refId || ''), (body.summary && typeof body.summary === 'object') ? body.summary : {});
+        if (!ev) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        return sendJson(res, 200, { ok: true, eventId: ev.id });
+      }
+      if (req.method === 'POST' && p === '/internal/events/resolve') {
+        const ev = reviewEvents.resolve(String(body.type || ''), String(body.refId || ''), String(body.actor || ''), String(body.result || ''));
+        return sendJson(res, 200, { ok: true, found: !!ev });
+      }
+      return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    }
+
+    // ===== 站长 API · 助手接口（令牌鉴权，#22/#31） =====
+    // 只读游标接口供助手侧秒级轮询：本服务无全局 IP 限流，nginx 亦不
+    // 对 /assistant-api/ 挂 limit_req，不会被高频轮询误伤（定版口径）。
+    if (p.startsWith('/assistant-api/')) {
+      const tok = String(req.headers['x-assistant-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '');
+      if (!reviewEvents.verifyToken(tok)) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
+      const nowA = Date.now();
+      if (req.method === 'GET' && p === '/assistant-api/events') {
+        const out = reviewEvents.list(u.searchParams.get('after') || 0, { type: u.searchParams.get('type') || '', status: u.searchParams.get('status') || '', limit: u.searchParams.get('limit') || 50 });
+        return sendJson(res, 200, Object.assign({ ok: true }, out));
+      }
+      const evDetailM = p.match(/^\/assistant-api\/events\/(\d+)$/);
+      if (req.method === 'GET' && evDetailM) {
+        const ev = reviewEvents.getById(Number(evDetailM[1]));
+        if (!ev) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        const detail = { ok: true, event: ev };
+        if (ev.type === 'order') {
+          const o = payOrders.getRaw(ev.refId);
+          if (o) { detail.order = payOrders.view(o, nowA); detail.order.username = o.username; detail.reviewHints = payOrders.reviewHints(o); detail.screenshotUrl = '/assistant-api/orders/' + o.id + '/screenshot'; }
+        } else if (ev.type === 'appeal' || ev.type === 'rebind') {
+          try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); const a = (v.appeals || []).find((x) => x.id === ev.refId); if (a) detail.appeal = { id: a.id, type: a.type || 'ban', username: a.username || a.key, reasonCode: a.reasonCode, desc: a.desc, status: a.status, platform: a.platform || null, createdAt: a.createdAt, images: Array.isArray(a.images) ? a.images.length : 0 }; } catch (e) {}
+        } else if (ev.type === 'device_review') {
+          const r = (lic.state().deviceReviews || []).find((x) => x.id === ev.refId);
+          if (r) detail.review = { id: r.id, accounts: r.accounts, platform: r.platform, status: r.status, createdAt: r.createdAt, evidence: r.evidence };
+        }
+        return sendJson(res, 200, detail);
+      }
+      if (req.method === 'GET' && p === '/assistant-api/orders/pending') {
+        // #21 一审即时触达：按提交序号游标增量拉取待一审单（提交→可见 ≤10 秒目标）
+        const out = payOrders.pendingReview(u.searchParams.get('after') || 0, u.searchParams.get('limit') || 50);
+        return sendJson(res, 200, Object.assign({ ok: true }, out));
+      }
+      const shotM = p.match(/^\/assistant-api\/orders\/([^/]+)\/screenshot$/);
+      if (req.method === 'GET' && shotM) {
+        const o = payOrders.getRaw(decodeURIComponent(shotM[1]));
+        const fp = o ? payOrders.shotPath(o) : null;
+        if (!o || !fp || !fs.existsSync(fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        const buf = fs.readFileSync(fp);
+        res.writeHead(200, { 'Content-Type': o.shotType || 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+        return res.end(buf);
+      }
+      if (req.method === 'POST' && p === '/assistant-api/decide') {
+        // 裁定回写：全部复用既有双通道裁定入口，执行者留痕「助手接口」，不另起平行逻辑
+        const body = await readJsonBody(req);
+        const type = String(body.type || ''); const refId = String(body.refId || '');
+        const action = String(body.action || ''); const ACTOR = '助手接口';
+        if (type === 'order') {
+          const o = payOrders.getRaw(refId);
+          if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+          if (o.stage !== 1) return sendJson(res, 409, { ok: false, code: 'OWNER_STAGE', msg: '该订单已过一审，二审（到账核对）由站长处理。' });
+          if (action !== 'approve' && action !== 'reject' && action !== 'fake') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          // #37：助手一审可判假（action=fake）——orders-core 一审判假分支直接
+          // 驳回关单、不封号不到二审，并累计当日判假计数/入口冻结。
+          const out = payOrders.decide(refId, action, ACTOR, nowA, {});
+          if (out.ok) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          return sendJson(res, out.ok ? 200 : 409, out);
+        }
+        if (type === 'appeal' || type === 'rebind') {
+          if (action !== 'approve' && action !== 'reject') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          // B1 冻结申诉走既有 appeal-admin 改密闭环（与站长后台同一路径），其余走统一台账裁决
+          let ap = null;
+          try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); ap = (v.appeals || []).find((x) => x.id === refId) || null; } catch (e) {}
+          if (ap && !ap.banId && !ap.reasonCode && ap.type !== 'rebind') {
+            if (ap.status !== 'pending') return sendJson(res, 409, { ok: false, code: 'ALREADY_DECIDED', msg: '该申诉已处理。' });
+            const uname = String(ap.username || ap.key || '');
+            let args;
+            if (action === 'approve') args = [APPEAL_ADMIN, 'approve', uname];
+            else {
+              const reason = String(body.reason || '').trim();
+              if (!reason) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '驳回须写明原因。' });
+              args = [APPEAL_ADMIN, 'reject', uname, reason.slice(0, 500)];
+            }
+            const r = await runCmd('node', args, 30000);
+            const okB1 = r.code === 0;
+            if (okB1) reviewEvents.resolve('appeal', refId, ACTOR, 'b1-' + action);
+            log({ ev: 'assistant-decide', type, refId, action, ok: okB1, via: 'appeal-admin' });
+            return sendJson(res, okB1 ? 200 : 409, { ok: okB1, msg: okB1 ? '申诉结论已生效（B1 改密闭环）。' : (lastLine(r.stderr) || '处理未成功。') });
+          }
+          const out = await decideAppeal(refId, action, String(body.reason || ''), ACTOR, body);
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          return sendJson(res, out.ok ? 200 : 409, out); // 事件销账在 decideAppeal 内完成
+        }
+        if (type === 'device_review') {
+          const dec = action === 'release' ? 'dismissed' : (action === 'violation' ? 'violation' : (action === 'escalate' ? 'escalate' : ''));
+          if (!dec) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 release / violation / escalate。' });
+          const out = lic.decideDeviceReview(refId, dec, ACTOR, nowA);
+          if (out.ok && out.violation) { for (const t of out.accounts || []) await licLockAccount(t); }
+          if (out.ok && dec !== 'escalate') reviewEvents.resolve('device_review', refId, ACTOR, dec);
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          return sendJson(res, out.ok ? 200 : 409, out);
+        }
+        if (type === 'forum') {
+          // kind 缺省时从 refId 前缀推导（事件 refId 形如 post:p12 / reply:r34，自带类型）：
+          // 否则回复类裁定会被论坛内网口默认按 post 查库、误报「内容不存在」（P8 巡查 F-003）。
+          const kindFromRef = refId.startsWith('reply:') ? 'reply' : (refId.startsWith('post:') ? 'post' : '');
+          const out = await postInternalJson(FORUM_INTERNAL_BASE + '/api/forum/internal/review', { kind: String(body.kind || '') || kindFromRef, id: refId, action, actor: ACTOR }, 8000);
+          if (out && out.ok) reviewEvents.resolve('forum', refId, ACTOR, action);
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok) });
+          return sendJson(res, out && out.ok ? 200 : 409, out || { ok: false });
+        }
+        if (type === 'support') {
+          const out = await postInternalJson(SOCIAL_INTERNAL_BASE + '/internal/support/decide', { ticketId: refId, action, text: String(body.text || ''), actor: ACTOR }, 8000);
+          if (out && out.ok && action === 'close') reviewEvents.resolve('support', refId, ACTOR, 'closed');
+          else if (out && out.ok) reviewEvents.resolve('support', refId, ACTOR, 'replied'); // 回复即视为已处理一轮；工单未关可由新消息再入队
+          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok) });
+          return sendJson(res, out && out.ok ? 200 : 409, out || { ok: false });
+        }
+        return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'type 不正确。' });
+      }
+      return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    }
+
+    // ===== 许可内网接口（仅回环 + 密钥文件鉴权；loginshim/register/代审调用） =====
+    if (p.startsWith('/internal/license/')) {
+      if (!isInternal(req)) return sendJson(res, 403, { ok: false, code: 'INTERNAL_AUTH' });
+      const body = await readJsonBody(req);
+      const now = Date.now();
+      const cfg = lic.readConfig();
+      if (req.method === 'POST' && p === '/internal/license/login-check') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        const d = lic.evaluate(username, now, { channel: body.channel === 'web' ? 'web' : (body.channel === 'qfclash' ? 'qfclash' : 'software'), deviceCode: body.deviceCode || null, platform: body.platform || null });
+        d.enforce = licEnforce(cfg, username);
+        if (!d.allow && cfg.shadow && !d.enforce) lic.shadowLog({ ev: 'gate-would-block', username, code: d.code, channel: body.channel || 'software' });
+        if (!d.allow) lic.save();
+        return sendJson(res, 200, Object.assign({ ok: true }, d));
+      }
+      if (req.method === 'POST' && p === '/internal/license/qfclash-login-note') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        noteQfclashLogin(username, body.ua || '');
+        log({ ev: 'qfclash-login-note', target: username });
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/internal/license/ban-event') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        if (body.action === 'apply') {
+          const exist = lic.activeBansFor(username, now).find((b) => b.code === body.code);
+          if (!exist) {
+            const endsAt = startOfNextDayMs(now);
+            lic.applyBan({ targetType: 'account', target: username, code: String(body.code || 'B1'), permanent: false, endsAt, actor: String(body.actor || 'loginshim') }, now);
+          }
+          return sendJson(res, 200, { ok: true });
+        }
+        if (body.action === 'lift') {
+          for (const b of lic.activeBansFor(username, now).filter((b) => b.code === body.code)) lic.liftBan(b, now, { by: String(body.actor || 'loginshim') });
+          return sendJson(res, 200, { ok: true });
+        }
+        return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+      }
+      if (req.method === 'POST' && p === '/internal/license/appeal-check') {
+        const username = String(body.username || '').trim().toLowerCase();
+        const bans = lic.activeBansFor(username, now);
+        const b = bans.find((x) => x.permanent) || bans[0] || null;
+        return sendJson(res, 200, { ok: true, hasActiveBan: !!b, ban: b ? { id: b.id, code: b.code, permanent: !!b.permanent, endsAt: b.endsAt } : null });
+      }
+      if (req.method === 'POST' && p === '/internal/license/device-review-decide') {
+        const out = lic.decideDeviceReview(String(body.reviewId || ''), String(body.decision || ''), String(body.actor || 'assistant'), now);
+        if (out.ok && out.violation) { for (const t of out.accounts || []) await licLockAccount(t); }
+        if (out.ok && (out.dismissed || out.violation)) reviewEvents.resolve('device_review', String(body.reviewId || ''), String(body.actor || 'assistant'), String(body.decision || ''));
+        return sendJson(res, out.ok ? 200 : 409, out);
+      }
+      if (req.method === 'GET' && p === '/internal/license/device-reviews') {
+        const st = lic.state();
+        const list = st.deviceReviews.slice(-50).map((r) => ({ id: r.id, accounts: r.accounts, platform: r.platform, status: r.status, escalated: !!r.escalated, createdAt: r.createdAt, deviceHashShort: String(r.deviceHash).slice(0, 12), decidedBy: r.decidedBy || null, decision: r.decision || null }));
+        return sendJson(res, 200, { ok: true, reviews: list });
+      }
+      if (req.method === 'POST' && p === '/internal/license/appeal-decide') {
+        const out = await decideAppeal(String(body.appealId || ''), String(body.decision || ''), String(body.reason || ''), String(body.actor || 'assistant'), body);
+        return sendJson(res, out.ok ? 200 : 409, out);
+      }
+      if (req.method === 'POST' && p === '/internal/license/register-check') {
+        return sendJson(res, 200, Object.assign({ ok: true }, lic.registerCheck(String(body.deviceHash || ''), String(body.ip || ''), now)));
+      }
+      if (req.method === 'POST' && p === '/internal/license/register-success') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        lic.registerSuccess(username, String(body.deviceHash || ''), String(body.ip || ''), now);
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/internal/license/issue') {
+        // 内网发码（代审/协调工具与测试用；与站长后台同一口径：来源必选无默认）
+        const username = String(body.username || '').trim().toLowerCase();
+        const plan = String(body.plan || '');
+        if (!LIC_PLANS[plan]) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '套餐不正确。' });
+        if (body.source !== 'paid' && body.source !== 'free') return sendJson(res, 400, { ok: false, code: 'SOURCE_REQUIRED', msg: '必须选择密钥来源。' });
+        const docs = loadDb();
+        if (!findDbUser(docs, username)) return sendJson(res, 404, { ok: false, msg: '账号不存在。' });
+        let orderId = null;
+        if (body.source === 'paid') { const o = lic.createOrder(username, plan, now); o.status = 'paid'; o.channel = 'admin-paid-record'; o.paidAt = now; lic.save(); orderId = o.id; }
+        if (body.source === 'paid') {
+          const g = lic.grantPurchase(username, plan, body.source, now, { actor: 'internal', orderId });
+          if (g.alreadyPermanent) return sendJson(res, 400, { ok: false, code: 'ALREADY_PERMANENT' });
+          return sendJson(res, 200, { ok: true, keyId: g.key.id, maskedKey: licMaskKey(g.key.str), swapped: !!g.swapped, stacked: !!g.stacked });
+        }
+        const rec = lic.issueKey(username, plan, body.source, now, { actor: 'internal', orderId });
+        return sendJson(res, 200, { ok: true, keyId: rec.id, maskedKey: licMaskKey(rec.str) });
+      }
+      if (req.method === 'POST' && p === '/internal/license/test-set-trial') {
+        if (!lic.readConfig().testHooks) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        const username = String(body.username || '').trim().toLowerCase();
+        const st = lic.state();
+        if (!st.accounts[username] || !st.accounts[username].trial) return sendJson(res, 400, { ok: false, msg: '无试用记录。' });
+        st.accounts[username].trial.expiresMs = Number(body.expiresMs);
+        lic.save();
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/internal/license/test-set-key-expiry') {
+        if (!lic.readConfig().testHooks) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        const st = lic.state();
+        const k = st.keys[String(body.keyId || '')];
+        if (!k) return sendJson(res, 400, { ok: false, msg: '密钥不存在。' });
+        if (!Number.isFinite(Number(body.expiresBaseMs))) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'expiresBaseMs 须为毫秒时间戳。' });
+        k.expiresBaseMs = Number(body.expiresBaseMs); k.pausedAccumMs = 0; k.pauseStartMs = null; if (k.timing === 'paused') k.timing = 'active';
+        lic.save();
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/internal/license/set-contact') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username || !body.email) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        lic.setContact(username, String(body.email).trim().toLowerCase(), now);
+        return sendJson(res, 200, { ok: true });
+      }
+      // 账号＋密码核验（内网版，裁决批③）：供 loginshim 申诉提交等站内
+      // 服务核验身份，只回 ok 与否；失败口径与公开核验面一致（不存在的
+      // 账号同样回 false，不透露账号是否存在）。
+      if (req.method === 'POST' && p === '/internal/license/verify-password') {
+        const username = String(body.username || '').trim().toLowerCase();
+        const okPw = !!(username && await verifyAccountPassword(username, String(body.password || '')));
+        lic.audit({ ev: 'verify-password-internal', username, ok: okPw });
+        return sendJson(res, 200, { ok: okPw });
+      }
+      if (req.method === 'GET' && p === '/internal/license/overview') {
+        const st = lic.state();
+        const masked = Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, plan: k.plan, source: k.source, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, createdAt: k.createdAt }));
+        return sendJson(res, 200, { ok: true, config: cfg, keys: masked, bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), shadowEvents: st.shadowEvents.slice(-30), accounts: st.accounts });
+      }
+      return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    }
+
+    // ===== 许可公开页 =====
+    if (req.method === 'GET' && p === '/purchase') {
+      const auth = await resolveAuth(req);
+      if (!auth) { res.writeHead(302, { Location: '/?return=/purchase', 'Cache-Control': 'no-store' }); return res.end(); }
+      return sendHtml(res, 200, purchasePageHtml({ payEnabled: lic.readConfig().payEnabled, shotPayEnabled: payOrders.enabled() && licEnforce(lic.readConfig(), auth.user) }));
+    }
+    if (req.method === 'GET' && p === '/license/orders') {
+      const auth = await resolveAuth(req);
+      if (!auth) { res.writeHead(302, { Location: '/?return=/license/orders', 'Cache-Control': 'no-store' }); return res.end(); }
+      if (!ordersPageHtml) return sendJson(res, 500, { ok: false, msg: '订单页模块未加载。' });
+      return sendHtml(res, 200, ordersPageHtml());
+    }
+    // 品牌付款卡与示例图（#21 资产：pay-cards 终版 8 张＋示例图 v5，部署于 EXT_ASSETS_DIR）
+    const cardM = p.match(/^\/license\/pay-cards\/(pay-(?:wechat|alipay)-(?:2|6|9\.9|18)\.png)$/);
+    if (req.method === 'GET' && cardM) {
+      const fp = path.join(EXT_ASSETS_DIR, 'pay-cards', cardM[1]);
+      if (!fs.existsSync(fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      const buf = fs.readFileSync(fp);
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=86400' });
+      return res.end(buf);
+    }
+    if (req.method === 'GET' && p === '/license/assets/pay-example.jpg') {
+      const fp = path.join(EXT_ASSETS_DIR, 'pay-example.jpg');
+      if (!fs.existsSync(fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      const buf = fs.readFileSync(fp);
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=86400' });
+      return res.end(buf);
+    }
+    if (req.method === 'GET' && p === '/license/status') return sendHtml(res, 200, statusPageHtml());
+    if (req.method === 'GET' && p === '/license/rebind') {
+      if (!rebindPageHtml) return sendJson(res, 500, { ok: false, msg: '换绑申诉页模块未加载。' });
+      return sendHtml(res, 200, rebindPageHtml({ deviceCode: u.searchParams.get('dc') || '', platform: u.searchParams.get('platform') || '', channel: u.searchParams.get('ch') || 'web' }));
+    }
+
+    // ===== 许可公开接口（控制台会话鉴权） =====
+    if (p.startsWith('/license/api/')) {
+      const now = Date.now();
+      // 互联窗观察入口：本站会话身份此刻可同步取到就先记（同一请求只记
+      // 一行，req._cvLogged 标记）；控制台会话身份在下方 resolveAuth
+      // 解析后补记。无头请求不记、行为不变。
+      if (req.headers['x-qf-client-version']) {
+        const _sa = sessionAuth(req);
+        if (_sa && _sa.user) { recordClientVersion(req, p, _sa.user); req._cvLogged = true; }
+      }
+      // 状态查询核验（裁决批③：全站统一账号＋密码，废止账号＋注册邮箱
+      // 路径——本站注册不采邮箱、无邮箱验证码）。失败统一提示不透露账号
+      // 是否存在，5 次失败锁核验 1 小时、审计留痕，口径与 reveal 一致。
+      if (req.method === 'POST' && p === '/license/api/status/query') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const ip = clientIpFromReq(req);
+        const lockKey = 'q:' + username + ':' + ip;
+        if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'status-query', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '查询失败次数过多，请 1 小时后再试。' }); }
+        const ok = !!(username && await verifyAccountPassword(username, String(body.password || '')));
+        lic.audit({ ev: 'status-query', username, ok, ip });
+        if (!ok) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法查询。' }); }
+        licVerifyHit(lockKey, true);
+        const view = lic.buildStatusView(username, now);
+        let appeals = [];
+        try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); appeals = (v.appeals || []).filter((a) => a && String(a.key || a.username || '').toLowerCase() === username).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map((a) => ({ id: a.id, status: a.status, statusText: ({ pending: '处理中', approved: '已通过', rejected: '已驳回', done: '已通过' })[a.status] || a.status, reasonCode: a.reasonCode || (a.banId ? '' : 'B1'), type: a.type || '', desc: a.desc || '', reason: a.reason || '', createdAt: a.createdAt })); } catch (e) {}
+        // 购买记录进度（#21：查询密钥处可看审核进度）＋积分兑换记录（#23：密钥查询处可见）
+        const payOrdersMine = payOrders.listUser(username, now).slice(0, 5).map((o) => ({ planName: o.planName, amount: o.amount, statusText: o.statusText, createdAt: o.createdAt }));
+        let redemptions = [];
+        try { const prec = pointsData.users[username]; if (prec && prec.earn && Array.isArray(prec.earn.ledger)) redemptions = prec.earn.ledger.filter((x) => x.kind === 'spend' && String(x.note || '').indexOf('福利兑换') === 0).slice(-10).reverse(); } catch (e) {}
+        return sendJson(res, 200, { ok: true, view, appeals, payOrders: payOrdersMine, redemptions });
+      }
+      if (req.method === 'POST' && p === '/license/api/status/reveal') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const ip = clientIpFromReq(req);
+        const lockKey = 'r:' + username + ':' + ip;
+        if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'status-reveal', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '查看失败次数过多，请 1 小时后再试。' }); }
+        const okPw = await verifyAccountPassword(username, String(body.password || ''));
+        lic.audit({ ev: 'status-reveal', username, ok: okPw, ip });
+        if (!okPw) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '密码不正确，无法查看。' }); }
+        licVerifyHit(lockKey, true);
+        const view = lic.buildStatusView(username, now);
+        const st = lic.state();
+        const rec = view.keyId ? st.keys[view.keyId] : null;
+        if (!rec) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '该账号尚未购买密钥。' });
+        return sendJson(res, 200, { ok: true, key: rec.str });
+      }
+      // 账号＋密码核验（裁决批③统一核验面）：只回 ok 与否，不回任何账号
+      // 资料；供智能客服等站内服务在服务端调用（本人状态查询前核验），
+      // 失败锁定与审计口径同 reveal（独立 'v:' 计数、5 次锁 1 小时）。
+      if (req.method === 'POST' && p === '/license/api/verify-password') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const ip = clientIpFromReq(req);
+        const lockKey = 'v:' + username + ':' + ip;
+        if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'verify-password', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '核验失败次数过多，请 1 小时后再试。' }); }
+        const okPw = !!(username && await verifyAccountPassword(username, String(body.password || '')));
+        lic.audit({ ev: 'verify-password', username, ok: okPw, ip });
+        if (!okPw) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法核验。' }); }
+        licVerifyHit(lockKey, true);
+        return sendJson(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/license/api/pay/sim-callback') {
+        const cfg2 = lic.readConfig();
+        if (!cfg2.simPayEnabled) return sendJson(res, 404, { ok: false, code: 'SIM_DISABLED' });
+        const body = await readJsonBody(req);
+        let simSecret = '';
+        try { simSecret = fs.readFileSync(path.join(LIC_DIR, 'sim.secret'), 'utf8').trim(); } catch (e) {}
+        const expect = simSecret ? crypto.createHmac('sha256', simSecret).update(String(body.orderId || '') + ':' + String(body.amount || '')).digest('hex') : '';
+        if (!expect || body.sign !== expect) return sendJson(res, 400, { ok: false, code: 'BADSIGN', msg: '验签失败。' });
+        const out = lic.simPayCallback(String(body.orderId || ''), body.amount, now);
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      // ===== 待领取转赠查看（17:23 定版，撤换 17:03 双通道点接受）：受赠人
+      // 在状态查询侧凭账号＋密码核验（只核验、不签发登录态）查看待领取转赠
+      // 并看到完整密钥串、复制；核验后仅开放「查看完整串」这一只读动作，
+      // 不再有点接受/拒绝——领取只能凭串到拦截页/付费与激活区粘贴完成
+      // （POST /license/api/transfer/claim）。旧 transfer-accept/reject
+      // 端点保留路径回 ENDPOINT_REPLACED，防止旧页面误以为领取成功。
+      if (req.method === 'POST' && p.startsWith('/license/api/status/transfer')) {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const ip = clientIpFromReq(req);
+        const lockKey = 't:' + username + ':' + ip;
+        if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'status-transfer-auth', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '核验失败次数过多，请 1 小时后再试。' }); }
+        const okPw = await verifyAccountPassword(username, String(body.password || ''));
+        lic.audit({ ev: 'status-transfer-auth', username, ok: okPw, ip });
+        if (!okPw) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法查询。' }); }
+        licVerifyHit(lockKey, true);
+        if (p === '/license/api/status/transfers') {
+          // 核验通过后回完整串（密钥原文红线的既定例外：仅本人、本次响应、不落日志）
+          const list = lic.listClaimableTransfers(username, now);
+          return sendJson(res, 200, { ok: true, transfers: list });
+        }
+        if (p === '/license/api/status/transfer-accept' || p === '/license/api/status/transfer-reject') {
+          return sendJson(res, 200, { ok: false, code: 'ENDPOINT_REPLACED', msg: '领取方式已变更：请复制完整密钥串，到登录拦截页或「付费与激活」区粘贴领取。' });
+        }
+        return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      }
+      // ===== 密钥串领取（17:23 定版，同一校验端点，双入口共用） =====
+      // 入口一（已登录）：控制台会话鉴权，claimant＝会话账号，体 {key}。
+      // 入口二（拦截页 G1/G2/G5）：无会话，体 {username,password,key}，
+      // 密码只核验不签发登录态（口径同状态查询核验，带失败锁定与审计）。
+      // 两入口最终都走 lic.claimByKeyString 同一校验：串须命中「正待领取、
+      // 收赠方＝当前账号、未过期未撤销」的转赠单。
+      if (req.method === 'POST' && p === '/license/api/transfer/claim') {
+        const body = await readJsonBody(req);
+        const keyStr = String(body.key || body.keyStr || '');
+        let claimant = null;
+        const sessAuth = await resolveAuth(req).catch(() => null);
+        if (!req._cvLogged && sessAuth && sessAuth.user) { recordClientVersion(req, p, sessAuth.user); req._cvLogged = true; }
+        if (sessAuth && sessAuth.user) {
+          claimant = sessAuth.user;
+          // 带了 username 时须与会话账号一致，防串号领取
+          const bu = String(body.username || '').trim().toLowerCase();
+          if (bu && bu !== claimant) return sendJson(res, 200, { ok: false, code: 'KEY_INVALID', msg: '密钥无效，请核对后重试。' });
+        } else if (body.username && body.password) {
+          const username = String(body.username || '').trim().toLowerCase();
+          const ip = clientIpFromReq(req);
+          const lockKey = 'c:' + username + ':' + ip;
+          if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'transfer-claim-auth', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '核验失败次数过多，请 1 小时后再试。' }); }
+          const okPw = await verifyAccountPassword(username, String(body.password || ''));
+          lic.audit({ ev: 'transfer-claim-auth', username, ok: okPw, ip });
+          if (!okPw) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法领取。' }); }
+          licVerifyHit(lockKey, true);
+          claimant = username;
+        }
+        if (!claimant) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+        const out = lic.claimByKeyString(claimant, keyStr, now);
+        lic.audit({ ev: 'transfer-claim', username: claimant, ok: !!out.ok, code: out.code || 'OK' });
+        if (out.ok) {
+          log({ ev: 'transfer-claimed', target: claimant, keyId: out.keyId });
+          // 同一时点强制原主人下线（17:29）：网页在线 WS 关闭＋已知 xid 撤销
+          // ＋本站会话清除同步执行；软件端经 forceLogout 标志通道即刻下线、
+          // 后续登录按 G1 拦截。执行摘要随响应回，不另起许可台账事件。
+          // 边界（阶段 F 深查修复）：原主人名下仍有其他有效密钥时，其权益
+          // 未终止，不执行强制下线（判定与 forceLogoutState 同一口径）；
+          // 此时响应文案也不宣称已下线。
+          let fl = null;
+          const gateAfterClaim = lic.forceLogoutState ? lic.forceLogoutState(out.from, Date.now()) : null;
+          if (gateAfterClaim) {
+            try { fl = await executeClaimForceLogout(out.from); } catch (e) { log({ ev: 'transfer-force-logout-error', target: out.from, err: String((e && e.message) || e) }); }
+            return sendJson(res, 200, Object.assign({}, out, { forceLogoutExec: fl, msg: '领取成功，密钥已转入您的账号，原主人一侧该密钥已失效，其在线会话已强制下线。登录后在软件端重新绑定即可使用。' }));
+          }
+          return sendJson(res, 200, Object.assign({}, out, { forceLogoutExec: { skipped: 'sender-retains-other-valid-key' }, msg: '领取成功，密钥已转入您的账号，原主人一侧该密钥已失效。登录后在软件端重新绑定即可使用。' }));
+        }
+        return sendJson(res, 200, out);
+      }
+      // ===== 换绑申诉提交（§11.9，无会话：账号＋密码只核验不签发登录态，
+      // 口径同状态查询核验——失败统一提示、5 次失败锁核验 1 小时、审计留痕）。
+      // 须带新设备码（壳自动带入，用户不手填）：缺码直接拒并给正式指引。
+      // 校验分离：本路径只走 lic.rebindEligibilityByHash 替换资格判定，
+      // 严禁经过普通绑定的槽满校验——同类槽位已占用是换绑的前提。 =====
+      if (req.method === 'POST' && p === '/license/api/rebind/submit') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const deviceCode = String(body.deviceCode || '').trim();
+        const platform = body.platform === 'mobile' ? 'mobile' : (body.platform === 'pc' ? 'pc' : '');
+        const channel = ['android', 'windows', 'web'].includes(body.channel) ? body.channel : 'web';
+        if (!deviceCode || !platform) {
+          lic.audit({ ev: 'rebind-submit', username, ok: false, why: 'no-device-code' });
+          return sendJson(res, 200, { ok: false, code: 'DEVICE_CODE_REQUIRED', msg: '请在新设备的 QFRemote 软件内提交换绑申诉。' });
+        }
+        if (!username || !body.password) return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法提交。' });
+        const ip = clientIpFromReq(req);
+        const lockKey = 'rb:' + username + ':' + ip;
+        if (licVerifyLocked(lockKey)) { lic.audit({ ev: 'rebind-submit', username, ok: false, why: 'locked', ip }); return sendJson(res, 200, { ok: false, code: 'VERIFY_LOCKED', msg: '核验失败次数过多，请 1 小时后再试。' }); }
+        const okPw = await verifyAccountPassword(username, String(body.password || ''));
+        lic.audit({ ev: 'rebind-submit', username, ok: okPw, ip });
+        if (!okPw) { licVerifyHit(lockKey, false); return sendJson(res, 200, { ok: false, code: 'VERIFY_FAILED', msg: '信息不一致，无法提交。' }); }
+        licVerifyHit(lockKey, true);
+        const elig = lic.rebindEligibilityByHash(username, crypto.createHash('sha256').update(deviceCode).digest('hex'), platform, now);
+        if (!elig.ok) return sendJson(res, 200, { ok: false, code: elig.code, msg: elig.msg });
+        // 防重复：同账号同类槽位已有一笔待审换绑时不受理第二笔（不同类可独立提交）
+        let data = { appeals: [] };
+        try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); if (v && Array.isArray(v.appeals)) { v.appeals = v.appeals.filter((x) => x && typeof x === 'object'); data = v; } } catch (e) {}
+        const exist = data.appeals.find((x) => x.type === 'rebind' && x.status === 'pending' && String(x.key || x.username || '').toLowerCase() === username && x.platform === platform);
+        if (exist) return sendJson(res, 200, { ok: false, code: 'REBIND_PENDING', appealId: exist.id, msg: '该类设备已有一笔换绑申诉正在审核中，无需重复提交。申诉编号：' + exist.id + '，请凭编号在申诉进度页查询。' });
+        const appeal = {
+          id: crypto.randomBytes(4).toString('hex'),
+          type: 'rebind', reasonCode: 'REBIND',
+          username, key: username, email: accountEmail(username) || '',
+          desc: String(body.desc || '').slice(0, 500),
+          platform, slotType: platform, channel,
+          keyId: elig.keyId,
+          oldDeviceCode: elig.oldDeviceCode, newDeviceCodeHash: elig.newDeviceCodeHash,
+          status: 'pending', createdAt: now,
+        };
+        data.appeals.push(appeal);
+        try {
+          const tmp = APPEALS_FILE + '.tmp-lic'; fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(tmp, APPEALS_FILE);
+          try { const st = fs.statSync(path.dirname(APPEALS_FILE)); fs.chownSync(APPEALS_FILE, st.uid, st.gid); } catch (e) {}
+        } catch (e) { return sendJson(res, 500, { ok: false, code: 'IO', msg: '提交失败，请稍后再试。' }); }
+        lic.audit({ ev: 'rebind-submitted', username, ok: true, appealId: appeal.id, platform });
+        log({ ev: 'rebind-submitted', appealId: appeal.id, target: username, platform, channel });
+        reviewEvents.enqueue('rebind', appeal.id, { username, platform });
+        return sendJson(res, 200, { ok: true, appealId: appeal.id, msg: '换绑申诉已提交，申诉编号：' + appeal.id + '，请保存编号。申诉已进入人工审核队列，处理结果将在申诉进度页更新。' });
+      }
+      // 其余 /license/api/* 须控制台会话
+      const auth = await resolveAuth(req);
+      if (!req._cvLogged) recordClientVersion(req, p, auth ? auth.user : null);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (req.method === 'GET' && p === '/license/api/me') {
+        const fls2 = lic.forceLogoutState ? lic.forceLogoutState(auth.user, now) : null;
+        // enforce 与内网 login-check 同口径补填（阶段 D 缺口修复）：enforce＝
+        // 非影子模式，或影子模式下该账号在 testUsers 名单内；影子模式下
+        // 名单外账号的拟拦截判定照常记入影子事件册（与 login-check 一致）。
+        const cfgMe = lic.readConfig();
+        const decisionMe = lic.evaluate(auth.user, now, { channel: 'software' });
+        decisionMe.enforce = licEnforce(cfgMe, auth.user);
+        if (!decisionMe.allow && cfgMe.shadow && !decisionMe.enforce) lic.shadowLog({ ev: 'gate-would-block', username: auth.user, code: decisionMe.code, channel: 'software' });
+        if (!decisionMe.allow) lic.save();
+        return sendJson(res, 200, Object.assign({ ok: true }, lic.buildStatusView(auth.user, now), { decision: decisionMe }, fls2 ? { forceLogout: true, gateCode: 'G1' } : {}));
+      }
+      if (req.method === 'GET' && p === '/license/api/qfclash-access') {
+        // QFClash 内嵌渠道准入（2.0.3 更新 3）：按 qfclash 渠道判许可——
+        // 有效密钥/试用在期放行进控制台，未激活/过期回 G 类码供客户端
+        // 自动打开购买页；不判槽位、不记绑定（evaluate 内已隔离）。
+        const cfgQc = lic.readConfig();
+        const decisionQc = lic.evaluate(auth.user, now, { channel: 'qfclash' });
+        decisionQc.enforce = licEnforce(cfgQc, auth.user);
+        if (!decisionQc.allow && cfgQc.shadow && !decisionQc.enforce) lic.shadowLog({ ev: 'gate-would-block', username: auth.user, code: decisionQc.code, channel: 'qfclash' });
+        if (!decisionQc.allow) lic.save();
+        const viewQc = lic.buildStatusView(auth.user, now);
+        return sendJson(res, 200, { ok: true, allow: decisionQc.allow, code: decisionQc.code, msgCode: decisionQc.msgCode || null, keyExpiresMs: decisionQc.keyExpiresMs || null, trialExpiresMs: decisionQc.trialExpiresMs || null, planName: viewQc.planName, displayStatus: viewQc.displayStatus, webEnabled: viewQc.webEnabled });
+      }
+      if (req.method === 'POST' && p === '/license/api/device-report') {
+        const body = await readJsonBody(req);
+        const deviceCode = String(body.deviceCode || '').trim();
+        const platform = body.platform === 'mobile' ? 'mobile' : 'pc';
+        if (!deviceCode) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '缺少设备码。' });
+        const r = lic.reportDevice(auth.user, deviceCode, platform, now);
+        // #31：设备异常待审进统一事件队列（同单只挂一条，enqueue 内去重）
+        if (r.reviewId && r.reviewPending) reviewEvents.enqueue('device_review', r.reviewId, { accounts: r.accounts, platform });
+        // #23：回填账号最近上报设备（积分设备维度封顶的设备键）
+        if (r.deviceHash) { pointsData.devices = pointsData.devices || {}; if (pointsData.devices[auth.user] !== r.deviceHash) { pointsData.devices[auth.user] = r.deviceHash; try { savePoints(); } catch (e) {} } }
+        // B6 新规（16:53）：待审期间只拦不封；forceLogout 供壳侧强制登出该设备会话
+        const d = lic.evaluate(auth.user, now, { channel: 'software', deviceCode, platform });
+        // enforce 与内网 login-check 同口径补填（阶段 D 缺口修复，口径同 /license/api/me）
+        const cfgDr = lic.readConfig();
+        d.enforce = licEnforce(cfgDr, auth.user);
+        if (!d.allow && cfgDr.shadow && !d.enforce) lic.shadowLog({ ev: 'gate-would-block', username: auth.user, code: d.code, channel: 'software' });
+        if (!d.allow) lic.save();
+        return sendJson(res, 200, { ok: true, device: r, decision: d });
+      }
+      if (req.method === 'POST' && p === '/license/api/bind') {
+        const body = await readJsonBody(req);
+        const deviceCode = String(body.deviceCode || '').trim();
+        const platform = body.platform === 'mobile' ? 'mobile' : 'pc';
+        if (!deviceCode) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '缺少设备码。' });
+        const out = lic.bindKey(auth.user, String(body.key || ''), deviceCode, platform, now);
+        // 影子纯净（阶段 F 深查修复）：只有犯次真实落盘执法（offenseApplied，
+        // 即非影子或名单内账号且已写入统一台账封禁）才联动 mcdb 冻结；
+        // 影子拟处置不得真冻结控制台账号。
+        if (out.offense && out.offenseApplied) await licLockAccount(auth.user);
+        return sendJson(res, out.ok ? 200 : 200, out);
+      }
+      if (req.method === 'POST' && p === '/license/api/transfer/initiate') {
+        const body = await readJsonBody(req);
+        // 裁决批④：发起转赠先校验受赠账号存在，不存在即拦截，不建待领取单
+        const toUser = String(body.toUsername || '').trim().toLowerCase();
+        if (!toUser || !accountExists(toUser)) return sendJson(res, 200, { ok: false, code: 'RECIPIENT_NOT_FOUND', msg: '受赠账号不存在，请核对账号后重试。' });
+        const out = lic.initiateTransfer(auth.user, String(body.keyId || ''), toUser, now);
+        return sendJson(res, 200, out);
+      }
+      if (req.method === 'POST' && p === '/license/api/transfer/reject') {
+        // 17:23 撤换：拒绝动作已取消（不领取即不领取，转出方可撤销）
+        return sendJson(res, 200, { ok: false, code: 'ENDPOINT_REPLACED', msg: '领取方式已变更：转赠不再设拒绝，不领取即可；如需处理请联系转出方撤销。' });
+      }
+      if (req.method === 'POST' && p === '/license/api/transfer/cancel') {
+        // 转出方撤销待接受转赠（站长 17:11 定版）：随时可撤、不计次，
+        // 撤销后同一把钥可再次发起转赠。
+        const body = await readJsonBody(req);
+        const out = lic.cancelTransfer(auth.user, String(body.transferId || ''), now);
+        if (out.ok) log({ ev: 'transfer-cancelled', target: auth.user, transferId: String(body.transferId || '') });
+        return sendJson(res, 200, out);
+      }
+      if (req.method === 'POST' && p === '/license/api/transfer/confirm') {
+        // 17:23 撤换：点接受已取消，唯一领取路径为 POST /license/api/transfer/claim（粘贴密钥串）
+        return sendJson(res, 200, { ok: false, code: 'ENDPOINT_REPLACED', msg: '领取方式已变更：请复制完整密钥串，粘贴到激活密钥输入框领取。' });
+      }
+      if (req.method === 'GET' && p === '/license/api/transfers') {
+        // incoming 只含待接受（密钥过期终结的单不出现，17:14 定版）；
+        // outgoing 含我发起的全部近单与终结状态/事由，供转出方看撤销入口与结果。
+        const lists = lic.listTransfers(auth.user, now);
+        const mine = lic.accountKeys(auth.user).map((k) => ({ keyId: k.id, planName: k.planName, masked: licMaskKey(k.str), transferredOnce: !!k.transferredOnce, transferable: k.source === 'paid' && !k.transferredOnce && (k.lifecycle === 'unactivated' || k.lifecycle === 'activated') }));
+        return sendJson(res, 200, { ok: true, incoming: lists.incoming, outgoing: lists.outgoing, keys: mine });
+      }
+      if (req.method === 'POST' && p === '/license/api/order') {
+        const body = await readJsonBody(req);
+        const cfg3 = lic.readConfig();
+        try {
+          const order = lic.createOrder(auth.user, String(body.plan || ''), now);
+          return sendJson(res, 200, { ok: true, orderId: order.id, amount: order.amount, status: order.status, payUnavailable: !cfg3.payEnabled });
+        } catch (e) { return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '套餐不正确。' }); }
+      }
+      // ===== 截图审核付款 · 用户侧订单接口组（蓝图 N-1，#21/21-补4） =====
+      if (req.method === 'POST' && p === '/license/api/pay/orders') {
+        const body = await readJsonBody(req);
+        const out = payOrders.createOrder(auth.user, String(body.plan || ''), String(body.method || ''), now);
+        if (!out.ok) return sendJson(res, 200, out);
+        return sendJson(res, 200, { ok: true, order: out.order, pay: payOrders.payViewData(payOrders.getRaw(out.order.id), now), reused: !!out.reused });
+      }
+      if (req.method === 'GET' && p === '/license/api/pay/orders') {
+        return sendJson(res, 200, { ok: true, orders: payOrders.listUser(auth.user, now) });
+      }
+      const paySubM = p.match(/^\/license\/api\/pay\/orders\/([^/]+)\/(continue|cancel|delete|submit)$/);
+      if (req.method === 'POST' && paySubM) {
+        const oid = decodeURIComponent(paySubM[1]); const act = paySubM[2];
+        const body = await readJsonBody(req, act === 'submit' ? BODY_LIMIT_SHOT : undefined);
+        if (body && body.__tooLarge) { log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: 'PAYLOAD_TOO_LARGE' }); return sendJson(res, 200, { ok: false, code: 'PAYLOAD_TOO_LARGE', msg: '截图文件过大，请上传不超过 8 MB 的 JPG 或 PNG 图片。' }); }
+        if (act === 'continue') { const out = payOrders.switchMethod(auth.user, oid, body.method ? String(body.method) : '', now); return sendJson(res, 200, out); }
+        if (act === 'cancel') return sendJson(res, 200, payOrders.cancelOrder(auth.user, oid, now));
+        if (act === 'delete') return sendJson(res, 200, payOrders.deleteOrder(auth.user, oid, now));
+        if (act === 'submit') {
+          const out = payOrders.submitShot(auth.user, oid, { orderNo: body.orderNo, imageBase64: body.imageBase64 }, now);
+          if (out.ok) reviewEvents.enqueue('order', oid, { username: auth.user, planName: out.order.planName, amount: out.order.amount, orderNo: String(body.orderNo || '') });
+          else log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: out.code || 'UNKNOWN' });
+          return sendJson(res, 200, out);
+        }
+      }
+      // ===== 我的密钥 / 兑换KEY（#24：与转赠粘贴领取、登录激活弹窗共用同一兑换逻辑） =====
+      if (req.method === 'GET' && p === '/license/api/mykeys') {
+        const st = lic.state();
+        const mine = lic.accountKeys(auth.user).map((k) => ({
+          keyId: k.id, masked: licMaskKey(k.str), planName: k.planName,
+          source: k.source, sourceLabel: k.source === 'paid' ? '付费购买' : (k.sourceNote || '免费发放'),
+          lifecycle: k.lifecycle, activated: k.lifecycle !== 'unactivated',
+          expiresText: k.lifecycle === 'unactivated' ? (lic.remainTextForKey ? lic.remainTextForKey(k, now) : '未激活，激活后起算') : (k.expiresBaseMs ? ('到期：' + new Date(lic.effectiveExpiry(k, now)).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })) : '长期有效'),
+          canRedeem: k.lifecycle === 'unactivated',
+          createdAt: k.createdAt,
+        })).sort((a, b) => b.createdAt - a.createdAt);
+        return sendJson(res, 200, { ok: true, keys: mine });
+      }
+      if (req.method === 'POST' && p === '/license/api/redeem') {
+        // 统一兑换入口：他人密钥（转赠待领取/未激活转售）走 claimByKeyString
+        // 同一事务；本人未激活密钥（福利兑换等）走同一激活口径（激活起算）。
+        // 本人密钥可凭 keyId 一键兑换（待兑换列表，串不下发到列表页）。
+        const body = await readJsonBody(req);
+        const keyStr = String(body.key || '').trim().toUpperCase();
+        const st = lic.state();
+        let rec = keyStr ? (Object.values(st.keys).find((k) => k.str === keyStr) || null) : null;
+        if (!rec && body.keyId) { const byId = st.keys[String(body.keyId)]; if (byId && byId.username === auth.user) rec = byId; }
+        if (!keyStr && !rec) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '请输入 QFRemote 激活密钥。' });
+        if (rec && rec.username === auth.user) {
+          if (lic.activeBansFor(auth.user, now).length) return sendJson(res, 200, { ok: false, code: 'ACCOUNT_BANNED', msg: '您的账号当前处于封禁或冻结状态，无法兑换密钥。请先处理账号状态或提交申诉。' });
+          if (rec.lifecycle === 'expired') return sendJson(res, 200, { ok: false, code: 'KEY_EXPIRED', msg: lic.expiredText(rec, now), expiredAt: rec.expiresBaseMs ? lic.effectiveExpiry(rec, now) : null });
+          if (rec.lifecycle !== 'unactivated') return sendJson(res, 200, { ok: false, code: 'ALREADY_ACTIVE', msg: '该密钥已在您的账号上生效，无需重复兑换。' });
+          lic.activateKey(rec, now); lic.save();
+          lic.audit({ ev: 'key-redeem-own', username: auth.user, ok: true, keyId: rec.id });
+          log({ ev: 'key-redeemed-own', target: auth.user, keyId: rec.id });
+          return sendJson(res, 200, { ok: true, keyId: rec.id, planName: rec.planName, msg: '兑换成功，密钥已激活并开始计时。' });
+        }
+        const out = lic.claimByKeyString(auth.user, keyStr, now);
+        lic.audit({ ev: 'key-redeem', username: auth.user, ok: !!out.ok, code: out.code || 'OK' });
+        if (out.ok && out.from) {
+          const gate = lic.forceLogoutState ? lic.forceLogoutState(out.from, Date.now()) : null;
+          if (gate) { try { await executeClaimForceLogout(out.from); } catch (e) { log({ ev: 'redeem-force-logout-error', target: out.from, err: String((e && e.message) || e) }); } }
+        }
+        return sendJson(res, 200, out);
+      }
+      // ===== 同账号设备间文件发送（#25 / 蓝图 N-3，服务端端点组） =====
+      if (req.method === 'POST' && p === '/license/api/files/send') {
+        const body = await readJsonBody(req, BODY_LIMIT_FILE);
+        if (body.__tooLarge) return sendJson(res, 200, { ok: false, code: 'TOO_LARGE', msg: '文件超过单文件上限（200 MB），无法发送。' });
+        const out = fileStage.stage(auth.user, { filename: body.filename, toNode: body.toNode, fromNode: body.fromNode, contentBase64: body.contentBase64 }, now);
+        return sendJson(res, 200, out);
+      }
+      if (req.method === 'GET' && p === '/license/api/files/inbox') {
+        return sendJson(res, 200, { ok: true, files: fileStage.inbox(auth.user, String(u.searchParams.get('node') || ''), now), limits: fileStage.limits() });
+      }
+      if (req.method === 'GET' && p === '/license/api/files/sent') {
+        return sendJson(res, 200, { ok: true, files: fileStage.sent(auth.user, now) });
+      }
+      const fileDlM = p.match(/^\/license\/api\/files\/([^/]+)\/download$/);
+      if (req.method === 'GET' && fileDlM) {
+        const got = fileStage.blobPathFor(auth.user, decodeURIComponent(fileDlM[1]), now);
+        if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
+        const buf = fs.readFileSync(got.fp);
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
+        return res.end(buf);
+      }
+      const fileAckM = p.match(/^\/license\/api\/files\/([^/]+)\/ack$/);
+      if (req.method === 'POST' && fileAckM) {
+        return sendJson(res, 200, fileStage.ack(auth.user, decodeURIComponent(fileAckM[1]), now));
+      }
+      return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '该接口不存在。' });
+    }
+
+    // ===== 新版首页（阶段 C-3，三端共用正本的网页落点）=====
+    // 页面本体在 home-page.js；数据全走同源接口：/license/api/me、
+    // /license/api/transfers、/points/api/me 与下面的 /home/api/stats。
+    if (req.method === 'GET' && p === '/home') {
+      const auth = await resolveAuth(req);
+      if (!auth) { res.writeHead(302, { Location: '/?return=/home', 'Cache-Control': 'no-store' }); return res.end(); }
+      if (!homePageHtml) return sendJson(res, 500, { ok: false, msg: '首页模块未加载。' });
+      return sendHtml(res, 200, homePageHtml());
+    }
+    if (req.method === 'GET' && p === '/home/api/stats') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      const out = await buildHomeStats(req, auth);
+      return sendJson(res, 200, out);
+    }
+    if (req.method === 'GET' && p === '/home/api/login-devices') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      const devices = qfclashLogins
+        .filter((r) => r.user === auth.user && !r.revokedAt)
+        .sort((a, b) => b.at - a.at)
+        .map((r) => ({ id: r.id, source: 'qfclash', label: '在QFClash应用登录中', loginAt: r.at }));
+      return sendJson(res, 200, { ok: true, devices });
+    }
+    if (req.method === 'POST' && p === '/home/api/login-devices/revoke') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      const body = await readJsonBody(req);
+      const rec = qfclashLogins.find((r) => r.id === String(body.id || '') && r.user === auth.user && !r.revokedAt);
+      if (!rec) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '这条登录记录不存在或已下线。' });
+      rec.revokedAt = Date.now();
+      saveQfclashLogins();
+      // 与转赠强制下线同一套双路机制：先把该账号已验真的 xid 登记撤销
+      // （本站接口即时拒），再经控制通道关 MeshCentral 在线会话。
+      const revoked = revokeXidsForUser(auth.user);
+      const closed = await mcForceCloseUserSessions(auth.user).catch(() => null);
+      log({ ev: 'qfclash-login-revoke', target: auth.user, id: rec.id, revokedXids: revoked, closed: closed ? 1 : 0 });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // ===== 一次性令牌（双挂路由，总装裁定 2026-10-25：安卓用 /admin/api/sso-token，原 brief 用 /points/api/sso-token，同一处理、都回 {token}） =====
+    if (req.method === 'POST' && (p === '/points/api/sso-token' || p === '/admin/api/sso-token')) {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '登录已过期，请重新登录后再试。' });
+      const token = crypto.randomBytes(32).toString('hex');
+      ssoTokens.set(token, { user: auth.user, siteadmin: auth.siteadmin, exp: Date.now() + SSO_TOKEN_TTL_MS });
+      return sendJson(res, 200, { ok: true, token, expiresIn: 60, loginPath: '/admin/login?token=' + token });
+    }
+    // ===== 积分 =====
+    if (req.method === 'POST' && p === '/points/api/heartbeat') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      const body = await readJsonBody(req);
+      const now = Date.now();
+      let rec = pointsData.users[auth.user];
+      if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; }
+      const addedSec = pointsCore.applyHeartbeat(rec, now);
+      if (body && typeof body.client === 'string' && body.client) rec.lastClient = body.client.slice(0, 40);
+      rec.lastBeatAt = new Date(now).toISOString();
+      // #23 赚分：服务器在线秒数计分（不做闲置检测，23-补），账号＋设备双封顶
+      const devKey = (pointsData.devices && pointsData.devices[auth.user]) || ('acct:' + auth.user);
+      const earnOut = pointsCore.earnHeartbeat(rec, devKey, addedSec, now, (pointsData.deviceDays = pointsData.deviceDays || {}));
+      try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+      // 17:29：软件壳在线期间的强制下线信号走既有心跳通道下发——壳收到
+      // forceLogout:true 须立即登出本机会话并回 G1 拦截页（契约 §7.5.7）。
+      const fls = lic.forceLogoutState ? lic.forceLogoutState(auth.user, now) : null;
+      return sendJson(res, 200, Object.assign({ ok: true }, pointsCore.computeMe(auth.user, rec, now), { earn: pointsCore.earnView(rec, devKey, now, pointsData.deviceDays), earnedNow: earnOut.grantedNow }, fls ? { forceLogout: true, gateCode: 'G1' } : {}));
+    }
+    if (req.method === 'GET' && p === '/points/api/me') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      // 无心跳记录时先建档再计算：首次打开积分页即显示「已经 1 天」，不再出现 0 天（F 线 ⑥，总线收口落地）
+      let meRec = pointsData.users[auth.user];
+      if (!meRec) {
+        meRec = pointsCore.newRecord(Date.now());
+        pointsData.users[auth.user] = meRec;
+        try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+      }
+      const devKey = (pointsData.devices && pointsData.devices[auth.user]) || ('acct:' + auth.user);
+      return sendJson(res, 200, Object.assign({ ok: true }, pointsCore.computeMe(auth.user, meRec, Date.now()), { earn: pointsCore.earnView(meRec, devKey, Date.now(), pointsData.deviceDays) }));
+    }
+    // ===== 赚取积分：每日签到（#23） =====
+    if (req.method === 'POST' && p === '/points/api/checkin') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      const now = Date.now();
+      let rec = pointsData.users[auth.user];
+      if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; }
+      const devKey = (pointsData.devices && pointsData.devices[auth.user]) || ('acct:' + auth.user);
+      const out = pointsCore.earnCheckin(rec, devKey, now, (pointsData.deviceDays = pointsData.deviceDays || {}));
+      try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+      log({ ev: 'points-checkin', target: auth.user, ok: !!out.ok });
+      return sendJson(res, 200, Object.assign({}, out, { earn: pointsCore.earnView(rec, devKey, now, pointsData.deviceDays) }));
+    }
+    // ===== 福利中心（#23/#24）：兑换密钥入本人「待兑换」列表，兑换动作在兑换KEY页完成激活 =====
+    if (req.method === 'GET' && p === '/points/api/welfare') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      const now = Date.now();
+      let rec = pointsData.users[auth.user];
+      if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; try { savePoints(); } catch (e) {} }
+      const ev2 = pointsCore.ensureEarn(rec, now);
+      const records = ev2.ledger.filter((x) => x.kind === 'spend').slice(-20).reverse();
+      return sendJson(res, 200, { ok: true, balance: ev2.balance, offers: [{ plan: 'd1', planName: 'QFRemote 1日套餐', cost: 200 }, { plan: 'd7', planName: 'QFRemote 7日套餐', cost: 500 }], records });
+    }
+    if (req.method === 'POST' && p === '/points/api/welfare/redeem') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      const body = await readJsonBody(req);
+      const plan = String(body.plan || '');
+      const cost = plan === 'd1' ? 200 : (plan === 'd7' ? 500 : 0);
+      if (!cost) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '兑换档位不正确。' });
+      const now = Date.now();
+      let rec = pointsData.users[auth.user];
+      if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; }
+      const spend = pointsCore.earnSpend(rec, cost, '福利兑换 ' + LIC_PLANS[plan].name, now);
+      if (!spend.ok) return sendJson(res, 200, { ok: false, code: spend.code, msg: spend.msg || '兑换失败。', balance: spend.balance });
+      const key = lic.issueKey(auth.user, plan, 'free', now, { actor: 'points-welfare' });
+      const stK = lic.state(); if (stK.keys[key.id]) { stK.keys[key.id].sourceNote = '积分兑换（免费）'; lic.save(); }
+      try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+      log({ ev: 'welfare-redeemed', target: auth.user, plan, keyId: key.id, cost });
+      return sendJson(res, 200, { ok: true, keyId: key.id, maskedKey: licMaskKey(key.str), planName: key.planName, balance: spend.balance, msg: '兑换成功，密钥已进入您的「待兑换」列表，在「兑换KEY」页一键兑换即可激活。' });
+    }
+    if (req.method === 'GET' && p === '/points/welfare') {
+      const auth = await resolveAuth(req);
+      if (!auth) { res.writeHead(302, { Location: '/?return=/points/welfare', 'Cache-Control': 'no-store' }); return res.end(); }
+      return sendHtml(res, 200, welfarePageHtml());
+    }
+
+    // ===== 一次性令牌换本站会话 =====
+    if (req.method === 'GET' && p === '/admin/login') {
+      const token = u.searchParams.get('token') || '';
+      const entry = ssoTokens.get(token);
+      if (entry) ssoTokens.delete(token); // 单次使用：取到即作废
+      if (!entry || Date.now() > entry.exp) {
+        return sendHtml(res, 401, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">这个入口链接已经失效</h1><p style="line-height:1.8;color:#43536a">入口链接只能用一次，而且只有一分钟有效。请回到 QFRemote 软件里重新打开站长管理页。</p></div></body></html>');
+      }
+      issueSession(res, entry);
+      res.writeHead(302, { Location: '/admin', 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+
+    // ===== 手动退出（2.3.0 新增）：作废本站会话 + 清 cookie + 落退出标记 =====
+    // 不要求先过站长鉴权：拿着本站会话或控制台会话来退出都照单全收，
+    // 退出后同一控制台会话内刷新管理页不会再自动以站长身份进来。
+    if (req.method === 'POST' && p === '/admin/api/logout') {
+      destroySession(req, res);
+      log({ ev: 'admin-logout' });
+      return sendJson(res, 200, { ok: true, msg: '已退出站长管理。' });
+    }
+    if (req.method === 'GET' && p === '/admin/logout') {
+      destroySession(req, res);
+      log({ ev: 'admin-logout' });
+      return sendHtml(res, 200, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>已退出 · QFRemote</title>'
+        + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#0B2B5B;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#43536a}a{color:#2470E0}</style></head>'
+        + '<body><div class="wrap"><div class="card"><h1>已退出站长管理</h1><p>本次登录已经结束。需要再进来时，请回到 QFRemote 软件里重新打开站长管理页。</p><p><a href="/">返回控制台</a></p></div></div></body></html>');
+    }
+
+    // ===== 站长管理（页面 + 接口）=====
+    if (p === '/admin' || p.startsWith('/admin/api')) {
+      const auth = await resolveAuth(req);
+      if (!isAdmin(auth)) {
+        log({ ev: 'admin-denied', user: auth ? auth.user : null, path: p });
+        if (p === '/admin') return forbiddenPage(res);
+        return sendJson(res, 403, { ok: false, msg: '只有站长账号可以进行这个操作。' });
+      }
+      if (req.method === 'GET' && p === '/admin') return sendHtml(res, 200, adminPageHtml());
+      if (req.method === 'GET' && p === '/admin/api/me') return sendJson(res, 200, { ok: true, user: auth.user });
+      if (req.method === 'GET' && p === '/admin/api/users') {
+        try { return sendJson(res, 200, { ok: true, users: buildUsersList() }); }
+        catch (e) { log({ ev: 'users-list-error', err: String(e && e.message) }); return sendJson(res, 500, { ok: false, msg: '账号列表暂时无法读取，请稍后再试。' }); }
+      }
+      if (req.method === 'GET' && p === '/admin/api/appeals') {
+        let data = { appeals: [] };
+        try { const v = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')); if (v && Array.isArray(v.appeals)) data = v; } catch (e) {}
+        const pick = (a) => ({ id: a.id, username: a.username, email: a.email || '', desc: a.desc || '', freezeDay: a.freezeDay || '', status: a.status, createdAt: a.createdAt, decidedAt: a.decidedAt || null, reason: a.reason || '', reasonCode: a.reasonCode || '', banId: a.banId || '', decidedBy: a.decidedBy || '', type: a.type || '', platform: a.platform || '', channel: a.channel || '', oldDeviceCode: a.oldDeviceCode || '', newDeviceCodeHash: a.newDeviceCodeHash || '', executionNote: a.executionNote || '', rebindExec: a.rebindExec || null });
+        const pending = data.appeals.filter((a) => a.status === 'pending').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map(pick);
+        const recent = data.appeals.filter((a) => a.status !== 'pending').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 20).map(pick);
+        return sendJson(res, 200, { ok: true, pending, recent });
+      }
+      // ===== 许可：站长发码（来源必选、无默认；paid 决定网页权益，口径对齐 §11.5） =====
+      if (req.method === 'POST' && p === '/admin/api/license/issue') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        const plan = String(body.plan || '');
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        if (!LIC_PLANS[plan]) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '套餐不正确。' });
+        if (body.source !== 'paid' && body.source !== 'free') return sendJson(res, 400, { ok: false, code: 'SOURCE_REQUIRED', msg: '必须选择密钥来源（付费购买入账 / 免费发放），不设默认。' });
+        const docs = loadDb();
+        if (!findDbUser(docs, username)) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        let orderId = null;
+        if (body.source === 'paid') { const o = lic.createOrder(username, plan, Date.now()); o.status = 'paid'; o.channel = 'admin-paid-record'; o.paidAt = Date.now(); lic.save(); orderId = o.id; }
+        // 付费入账一律走 grantPurchase（试用换卡/按天叠加/永久不可叠加＋作废按天，口径一处）
+        if (body.source === 'paid') {
+          const g = lic.grantPurchase(username, plan, body.source, Date.now(), { actor: auth.user, orderId });
+          if (g.alreadyPermanent) return sendJson(res, 400, { ok: false, code: 'ALREADY_PERMANENT', msg: '该账号已持有永久套餐，不可重复发放/购买永久档。' });
+          const rec2 = g.key;
+          log({ ev: 'license-issue', target: username, plan, source: body.source, keyId: rec2.id });
+          return sendJson(res, 200, { ok: true, msg: '密钥已发放到 ' + username + '（' + rec2.planName + '，来源：付费购买入账）。', keyId: rec2.id, maskedKey: licMaskKey(rec2.str) });
+        }
+        const rec = lic.issueKey(username, plan, body.source, Date.now(), { actor: auth.user, orderId });
+        log({ ev: 'license-issue', target: username, plan, source: body.source, keyId: rec.id });
+        return sendJson(res, 200, { ok: true, msg: '密钥已发放到 ' + username + '（' + rec.planName + '，来源：' + (body.source === 'paid' ? '付费购买入账' : '免费发放') + '）。', keyId: rec.id, maskedKey: licMaskKey(rec.str) });
+      }
+      if (req.method === 'POST' && p === '/admin/api/license/review-decide') {
+        const body = await readJsonBody(req);
+        // #38：站长改判（override:true）——已裁定的设备异常记录可反向改判，
+        // 联动同步执行（改判违规→锁定账号；改判不成立→解封并恢复密钥）。
+        if (body.override === true) {
+          const out = lic.overrideDeviceReview(String(body.reviewId || ''), String(body.decision || ''), 'owner', Date.now());
+          if (out.ok && out.violation) { for (const t of out.accounts || []) await licLockAccount(t); }
+          if (out.ok && out.dismissed) { for (const t of out.accounts || []) await licUnlockAccount(t); }
+          log({ ev: 'admin-review-override', reviewId: body.reviewId, decision: body.decision, ok: !!out.ok });
+          return sendJson(res, out.ok ? 200 : 409, out);
+        }
+        const out = lic.decideDeviceReview(String(body.reviewId || ''), String(body.decision || ''), 'owner', Date.now());
+        if (out.ok && out.violation) { for (const t of out.accounts || []) await licLockAccount(t); }
+        return sendJson(res, out.ok ? 200 : 409, out);
+      }
+      // #38 解封缺口补齐：站长可对台账内任意一条生效中的封禁直接解封
+      // （此前 B7/B9/B6/B10 封禁只能等申诉裁决解除）。恢复密钥口径与申诉
+      // 通过一致（liftBan 只恢复与该封禁绑定的回收密钥）。
+      if (req.method === 'POST' && p === '/admin/api/license/unban') {
+        const body = await readJsonBody(req);
+        const ban = lic.getBan(String(body.banId || ''));
+        if (!ban) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '封禁记录不存在。' });
+        if (ban.status !== 'active') return sendJson(res, 409, { ok: false, code: 'BAD_STATE', msg: '该封禁当前不是生效状态，无需解封。' });
+        lic.liftBan(ban, Date.now(), { by: auth.user, restoreKeys: true });
+        if (ban.targetType === 'account') await licUnlockAccount(ban.target);
+        log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user });
+        return sendJson(res, 200, { ok: true, msg: '已解封：' + ban.target + '（关联回收密钥已按规恢复）。' });
+      }
+      if (req.method === 'GET' && p === '/admin/api/license/overview') {
+        const st = lic.state();
+        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
+      }
+      // ===== 截图付款订单审核（#21：站长侧含二审到账核对；一审亦可在此处理） =====
+      if (req.method === 'GET' && p === '/admin/api/orders') {
+        return sendJson(res, 200, { ok: true, orders: payOrders.listRecent(80), enabled: payOrders.enabled() });
+      }
+      if (req.method === 'POST' && p === '/admin/api/orders/decide') {
+        const body = await readJsonBody(req);
+        const o = payOrders.getRaw(String(body.orderId || ''));
+        if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '订单不存在。' });
+        const decision = String(body.decision || '');
+        const out = payOrders.decide(o.id, decision, '站长', Date.now(), {});
+        if (out.ok) {
+          if (out.stage === 1) reviewEvents.resolve('order', o.id, '站长', 'review1-' + decision);
+          if (out.fake) { await licLockAccount(o.username); }
+        }
+        log({ ev: 'admin-order-decide', orderId: o.id, decision, ok: !!out.ok });
+        return sendJson(res, out.ok ? 200 : 409, out);
+      }
+      // #38 站长改判重审：未发钥、未经二审的驳回订单可放回一审队列重审
+      if (req.method === 'POST' && p === '/admin/api/orders/reopen') {
+        const body = await readJsonBody(req);
+        const out = payOrders.reopenForOwner(String(body.orderId || ''), '站长', Date.now());
+        if (out.ok) reviewEvents.enqueue('order', String(body.orderId || ''), { reopened: true });
+        log({ ev: 'admin-order-reopen', orderId: body.orderId, ok: !!out.ok });
+        return sendJson(res, out.ok ? 200 : 409, out);
+      }
+      const adminShotM = p.match(/^\/admin\/api\/orders\/([^/]+)\/screenshot$/);
+      if (req.method === 'GET' && adminShotM) {
+        const o = payOrders.getRaw(decodeURIComponent(adminShotM[1]));
+        const fp = o ? payOrders.shotPath(o) : null;
+        if (!o || !fp || !fs.existsSync(fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        const buf = fs.readFileSync(fp);
+        res.writeHead(200, { 'Content-Type': o.shotType || 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+        return res.end(buf);
+      }
+      // ===== 站长 API 管理（#22/#31：令牌＋事件计数＋已处理日志） =====
+      if (req.method === 'GET' && p === '/admin/api/assistant') {
+        return sendJson(res, 200, { ok: true, token: reviewEvents.tokenStatus(), counts: reviewEvents.counts(), recentDone: reviewEvents.recentDone(20) });
+      }
+      if (req.method === 'POST' && p === '/admin/api/assistant/token') {
+        const body = await readJsonBody(req);
+        const action = String(body.action || '');
+        if (action === 'generate' || action === 'reset') { const out = reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
+        if (action === 'revoke') { const out = reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
+        return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });
+      }
+      if (req.method === 'POST' && (p === '/admin/api/appeals/approve' || p === '/admin/api/appeals/reject')) {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const isApprove = p.endsWith('/approve');
+        // 统一申诉（带 banId/reasonCode）：走许可台账裁决（防双判），不走 B1 改密闭环
+        if (body.appealId) {
+          const out = await decideAppeal(String(body.appealId), isApprove ? String(body.decision || 'approve') : 'reject', String(body.reason || ''), 'owner', body);
+          return sendJson(res, out.ok ? 200 : 409, out);
+        }
+        let args;
+        if (isApprove) args = [APPEAL_ADMIN, 'approve', username];
+        else {
+          const reason = String(body.reason || '').trim();
+          if (!reason) return sendJson(res, 400, { ok: false, msg: '驳回申诉须写明原因。' });
+          args = [APPEAL_ADMIN, 'reject', username, reason.slice(0, 500)];
+        }
+        const r = await runCmd('node', args, 30000);
+        if (r.code === 0) {
+          let note = isApprove ? '申诉已通过，对方可设置新密码。' : '申诉已驳回。';
+          try { const j = JSON.parse(lastLine(r.stdout)); if (j && j.note) note = j.note; } catch (e) {}
+          log({ ev: 'appeal-decision', action: isApprove ? 'approve' : 'reject', target: username, ok: true });
+          return sendJson(res, 200, { ok: true, msg: note });
+        }
+        const msg = lastLine(r.stderr) || '处理未成功，请稍后再试。';
+        log({ ev: 'appeal-decision', action: isApprove ? 'approve' : 'reject', target: username, ok: false, code: r.code });
+        return sendJson(res, 200, { ok: false, msg });
+      }
+      if (req.method === 'POST' && ['/admin/api/freeze', '/admin/api/unfreeze', '/admin/api/ban', '/admin/api/resetpass', '/admin/api/rename'].includes(p)) {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const action = p.replace('/admin/api/', '');
+        if (action === 'rename') {
+          const newName = String(body.newName || '').trim();
+          if (!ACCOUNT_RE.test(newName)) return sendJson(res, 400, { ok: false, msg: '新账号名格式不正确，请检查后重试。' });
+          const docs = loadDb();
+          const user = findDbUser(docs, username);
+          if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+          const guard = adminGuardCheck(user, username); // #38：站长后台口径
+          if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+          const out = await enqueueOp(() => runRenameOp(username.toLowerCase(), newName.toLowerCase()));
+          return sendJson(res, out.ok ? 200 : 400, out);
+        }
+        // 预检（不进停服窗）：账号存在性 + 护栏 + 幂等状态。#38：站长后台
+        // 用 adminGuardCheck（仅服务账号拒绝），自动联动仍用 guardCheck。
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const isFrozen = ((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0;
+        if (action === 'freeze' && isFrozen) return sendJson(res, 200, { ok: true, msg: '账号已是冻结状态，未重复操作：' + username });
+        if (action === 'unfreeze' && !isFrozen) return sendJson(res, 200, { ok: true, msg: '账号未冻结，未操作：' + username });
+        // 【C-2 重点变更】B9 人工封号改「封禁」（#30 用词定版，原内部称谓「封存」）：不再删号。封禁＝mcdb 冻结（禁用）
+        // ＋统一台账永久封禁（B9，数据保留、可申诉）；旧 mcdb ban（删除）下线。
+        if (action === 'ban') {
+          const out2 = await enqueueOp(() => runMcdbOp('freeze', username.toLowerCase(), { adminOverride: true }));
+          if (!out2.ok) return sendJson(res, 400, out2);
+          lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B9', permanent: true, actor: auth.user, evidence: 'admin-seal' }, Date.now());
+          log({ ev: 'admin-seal', target: username });
+          return sendJson(res, 200, { ok: true, msg: '账号已封禁（禁用＋数据保留＋可申诉，未删除）：' + username, probeBefore: out2.probeBefore, probeAfter: out2.probeAfter });
+        }
+        const out = await enqueueOp(() => runMcdbOp(action, username.toLowerCase(), { adminOverride: true }));
+        if (out.ok && action === 'freeze') {
+          lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B8', permanent: false, endsAt: null, actor: auth.user, evidence: 'admin-freeze' }, Date.now());
+        }
+        if (out.ok && action === 'unfreeze') {
+          for (const b of lic.activeBansFor(username.toLowerCase(), Date.now()).filter((b) => b.code === 'B8')) lic.liftBan(b, Date.now(), { by: auth.user });
+        }
+        return sendJson(res, out.ok ? 200 : 400, out);
+      }
+      return sendJson(res, 404, { ok: false, msg: '该接口不存在。' });
+    }
+
+    return sendJson(res, 404, { ok: false, msg: '该页面不存在。' });
+  } catch (e) {
+    log({ ev: 'handler-error', err: String(e && e.message) });
+    try { sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' }); } catch (e2) {}
+  }
+});
+
+// 封禁保留期清除任务（16:53 裁决）：B9/永封封禁满 1 年、无在审申诉 → 数据清除
+// （mcdb ban 删除动作仅在此清除路径使用）并回写台账。每 6 小时扫一次。
+async function sealPurgeSweep() {
+  try {
+    let appeals = [];
+    try { appeals = JSON.parse(fs.readFileSync(APPEALS_FILE, 'utf8')).appeals || []; } catch (e) {}
+    const pendingFor = (u) => appeals.some((a) => a && a.status === 'pending' && String(a.key || a.username || '').toLowerCase() === u);
+    const expired = lic.sealedExpired(Date.now(), pendingFor);
+    for (const ban of expired) {
+      const cfg = lic.readConfig();
+      if (cfg.shadow && !cfg.testUsers.includes(ban.target)) { log({ ev: 'seal-purge-shadow-skip', target: ban.target }); continue; }
+      const out = await enqueueOp(() => runMcdbOp('ban', ban.target));
+      if (out.ok) { lic.markPurged(ban, Date.now()); log({ ev: 'seal-purged', target: ban.target, banId: ban.id }); }
+      else log({ ev: 'seal-purge-failed', target: ban.target, banId: ban.id });
+    }
+  } catch (e) { log({ ev: 'seal-purge-error', err: String(e && e.message) }); }
+}
+if (!process.env.QFEXT_NO_LISTEN) { setInterval(sealPurgeSweep, 6 * 3600000); setTimeout(sealPurgeSweep, 60000); }
+
+if (!process.env.QFEXT_NO_LISTEN) {
+  server.listen(PORT, BIND, () => {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    log({ ev: 'listening', bind: BIND, port: PORT });
+    console.log('qfremote-ext listening on ' + BIND + ':' + PORT);
+  });
+}
+
+// 供本地单测使用（生产路径不依赖）
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE };

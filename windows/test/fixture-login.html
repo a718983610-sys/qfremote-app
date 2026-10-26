@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>模拟：登录页</title></head>
+<body style="font-family:sans-serif;background:#16283f;color:#dfe9f7;">
+  <h3>登录（模拟页，含诱饵元素）</h3>
+  <div>状态：<span>已断线</span></div>
+  <p><button id="btn">连接</button></p>
+  <form>
+    <label>账号 <input type="text"></label><br>
+    <label>密码 <input type="password"></label>
+  </form>
+<script>
+  window.__clicks = 0;
+  document.getElementById('btn').addEventListener('click', function () { window.__clicks++; });
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:#ffffff; color:#1f2d47; box-sizing:border-box;
+    border-bottom:1px solid #dfe7f2;
+    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    display:flex; align-items:center; gap:10px; padding:0 12px;
+    -webkit-user-select:none; user-select:none;
+  }
+  html[data-theme="dark"] body { background:#22262e; color:#eceff3; border-bottom-color:rgba(255,255,255,.08); }
+  button {
+    appearance:none; border:1px solid #c9d6ea; background:#ffffff; color:#2470e0;
+    border-radius:8px; cursor:pointer; font-family:inherit; font-size:13px;
+    height:30px; padding:0 12px; display:flex; align-items:center; gap:5px;
+  }
+  html[data-theme="dark"] button { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16); }
+  button:hover { background:#eef3fb; }
+  html[data-theme="dark"] button:hover { background:#32363f; }
+  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
+  .title { font-size:14px; font-weight:600; }
+</style>
+</head>
+<body>
+  <button id="back" title="返回上一面"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>返回</button>
+  <span class="title" id="title">网页</span>
+<script>
+  const q = new URLSearchParams(location.search);
+  if (q.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+  const titleEl = document.getElementById('title');
+  if (q.get('title')) titleEl.textContent = q.get('title');
+  if (window.qfExtBar) {
+    qfExtBar.onState((s) => { if (s && s.title) titleEl.textContent = s.title; });
+    qfExtBar.onTheme((t) => {
+      if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+      else delete document.documentElement.dataset.theme;
+    });
+  }
+  document.getElementById('back').addEventListener('click', () => { if (window.qfExtBar) qfExtBar.back(); });
+</script>
+</body>
+</html>

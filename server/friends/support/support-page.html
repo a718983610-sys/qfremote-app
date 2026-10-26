@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>官方客服 · QFRemote</title>
+<style>
+  /* 与定版样图 support-page-preview.html 及好友/聊天页家族同一套令牌 */
+  :root{
+    --brand-grad:linear-gradient(180deg,#3F8CFF,#2470E0);
+    --deep:#0B2B5B; --bg1:#EDF3FD; --bg2:#FFFFFF; --card:#FFFFFF;
+    --ink:#243B5E; --sub:#6B7A90; --line:#D7E1F2; --orange:#FF8A1E;
+    --ok-ink:#12753C; --ok-bg:#E7F8EE;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --deep:#EAF1FD; --bg1:#10141C; --bg2:#171B23; --card:#22262E;
+      --ink:#EDF2F9; --sub:#9AA7BC; --line:#3A4150; --ok-ink:#5EEAA0; --ok-bg:#173527; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    background:linear-gradient(180deg,var(--bg1),var(--bg2));color:var(--ink);min-height:100vh}
+  .wrap{max-width:760px;margin:0 auto;padding:18px 16px 40px}
+  .head{display:flex;align-items:center;gap:12px;padding:6px 2px 14px}
+  .mark{width:42px;height:42px;border-radius:12px;background:var(--brand-grad);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px}
+  .head h1{font-size:19px;margin:0;color:var(--deep)}
+  .head p{margin:2px 0 0;font-size:12.5px;color:var(--sub)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:18px;
+    box-shadow:0 12px 40px rgba(13,49,112,.12);margin-bottom:14px}
+  .disclosure{font-size:13.5px;line-height:1.75;color:var(--ink);
+    border-left:4px solid var(--orange);padding:10px 14px;background:rgba(255,138,30,.07);border-radius:8px}
+  .msg{display:flex;gap:10px;margin:14px 0}
+  .msg.me{flex-direction:row-reverse}
+  .avatar{flex:0 0 34px;width:34px;height:34px;border-radius:10px;background:var(--brand-grad);
+    color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+  .avatar.human{background:#5B7BA5}
+  .avatar.me{background:#93A3B8}
+  .bubble{border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;line-height:1.75;max-width:88%;white-space:pre-wrap;word-break:break-word}
+  .msg.me .bubble{background:rgba(63,140,255,.10)}
+  .name{font-size:12px;color:var(--sub);margin-bottom:4px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .chip{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;
+    padding:8px 14px;font-size:13.5px;cursor:pointer;min-height:40px}
+  .chip.primary{background:var(--brand-grad);color:#fff;border:none}
+  .verify h2{font-size:15.5px;margin:0 0 8px;color:var(--deep)}
+  .verify p{font-size:13.5px;color:var(--sub);line-height:1.7;margin:0 0 12px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:13.5px;font-weight:600;margin-bottom:6px}
+  .field input{width:100%;height:48px;border:1px solid var(--line);border-radius:12px;padding:0 14px;
+    font-size:16px;background:transparent;color:var(--ink)}
+  .btn{width:100%;height:50px;border:none;border-radius:12px;background:var(--brand-grad);color:#fff;
+    font-size:15.5px;font-weight:700;cursor:pointer}
+  .tag{display:inline-block;font-size:12px;color:var(--ok-ink);background:var(--ok-bg);
+    border-radius:999px;padding:3px 10px;margin-left:8px}
+  .note{font-size:12.5px;color:var(--sub);line-height:1.7}
+  .inputbar{display:flex;gap:10px}
+  .inputbar input{flex:1;min-width:0;height:50px;border:1px solid var(--line);border-radius:12px;padding:0 14px;font-size:16px;background:transparent;color:var(--ink)}
+  .inputbar button{width:96px;height:50px;border:none;border-radius:12px;background:var(--brand-grad);color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+  .hidden{display:none !important}
+  .err{font-size:13.5px;color:#D92D20;line-height:1.6;min-height:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="mark">Q</div>
+    <div>
+      <h1>官方客服</h1>
+      <p id="headState">智能客服先行接待</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="disclosure">本会话为官方客服会话，由智能客服系统先行接待。本会话不使用与好友聊天相同的加密方式，对话内容仅用于客服处理与问题跟进；您与好友之间的聊天经加密传输与保存，聊天钥匙由您的登录状态保管，不受影响。未登录咨询时，请勿在对话中发送密码等敏感信息。</div>
+    <div id="msgs"></div>
+    <div class="inputbar">
+      <input id="msgInput" placeholder="请输入您遇到的问题" autocomplete="off">
+      <button id="sendBtn" type="button">发送</button>
+    </div>
+    <p class="note">默认正式表述；回复「说人话」可切换为通俗说法，本会话内保持。涉及您本人账号状态的问题，登录后可直接查询；未登录时需先核对账号与密码。</p>
+  </div>
+
+  <div class="card verify hidden" id="verifyCard">
+    <h2>查询本人账号状态 · 身份核对</h2>
+    <p>您当前未登录。查询冻结状态、申诉进度等本人信息前，请先核对身份。核对仅用于本次查询，不会登录您的账号，也不会关联或改动账号状态。</p>
+    <div class="field"><label for="vAccount">账号</label><input id="vAccount" placeholder="请输入要查询的账号" autocomplete="off"></div>
+    <div class="field"><label for="vPass">账号密码</label><input id="vPass" type="password" placeholder="请输入该账号的密码" autocomplete="current-password"></div>
+    <div class="err" id="vErr"></div>
+    <button class="btn" id="vBtn" type="button">核对并查询</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var API = '/support/api';
+  var token = null;
+  var ticketPoll = null;
+  var seenAgentMsgs = 0;
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
+  async function api(method, path, body) {
+    var opt = { method: method, headers: { 'Content-Type': 'application/json' } };
+    if (token) opt.headers['x-support-session'] = token;
+    if (body) opt.body = JSON.stringify(body);
+    var r = await fetch(API + path, opt);
+    var d = {};
+    try { d = await r.json(); } catch (e) {}
+    if (r.status === 429) throw new Error(d.msg || '操作过于频繁，请稍后再试。');
+    if (r.status === 401) throw new Error(d.msg || '会话已过期，请刷新页面重新进入客服。');
+    return d;
+  }
+  function addMsg(who, text, options) {
+    var box = $('msgs');
+    var row = document.createElement('div');
+    row.className = 'msg' + (who === 'me' ? ' me' : '');
+    var av = who === 'me' ? '<div class="avatar me">我</div>'
+      : (who === 'agent' ? '<div class="avatar human">人</div>' : '<div class="avatar">智</div>');
+    var name = who === 'me' ? '我' : (who === 'agent' ? '人工客服' : '智能客服');
+    var html = av + '<div class="bubble"><div class="name">' + name + '</div><div>' + esc(text) + '</div>';
+    if (options && options.length) {
+      html += '<div class="chips">' + options.map(function (o) {
+        return '<button class="chip" data-pick="' + esc(o.id) + '">' + esc(o.label) + '</button>';
+      }).join('') + '</div>';
+    }
+    row.innerHTML = html + '</div>';
+    box.appendChild(row);
+    row.querySelectorAll('[data-pick]').forEach(function (b) {
+      b.addEventListener('click', function () { sendPick(b.getAttribute('data-pick'), b.textContent); });
+    });
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+  function renderReplies(replies) {
+    (replies || []).forEach(function (r) {
+      addMsg('bot', r.text, r.options);
+      if (r.kind === 'verify-required') $('verifyCard').classList.remove('hidden');
+      if (r.kind === 'handoff-done') { $('headState').textContent = '已转人工客服'; startTicketPoll(); }
+    });
+  }
+  async function sendText(text) {
+    if (!text) return;
+    addMsg('me', text);
+    try {
+      var d = await api('POST', '/message', { text: text });
+      renderReplies(d.replies);
+    } catch (e) { addMsg('bot', e.message); }
+  }
+  async function sendPick(id, label) {
+    addMsg('me', label || id);
+    try {
+      var d = await api('POST', '/message', { pick: id });
+      renderReplies(d.replies);
+    } catch (e) { addMsg('bot', e.message); }
+  }
+  function startTicketPoll() {
+    if (ticketPoll) return;
+    ticketPoll = setInterval(async function () {
+      try {
+        var d = await api('GET', '/ticket');
+        if (!d.ticket) return;
+        var msgs = (d.ticket.messages || []).filter(function (m) { return m.role === 'agent'; });
+        for (var i = seenAgentMsgs; i < msgs.length; i++) addMsg('agent', msgs[i].text);
+        seenAgentMsgs = msgs.length;
+        if (d.ticket.status !== 'open') { clearInterval(ticketPoll); ticketPoll = null; $('headState').textContent = '工单已关闭'; }
+      } catch (e) { /* 轮询失败静默，下轮重试 */ }
+    }, 5000);
+  }
+  $('sendBtn').addEventListener('click', function () {
+    var v = $('msgInput').value.trim();
+    $('msgInput').value = '';
+    sendText(v);
+  });
+  $('msgInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('sendBtn').click(); });
+  $('vBtn').addEventListener('click', async function () {
+    var account = $('vAccount').value.trim();
+    var password = $('vPass').value;
+    $('vErr').textContent = '';
+    if (!account || !password) { $('vErr').textContent = '账号与密码都需要填写。'; return; }
+    $('vBtn').disabled = true;
+    try {
+      var d = await api('POST', '/verify', { account: account, password: password });
+      if (d.ok) {
+        $('verifyCard').classList.add('hidden');
+        addMsg('bot', '身份核对已通过，下面按您的账号状态答复。');
+        if (d.follow) renderReplies(d.follow);
+      } else if (d.reason === 'unavailable') {
+        $('vErr').textContent = '身份核对暂时不可用，无法查询账号状态。您可以先按通用指引处理，或在对话中回复「转人工」由人工协助。';
+      } else if (d.reason === 'locked') {
+        $('vErr').textContent = '核对次数过多，已暂时锁定，请一小时后再试；着急处理可在对话中回复「转人工」。';
+      } else if (d.text) {
+        // 核对未通过：只展示引擎给出的通用指引，不展示任何账号信息
+        $('verifyCard').classList.add('hidden');
+        addMsg('bot', d.text);
+      } else {
+        $('vErr').textContent = '核对未通过，请确认账号与密码后重试。';
+      }
+    } catch (e) { $('vErr').textContent = e.message; }
+    $('vBtn').disabled = false;
+  });
+  (async function init() {
+    try {
+      var d = await api('POST', '/session', {});
+      token = d.session;
+      try { sessionStorage.setItem('qfr_sup_tok', token); } catch (e) {}
+      $('headState').textContent = d.kind === 'user' ? '智能客服先行接待 · 已登录' : '智能客服先行接待 · 未登录';
+      if (d.welcome) addMsg('bot', d.welcome.text, [
+        { id: 'F05', label: '账号被冻结了' }, { id: 'S01', label: '连不上自己的电脑' },
+        { id: 'F04', label: '忘记密码' }, { id: 'handoff', label: '转人工客服' }
+      ]);
+    } catch (e) {
+      addMsg('bot', '客服暂时无法打开，请稍后刷新重试。');
+    }
+  })();
+})();
+</script>
+</body>
+</html>

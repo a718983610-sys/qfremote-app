@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-user-select:none; user-select:none; color:#1f2d47;
+    position:relative;
+  }
+  /* QFClash 家族母题：右上方的金色轨道环（低透明，只作氛围） */
+  .orbit {
+    position:absolute; right:-120px; top:-150px; width:340px; height:340px;
+    border:1.5px solid rgba(245,193,92,.30); border-radius:50%;
+    transform: rotate(-18deg) scaleY(.62); pointer-events:none;
+  }
+  .orbit::after {
+    content:""; position:absolute; left:26px; top:38px; width:9px; height:9px; border-radius:50%;
+    background: #ff8a1e;
+  }
+  .col { display:flex; flex-direction:column; align-items:center; animation: rise .5s ease both; }
+  @keyframes rise { from { opacity:0; transform: translateY(8px);} to { opacity:1; transform:none;} }
+  .tile {
+    width:92px; height:92px; border-radius:24px; padding:5px; background:#0b2b5b;
+    box-sizing:border-box;
+  }
+  .tile img { width:100%; height:100%; border-radius:20px; display:block; }
+  .name { font-size:29px; font-weight:700; letter-spacing:1.2px; margin-top:18px; }
+  .tag { font-size:12.5px; color:#6b7a90; margin-top:6px; letter-spacing:5px; }
+  .bar { width:188px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:26px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:38%; border-radius:3px;
+    background: #2470e0;
+    animation: slide 1.15s ease-in-out infinite alternate; }
+  @keyframes slide { from { transform: translateX(-55%);} to { transform: translateX(310%);} }
+  .hint { font-size:12px; color:#6b7a90; margin-top:11px; }
+  .ver { position:absolute; bottom:13px; left:0; right:0; text-align:center; font-size:11px; color:rgba(107,122,144,.75); letter-spacing:.6px; }
+  /* 深灰深色主题（与工具栏联动，不用纯黑） */
+  html[data-theme="dark"] body { background: #17181c; color:#eceff3; }
+  html[data-theme="dark"] .tile { background:#ffffff; }
+  html[data-theme="dark"] .tag { color:#9aa1ab; }
+  html[data-theme="dark"] .bar { background: rgba(255,255,255,.16); }
+  html[data-theme="dark"] .hint { color:#868d98; }
+  html[data-theme="dark"] .ver { color:rgba(167,173,184,.65); }
+</style>
+</head>
+<body>
+  <div class="orbit"></div>
+  <div class="col">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
+    <div class="name">QFRemote</div>
+    <div class="tag">远程控制</div>
+    <div class="bar"><i></i></div>
+    <div class="hint">正在连接服务器…</div>
+  </div>
+  <div class="ver" id="ver"></div>
+<script>
+  var q0 = new URLSearchParams(location.search);
+  if (q0.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+  const v = q0.get('v');
+  if (v) document.getElementById('ver').textContent = 'QFRemote v' + v;
+</script>
+</body>
+</html>
