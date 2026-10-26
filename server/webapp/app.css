@@ -136,3 +136,17 @@ table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;colo
 .nativehost{margin-top:2px}
 .nativehost iframe{width:100%;height:calc(100dvh - 148px);min-height:400px;border:0;display:block;background:#fff;border-radius:var(--r)}
 @media(max-width:760px){.nativehost iframe{height:calc(100dvh - 132px);min-height:360px}}
+
+/* ===== 聊天页手机单栏（P2-028：≤820px 列表与对话分屏切换，桌面双栏不变） =====
+   病根：聊天视图 .grid2 带内联 grid-template-columns，压过全站 ≤760px 塌栏规则，手机双栏挤爆。
+   本段在 ≤820px 以 !important 压回单栏、.showthread 两面切换；返回钮仅手机显形。 */
+.chatback{display:none}
+@media(max-width:820px){
+  .chatwrap{grid-template-columns:1fr !important}
+  .chatwrap .chatpane-thread{display:none}
+  .chatwrap.showthread .chatpane-thread{display:block}
+  .chatwrap.showthread .chatpane-list{display:none}
+  .chatback{display:inline-flex;align-items:center;gap:6px;margin-bottom:12px}
+  .chatback svg{width:16px;height:16px;transform:scaleX(-1)}
+  .chatwrap .framebox iframe{height:min(560px,calc(100dvh - 380px));min-height:400px}
+}
