@@ -24,12 +24,12 @@
 | server/ext/home-page.js | /opt/qfremote-ext/home-page.js | `71ad026f3d1c652a568d0c59737e4f59` |
 | server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `d2918b81d39c4ef545534d35d6d7e86a` |
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `78009b67a760e3b05449255c8f327e80` |
-| server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `d5c76673ce2f7aa0e4cf364370ae03b4` |
+| server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `6e6b18ec7d329b3eaae0c7f51cd55527` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
 | server/ext/page.js | /opt/qfremote-ext/page.js | `2c669993b28a935c9252ebc76c8e6a52` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `21faf0870660eea2cf0b941fe9310181` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `a6edb4c6e7a5a7a8472d492b1148e923` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
 | server/ext/test-points.js | /opt/qfremote-ext/test-points.js | `8863c2daff65b567cceea8100993e344` |

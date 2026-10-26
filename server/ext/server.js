@@ -220,6 +220,21 @@ function parseCookies(req) {
 //  会话签名密钥每启动随机生成不可本地验签），故不设 HTTP 备用路径；
 //  结构修法（config 固定 sessionKey 后可本地验签）已上报总装裁定。
 const validateCache = new Map();
+// DS-R02-①（2026-10-26 修复批）：缓存键＝sha256(xid+'.'+xid.sig)，xid 由请求方任意构造，
+// 原实现无容量上限且过期条目永不删除——未认证随机 xid 可无限涨内存，每次未命中还各打一次
+// MeshCentral 校验连接（放大）。上限 5000 条（30 秒新鲜窗口内真实并发会话远不及此量级）；
+// 写入前剪枝：先删过期（与读侧 30 秒新鲜判定同口径），仍超限按插入序淘汰最旧——被淘汰等价
+// 从未缓存，下次验真走 MC 重查，不改变任何会话语义。mcForceClose/G1 吊销门仍是兜底。
+const VALIDATE_CACHE_MAX = 5000;
+function pruneValidateCache(now) {
+  if (validateCache.size < VALIDATE_CACHE_MAX) return;
+  for (const [k, v] of validateCache) { if (!v || now - v.at >= 30000) validateCache.delete(k); }
+  while (validateCache.size >= VALIDATE_CACHE_MAX) {
+    const oldest = validateCache.keys().next();
+    if (oldest.done) break;
+    validateCache.delete(oldest.value);
+  }
+}
 // ---------- 已撤销 xid（17:29 领取后原主人网页会话即时失效） ----------
 // 转赠领取落盘后，原主人当时已知的控制台 xid 哈希全部登记撤销（落盘，
 // 有效期 30 天＝xid 最长寿命）：此后这些 xid 在本站一切接口验真直接拒，
@@ -246,6 +261,15 @@ function revokeXidsForUser(user) {
   }
   if (n) saveRevokedXids();
   return n;
+}
+// DS-R02-③：单条会话靶向撤销（与 revokeXidsForUser 的账号级口径分开）：只登记该 xid 哈希
+// ＋清其验真缓存，同账号其他会话不受影响。G1 验真门查 revokedXids 命中即拒，覆盖 ext 全部接口。
+function revokeSingleXid(hash, user) {
+  const now = Date.now();
+  revokedXids[hash] = { user, at: now, exp: now + SESSION_TTL_MS };
+  validateCache.delete(hash);
+  saveRevokedXids();
+  return 1;
 }
 // 经服务账号官方 WS 通道即时关闭某用户的全部在线会话：对目标做一轮
 // 「置锁定 bit → 立即恢复原值」的 edituser——MeshCentral 在置锁定 bit 的
@@ -338,6 +362,7 @@ async function validateConsoleCookie(cookieHeader, clientIpHint) {
       if (e && e.message === 'mc-session-rejected') break; // 明确拒绝不再重试
     } finally { if (sess) { try { sess.ws.close(); } catch (e) {} } }
   }
+  pruneValidateCache(Date.now());
   validateCache.set(key, { at: Date.now(), user: out ? out.user : null, siteadmin: out ? out.siteadmin : 0 });
   return out;
 }
@@ -368,8 +393,10 @@ function saveQfclashLogins() {
     fs.renameSync(QFCLASH_LOGINS_FILE + '.tmp', QFCLASH_LOGINS_FILE);
   } catch (e) { log({ ev: 'qfclash-logins-save-error', err: String(e && e.message) }); }
 }
-function noteQfclashLogin(user, ua) {
-  qfclashLogins.push({ id: crypto.randomBytes(8).toString('hex'), user, at: Date.now(), ua: String(ua || '').slice(0, 120), revokedAt: 0 });
+function noteQfclashLogin(user, ua, xidHash) {
+  // DS-R02-③：记录该次登录的 xid 哈希（与 validateCache 键同构造 sha256(xid+'.'+xid.sig)，不存明文），
+  // 使撤销可按条靶向；loginshim 未上报哈希的旧记录落 null，撤销时回落全账号口径（保持旧行为）。
+  qfclashLogins.push({ id: crypto.randomBytes(8).toString('hex'), user, at: Date.now(), ua: String(ua || '').slice(0, 120), xidHash: /^[0-9a-f]{64}$/.test(String(xidHash || '')) ? String(xidHash) : null, revokedAt: 0 });
   const mine = qfclashLogins.filter((r) => r.user === user);
   if (mine.length > 20) {
     const drop = mine.slice(0, mine.length - 20).map((r) => r.id);
@@ -659,7 +686,7 @@ function sendHtml(res, code, html) {
   res.end(body);
 }
 const BODY_LIMIT_DEFAULT = 65536;
-const BODY_LIMIT_SHOT = 12 * 1024 * 1024; // 付款截图提交：8MB 图片 base64 约 10.7MB + JSON 包装（2026-10-26 热修：原 64KB 上限＋destroy 掐断是真机大图提交必挂的根因）
+const BODY_LIMIT_SHOT = 17 * 1024 * 1024; // 付款截图提交：图片上限 12MB（DS-R03-① 口径，orders-core MAX_SHOT_BYTES 同步）→ base64 恰 16MB + JSON 包装，报文上限取 17MB 留头（2026-10-26 热修史：原 64KB 上限＋destroy 掐断是真机大图提交必挂的根因）
 const BODY_LIMIT_FILE = 288 * 1024 * 1024; // 设备间文件发送（#25）：单文件上限 200MB、base64 约 267MB + JSON 包装；须 > 默认 64KB，否则请求体被吞、toNode 读空误报「请选择要发送到的设备。」（2026-10-26 巡查 P2-003 实锤）
 function readJsonBody(req, maxBytes) {
   const limit = (typeof maxBytes === 'number' && maxBytes > 0) ? Math.floor(maxBytes) : BODY_LIMIT_DEFAULT;
@@ -811,7 +838,7 @@ async function decideAppeal(appealId, decision, reason, actor, extra) {
         return { ok: false, code: 'ALREADY_DECIDED', msg: '该申诉已由另一通道处理。', decidedStatus: a.status };
       }
     }
-    const isB1 = !a.banId && !a.reasonCode;
+    const isB1 = a.type !== 'rebind' && !a.banId && !a.reasonCode; // DS-R02-②：与助手分流口径对齐，type 显式排除（现行换绑单恒带 reasonCode=REBIND 本已落空，此为防数据形状漂移的口径统一，零行为变更）
     if (isB1) return { ok: false, code: 'LEGACY_B1', msg: 'B1 冻结申诉走既有改密闭环（appeal-admin approve/reject）。' };
     // ===== 换绑申诉裁决（§11.9）：与封禁申诉同队列同台账、同一防双判；
     // 通过即同事务真实执行换绑（人工裁决补救通道，不随影子模式打折）。
@@ -1120,7 +1147,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/internal/license/qfclash-login-note') {
         const username = String(body.username || '').trim().toLowerCase();
         if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
-        noteQfclashLogin(username, body.ua || '');
+        noteQfclashLogin(username, body.ua || '', body.xidHash || null);
         log({ ev: 'qfclash-login-note', target: username });
         return sendJson(res, 200, { ok: true });
       }
@@ -1576,7 +1603,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && paySubM) {
         const oid = decodeURIComponent(paySubM[1]); const act = paySubM[2];
         const body = await readJsonBody(req, act === 'submit' ? BODY_LIMIT_SHOT : undefined);
-        if (body && body.__tooLarge) { log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: 'PAYLOAD_TOO_LARGE' }); return sendJson(res, 200, { ok: false, code: 'PAYLOAD_TOO_LARGE', msg: '截图文件过大，请上传不超过 8 MB 的 JPG 或 PNG 图片。' }); }
+        if (body && body.__tooLarge) { log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: 'PAYLOAD_TOO_LARGE' }); return sendJson(res, 200, { ok: false, code: 'PAYLOAD_TOO_LARGE', msg: '截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。' }); }
         if (act === 'continue') { const out = payOrders.switchMethod(auth.user, oid, body.method ? String(body.method) : '', now); return sendJson(res, 200, out); }
         if (act === 'cancel') return sendJson(res, 200, payOrders.cancelOrder(auth.user, oid, now));
         if (act === 'delete') return sendJson(res, 200, payOrders.deleteOrder(auth.user, oid, now));
@@ -1688,11 +1715,21 @@ const server = http.createServer(async (req, res) => {
       if (!rec) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '这条登录记录不存在或已下线。' });
       rec.revokedAt = Date.now();
       saveQfclashLogins();
-      // 与转赠强制下线同一套双路机制：先把该账号已验真的 xid 登记撤销
-      // （本站接口即时拒），再经控制通道关 MeshCentral 在线会话。
-      const revoked = revokeXidsForUser(auth.user);
-      const closed = await mcForceCloseUserSessions(auth.user).catch(() => null);
-      log({ ev: 'qfclash-login-revoke', target: auth.user, id: rec.id, revokedXids: revoked, closed: closed ? 1 : 0 });
+      // DS-R02-③（2026-10-26 修复批）：按渠道隔离撤销面——本路由是 QFClash 登录记录的
+      // 「下线这一条」，有该次登录的 xid 哈希时只撤这一条会话（登记撤销＋清验真缓存，
+      // 本站一切验真接口即时拒）。边界：MeshCentral 控制通道无「按会话关闭」原语
+      // （其会话按用户聚合、关会话原语即账号级），故 MC 侧在线连接不在本路由处理——
+      // 该 xid 已被登记撤销且有效期与 xid 同寿（30 天），残余连接随 xid 自然到期消亡；
+      // 需要连 MC 在线会话一并清的场景走转赠认领的账号级强制下线（定版语义，另有其路）。
+      // 无哈希的历史记录回落旧口径（全账号双路），行为与修复前一致。
+      if (rec.xidHash) {
+        revokeSingleXid(rec.xidHash, auth.user);
+        log({ ev: 'qfclash-login-revoke', target: auth.user, id: rec.id, mode: 'targeted', revokedXids: 1, closed: 0 });
+      } else {
+        const revoked = revokeXidsForUser(auth.user);
+        const closed = await mcForceCloseUserSessions(auth.user).catch(() => null);
+        log({ ev: 'qfclash-login-revoke', target: auth.user, id: rec.id, mode: 'legacy-account-wide', revokedXids: revoked, closed: closed ? 1 : 0 });
+      }
       return sendJson(res, 200, { ok: true });
     }
 
@@ -2072,4 +2109,4 @@ if (!process.env.QFEXT_NO_LISTEN) {
 }
 
 // 供本地单测使用（生产路径不依赖）
-module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE };
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids };
