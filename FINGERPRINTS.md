@@ -36,7 +36,7 @@
 | server/forum/feedback.js | /opt/qfremote-forum/feedback.js | `782c79a26b81925c66d0f6e202c0a673` |
 | server/forum/forum.html | /opt/qfremote-forum/forum.html | `ba8aeb4ed18a990deb7f56ae6fc643fd` |
 | server/forum/review.js | /opt/qfremote-forum/review.js | `f89d5827d1a715ff5ede0bc4b03fe0b4` |
-| server/forum/server.js | /opt/qfremote-forum/server.js | `ed959a2156e7365a4a9043c6cfcf84a4` |
+| server/forum/server.js | /opt/qfremote-forum/server.js | `35ebb38787b5c23014f099cec7f06f3e` |
 | server/forum/words-seed.js | /opt/qfremote-forum/words-seed.js | `90a0d9235addc857aa3788955795dfcc` |
 | server/friends/chat/DESIGN.md | /opt/qfremote-friends/chat/DESIGN.md | `beb5c7c870e019486360165b0595a920` |
 | server/friends/chat/chat-client.js | /opt/qfremote-friends/chat/chat-client.js | `29ea090152d52a66462b686737782ec3` |
