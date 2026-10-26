@@ -96,6 +96,12 @@ const RENAME_SH = process.env.QFEXT_RENAME_SH || '/opt/meshcentral/account-kit/r
 
 const payOrders = createOrdersCore({ dir: LIC_DIR, lic, log });
 const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt' });
+// 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
+let instantReview = null;
+try {
+  const _instantMod = require('./instant-review');
+  instantReview = _instantMod.createInstantReview({ payOrders, reviewEvents, lic, log, licDir: LIC_DIR, extDir: process.env.QFEXT_DIR || '/opt/qfremote-ext' });
+} catch (e) { log({ ev: 'instant-review-unavailable', err: String(e && e.message || e) }); }
 const fileStage = createFilesCore({ dir: LIC_DIR, lic, log });
 const EXT_ASSETS_DIR = process.env.QFEXT_ASSETS_DIR || '/opt/qfremote-ext/assets';
 
@@ -1577,6 +1583,7 @@ const server = http.createServer(async (req, res) => {
         if (act === 'submit') {
           const out = payOrders.submitShot(auth.user, oid, { orderNo: body.orderNo, imageBase64: body.imageBase64 }, now);
           if (out.ok) reviewEvents.enqueue('order', oid, { username: auth.user, planName: out.order.planName, amount: out.order.amount, orderNo: String(body.orderNo || '') });
+          if (out.ok && instantReview) { const _ir = instantReview, _oid = oid; setImmediate(() => { try { const p = _ir.tryReview(_oid); if (p && typeof p.catch === 'function') p.catch((e) => { try { log({ ev: 'instant-trigger-error', orderId: _oid, err: String(e && e.message || e) }); } catch (e2) {} }); } catch (e) { try { log({ ev: 'instant-trigger-error', orderId: _oid, err: String(e && e.message || e) }); } catch (e2) {} } }); } // 门二 D1/D10：响应先行、异步触发、promise 挂 catch
           else log({ ev: 'pay-order-submit-failed', orderId: oid, target: auth.user, code: out.code || 'UNKNOWN' });
           return sendJson(res, 200, out);
         }

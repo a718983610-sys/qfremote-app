@@ -29,7 +29,8 @@
 | server/ext/page.js | /opt/qfremote-ext/page.js | `f4dff3fce5c8515b9cf864200ea45d4e` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `324cac53fdcf7788b8fea1afe7308679` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `a8755b757d99006f1afe24bdf231e59c` |
+| server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
 | server/ext/test-points.js | /opt/qfremote-ext/test-points.js | `8863c2daff65b567cceea8100993e344` |
 | server/forum/feedback.js | /opt/qfremote-forum/feedback.js | `782c79a26b81925c66d0f6e202c0a673` |
