@@ -18,7 +18,7 @@ AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
 
 # 生成映射清单：repo_path <TAB> live_path
 MAP=$(mktemp)
-git ls-tree -r --name-only origin/main -- server windows | while IFS= read -r p; do
+git ls-tree -r --name-only origin/main -- server windows ops | while IFS= read -r p; do
   case "$p" in
     server/webapp/*)     live="/opt/qfremote-webapp/${p#server/webapp/}" ;;
     server/ext/*)        live="/opt/qfremote-ext/${p#server/ext/}" ;;
@@ -30,19 +30,20 @@ git ls-tree -r --name-only origin/main -- server windows | while IFS= read -r p;
     server/nginx/*)      live="/etc/nginx/sites-enabled/${p#server/nginx/}" ;;
     server/lock/*)       live="/opt/qfremote-lock/${p#server/lock/}" ;;
     windows/*)           live="$HOME/workspace/qfremote/app-src/${p#windows/}" ;;
+    ops/assistant-api/*) live="$HOME/workspace/qfremote/assistant-api/${p#ops/assistant-api/}" ;;
     *) continue ;;
   esac
   printf '%s\t%s\n' "$p" "$live"
 done > "$MAP"
 
 TOTAL=$(wc -l < "$MAP")
-# 线上批量取指纹（服务器路径走 ssh+sudo；本地 app-src 路径直接 md5sum）
-SRV_PATHS=$(awk -F'\t' '$2 ~ /^\//'"{print \$2}" "$MAP")
+# 线上批量取指纹（服务器路径 /opt、/etc 走 ssh+sudo；本地 $HOME 路径直接 md5sum）
+SRV_PATHS=$(awk -F'\t' '$2 ~ /^\/(opt|etc)\//'"{print \$2}" "$MAP")
 LIVE_TMP=$(mktemp)
 if [ -n "$SRV_PATHS" ]; then
   echo "$SRV_PATHS" | $SSH 'sudo -n md5sum $(cat) 2>/dev/null' >> "$LIVE_TMP" || echo "DRIFT-CHECK-ERROR: ssh 取指纹失败"
 fi
-awk -F'\t' '$2 !~ /^\//'"{print \$2}" "$MAP" | while IFS= read -r lp; do
+awk -F'\t' '$2 ~ /^\/home\//'"{print \$2}" "$MAP" | while IFS= read -r lp; do
   [ -f "$lp" ] && md5sum "$lp"
 done >> "$LIVE_TMP"
 # 统一成 "livepath md5"
