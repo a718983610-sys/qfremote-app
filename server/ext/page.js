@@ -95,6 +95,22 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
     <button class="btn" id="lic-issue-btn" type="button">发放密钥</button></div>
     <div id="lic-keys"><p class="empty">正在加载许可概览…</p></div>
   </div>
+  <div class="card">
+    <h2>生成密钥（不绑账号）</h2>
+    <p class="hint">生成一把不绑定任何账号的密钥串：选套餐、选来源后点「生成密钥」，把完整串复制给对方即可。对方在「我的账户 · 兑换 KEY」处粘贴，或在登录拦截页粘贴提交，首个兑换的账号即为归属，兑换当时开始计时。来源口径与上方发放一致，必须选：付费购买入账＝开通网页版；免费发放＝不开通网页版。此处不设默认，选错会影响对方网页权益。</p>
+    <div class="row"><div class="who"><div class="meta">套餐</div><select id="gen-plan" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
+    <div class="row"><div class="who"><div class="meta">来源（必选）</div>
+      <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="gen-source" value="paid"> 付费购买入账（开通网页版）</label>
+      <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="gen-source" value="free"> 免费发放（不开通网页版）</label></div>
+    <button class="btn" id="gen-btn" type="button">生成密钥</button></div>
+    <div id="gen-result" style="display:none">
+      <div class="meta" style="margin-top:12px">新生成的密钥串（完整串请复制后交付对方；下方生成记录中可再次查看）：</div>
+      <div class="newpass" id="gen-str"></div>
+      <div style="margin-top:10px"><button class="btn ghost" id="gen-copy" type="button">复制密钥串</button></div>
+    </div>
+    <h2 style="margin-top:18px">生成记录</h2>
+    <div id="gen-list"><p class="empty">正在加载…</p></div>
+  </div>
   </section>
 
   <section class="view" data-view="bans">
@@ -357,7 +373,7 @@ function loadLicense(){
     var h = '';
     if (!r.keys.length) h += '<p class="empty">暂无密钥记录。</p>';
     r.keys.slice(-20).reverse().forEach(function(k){
-      h += '<div class="row"><div class="who"><div class="login">' + esc(k.username) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
+      h += '<div class="row"><div class="who"><div class="login">' + (k.unbound ? '生成密钥（未绑账号）' : esc(k.username)) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
     });
     $('lic-keys').innerHTML = h;
     var hb = '';
@@ -418,6 +434,53 @@ $('lic-issue-btn').onclick = function(){
     api('/admin/api/license/issue', { username: u, plan: plan, source: src.value }).then(function(r){ toast(r.msg || (r.ok ? '已发放。' : '发放未成功。')); if (r.ok) loadLicense(); });
   }});
 };
+
+function copyText(s){
+  function done(){ toast('已复制。'); }
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(s).then(done).catch(function(){ fallbackCopy(s); done(); }); }
+  else { fallbackCopy(s); done(); }
+}
+function fallbackCopy(s){
+  var ta = document.createElement('textarea');
+  ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+}
+$('gen-btn').onclick = function(){
+  var plan = $('gen-plan').value;
+  var planLabel = $('gen-plan').options[$('gen-plan').selectedIndex].textContent;
+  var src = document.querySelector('input[name="gen-source"]:checked');
+  if (!src) { toast('必须选择密钥来源（付费购买入账 / 免费发放）。'); return; }
+  showModal('生成密钥', '确定生成一把「' + planLabel + '」密钥串吗？不绑任何账号，首个兑换的账号即归属。来源：' + (src.value === 'paid' ? '付费购买入账（开通网页版）' : '免费发放（不开通网页版）') + '。', { okText: '确认生成', onOk: function(){
+    api('/admin/api/license/generate', { plan: plan, source: src.value }).then(function(r){
+      if (!r.ok) { toast(r.msg || '生成未成功。'); return; }
+      $('gen-result').style.display = 'block';
+      $('gen-str').textContent = r.keyStr;
+      toast(r.msg || '已生成。');
+      loadGenerated();
+      loadLicense();
+    }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
+  }});
+};
+$('gen-copy').onclick = function(){ var s = $('gen-str').textContent; if (s) copyText(s); };
+function loadGenerated(){
+  api('/admin/api/license/generated').then(function(r){
+    if (!r.ok) { $('gen-list').innerHTML = '<p class="empty">生成记录加载失败。</p>'; return; }
+    if (!r.records.length) { $('gen-list').innerHTML = '<p class="empty">还没有生成记录。</p>'; return; }
+    var label = { unclaimed: '未认领', claimed: '已认领', voided: '已作废' };
+    $('gen-list').innerHTML = r.records.map(function(rec){
+      var h = '<div class="row"><div class="who"><div class="login">' + esc(rec.planName) + '</div>'
+        + '<div class="meta">生成时间：' + esc(fmtTime(rec.createdAt)) + ' · 来源：' + (rec.source === 'paid' ? '付费购买入账' : '免费发放')
+        + ' · 状态：' + esc(label[rec.status] || rec.status) + (rec.status === 'claimed' && rec.claimedBy ? '（认领账号：' + esc(rec.claimedBy) + (rec.claimedAt ? ' · ' + esc(fmtTime(rec.claimedAt)) : '') + '）' : '')
+        + '<br>' + (rec.str ? esc(rec.str) : esc(rec.masked)) + '</div></div>';
+      if (rec.str) h += '<button class="btn ghost" data-gen-copy="' + esc(rec.str) + '">复制</button>';
+      return h + '</div>';
+    }).join('');
+    var btns = document.querySelectorAll('button[data-gen-copy]');
+    for (var i = 0; i < btns.length; i++) btns[i].onclick = function(){ copyText(this.getAttribute('data-gen-copy')); };
+  }).catch(function(){ $('gen-list').innerHTML = '<p class="empty">生成记录加载失败，请刷新页面重试。</p>'; });
+}
 
 function supportTicketRow(t){
   var who = t.anon ? ('未登录访客' + (t.verifiedAccount ? '（已核对账号：' + esc(t.verifiedAccount) + '）' : '')) : esc(t.user || '');
@@ -529,6 +592,7 @@ loadUsers();
 loadAppeals();
 loadSupportInbox();
 loadLicense();
+loadGenerated();
 loadPayOrders();
 loadAssistantApi();
 

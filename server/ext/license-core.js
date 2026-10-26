@@ -372,6 +372,54 @@ function createLicenseCore(opts) {
     save();
     return rec;
   }
+  // ---------- 站长生成不绑账号钥串（站长 2026-10-26 13:54 令） ----------
+  // 与 issueKey 的区别：不绑任何账号（username=null）、不建账号、不联动
+  // 任何账号状态。钥入同一许可台账，形态与转售未激活钥一致（未激活、
+  // 未起算、长期有效），归属在首个粘贴兑换时由 claimByKeyString 的生成
+  // 钥分支落定。来源在生成时定版：paid 开通网页版、free 不开通（#⑥ 与
+  // ledger source 口径，与后台「给账号发放」同一套来源语义）。生成记
+  // generatedBy/generatedAt 供站长后台「生成记录」对账，认领后仍保留。
+  function generateUnboundKey(planId, source, now, meta) {
+    const plan = PLANS[planId]; if (!plan || planId === 'trial') throw new Error('bad-plan');
+    if (source !== 'paid' && source !== 'free') throw new Error('source-required');
+    const actor = (meta && meta.actor) || 'owner-admin';
+    const str = genKeyString();
+    const rec = {
+      id: 'key_' + crypto.randomBytes(6).toString('hex'), str, username: null, plan: planId, planName: plan.name,
+      source, createdAt: now,
+      lifecycle: 'unactivated', link: 'normal', timing: 'none',
+      expiresBaseMs: null, activatedAt: null, extraDays: 0,
+      pausedAccumMs: 0, pauseStartMs: null, remainingSecAtRecycle: null,
+      slots: { pc: [], mobile: null }, everBanned: false, transferredOnce: false,
+      orderId: null, issuedBy: actor,
+      revokedReason: null, revokedBanId: null,
+      unbound: true, generatedBy: actor, generatedAt: now, claimedBy: null, claimedAt: null,
+    };
+    state.keys[rec.id] = rec; state.keyStrHashes[sha(str)] = rec.id;
+    appendLine(bansLog, { ev: 'key-generated-unbound', keyId: rec.id, plan: planId, source, by: actor, at: now });
+    save();
+    return rec;
+  }
+  // 生成记录（站长后台对账面）：仅生成钥（generatedBy 在册者），新者
+  // 在前。全文串只回「未认领」者（站长交付对方用、刷新不丢）；已认领/
+  // 已作废只回掩码。状态派生：revoked＝已作废；username 已落定＝已认领。
+  function listGeneratedKeys(limit) {
+    const cap = Math.max(1, Math.min(100, Number(limit) || 30));
+    return Object.values(state.keys)
+      .filter((k) => k.generatedBy)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, cap)
+      .map((k) => ({
+        id: k.id,
+        str: (k.username == null && k.lifecycle === 'unactivated') ? k.str : null,
+        masked: maskKey(k.str),
+        plan: k.plan, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null,
+        createdAt: k.createdAt, generatedBy: k.generatedBy,
+        status: k.lifecycle === 'revoked' ? 'voided' : (k.username ? 'claimed' : 'unclaimed'),
+        claimedBy: k.username || null, claimedAt: k.claimedAt || null,
+        lifecycle: k.lifecycle,
+      }));
+  }
   function lazyExpireKeys(username, now) {
     let changed = false;
     for (const k of accountKeys(username)) {
@@ -1075,6 +1123,25 @@ function createLicenseCore(opts) {
       if (k.username === username && k.lifecycle === 'activated') {
         return { ok: false, code: 'ALREADY_ACTIVE', msg: '该密钥已在您的账号上生效，无需重复领取。' };
       }
+      // —— 站长生成的不绑账号钥串认领（站长 2026-10-26 13:54 令）——
+      // 生成钥无原主人（username=null）：首个粘贴兑换的账号即归属，粘贴
+      // 即激活起算（与本人钥粘贴、转售赎回同一口径）；来源已在生成时
+      // 定版，网页权益按 ledger source 判定（paid 开、free 不开，#⑥）。
+      // 无原主人故不置 transferOutGate、不产生强制下线。已作废
+      // （revoked）或形态不符的生成钥与其它死钥同口径统一拒绝，
+      // 不透露生成信息。
+      if (k.unbound && k.username == null) {
+        if (k.lifecycle !== 'unactivated' || k.activatedAt != null
+          || state.transfers.some((t) => t.keyId === k.id && t.status === 'pending')) {
+          return { ok: false, code: 'KEY_INVALID', msg: '密钥无效，请核对后重试。' };
+        }
+        ensureAccount(username, now, {});
+        k.username = username; k.unbound = false; k.claimedBy = username; k.claimedAt = now;
+        activateKey(k, now); // 粘贴即激活：自此刻起算满 N×24 小时（裁决批⑥同口径）
+        appendLine(bansLog, { ev: 'key-generated-claimed', keyId: k.id, username, plan: k.plan, source: k.source, generatedBy: k.generatedBy || null, at: now });
+        save();
+        return { ok: true, keyId: k.id, maskedKey: maskKey(k.str), planName: k.planName, generated: true, msg: '兑换成功，密钥已转入您的账号并开始计时。' };
+      }
       // —— 未激活密钥转售赎回（裁决批⑦）——
       // 未激活（从未激活起算）付费密钥的转手不走转赠通道：持有字符串者
       // 粘贴提交即完成转手——归属转到粘贴者、此刻激活起算；不置
@@ -1280,7 +1347,7 @@ function createLicenseCore(opts) {
   return {
     PLANS, readConfig, save, ensureAccount, accountKeys, activeKeys, effectiveExpiry,
     activeBansFor, activeDeviceBan, applyBan, liftBan, expireBans, syncAccountLinkage,
-    issueKey, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
+    issueKey, generateUnboundKey, listGeneratedKeys, evaluate, reportDevice, bindKey, registerCheck, registerSuccess,
     createOrder, simPayCallback, buildStatusView, audit, maskKey, state: () => state,
     grantPurchase, initiateTransfer, confirmTransfer, rejectTransfer, cancelTransfer, listTransfers, expireTransfers, transferTtlMs, claimByKeyString, listClaimableTransfers, forceLogoutState, decideDeviceReview, overrideDeviceReview, sealedExpired, markPurged,
     activateKey, primaryKeyOf, expiredText, remainTextForKey,
