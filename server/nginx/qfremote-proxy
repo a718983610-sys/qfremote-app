@@ -45,7 +45,7 @@ server {
 
     # 聊天二期：页面 /chat + 全部子路径 -> 好友服务(8445，聊天已合入同一进程)
     location = /chat {
-        if ($http_sec_fetch_dest = "document") { return 302 /#chat; }
+        if ($request_method = GET) { return 302 /#chat; }
         proxy_pass https://127.0.0.1:8445;
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
@@ -90,6 +90,7 @@ server {
 
     # 登录冻结申诉：页面 /appeal 与子路径 -> 登录垫片(8450)
     location = /appeal {
+        if ($request_method = GET) { return 302 /#appeal; }
         proxy_pass http://127.0.0.1:8450;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -191,6 +192,12 @@ server {
         proxy_pass https://127.0.0.1:8445;
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # #33 收口补漏·漏网乙（收编一期备补丁，待批）：隧道源 /login 不再直出 MeshCentral 原生登录页，
+    # 一律回新控制台 SPA 登录（根路径）。8443 直连源 /login 不在此列（正当登录面＋站长例外路径，不动）。
+    location = /login {
+        return 302 /;
     }
 
     # 新控制台（2.3.1 切换，#32/#33）：根路径只发新控制台壳；其静态资源同目录。

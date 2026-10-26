@@ -330,8 +330,10 @@ function createChatHandler(configOverrides) {
     const p = u.pathname;
     // ---------- 静态页（同一套页面：网页/双壳共用） ----------
     if (req.method === 'GET' && (p === '/chat' || p === '/chat/')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
-      return res.end(PAGE);
+      // 收编二期收口（2026-10-26）：独立聊天页退役，活路只剩控制台 SPA 的 #chat 视图；
+      // /chat/api/*、crypto-core.js 等静态脚本与 poll 通道不在此列、原样保留。
+      res.writeHead(302, { 'Location': '/#chat', 'Cache-Control': 'no-store' });
+      return res.end();
     }
     if (req.method === 'GET' && p === '/chat/crypto-core.js') { res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); return res.end(CRYPTO_JS); }
     if (req.method === 'GET' && p === '/chat/chat-client.js') { res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); return res.end(CLIENT_JS); }
