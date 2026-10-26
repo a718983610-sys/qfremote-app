@@ -292,6 +292,26 @@ function main() {
     saveProfiles();
     return { count30d: n, mute: p.mute };
   }
+  // firstDone 统一重算（P8 K-04 甲案口径，2026-10-26 主会话裁定）：作者名下已有
+  // 「已公开」submission 且当前无「待审」submission 时，才视为新号首审完成（置真）；
+  // 仍有待审件、或全部被驳无一公开时保持假。只置真不回置（存量回置走订正脚本、
+  // 另行批准）；已删除件不计入（与管理队列 adminQueue 的口径一致）。检查点只设在
+  // adminReview 裁定落定后一处，approve/reject 两路都触发——驳回最后一件待审件
+  // 同样可能使条件成立（如次帖已先通过、首帖最后被驳）。直读 profiles 不经
+  // profileOf：裁定路径无建档语义，避免给无档作者凭空建档。
+  function recomputeFirstDone(name) {
+    const p = profiles[name];
+    if (!p || p.firstDone) return;
+    let hasPublished = false, hasPending = false;
+    for (const db of [postsDb, repliesDb]) {
+      for (const it of Object.values(db.items)) {
+        if (it.author !== name || it.deleted) continue;
+        if (it.status === 'published') hasPublished = true;
+        else if (it.status === 'pending') hasPending = true;
+      }
+    }
+    if (hasPublished && !hasPending) { p.firstDone = true; saveProfiles(); }
+  }
 
   // ---- 账号对账（官方通道 users） ----
   let lastUsers = null; // Map name -> {siteadmin, creation, _id}
@@ -613,7 +633,10 @@ function main() {
       contentHash: sha256(R.normalizeText(title + '\n' + body)), titleHash: sha256(R.normalizeText(title))
     };
     postsDb.items[id] = post;
-    const p = profileOf(sess.user); p.firstDone = true;
+    // firstDone（新号首审完成标记）只许在 submission 实际公开时置真：落库即置真会让
+    // 首帖尚在待审/已被驳回期间，同号后续帖绕过新号人工把关直发公开（P8 K-04）。
+    // 待审件经人工裁定通过的，在 adminReview 的 approve 分支置真。
+    const p = profileOf(sess.user); if (out.status === 'published') p.firstDone = true;
     savePosts(); saveProfiles();
     if (out.status === 'pending') pushReviewEvent('post', id, { kind: 'post', author: sess.user, board, title: String(title).slice(0, 40) });
     modlog({ actor: out.status === 'rejected' ? 'machine' : 'user', action: 'post-' + out.status, targetType: 'post', targetId: id, author: sess.user, category: out.category, detail: out.review.detail, snapshot: esc(title + ' ' + body) });
@@ -642,7 +665,8 @@ function main() {
       contentHash: sha256(R.normalizeText(body)), titleHash: ''
     };
     repliesDb.items[id] = reply;
-    const p = profileOf(sess.user); p.firstDone = true;
+    // firstDone 置真时机同发帖路径（P8 K-04）：回复同样计入 submission，仅实际公开才置真。
+    const p = profileOf(sess.user); if (out.status === 'published') p.firstDone = true;
     saveReplies(); saveProfiles();
     if (out.status === 'pending') pushReviewEvent('reply', id, { kind: 'reply', author: sess.user, postId });
     modlog({ actor: out.status === 'rejected' ? 'machine' : 'user', action: 'reply-' + out.status, targetType: 'reply', targetId: id, author: sess.user, category: out.category, detail: out.review.detail, snapshot: esc(body) });
@@ -797,6 +821,9 @@ function main() {
       modlog({ actor: adm.reviewer, action: 'review-reject', targetType: type, targetId: it.id, author: it.author, category: it.reviewCategory, detail: 'muteCount30d=' + m.count30d, snapshot: esc((it.title || '') + ' ' + it.body) });
     } else return sendJson(res, 400, { ok: false, msg: 'decision 只许 approve 或 reject。' });
     if (type === 'post') savePosts(); else saveReplies();
+    // 裁定落定后统一重算作者 firstDone（甲案口径，函数注记见 recomputeFirstDone）：
+    // 先落内容状态、后落档案，approve/reject 两路都到这一处。
+    recomputeFirstDone(it.author);
     resolveReviewEvent(type, it.id, adm.reviewer, data.decision);
     return sendJson(res, 200, { ok: true, status: it.status });
   }
