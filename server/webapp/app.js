@@ -700,7 +700,7 @@ Views.home = async function (view) {
   const sec = $('#homeSec', view);
   const last = S.stats && S.stats.lastLoginMs ? fmtDate(S.stats.lastLoginMs) : '—';
   sec.innerHTML =
-    rowHtml('shield', '账号状态', (lic.displayStatus || '正常') + (lic.everBanned ? ' · 该密钥曾被封禁（已恢复）' : '')) +
+    rowHtml('shield', '账号状态', (lic.displayStatus || '正常') + (lic.everBanned ? ' · 该密钥曾被封禁（已恢复）' : ''), 'profile') +
     rowHtml('lock', '更改密码', '在「我的 · 账号与安全」中修改', 'profile') +
     rowHtml('file', '最近登录', last + ' · 本设备', 'profile');
   // 设备
@@ -1462,7 +1462,7 @@ Views.purchase = async function (view, param, _s, opts) {
         <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">请上传付款账单详情截图。<b style="color:var(--err)">截图必须露出完整订单号</b>，并填写截图中的订单号。一个订单号只能兑换一把密钥。</p>
         <img src="${esc(pay.exampleUrl || '/license/assets/pay-example.jpg')}" alt="账单详情截图示例" style="display:block;max-width:250px;width:100%;margin:0 auto 12px;border:1px solid var(--line);border-radius:10px" onerror="this.style.display='none'">
         <div class="field"><label>订单号</label><input data-ono maxlength="64" placeholder="请填写截图中的完整订单号"></div>
-        <div class="field"><label>账单详情截图（JPG / PNG，不超过 8 MB）</label><input type="file" data-shot accept="image/jpeg,image/png"></div>
+        <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png"></div>
         <button class="btn block" data-act="submit">提交审核</button>
         <div data-subout style="margin-top:12px"></div>
       </div>`;
@@ -1523,7 +1523,7 @@ Views.purchase = async function (view, param, _s, opts) {
           const fail = m => { if (subout) subout.innerHTML = `<div class="note err" style="margin:0">${esc(m)}</div>`; };
           if (!ono) return fail('请填写订单号。');
           if (!f) return fail('请选择账单详情截图。');
-          if (f.size > 8 * 1024 * 1024) return fail('截图文件过大，请上传不超过 8 MB 的 JPG 或 PNG 图片。');
+          if (f.size > 12 * 1024 * 1024) return fail('截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。');
           el.disabled = true; el.textContent = '提交中…';
           try {
             const b64 = await readFileBase64(f);
@@ -1884,6 +1884,7 @@ Views.admin = async function (view) {
     <div class="grid2"><div class="card"><h3>账号管理</h3>
       ${rowHtml('users', '用户列表与搜索', '改名、改密、冻结、封禁（危险操作均需二次确认并留痕）', '__admin', 'users')}
       ${rowHtml('key', '发放密钥', '必须选择来源：付费 / 免费（决定网页版权益），无默认', '__admin', 'lic-user')}
+      ${rowHtml('key', '生成密钥（不绑账号）', '生成不绑账号的密钥串，复制交付对方，首个兑换的账号即归属', '__admin', 'genkey')}
       ${rowHtml('shield', '封禁与冻结台账', '含设备封禁与异常登录复核', '__admin', 'lic-overview')}</div>
     <div class="card"><h3>内容与服务审核</h3>
       ${rowHtml('forum', '论坛审核', '待审帖子与评论、禁言管理（与论坛同一队列）', 'forum')}
