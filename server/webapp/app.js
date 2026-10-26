@@ -1165,8 +1165,8 @@ async function chatApi(path, opts) {
 /* ================= 聊天（会话列表原生；对话区挂载聊天通道，端到端加密不变） ================= */
 Views.chat = async function (view) {
   view.innerHTML = `<h1 class="pt">聊天</h1><p class="psub">好友聊天内容全程加密，钥匙由您的登录状态保管，登录了账号的设备可直接查看记录。左侧选联系人，右侧即对话，不再跳页。</p>
-    <div class="grid2" style="grid-template-columns:1fr 1.6fr"><div class="card chatlist"><h3>会话</h3><div id="chList"><div class="skel" style="height:52px"></div></div></div>
-    <div class="card"><h3>对话</h3><div class="framebox"><iframe id="ch-frame" src="/chat" title="聊天"></iframe></div>
+    <div class="grid2 chatwrap" style="grid-template-columns:1fr 1.6fr"><div class="card chatlist chatpane-list"><h3>会话</h3><div id="chList"><div class="skel" style="height:52px"></div></div></div>
+    <div class="card chatpane-thread"><button class="btn sm grey chatback" id="ch-back" type="button">${ic('chevR')} 返回会话列表</button><h3>对话</h3><div class="framebox"><iframe id="ch-frame" src="/chat" title="聊天"></iframe></div>
     <p style="color:var(--sub);font-size:12.5px;margin-top:8px">对话区为聊天加密通道：密钥由登录状态保管，在本机静默解锁，不再有单独解锁页；修改或重置密码后，以前的聊天记录仍可正常打开。</p></div></div>`;
   const r = await chatApi('/chat/api/friends');
   const box = $('#chList', view);
@@ -1177,6 +1177,12 @@ Views.chat = async function (view) {
     const why = r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。');
     box.innerHTML = `<div class="statebox"><b>会话列表加载失败</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
     const rb = $('#ch-retry', view); if (rb) rb.onclick = () => Views.chat(view);
+  }
+  /* P2-028 手机单栏分屏：点会话行进对话面、返回钮回列表（切换类仅 ≤820px CSS 生效） */
+  const wrap = view.querySelector('.chatwrap');
+  if (wrap) {
+    box.querySelectorAll('.row').forEach(row => row.addEventListener('click', () => wrap.classList.add('showthread')));
+    const back = $('#ch-back', view); if (back) back.onclick = () => wrap.classList.remove('showthread');
   }
 };
 
