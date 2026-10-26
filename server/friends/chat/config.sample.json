@@ -1,0 +1,1 @@
+{"bind":"127.0.0.1","dataFile":"/opt/qfremote-social/data/chat-data.json","friendsFile":"/opt/qfremote-social/data/friends.json","logFile":"/opt/qfremote-social/data/chat.log","mcUrl":"wss://127.0.0.1:8443/control.ashx","port":8446,"tlsCert":"","tlsKey":""}

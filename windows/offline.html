@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+  }
+  .card {
+    background: #ffffff;
+    border:1px solid #dfe7f2; border-radius:14px;
+    padding:44px 58px 38px; width:400px; box-sizing:border-box;
+    display:flex; flex-direction:column; align-items:center; text-align:center;
+    animation: rise .5s ease both;
+  }
+  @keyframes rise { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
+  .tile {
+    width:76px; height:76px; border-radius:18px; padding:4px; position:relative; box-sizing:border-box;
+    background: #0b2b5b;
+  }
+  .tile img { width:100%; height:100%; border-radius:15px; display:block; }
+  .tile .dot {
+    position:absolute; right:-5px; bottom:-5px; width:15px; height:15px; border-radius:50%;
+    background: #ff8a1e;
+    border:2.5px solid #ffffff;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,150,40,.45);} 55% { box-shadow: 0 0 0 8px rgba(255,150,40,0);} }
+  .title { font-size:20px; font-weight:600; letter-spacing:.6px; margin-top:20px; color:#1f2d47; }
+  .desc { font-size:13.5px; line-height:1.75; color:#6b7a90; margin-top:9px; }
+  .count { font-size:12.5px; color:#6b7a90; margin-top:16px; min-height:18px; }
+  .count b { color:#f58a0c; font-weight:600; }
+  .btn {
+    margin-top:14px; border:none; cursor:pointer; text-decoration:none;
+    font-family:inherit; font-size:14.5px; font-weight:600; color:#fff; letter-spacing:1px;
+    padding:11px 38px; border-radius:12px;
+    background: #2470e0;
+    transition: filter .15s ease, transform .05s ease;
+  }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:active { transform: translateY(1px); }
+  .foot { font-size:11.5px; color:rgba(107,122,144,.75); margin-top:22px; }
+  /* 深灰深色主题（与工具栏联动，不用纯黑） */
+  html[data-theme="dark"] body { background: #17181c; }
+  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
+  html[data-theme="dark"] .tile { background: #ffffff; }
+  html[data-theme="dark"] .title { color:#eceff3; }
+  html[data-theme="dark"] .desc { color:#a7adb8; }
+  html[data-theme="dark"] .count { color:#868d98; }
+  html[data-theme="dark"] .tile .dot { border-color:#22262e; }
+  html[data-theme="dark"] .foot { color:rgba(167,173,184,.6); }
+</style>
+</head>
+<body>
+  <div class="orbit"></div>
+  <div class="card">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"><span class="dot"></span></div>
+    <div class="title">暂时连不上服务器</div>
+    <div class="desc">连不上服务器，正在重试。<br>网络恢复后将自动回到控制台，无需操作。</div>
+    <div class="count" id="count"></div>
+    <a class="btn" id="retry" href="#">立即重试</a>
+    <div class="foot">长时间连不上，请检查本机网络后重试。</div>
+  </div>
+<script>
+  var q = new URLSearchParams(location.search);
+  if (q.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+  var target = q.get('u') || 'https://54.248.9.192:8443/';
+  var delay = parseInt(q.get('d') || '6', 10);
+  if (isNaN(delay) || delay < 1) delay = 6;
+  var el = document.getElementById('count');
+  var btn = document.getElementById('retry');
+  btn.setAttribute('href', target);
+  function go() { location.href = target; }
+  btn.addEventListener('click', function (e) { e.preventDefault(); go(); });
+  var left = delay;
+  function render() {
+    el.innerHTML = '将在 <b>' + left + '</b> 秒后自动重试';
+    if (left <= 0) { go(); return; }
+    left--;
+    setTimeout(render, 1000);
+  }
+  render();
+</script>
+</body>
+</html>

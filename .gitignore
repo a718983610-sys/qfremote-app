@@ -1,0 +1,18 @@
+# QFRemote 正本仓库防护网（2026-10-26 立）：密钥/令牌/数据/备份/依赖永不入库。
+# 确需破例跟踪某个被忽略文件时，必须先过秘密扫描并在提交信息里注明理由（git add -f）。
+node_modules/
+**/node_modules/
+dist/
+**/data/
+*.log
+*.db
+*.sqlite*
+*.bak-*
+**/*.bak-*
+*token*.txt
+*secret*
+*credentials*.json
+*.pem
+*.key
+**/cert/
+config.json

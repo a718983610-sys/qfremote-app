@@ -1,0 +1,733 @@
+'use strict';
+/*
+ * QFRemote 登录垫片（qfremote-loginshim）
+ * ================================================================
+ * 职责一：「记住此设备」的会话保鲜层（原有机制，不变）。
+ * 背景：MeshCentral 1.3.1 的会话 cookie（xid/xid.sig，cookie-session）默认会话级
+ * （关浏览器即失效）；官方唯一的有效期开关是全局 settings.sessionTime，一开全员
+ * 持久，没法按「本次登录是否勾选」区分。且登录后控制台的普通请求会改动会话、
+ * 重发不带有效期的 xid，把登录那一笔设好的持久 cookie 冲掉——所以保鲜必须覆盖
+ * 记住用户的全部控制台流量，而不只是登录那一笔。
+ *  1) 登录页提交走 /qf-login 到本服务：摘掉自家字段 qfrememberdevice 后原样
+ *     转发 MeshCentral；勾选时在回程给 xid/xid.sig 补 Max-Age=2592000（30 天），
+ *     同时种一颗同为 30 天的标记 cookie「qfrem=1」。
+ *  2) nginx 对带 qfrem 标记的请求走本服务（通用转发模式）：请求/响应/WebSocket
+ *     原样透传，只在回程 Set-Cookie 上继续给 xid/xid.sig 补 Max-Age 防冲掉。
+ *  3) 登出（/logout）时清掉 qfrem 标记；未勾选提交时同样清标记。
+ *
+ * 职责二：登录冻结＋申诉（2026-10-24 用户亲定，本次新增）。
+ * 规则：同一账号当天（Asia/Shanghai 自然日）密码输错满 5 次 → 当天冻结，
+ * 之后输对也不让进，次日 0 点自动解冻；计数只认账号不认 IP。
+ * 触发冻结的那次及冻结期间每次尝试，登录页弹出原文提示，句中「申诉＞＞＞＞」
+ * 红字可点进申诉页 /appeal。申诉（账号/邮箱/情况说明）入库待审，站长（经助手）
+ * 批准后生成一次性改密凭证，用户在申诉进度页点「修改密码」设新密码，设完
+ * 冻结与计数一并清除。冻结状态与申诉都落盘（data/），服务重启不丢。
+ * 适用面 v1：控制台登录页（网页通道）。直连 8443 与好友/聊天/论坛登录不纳入。
+ * MeshCentral 本体零改动；改密经一次性 spool + root 包装脚本停服写库完成。
+ * 只监听回环 127.0.0.1:8450，仅 nginx 本机反代可达。
+ */
+const http = require('http');
+const https = require('https');
+const tls = require('tls');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+
+const MAX_AGE = 2592000; // 30 天（秒）
+const MARKER = 'qfrem=1; Path=/; Max-Age=' + MAX_AGE + '; Secure; SameSite=Lax';
+const MARKER_CLEAR = 'qfrem=; Path=/; Max-Age=0; Secure; SameSite=Lax';
+
+const DATA_DIR = '/opt/qfremote-loginshim/data';
+const FREEZE_FILE = path.join(DATA_DIR, 'freeze.json');
+const APPEALS_FILE = path.join(DATA_DIR, 'appeals.json');
+const ATTEMPTS_FILE = path.join(DATA_DIR, 'attempts.jsonl');
+const SPOOL_DIR = path.join(DATA_DIR, 'reset-spool');
+const SETPASS_CMD = '/usr/local/bin/qfremote-appeal-setpass';
+const FREEZE_LIMIT = 5;
+const FREEZE_TEXT_PRE = '该账号今日密码输入错误已超过 5 次，今日不能再试。请前往';
+const FREEZE_LINK_TEXT = '申诉＞＞＞＞';
+
+let passmod = null;
+try { passmod = require('/opt/meshcentral/node_modules/meshcentral/pass.js'); }
+catch (e) { console.error('警告：加载不到 MeshCentral pass.js，申诉改密将不可用：', e.message); }
+
+/* ===== 许可门（阶段 C-2）：只经内网接口问扩展服务（唯一写者），本垫片不直写许可状态 ===== */
+const LIC_SECRET_FILE = process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret';
+function licInternal(pathname, payload) {
+  return new Promise((resolve) => {
+    let secret = '';
+    try { secret = fs.readFileSync(LIC_SECRET_FILE, 'utf8').trim(); } catch (e) { return resolve(null); }
+    if (!secret) return resolve(null);
+    const body = JSON.stringify(payload || {});
+    const r = http.request({ hostname: '127.0.0.1', port: 8448, path: pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-QF-Internal-Secret': secret }, timeout: 5000 }, (resp) => {
+      const chunks = [];
+      resp.on('data', (c) => chunks.push(c));
+      resp.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { resolve(null); } });
+    });
+    r.on('timeout', () => { r.destroy(); resolve(null); });
+    r.on('error', () => resolve(null));
+    r.write(body); r.end();
+  });
+}
+function fmtDate(ms) {
+  if (!ms) return '';
+  try { return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(ms)); } catch (e) { return ''; }
+}
+// 许可/封禁拦截整页（设计稿 §四 L 文案；G 类与 B 类不同标题与主按钮）
+function gatePageHtml(username, d) {
+  const u = encodeURIComponent(username || '');
+  let title = '暂时无法登录', text = '', btn = '';
+  if (d.code === 'BAN_PERM') {
+    title = '账号已被封禁';
+    text = d.banCode === 'B6'
+      ? '该账号已被永久封禁。原因：检测到同一台设备登录多个账号，违反《用户协议》关于账号与设备使用的约定。如对处理结果有异议，可提交申诉，审核通过后将解除封禁。'
+      : '该账号已被封禁。原因：账号存在违规使用行为，违反《用户协议》相关约定。如对处理结果有异议，可提交申诉。';
+    btn = '<a class="btn" href="/appeal?u=' + u + '">提交申诉</a>';
+  } else if (d.code === 'BAN_UNTIL') {
+    title = '账号已被冻结';
+    text = d.banCode === 'B10'
+      ? '该账户已被冻结（至 ' + fmtDate(d.endsAt) + '）。原因：检测到密钥绑定异常操作。如对处理结果有异议，可提交申诉。'
+      : '该账号已被冻结，暂时无法登录' + (d.endsAt ? '（至 ' + fmtDate(d.endsAt) + '）' : '') + '。如需处理，可提交申诉查询原因。';
+    btn = '<a class="btn" href="/appeal?u=' + u + '">提交申诉</a>';
+  } else if (d.code === 'G1') {
+    title = '尚未激活';
+    text = '软件已升级为一次性付费版本，您尚未购买密钥激活。价格为 18 元，一次购买，终生免费更新。';
+    btn = '<a class="btn" href="/purchase">前往购买</a>';
+  } else if (d.code === 'G2') {
+    title = '试用已到期';
+    text = '您的 3 天免费试用已于 ' + fmtDate(d.trialExpiresMs) + ' 到期。真实付费购买密钥后即可继续使用：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。';
+    btn = '<a class="btn" href="/purchase">前往购买</a>';
+  } else if (d.code === 'G4') {
+    title = '网页版未开通';
+    text = '网页版为真实付费购买密钥后开通的权益。您当前未真实付费购买密钥（免费试用，或密钥为试用、赠送、活动发放等免费获得），使用范围仅为电脑端与手机端软件，不包含网页版。真实付费购买密钥后即可开通网页版，并可在任意设备上登录使用。';
+    btn = '<a class="btn" href="/purchase">前往购买</a>';
+  } else if (d.code === 'G5') {
+    title = '密钥已过期';
+    text = (d.keyExpiresMs ? '您的密钥已于 ' + fmtDate(d.keyExpiresMs) + ' 到期' : '您的密钥已到期') + '，密钥已收回，当前账号无法登录。如需继续使用，请购买新密钥（可选永久套餐或按天套餐）：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。';
+    btn = '<a class="btn" href="/purchase">前往购买</a>';
+  } else if (d.code === 'G3') {
+    title = '设备名额已满';
+    text = '本设备尚未绑定密钥。您的密钥已绑定两台电脑与一部手机，如需在本设备使用，请购买新密钥。';
+    btn = '<a class="btn" href="/purchase">前往购买</a>'
+      + '<p class="note" style="margin-top:10px">如已更换设备，可由本设备提交换绑申诉，审核通过后以本设备替换同类旧设备：<a href="/license/rebind">申诉换绑设备</a></p>';
+  } else {
+    text = '当前状态暂时无法登录，请稍后再试，或咨询智能客服。';
+    btn = '<a class="btn" href="/support">咨询智能客服</a>';
+  }
+  // G1/G2/G5 拦截页转赠领取（17:23 定版，撤换 17:03 点接受指引）：
+  // 受赠人先在登录页「查询密钥」凭账号＋密码核验后看完整串并复制，再回到
+  // 本页把串粘贴进激活框提交即完成领取。本页无登录会话，领取请求带账号
+  // ＋密码再核验一次（只核验不签发登录态），与同一校验端点
+  // POST /license/api/transfer/claim 的无会话入口一致；软件端壳（阶段
+  // D/E）在登录流程内已验密，可由壳直接带核验结果调用同一端点，用户侧
+  // 只需粘贴串（契约 §7.5 拦截页激活框行为）。
+  const isGate = ['G1', 'G2', 'G5'].includes(d.code);
+  const transferGuide = isGate
+    ? '<p class="note" style="margin-top:10px">如有他人向您转赠密钥：先在登录页点击「查询密钥」，凭账号和密码核验后查看并复制完整密钥串，再回到本页粘贴到下方输入框领取；领取成功后即可正常登录使用，无需购买。</p>' : '';
+  const claimBox = isGate
+    ? '<div style="margin-top:14px;border:1px solid #DFE7F2;border-radius:10px;padding:14px">'
+    + '<label for="qfClaimKey" style="margin-top:0">请输入 QFRemote 激活密钥</label>'
+    + '<input id="qfClaimKey" type="text" maxlength="40" autocomplete="off" placeholder="粘贴完整密钥串">'
+    + '<label for="qfClaimPw">账号密码（再次核验）</label>'
+    + '<input id="qfClaimPw" type="password" maxlength="256" autocomplete="current-password" placeholder="输入当前账号的密码">'
+    + '<button class="btn" type="button" id="qfClaimBtn">领取密钥</button>'
+    + '<div id="qfClaimOut" style="margin-top:10px"></div>'
+    + '<script>(function(){var btn=document.getElementById("qfClaimBtn");btn.onclick=function(){var key=document.getElementById("qfClaimKey").value.trim(),pw=document.getElementById("qfClaimPw").value,out=document.getElementById("qfClaimOut");'
+    + 'if(!key){out.innerHTML="<div class=\\"err\\">请输入 QFRemote 激活密钥。</div>";return;}'
+    + 'btn.disabled=true;fetch("/license/api/transfer/claim",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:' + JSON.stringify(String(username || '')) + ',password:pw,key:key})}).then(function(r){return r.json()}).then(function(j){btn.disabled=false;'
+    + 'if(j.ok){out.innerHTML="<div class=\\"ok\\">领取成功，密钥已转入您的账号。请重新登录使用。</div><a class=\\"btn\\" href=\\"/\\">去登录</a>";}else{out.innerHTML="<div class=\\"err\\">"+String(j.msg||"领取未成功，请核对后重试。").replace(/[<>&]/g,"")+"</div>";}}).catch(function(){btn.disabled=false;out.innerHTML="<div class=\\"err\\">网络异常，请稍后再试。</div>";});};})();</' + 'script>'
+    + '</div>' : '';
+  const inner = '<div style="font-size:19px;font-weight:700;margin:4px 0 10px">' + esc(title) + '</div>'
+    + '<p class="note" style="font-size:14px">' + esc(text) + '</p>'
+    + transferGuide
+    + (username ? '<p class="note">当前账号：' + esc(username) + '</p>' : '')
+    + btn
+    + claimBox
+    + '<p class="note" style="margin-top:14px">如需帮助，可咨询<a href="/support">智能客服</a>。</p>';
+  return pageShell(title, inner);
+}
+
+function hasMarker(req) {
+  const c = String(req.headers.cookie || '');
+  return /(?:^|;\s*)qfrem=1(?:;|$)/.test(c);
+}
+function addMaxAge(setCookies) {
+  return setCookies.map((v) => {
+    const name = v.split('=', 1)[0].trim().toLowerCase();
+    if ((name === 'xid' || name === 'xid.sig') && !/;\s*max-age=/i.test(v)) return v + '; Max-Age=' + MAX_AGE;
+    return v;
+  });
+}
+function appendCookie(headers, cookie) {
+  const sc = headers['set-cookie'];
+  if (Array.isArray(sc)) sc.push(cookie);
+  else if (sc) headers['set-cookie'] = [sc, cookie];
+  else headers['set-cookie'] = [cookie];
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function todayKey() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function atomicWriteJson(file, obj) {
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 1), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+function loadJson(file, fallback) {
+  try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return v == null ? fallback : v; }
+  catch (e) { return fallback; }
+}
+
+// —— 冻结状态（垫片是唯一写者） ——
+let freezeState = loadJson(FREEZE_FILE, { accounts: {} });
+if (!freezeState.accounts) freezeState = { accounts: {} };
+function accountState(key) {
+  const t = todayKey();
+  let st = freezeState.accounts[key];
+  if (!st || st.day !== t) { st = { day: t, fails: 0, frozen: false }; freezeState.accounts[key] = st; }
+  return st;
+}
+function saveFreeze() { try { atomicWriteJson(FREEZE_FILE, freezeState); } catch (e) { console.error('freeze 落盘失败：', e.message); } }
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  if (cf) return String(cf);
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return String(req.socket.remoteAddress || '');
+}
+function logAttempt(user, ok, ip, blocked) {
+  try {
+    fs.appendFileSync(ATTEMPTS_FILE, JSON.stringify({ ts: new Date().toISOString(), user, ok, ip, blocked: !!blocked }) + '\n');
+  } catch (e) { /* 记账失败不许影响登录 */ }
+}
+
+// —— 冻结弹窗（注入登录页 </body> 前） ——
+function freezePopupHtml(username) {
+  const link = '/appeal?u=' + encodeURIComponent(username || '');
+  return '<div id="qfFreezePopup" style="position:fixed;inset:0;background:rgba(8,18,38,.5);z-index:99999;display:flex;align-items:center;justify-content:center">'
+    + '<div style="background:#fff;border-radius:14px;max-width:88vw;width:430px;padding:24px 22px;box-shadow:0 14px 44px rgba(0,0,0,.3);font-size:15px;line-height:1.8;color:#1c2733;text-align:center">'
+    + '<div>' + FREEZE_TEXT_PRE + '<a href="' + link + '" style="color:#d40000;text-decoration:none;font-weight:700">' + FREEZE_LINK_TEXT + '</a></div>'
+    + '<div style="margin-top:8px">也可以先咨询<a href="/support" style="color:#2470e0;text-decoration:none;font-weight:700">智能客服</a>，或在客服中申请转人工。</div>'
+    + '<button type="button" onclick="document.getElementById(\'qfFreezePopup\').remove()" style="margin-top:16px;border:0;border-radius:8px;background:#2470e0;color:#fff;font-size:14px;padding:8px 26px;cursor:pointer">知道了</button>'
+    + '</div></div>';
+}
+function injectPopup(html, username) {
+  const tag = freezePopupHtml(username);
+  const i = html.toLowerCase().lastIndexOf('</body>');
+  if (i >= 0) return html.slice(0, i) + tag + html.slice(i);
+  return html + tag;
+}
+
+const server = http.createServer((req, res) => {
+  let pathname = req.url;
+  try { pathname = new URL(req.url, 'http://localhost').pathname; } catch (e) {}
+  if (pathname === '/qf-login') return handleLogin(req, res);
+  if (pathname === '/appeal' || pathname.startsWith('/appeal/')) return handleAppeal(req, res, pathname);
+  const isLogout = pathname === '/logout' || pathname.startsWith('/logout/');
+  return handleGeneric(req, res, isLogout);
+});
+
+// —— 登录专用：冻结计数 + 摘自家字段 + 转发 MeshCentral 根路径 ——
+function handleLogin(req, res) {
+  if (req.method !== 'POST') { res.writeHead(405, { 'Content-Type': 'text/plain' }); return res.end('Method Not Allowed'); }
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > 1024 * 1024) { req.destroy(); return; } chunks.push(c); });
+  req.on('end', () => {
+    let body = Buffer.concat(chunks);
+    let remember = false;
+    let usernameRaw = '';
+    const ct = String(req.headers['content-type'] || '');
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      try {
+        const params = new URLSearchParams(body.toString('utf8'));
+        usernameRaw = String(params.get('username') || '');
+        if (params.get('qfrememberdevice') === 'on') {
+          remember = true;
+          params.delete('qfrememberdevice');
+          body = Buffer.from(params.toString(), 'utf8');
+        }
+      } catch (e) { /* 解析不了就原样转发 */ }
+    }
+    const key = usernameRaw.trim().toLowerCase();
+    const ip = clientIp(req);
+    let st = null;
+    if (key) {
+      st = accountState(key);
+      if (st.frozen) {
+        // 2026-10-26 热修（冻结误报）：冻结账号不再不验密码就回冻结页——
+        // 先把凭据转发 MeshCentral 验真，按结果分流：
+        //  · 密码错 → 原样透传上游失败响应（控制台据 /me 401 报「账号或密码
+        //    不正确」，与未冻结时口径一致）；
+        //  · 密码对 → 回冻结提示页并带结构化信号头 X-QF-Login-Result: frozen，
+        //    控制台据此在登录页显示冻结提示＋申诉入口，不再误报密码错误；
+        //    会话 cookie 不下发（serveFrozenPage 另行取登录页并滤掉 xid）。
+        // 冻结判定与计数（B1）一概不动：本分支不改 fails/frozen、不落盘。
+        return serveFrozenVerify(req, res, body, usernameRaw, key, ip);
+      }
+    }
+    const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443', 'content-length': body.length });
+    delete headers.connection;
+    delete headers['accept-encoding']; // 强制明文回程，便于判定成败与注入弹窗
+    const up = https.request({ hostname: '127.0.0.1', port: 8443, path: '/', method: 'POST', headers, rejectUnauthorized: false }, (ur) => {
+      const uchunks = [];
+      ur.on('data', (c) => uchunks.push(c));
+      ur.on('end', () => {
+        let ubody = Buffer.concat(uchunks);
+        const h = Object.assign({}, ur.headers);
+        if (remember) {
+          if (Array.isArray(h['set-cookie'])) h['set-cookie'] = addMaxAge(h['set-cookie']);
+          appendCookie(h, MARKER);
+        } else {
+          appendCookie(h, MARKER_CLEAR); // 防御：走到这里却没勾选时，清掉旧标记
+        }
+        if (key && st) {
+          const text = ubody.toString('utf8');
+          const hasLoginForm = text.includes('loginpanelform');
+          let verdict = 'neutral';
+          if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
+          else if (!hasLoginForm) verdict = 'ok';
+          if (verdict === 'fail') {
+            st.fails += 1;
+            if (st.fails >= FREEZE_LIMIT) st.frozen = true;
+            saveFreeze();
+            logAttempt(key, false, ip, false);
+            if (st.frozen) {
+              licInternal('/internal/license/ban-event', { username: key, code: 'B1', action: 'apply', actor: 'loginshim' }); // 统一台账回写（暂停计时联动）
+              ubody = Buffer.from(injectPopup(text, usernameRaw), 'utf8');
+              h['content-length'] = ubody.length;
+              delete h.etag;
+            }
+          } else if (verdict === 'ok') {
+            if (st.fails !== 0) { st.fails = 0; saveFreeze(); }
+            logAttempt(key, true, ip, false);
+            // 2026-10-26 热修（登录误报）：许可门不再在垫片层拦截 /qf-login。
+            // 旧做法对无钥/未开通网页权益的账号回整页拦截并清会话 cookie，
+            // 而新控制台丢弃登录响应体、改以 /license/api/me 判成败——会话被
+            // 吃掉后 /me 必 401，G1/G2/G4/G5/BAN 被一律误报「账号或密码不正确」，
+            // 且与决策 #46（未激活只限功能、不限登录）冲突。现一律透传上游
+            // 响应：准入与封禁的呈现由新控制台按 /me 的 decision 处理
+            // （未激活首页/准入提示态/封禁申诉入口），冻结机制不受影响。
+            // QFClash 内嵌登录（2.0.3 更新 3）：带 qfr_src=qfclash 标记的
+            // 一笔成功登录记入扩展服务，供个人中心「登录设备」显示来源；
+            // 不改判定、不计绑定，失败不影响登录主流程。
+            if (/(?:^|;\s*)qfr_src=qfclash(?:;|$)/.test(req.headers.cookie || '')) {
+              licInternal('/internal/license/qfclash-login-note', { username: key, ua: req.headers['user-agent'] || '' });
+            }
+            res.writeHead(ur.statusCode, h);
+            return res.end(ubody);
+          } else {
+            logAttempt(key, null, ip, false);
+          }
+        }
+        res.writeHead(ur.statusCode, h);
+        res.end(ubody);
+      });
+      ur.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); try { res.end('Bad Gateway'); } catch (e) {} });
+    });
+    up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('Bad Gateway'); });
+    up.write(body);
+    up.end();
+  });
+  req.on('error', () => { try { res.destroy(); } catch (e) {} });
+}
+
+// 冻结账号的登录尝试：先转发 MeshCentral 验密码再分流（见 handleLogin 冻结
+// 分支注释）。判定口径与主路径一致：上游回登录页且含「登录失败」＝密码错；
+// 回非登录页＝密码对。本函数绝不修改冻结状态（fails/frozen 不动、不落盘），
+// 密码对时也不透传会话，改回冻结提示页（serveFrozenPage）。
+function serveFrozenVerify(req, res, body, usernameRaw, key, ip) {
+  const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443', 'content-length': body.length });
+  delete headers.connection;
+  delete headers['accept-encoding']; // 强制明文回程，便于判定成败
+  const up = https.request({ hostname: '127.0.0.1', port: 8443, path: '/', method: 'POST', headers, rejectUnauthorized: false }, (ur) => {
+    const uchunks = [];
+    ur.on('data', (c) => uchunks.push(c));
+    ur.on('end', () => {
+      const ubody = Buffer.concat(uchunks);
+      const text = ubody.toString('utf8');
+      const hasLoginForm = text.includes('loginpanelform');
+      let verdict = 'neutral';
+      if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
+      else if (!hasLoginForm) verdict = 'ok';
+      if (verdict === 'ok') {
+        logAttempt(key, true, ip, true);
+        return serveFrozenPage(req, res, usernameRaw);
+      }
+      logAttempt(key, verdict === 'fail' ? false : null, ip, true);
+      res.writeHead(ur.statusCode, ur.headers);
+      res.end(ubody);
+    });
+    ur.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); try { res.end('Bad Gateway'); } catch (e) {} });
+  });
+  up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('Bad Gateway'); });
+  up.write(body);
+  up.end();
+}
+
+// 冻结提示：回登录页 + 冻结弹窗（只在「密码正确但账号冻结」时经此返回）
+function serveFrozenPage(req, res, usernameRaw) {
+  const headers = { host: '127.0.0.1:8443', 'user-agent': req.headers['user-agent'] || 'qfremote-loginshim' };
+  const up = https.request({ hostname: '127.0.0.1', port: 8443, path: '/', method: 'GET', headers, rejectUnauthorized: false }, (ur) => {
+    const chunks = [];
+    ur.on('data', (c) => chunks.push(c));
+    ur.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      const body = Buffer.from(injectPopup(text, usernameRaw), 'utf8');
+      const h = Object.assign({}, ur.headers, { 'content-length': body.length });
+      delete h.etag;
+      // 2026-10-26 热修（冻结误报）：给新控制台一个结构化信号——控制台
+      // doLogin 读到 X-QF-Login-Result: frozen 即在登录页呈现冻结提示＋
+      // 申诉入口，不再把冻结误报成「账号或密码不正确」。
+      h['x-qf-login-result'] = 'frozen';
+      // 防御：冻结提示页不得携带会话 cookie（冻结账号不签发会话）
+      if (Array.isArray(h['set-cookie'])) {
+        h['set-cookie'] = h['set-cookie'].filter((v) => !/^\s*xid(\.sig)?=/i.test(v));
+        if (!h['set-cookie'].length) delete h['set-cookie'];
+      }
+      res.writeHead(200, h);
+      res.end(body);
+    });
+    ur.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); try { res.end('Bad Gateway'); } catch (e) {} });
+  });
+  up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('Bad Gateway'); });
+  up.end();
+}
+
+// —— 通用转发：记住用户的控制台流量（含普通请求，流式透传） ——
+function handleGeneric(req, res, isLogout) {
+  const marked = hasMarker(req);
+  const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443' });
+  const up = https.request({ hostname: '127.0.0.1', port: 8443, path: req.url, method: req.method, headers, rejectUnauthorized: false }, (ur) => {
+    const h = Object.assign({}, ur.headers);
+    if (isLogout) {
+      appendCookie(h, MARKER_CLEAR);
+    } else if (marked && Array.isArray(h['set-cookie'])) {
+      h['set-cookie'] = addMaxAge(h['set-cookie']);
+    }
+    res.writeHead(ur.statusCode, h);
+    ur.pipe(res);
+  });
+  up.on('error', () => { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' }); try { res.end('Bad Gateway'); } catch (e) {} });
+  req.pipe(up);
+}
+
+// —— WebSocket 透传：记住用户的控制台长连接（原始字节管道，不解析） ——
+server.on('upgrade', (req, socket, head) => {
+  const upstream = tls.connect({ host: '127.0.0.1', port: 8443, rejectUnauthorized: false }, () => {
+    const lines = [req.method + ' ' + req.url + ' HTTP/' + req.httpVersion];
+    let hostWritten = false;
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      const k = req.rawHeaders[i], v = req.rawHeaders[i + 1];
+      if (k.toLowerCase() === 'host') { lines.push('Host: 127.0.0.1:8443'); hostWritten = true; }
+      else lines.push(k + ': ' + v);
+    }
+    if (!hostWritten) lines.push('Host: 127.0.0.1:8443');
+    upstream.write(lines.join('\r\n') + '\r\n\r\n');
+    if (head && head.length) upstream.write(head);
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+  upstream.on('error', () => { try { socket.destroy(); } catch (e) {} });
+  socket.on('error', () => { try { upstream.destroy(); } catch (e) {} });
+});
+
+/* ================= 申诉 ================= */
+
+function loadAppeals() {
+  const v = loadJson(APPEALS_FILE, { appeals: [] });
+  if (!v || !Array.isArray(v.appeals)) return { appeals: [] };
+  v.appeals = v.appeals.filter((a) => a && typeof a === 'object'); // 历史文件曾混入 null，先过滤防崩
+  return v;
+}
+function saveAppeals(data) { atomicWriteJson(APPEALS_FILE, data); }
+function appealKey(username) { return String(username || '').trim().toLowerCase(); }
+function latestAppeal(data, key) {
+  let best = null;
+  for (const a of data.appeals) {
+    if (a.key === key && (!best || a.createdAt > best.createdAt)) best = a;
+  }
+  return best;
+}
+function pageShell(title, inner) {
+  return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>' + esc(title) + ' · QFRemote</title>'
+    + '<style>'
+    + 'body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#eef3fa;color:#1c2733}'
+    + '.wrap{max-width:430px;margin:0 auto;padding:26px 16px 40px}'
+    + '.brand{font-size:20px;font-weight:700;color:#1450b4;margin:8px 2px 4px}'
+    + '.sub{font-size:13px;color:#5b6b7d;margin:0 2px 18px}'
+    + '.card{background:#fff;border-radius:14px;padding:22px 20px;box-shadow:0 6px 24px rgba(20,60,140,.08)}'
+    + 'label{display:block;font-size:13px;color:#43536a;margin:14px 0 6px}'
+    + 'input,textarea{box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;background:#fff}'
+    + 'textarea{min-height:96px;resize:vertical}'
+    + '.btn{display:block;width:100%;box-sizing:border-box;text-align:center;border:0;border-radius:9px;background:linear-gradient(135deg,#3f8cff,#2470e0);color:#fff;font-size:16px;padding:12px;margin-top:20px;cursor:pointer;text-decoration:none}'
+    + '.note{font-size:13px;color:#5b6b7d;line-height:1.7}'
+    + '.err{background:#fdf0f0;border:1px solid #f3c2c2;color:#a40000;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7}'
+    + '.ok{background:#eefaf0;border:1px solid #bfe6c8;color:#14632a;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7}'
+    + '.status{font-size:19px;font-weight:700;margin:4px 0 8px}'
+    + 'a{color:#2470e0}'
+    + '</style></head><body><div class="wrap">'
+    + '<div class="brand">QFRemote</div>'
+    + '<p class="sub">' + esc(title) + '</p>'
+    + '<div class="card">' + inner + '</div>'
+    + '<p class="note" style="text-align:center;margin-top:18px"><a href="/">返回登录页</a> · <a href="/support">智能客服</a></p>'
+    + '</div></body></html>';
+}
+function sendHtml(res, status, html) {
+  const body = Buffer.from(html, 'utf8');
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
+  res.end(body);
+}
+function readForm(req, cb) {
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > 256 * 1024) { req.destroy(); return; } chunks.push(c); });
+  req.on('end', () => {
+    let params = new URLSearchParams();
+    try { params = new URLSearchParams(Buffer.concat(chunks).toString('utf8')); } catch (e) {}
+    cb(params);
+  });
+  req.on('error', () => { try { cb(new URLSearchParams()); } catch (e) {} });
+}
+function appealFormPage(prefillUser, errMsg) {
+  const inner = (errMsg ? '<div class="err">' + esc(errMsg) + '</div>' : '')
+    + '<form method="post" action="/appeal">'
+    + '<label for="a-user">账号</label><input id="a-user" name="username" type="text" required maxlength="64" value="' + esc(prefillUser || '') + '">'
+    + '<label for="a-pass">账号密码（身份核验）</label><input id="a-pass" name="password" type="password" required maxlength="256" autocomplete="current-password">'
+    + '<p class="note">本站身份核验只使用账号密码，不使用邮箱验证码；密码只用于核验本次申诉身份。</p>'
+    + '<label for="a-email">联系邮箱（仅用于接收审核结果通知，不作身份核验）</label><input id="a-email" name="email" type="email" required maxlength="120" placeholder="审核结果与改密进度都靠它联系你">'
+    + '<label for="a-desc">情况说明</label><textarea id="a-desc" name="desc" required maxlength="2000" placeholder="说说账号是你的什么设备在用、最后一次成功登录大概是什么时候"></textarea>'
+    + '<label for="a-newev">新证据说明（再次申诉时必填）</label><textarea id="a-newev" name="newev" maxlength="2000" placeholder="如曾就同一处理提交过申诉，请写明这次新增的事实或证据；首次申诉可留空"></textarea>'
+    + '<p class="note">申诉次数上限：永久封禁可申诉 2 次，其余封禁/冻结可申诉 3 次（按同一处理计算）；再次申诉须提供新证据。</p>'
+    + '<button class="btn" type="submit">提交申诉</button></form>'
+    + '<p class="note" style="margin-top:14px">提交后由站长人工审核。审核进度可在登录页「申诉进度」中输入账号查询。</p>';
+  return pageShell('账号冻结申诉', inner);
+}
+function statusFormPage(username, resultHtml) {
+  const inner = '<form method="post" action="/appeal/status">'
+    + '<label for="s-user">账号</label><input id="s-user" name="username" type="text" required maxlength="64" value="' + esc(username || '') + '">'
+    + '<button class="btn" type="submit">查询进度</button></form>'
+    + (resultHtml || '');
+  return pageShell('申诉进度', inner);
+}
+
+function handleAppeal(req, res, pathname) {
+  const q = new URL(req.url, 'http://localhost').searchParams;
+  if (pathname === '/appeal') {
+    if (req.method === 'GET') return sendHtml(res, 200, appealFormPage(q.get('u') || '', ''));
+    if (req.method === 'POST') return readForm(req, (p) => handleAppealSubmit(req, res, p));
+  }
+  if (pathname === '/appeal/status') {
+    if (req.method === 'GET') return sendHtml(res, 200, statusFormPage(q.get('u') || '', ''));
+    if (req.method === 'POST') return readForm(req, (p) => handleStatusQuery(req, res, p));
+  }
+  if (pathname === '/appeal/reset') {
+    if (req.method === 'GET') return handleResetGet(req, res, q.get('t') || '');
+    if (req.method === 'POST') return readForm(req, (p) => handleResetPost(req, res, p));
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not Found');
+}
+
+async function handleAppealSubmit(req, res, p) {
+  const username = String(p.get('username') || '').trim();
+  const email = String(p.get('email') || '').trim();
+  const desc = String(p.get('desc') || '').trim();
+  if (!username || !email || !desc) return sendHtml(res, 200, appealFormPage(username, '账号、联系邮箱、情况说明三项均须填写。'));
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendHtml(res, 200, appealFormPage(username, '联系邮箱格式不正确，请检查后重新填写。'));
+  // 身份核验（裁决批③：全站统一账号＋密码，废止邮箱核验）：经许可内网
+  // 核验端点验密，不存在的账号与密码错误回同一提示，不透露账号是否存在。
+  const vpw = await licInternal('/internal/license/verify-password', { username: appealKey(username), password: String(p.get('password') || '') });
+  if (!vpw || vpw.ok !== true) return sendHtml(res, 200, appealFormPage(username, '账号或密码不正确，无法核验身份，请核对后重新提交。'));
+  const key = appealKey(username);
+  const st = accountState(key);
+  if (!st.frozen) {
+    // 统一申诉：不在 B1 冻结中时，查统一封禁台账（B2/B3/B6/B7/B8/B9/B10）
+    const chk = await licInternal('/internal/license/appeal-check', { username: key });
+    if (chk && chk.ok && chk.hasActiveBan) {
+      const data = loadAppeals();
+      // 申诉次数上限（站长 16:53 裁决，按同一处置计）：永久 2 次，其余 3 次
+      const prior = data.appeals.filter((a) => a.key === key && a.banId === chk.ban.id);
+      const limit = chk.ban.permanent ? 2 : 3;
+      if (prior.length >= limit) {
+        return sendHtml(res, 200, pageShell('申诉',
+          '<div class="err">该处理已达申诉次数上限（' + limit + ' 次），申诉入口关闭。如仍有疑问，请联系智能客服。</div>'));
+      }
+      // 再次申诉须新证据（§6.5 并行保留）
+      const hasDecided = prior.some((a) => a.status === 'rejected' || a.status === 'approved');
+      const newev = String(p.get('newev') || '').trim();
+      if (hasDecided && !newev) {
+        return sendHtml(res, 200, appealFormPage(username, '您已就同一处理提交过申诉。再次申诉须在「新证据说明」中写明新增的事实或证据。'));
+      }
+      const existU = data.appeals.find((a) => a.key === key && a.banId === chk.ban.id && a.status === 'pending');
+      if (existU) {
+        return sendHtml(res, 200, pageShell('申诉',
+          '<div class="ok">该封禁已有一条申诉正在审核中，无需重复提交。<br>申诉编号：' + esc(existU.id) + '<br><a href="/appeal/status?u=' + encodeURIComponent(username) + '">去看申诉进度</a></div>'));
+      }
+      const appealU = {
+        id: crypto.randomBytes(4).toString('hex'),
+        username, key, email, desc: newev ? desc + '\n【新证据】' + newev : desc,
+        reasonCode: chk.ban.code, banId: chk.ban.id,
+        status: 'pending', createdAt: Date.now(),
+      };
+      data.appeals.push(appealU);
+      try { saveAppeals(data); } catch (e) { return sendHtml(res, 500, appealFormPage(username, '提交失败，请稍后再试。')); }
+      licInternal('/internal/events/push', { type: 'appeal', refId: appealU.id, summary: { username: key, reasonCode: chk.ban.code } }); // #31 统一事件队列（不阻塞响应）
+      return sendHtml(res, 200, pageShell('申诉',
+        '<div class="ok">申诉已提交，正在审核中。申诉编号：' + esc(appealU.id) + '，请保存编号，凭编号在「申诉进度」查询结果。申诉已进入人工审核队列，处理结果将在进度页更新。</div>'
+        + '<a class="btn" href="/appeal/status?u=' + encodeURIComponent(username) + '">查看申诉进度</a>'));
+    }
+    return sendHtml(res, 200, pageShell('账号冻结申诉',
+      '<div class="ok">该账号当前未被冻结或封禁，无需申诉。如忘记密码，请联系站长处理。</div>'));
+  }
+  const data = loadAppeals();
+  // B1 属冻结类：同一处置（当日冻结）上限 3 次（16:53 裁决）
+  const priorB1 = data.appeals.filter((a) => a.key === key && a.freezeDay === st.day && !a.banId);
+  if (priorB1.length >= 3) {
+    return sendHtml(res, 200, pageShell('账号冻结申诉',
+      '<div class="err">本次冻结已达申诉次数上限（3 次），申诉入口关闭。冻结将于次日 0 点自动解除。</div>'));
+  }
+  const exist = data.appeals.find((a) => a.key === key && a.freezeDay === st.day && a.status === 'pending');
+  if (exist) {
+    return sendHtml(res, 200, pageShell('账号冻结申诉',
+      '<div class="ok">该账号今日已提交申诉，正在审核中，无需重复提交。<br><a href="/appeal/status?u=' + encodeURIComponent(username) + '">去看申诉进度</a></div>'));
+  }
+  const approvedOpen = data.appeals.find((a) => a.key === key && a.status === 'approved');
+  if (approvedOpen) {
+    return sendHtml(res, 200, pageShell('账号冻结申诉',
+      '<div class="ok">该账号的申诉已通过。<br><a href="/appeal/status?u=' + encodeURIComponent(username) + '">去申诉进度页改密码</a></div>'));
+  }
+  // 再次申诉须新证据（§6.5，阶段 F 深查修复：与统一封禁申诉同口径补齐
+  // B1 分支——此前 B1 被驳回后可无新证据重复提交，与统一路径不一致）
+  const newevB1 = String(p.get('newev') || '').trim();
+  const hasDecidedB1 = priorB1.some((a) => a.status === 'rejected');
+  if (hasDecidedB1 && !newevB1) {
+    return sendHtml(res, 200, appealFormPage(username, '您已就同一处理提交过申诉。再次申诉须在「新证据说明」中写明新增的事实或证据。'));
+  }
+  const appeal = {
+    id: crypto.randomBytes(4).toString('hex'),
+    username, key, email, desc: newevB1 ? desc + '\n【新证据】' + newevB1 : desc,
+    freezeDay: st.day,
+    status: 'pending',
+    createdAt: Date.now(),
+  };
+  data.appeals.push(appeal);
+  try { saveAppeals(data); }
+  catch (e) { return sendHtml(res, 500, appealFormPage(username, '提交失败，请稍后再试。')); }
+  licInternal('/internal/events/push', { type: 'appeal', refId: appeal.id, summary: { username: key, reasonCode: 'B1' } }); // #31 统一事件队列（不阻塞响应）
+  return sendHtml(res, 200, pageShell('账号冻结申诉',
+    '<div class="ok">申诉已提交，正在审核中。站长处理后，可在「申诉进度」中输入账号查看结果。</div>'
+    + '<a class="btn" href="/appeal/status?u=' + encodeURIComponent(username) + '">查看申诉进度</a>'));
+}
+
+function handleStatusQuery(req, res, p) {
+  const username = String(p.get('username') || '').trim();
+  if (!username) return sendHtml(res, 200, statusFormPage('', ''));
+  const data = loadAppeals();
+  const a = latestAppeal(data, appealKey(username));
+  let html;
+  if (!a) {
+    html = '<div class="err" style="margin-top:16px">未查询到该账号的申诉记录。</div>';
+  } else if (a.status === 'pending' && a.type === 'rebind') {
+    html = '<div style="margin-top:18px"><div class="status">审核中</div>'
+      + '<p class="note">换绑申诉已收到，正在人工审核中。审核通过后，同类旧设备将解绑、本设备将绑入。</p></div>';
+  } else if (a.status === 'pending') {
+    html = '<div style="margin-top:18px"><div class="status">审核中</div>'
+      + '<p class="note">申诉已收到，站长将尽快审核，请耐心等待。</p></div>';
+  } else if (a.status === 'approved' && a.type === 'rebind') {
+    html = '<div style="margin-top:18px"><div class="status">已通过</div>'
+      + '<p class="note">换绑申诉已通过，设备已换绑完成，请在新设备上登录使用。</p>'
+      + '<a class="btn" href="/">去登录</a></div>';
+  } else if (a.status === 'approved' && a.banId) {
+    html = '<div style="margin-top:18px"><div class="status">已通过</div>'
+      + '<p class="note">申诉已通过，封禁已解除，请重新登录。如曾因永久封禁被回收密钥，原密钥已恢复。</p>'
+      + '<a class="btn" href="/">去登录</a></div>';
+  } else if (a.status === 'approved') {
+    html = '<div style="margin-top:18px"><div class="status">已通过</div>'
+      + '<p class="note">申诉已通过，请点下方按钮设置新密码。设置完成后冻结自动解除，请使用新密码登录。</p>'
+      + '<a class="btn" href="/appeal/reset?t=' + encodeURIComponent(a.token || '') + '">修改密码</a></div>';
+  } else if (a.status === 'rejected') {
+    html = '<div style="margin-top:18px"><div class="status">已驳回</div>'
+      + '<p class="note">原因：' + esc(a.reason || '未说明') + '</p></div>';
+  } else if (a.status === 'done') {
+    html = '<div style="margin-top:18px"><div class="status">已通过</div>'
+      + '<p class="note">密码已经修改完成，冻结已解除，请用新密码登录。</p></div>';
+  } else {
+    html = '<div class="err" style="margin-top:16px">状态异常，请联系站长。</div>';
+  }
+  return sendHtml(res, 200, statusFormPage(username, html));
+}
+
+function findByToken(data, token) {
+  if (!token || !/^[a-f0-9]{48}$/.test(token)) return null;
+  return data.appeals.find((a) => a.status === 'approved' && a.token === token) || null;
+}
+function resetFormPage(token, errMsg) {
+  const inner = (errMsg ? '<div class="err">' + esc(errMsg) + '</div>' : '')
+    + '<form method="post" action="/appeal/reset">'
+    + '<input type="hidden" name="t" value="' + esc(token) + '">'
+    + '<label for="r-p1">新密码</label><input id="r-p1" name="password" type="password" required minlength="8" maxlength="256" placeholder="至少 8 位">'
+    + '<label for="r-p2">请再次输入新密码</label><input id="r-p2" name="password2" type="password" required minlength="8" maxlength="256">'
+    + '<button class="btn" type="submit">确认修改</button></form>'
+    + '<p class="note" style="margin-top:14px">本改密入口仅可使用一次。设置完成后冻结自动解除，请使用新密码登录。</p>';
+  return pageShell('修改密码', inner);
+}
+function handleResetGet(req, res, token) {
+  const data = loadAppeals();
+  const a = findByToken(data, token);
+  if (!a) {
+    return sendHtml(res, 200, pageShell('修改密码',
+      '<div class="err">本改密入口不正确，或已被使用。请返回「申诉进度」页输入账号重新查看。</div>'));
+  }
+  return sendHtml(res, 200, resetFormPage(token, ''));
+}
+function handleResetPost(req, res, p) {
+  const token = String(p.get('t') || '');
+  const pw = String(p.get('password') || '');
+  const pw2 = String(p.get('password2') || '');
+  const data = loadAppeals();
+  const a = findByToken(data, token);
+  if (!a) {
+    return sendHtml(res, 200, pageShell('修改密码',
+      '<div class="err">本改密入口不正确，或已被使用。请返回「申诉进度」页输入账号重新查看。</div>'));
+  }
+  if (pw.length < 8) return sendHtml(res, 200, resetFormPage(token, '新密码至少为 8 位。'));
+  if (pw !== pw2) return sendHtml(res, 200, resetFormPage(token, '两次输入的新密码不一致，请重新输入。'));
+  if (!passmod) return sendHtml(res, 500, resetFormPage(token, '服务器暂时无法处理，请稍后再试或联系站长。'));
+  passmod.hash(pw, (err, salt, hash) => {
+    if (err) return sendHtml(res, 500, resetFormPage(token, '服务器暂时无法处理，请稍后再试或联系站长。'));
+    let spoolFile;
+    try {
+      fs.mkdirSync(SPOOL_DIR, { recursive: true });
+      spoolFile = path.join(SPOOL_DIR, token + '.json');
+      fs.writeFileSync(spoolFile, JSON.stringify({ username: a.username, salt, hash }), { mode: 0o600 });
+    } catch (e) {
+      return sendHtml(res, 500, resetFormPage(token, '服务器暂时无法处理，请稍后再试或联系站长。'));
+    }
+    execFile('sudo', ['-n', SETPASS_CMD, token], { timeout: 90000 }, (e2) => {
+      if (e2) {
+        try { fs.unlinkSync(spoolFile); } catch (e) {}
+        console.error('申诉改密执行失败：', e2.message);
+        return sendHtml(res, 500, resetFormPage(token, '修改未成功，请稍后再试；如仍不成功，请联系站长。'));
+      }
+      a.status = 'done';
+      delete a.token;
+      a.doneAt = Date.now();
+      try { saveAppeals(data); } catch (e) {}
+      const st = freezeState.accounts[a.key];
+      if (st) { st.fails = 0; st.frozen = false; saveFreeze(); }
+      return sendHtml(res, 200, pageShell('修改密码',
+        '<div class="ok">密码已修改，冻结已解除。请用新密码登录。</div>'
+        + '<a class="btn" href="/">去登录</a>'));
+    });
+  });
+}
+
+server.listen(8450, '127.0.0.1', () => {
+  console.log('qfremote-loginshim listening on 127.0.0.1:8450');
+});

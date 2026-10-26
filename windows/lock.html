@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; }
+  body { overflow-y:auto; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    display:flex; flex-direction:column;
+  }
+  html[data-theme="dark"] body {
+    background: #17181c; color:#eceff3;
+  }
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:20px 22px 0; }
+  .tile {
+    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    box-sizing:border-box;
+  }
+  html[data-theme="dark"] .tile { background:#ffffff; }
+  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
+  .tt { margin-left:14px; padding-top:5px; }
+  .tt .nm { font-size:21px; font-weight:700; letter-spacing:.8px; line-height:1.1; }
+  .tt .ds { font-size:12px; color:#6b7a90; margin-top:5px; }
+  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .x {
+    -webkit-app-region: no-drag; margin-left:auto; appearance:none; border:none; cursor:pointer;
+    background:transparent; color:#6b7a90; width:30px; height:30px; border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    transition: background .13s ease, color .13s ease;
+  }
+  .x:hover { background:#d3382c; color:#fff; }
+  .x svg { width:14px; height:14px; }
+  .intro {
+    margin:18px 22px 0; padding:13px 16px; border-radius:14px; font-size:12.5px; line-height:1.7;
+    background: #ffffff; border:1px solid #dfe7f2; color:#1f2d47;
+  }
+  html[data-theme="dark"] .intro { background: #22262e; border-color: rgba(255,255,255,.08);
+    color:#c9cdd4; }
+  .dev {
+    margin:14px 22px 0; padding:14px 16px; border-radius:14px;
+    background: #ffffff;
+    border:1px solid #dfe7f2;
+  }
+  html[data-theme="dark"] .dev { background: #22262e; border-color: rgba(255,255,255,.08); }
+  .drow { display:flex; align-items:center; gap:10px; }
+  .drow::before { content:""; flex:none; width:34px; height:34px; border-radius:9px; background:#eef3fb url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232470e0' stroke-width='2' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E") center/19px no-repeat; }
+  html[data-theme="dark"] .drow::before { background-color:rgba(255,255,255,.07); background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238fb8f5' stroke-width='2' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E"); }
+  ::-webkit-scrollbar { width:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:#c9d6ea; border-radius:6px; border:2px solid #f4f7fb; }
+  html[data-theme="dark"] ::-webkit-scrollbar-thumb { background:#3a3f49; border-color:#17181c; }
+  .dname { font-size:15px; font-weight:600; flex:1; word-break:break-all; color:#1f2d47; }
+  html[data-theme="dark"] .dname { color:#eceff3; }
+  .dstat { font-size:12px; color:#6b7a90; white-space:nowrap; }
+  html[data-theme="dark"] .dstat { color:#9aa1ab; }
+  .dstat.locked { color:#f58a0c; font-weight:600; }
+  .note { font-size:12px; color:#6b7a90; margin-top:8px; line-height:1.6; }
+  html[data-theme="dark"] .note { color:#9aa1ab; }
+  /* 开关（手动，默认关） */
+  .sw { -webkit-app-region: no-drag; flex:none; width:46px; height:26px; border-radius:99px; cursor:pointer;
+    border:none; background: #c9d6ea; position:relative; padding:0; appearance:none;
+    transition: background .15s ease; }
+  html[data-theme="dark"] .sw { background: rgba(255,255,255,.18); }
+  .sw i { position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%;
+    background:#fff; box-shadow: 0 1px 3px rgba(11,43,91,.25); transition: left .15s ease; display:block; }
+  .sw.on { background: #2470e0; }
+  html[data-theme="dark"] .sw.on { background: #2470e0; }
+  .sw.on i { left:23px; background:#fff; }
+  .sw:disabled { opacity:.45; cursor:default; }
+  .form { display:none; margin-top:12px; border-top:1px solid #dfe7f2; padding-top:12px; }
+  html[data-theme="dark"] .form { border-top-color: rgba(255,255,255,.08); }
+  .form.show { display:block; }
+  .form label { display:block; font-size:12px; color:#6b7a90; margin:9px 0 5px; }
+  html[data-theme="dark"] .form label { color:#9aa1ab; }
+  .form input {
+    width:100%; box-sizing:border-box; padding:9px 11px; border-radius:10px; font-size:14px;
+    border:1px solid #dfe7f2; background: #f4f7fb; color:#1f2d47; outline:none;
+    font-family:inherit; transition: border-color .13s ease, box-shadow .13s ease;
+  }
+  html[data-theme="dark"] .form input { background: #1b1e24; border-color: rgba(255,255,255,.14); color:#eceff3; }
+  .form input:focus { border-color:#2470e0; box-shadow: 0 0 0 3px rgba(36,112,224,.18); }
+  .btn {
+    width:100%; border:none; cursor:pointer; font-family:inherit; margin-top:13px;
+    font-size:14px; font-weight:600; color:#fff; letter-spacing:1px;
+    padding:10.5px 0; border-radius:12px;
+    background: #2470e0;
+    transition: filter .15s ease, opacity .15s;
+  }
+  .btn:hover { filter: brightness(1.07); }
+  .btn:disabled { opacity:.55; cursor:default; filter:none; }
+  .btn.ghost { background: #ffffff; color:#2470e0;
+    border:1px solid #c9d6ea; }
+  .btn.ghost:hover { filter:none; background:#eef3fb; }
+  .btn.ghost:active { background:#e1ecfc; }
+  html[data-theme="dark"] .btn.ghost { background: #2b2f36; color:#eceff3;
+    border-color: rgba(255,255,255,.16); }
+  html[data-theme="dark"] .btn.ghost:hover { background:#32363f; }
+  html[data-theme="dark"] .btn.ghost:active { background:#3a3f49; }
+  .btn.danger { background: #d3382c; }
+  .linkbtn { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit;
+    color:#2470e0; font-size:12.5px; padding:0; margin-top:11px; text-decoration:underline; }
+  html[data-theme="dark"] .linkbtn { color:#8fb8f5; }
+  .msg { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center; color:#6b7a90; }
+  html[data-theme="dark"] .msg { color:#a7adb8; }
+  .msg .ok { color:#128a43; font-weight:600; }
+  .msg .bad { color:#d3382c; font-weight:600; }
+  html[data-theme="dark"] .msg .ok { color:#5eeaa0; }
+  html[data-theme="dark"] .msg .bad { color:#ff9d8f; }
+  .statebox { margin:18px 22px 0; text-align:center; font-size:13.5px; line-height:1.8; color:#1f2d47; }
+  html[data-theme="dark"] .statebox { color:#c9cdd4; }
+  .statebox .btn { max-width:260px; margin-left:auto; margin-right:auto; }
+  .foot { margin-top:auto; padding:16px 22px 15px; text-align:center;
+    font-size:11.5px; color:rgba(107,122,144,.75); }
+  html[data-theme="dark"] .foot { color:rgba(167,173,184,.55); }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
+    <div class="tt">
+      <div class="nm">隐私锁</div>
+      <div class="ds">QFRemote · 只锁电脑跟前</div>
+    </div>
+    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+
+  <div class="intro">打开后，这台电脑屏幕变黑、只留输密码的框，坐在跟前的人看不见也动不了，必须输对密码才能用。远程控制不受影响。密码只用这一次：本地解锁成功后自动作废，下次打开重新设置。不想锁就不打开，关着一切照常。</div>
+
+  <div class="statebox" id="stateBox">正在读取设备…</div>
+  <div id="list"></div>
+  <div class="msg" id="msg"></div>
+
+  <div class="foot">QFRemote 远程控制 · 隐私锁</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  function applyTheme(t) {
+    if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+  }
+  applyTheme(q.get('t') || 'blue');
+  qfLock.onTheme(applyTheme);
+  document.getElementById('close').addEventListener('click', () => qfLock.close());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') qfLock.close(); });
+
+  const stateBox = document.getElementById('stateBox');
+  const listEl = document.getElementById('list');
+  const msgEl = document.getElementById('msg');
+  let devices = [];
+  let busy = false;
+
+  function say(html, bad) {
+    msgEl.innerHTML = html || '';
+    msgEl.className = 'msg' + (bad ? ' badwrap' : '');
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function renderState(kind, text) {
+    listEl.innerHTML = '';
+    if (kind === 'loading') { stateBox.textContent = '正在读取设备…'; stateBox.style.display = ''; return; }
+    if (kind === 'none') { stateBox.style.display = 'none'; return; }
+    stateBox.style.display = '';
+    stateBox.innerHTML = '';
+    const div = document.createElement('div');
+    div.textContent = text || '';
+    stateBox.appendChild(div);
+    if (kind === 'login') {
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = '关闭面板';
+      b.addEventListener('click', () => qfLock.close());
+      stateBox.appendChild(b);
+    } else if (kind === 'retry') {
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = '重试';
+      b.addEventListener('click', load);
+      stateBox.appendChild(b);
+    }
+  }
+
+  function pwField(labelText, id) {
+    const wrap = document.createElement('div');
+    const lab = document.createElement('label');
+    lab.textContent = labelText;
+    const inp = document.createElement('input');
+    inp.type = 'password'; inp.id = id; inp.autocomplete = 'off';
+    wrap.appendChild(lab); wrap.appendChild(inp);
+    return { wrap, inp };
+  }
+
+  function renderDevices() {
+    renderState('none');
+    listEl.innerHTML = '';
+    devices.forEach((d) => {
+      const card = document.createElement('div');
+      card.className = 'dev';
+      const row = document.createElement('div');
+      row.className = 'drow';
+      const nm = document.createElement('div');
+      nm.className = 'dname'; nm.textContent = d.name;
+      const st = document.createElement('div');
+      st.className = 'dstat' + (d.locked ? ' locked' : '');
+      st.textContent = d.locked ? '已锁定' : '未锁定';
+      row.appendChild(nm); row.appendChild(st);
+
+      const manageable = d.owner && d.component;
+      if (manageable) {
+        const sw = document.createElement('button');
+        sw.className = 'sw' + (d.locked ? ' on' : '');
+        sw.title = d.locked ? '关闭隐私锁' : '打开隐私锁（先设密码）';
+        sw.innerHTML = '<i></i>';
+        row.appendChild(sw);
+        card.appendChild(row);
+
+        // 打开表单：先设本次密码，提交成功才真正打开
+        const form = document.createElement('div');
+        form.className = 'form';
+        const f1 = pwField('设置本次密码（至少 4 位）', '');
+        const f2 = pwField('请再次输入', '');
+        const hint = document.createElement('div');
+        hint.className = 'note';
+        hint.textContent = '密码只用这一次：本地解锁成功后自动作废，下次打开重新设置。';
+        const go = document.createElement('button');
+        go.className = 'btn'; go.textContent = '打开隐私锁';
+        form.appendChild(f1.wrap); form.appendChild(f2.wrap); form.appendChild(hint); form.appendChild(go);
+        card.appendChild(form);
+
+        // 已锁定操作区：关锁（二次确认）＋忘记密码重设
+        const ops = document.createElement('div');
+        ops.className = 'form' + (d.locked ? ' show' : '');
+        const off = document.createElement('button');
+        off.className = 'btn danger'; off.textContent = '关闭隐私锁';
+        const forgot = document.createElement('button');
+        forgot.className = 'linkbtn'; forgot.textContent = '忘记密码？用登录密码重设';
+        const rform = document.createElement('div');
+        rform.className = 'form';
+        const r1 = pwField('您的 QFRemote 登录密码', '');
+        const r2 = pwField('新锁密码（至少 4 位）', '');
+        const r3 = pwField('请再次输入新锁密码', '');
+        const rgo = document.createElement('button');
+        rgo.className = 'btn'; rgo.textContent = '重设密码（电脑保持锁定）';
+        rform.appendChild(r1.wrap); rform.appendChild(r2.wrap); rform.appendChild(r3.wrap); rform.appendChild(rgo);
+        ops.appendChild(off); ops.appendChild(forgot); ops.appendChild(rform);
+        card.appendChild(ops);
+
+        let armed = false;
+        sw.addEventListener('click', () => {
+          if (busy) return;
+          if (d.locked) {
+            form.classList.remove('show');
+            ops.classList.add('show');
+            off.focus();
+          } else {
+            ops.classList.remove('show');
+            form.classList.toggle('show');
+            if (form.classList.contains('show')) f1.inp.focus();
+          }
+        });
+        go.addEventListener('click', async () => {
+          if (busy) return;
+          const pw = f1.inp.value, pw2 = f2.inp.value;
+          if (pw.length < 4) { say('<span class="bad">密码至少 4 位，请检查后重试。</span>', true); return; }
+          if (pw !== pw2) { say('<span class="bad">两次输入的密码不一致，请检查后重试。</span>', true); return; }
+          busy = true; go.disabled = true;
+          const r = await qfLock.enable(d.id, pw);
+          busy = false; go.disabled = false;
+          f1.inp.value = ''; f2.inp.value = '';
+          if (r && r.ok) { say('<span class="ok">已开启。</span>本机屏幕已锁定，须在本机输入正确密码后使用。'); load(); }
+          else say('<span class="bad">' + esc((r && r.error) || '打开失败，请稍后再试。') + '</span>', true);
+        });
+        off.addEventListener('click', async () => {
+          if (busy) return;
+          if (!armed) {
+            armed = true;
+            off.textContent = '再次点击确认关闭（本次密码立即作废）';
+            setTimeout(() => { armed = false; off.textContent = '关闭隐私锁'; }, 3500);
+            return;
+          }
+          busy = true; off.disabled = true;
+          const r = await qfLock.disable(d.id);
+          busy = false; off.disabled = false;
+          if (r && r.ok) { say('<span class="ok">已关闭。</span>本次密码已作废。'); load(); }
+          else say('<span class="bad">' + esc((r && r.error) || '关闭失败，请稍后再试。') + '</span>', true);
+        });
+        forgot.addEventListener('click', () => rform.classList.toggle('show'));
+        rgo.addEventListener('click', async () => {
+          if (busy) return;
+          const lp = r1.inp.value, np = r2.inp.value, np2 = r3.inp.value;
+          if (!lp) { say('<span class="bad">请输入登录密码。</span>', true); return; }
+          if (np.length < 4) { say('<span class="bad">密码至少 4 位，请检查后重试。</span>', true); return; }
+          if (np !== np2) { say('<span class="bad">两次输入的密码不一致，请检查后重试。</span>', true); return; }
+          busy = true; rgo.disabled = true;
+          const r = await qfLock.reset(d.id, lp, np);
+          busy = false; rgo.disabled = false;
+          r1.inp.value = ''; r2.inp.value = ''; r3.inp.value = '';
+          if (r && r.ok) { say('<span class="ok">已重设。</span>电脑保持锁定状态，请使用新密码在本机解锁。'); load(); }
+          else say('<span class="bad">' + esc((r && r.error) || '重设失败，请稍后再试。') + '</span>', true);
+        });
+      } else {
+        card.appendChild(row);
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = !d.component
+          ? '这台电脑尚未安装本机锁组件，暂无法使用隐私锁。'
+          : '仅设备所有者可管理这台电脑的隐私锁。';
+        card.appendChild(note);
+      }
+      listEl.appendChild(card);
+    });
+    if (!devices.length) renderState('retry', '未能读取设备列表。请确认已登录后重试。');
+  }
+
+  async function load() {
+    renderState('loading');
+    say('');
+    let r;
+    try { r = await qfLock.devices(); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    if (r && r.ok) {
+      devices = r.devices || [];
+      renderDevices();
+    } else if (r && r.code === 'NEED_LOGIN') {
+      renderState('login', '软件的登录状态已失效，请重新登录软件后再回来管理隐私锁。');
+    } else {
+      renderState('retry', (r && r.error) || '暂时无法连接隐私锁服务，请检查网络后重试。');
+    }
+  }
+  load();
+</script>
+</body>
+</html>

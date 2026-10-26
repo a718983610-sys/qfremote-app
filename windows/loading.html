@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #f4f7fb;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+  }
+  .card {
+    background: #ffffff;
+    border:1px solid #dfe7f2; border-radius:14px;
+    padding:46px 60px 40px; display:flex; flex-direction:column; align-items:center;
+    animation: rise .5s ease both;
+  }
+  @keyframes rise { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
+  .tile {
+    width:88px; height:88px; border-radius:20px; padding:4px; box-sizing:border-box;
+    background: #0b2b5b;
+  }
+  .tile img { width:100%; height:100%; border-radius:17px; display:block; }
+  .name { font-size:20px; font-weight:600; letter-spacing:1.2px; margin-top:17px; color:#1f2d47; }
+  .bar { width:196px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:25px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:38%; border-radius:3px;
+    background: #2470e0;
+    animation: slide 1.15s ease-in-out infinite alternate; }
+  @keyframes slide { from { transform: translateX(-55%);} to { transform: translateX(315%);} }
+  .hint { font-size:13.5px; color:#6b7a90; margin-top:12px; }
+  /* 深灰深色主题（与工具栏联动，不用纯黑） */
+  html[data-theme="dark"] body { background: #17181c; }
+  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
+  html[data-theme="dark"] .tile { background: #ffffff; }
+  html[data-theme="dark"] .name { color:#eceff3; }
+  html[data-theme="dark"] .bar { background: rgba(255,255,255,.14); }
+  html[data-theme="dark"] .hint { color:#9aa1ab; }
+</style>
+</head>
+<body>
+  <div class="orbit"></div>
+  <div class="card">
+    <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
+    <div class="name">QFRemote</div>
+    <div class="bar"><i></i></div>
+    <div class="hint">正在连接 QFRemote 服务器…</div>
+  </div>
+<script>
+  if (new URLSearchParams(location.search).get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+</script>
+</body>
+</html>

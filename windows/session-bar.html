@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:#ffffff; color:#1f2d47; box-sizing:border-box;
+    border-bottom:1px solid #dfe7f2;
+    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    display:flex; align-items:center; gap:10px; padding:0 12px;
+    -webkit-user-select:none; user-select:none;
+  }
+  html[data-theme="dark"] body { background:#22262e; color:#eceff3; border-bottom-color:rgba(255,255,255,.08); }
+  .dot { width:9px; height:9px; border-radius:50%; background:#1db954; flex:none; }
+  .title { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mode { font-size:12.5px; color:#6b7a90; white-space:nowrap; }
+  html[data-theme="dark"] .mode { color:rgba(228,232,238,.60); }
+  .spacer { flex:1; }
+  button {
+    appearance:none; border:1px solid #c9d6ea; background:#ffffff; color:#2470e0;
+    border-radius:8px; cursor:pointer; font-family:inherit; font-size:13px;
+    height:30px; padding:0 12px; display:flex; align-items:center; gap:5px; flex:none;
+  }
+  html[data-theme="dark"] button { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16); }
+  button:hover { background:#eef3fb; }
+  html[data-theme="dark"] button:hover { background:#32363f; }
+  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
+</style>
+</head>
+<body>
+  <span class="dot"></span>
+  <span class="title" id="title">远程会话</span>
+  <span class="mode" id="mode"></span>
+  <span class="spacer"></span>
+  <button id="back" title="断开当前会话并返回设备列表">断开并返回</button>
+<script>
+  const q = new URLSearchParams(location.search);
+  if (q.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+  const titleEl = document.getElementById('title');
+  const modeEl = document.getElementById('mode');
+  if (q.get('title')) titleEl.textContent = q.get('title');
+  if (q.get('mode')) modeEl.textContent = q.get('mode');
+  if (window.qfSessionBar) {
+    qfSessionBar.onState((s) => {
+      if (!s) return;
+      if (s.title) titleEl.textContent = s.title;
+      if (typeof s.mode === 'string') modeEl.textContent = s.mode;
+    });
+    qfSessionBar.onTheme((t) => {
+      if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+      else delete document.documentElement.dataset.theme;
+    });
+  }
+  document.getElementById('back').addEventListener('click', () => { if (window.qfSessionBar) qfSessionBar.back(); });
+</script>
+</body>
+</html>

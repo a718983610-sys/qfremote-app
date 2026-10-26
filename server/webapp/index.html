@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>QFRemote 控制台</title>
+<link rel="stylesheet" href="app.css?v=20261026-24">
+<link rel="icon" type="image/x-icon" href="favicon.ico?v=20261026-24">
+</head>
+<body>
+  <!-- 未登录区（登录 / 注册 / 拦截状态：单卡布局，无顶栏） -->
+  <div id="authRoot" hidden></div>
+
+  <!-- 登录区（统一壳：桌面固定边栏 / 移动单行顶栏＋底部导航，视图同框切换） -->
+  <div id="shellRoot" hidden>
+    <div class="app">
+      <aside class="side" id="sidebar"></aside>
+      <div class="main">
+        <div class="top">
+          <button class="burger" id="burgerBtn" aria-label="打开主菜单"></button>
+          <div class="search" id="topSearch"></div>
+          <div class="grow"></div>
+          <span class="online" id="svcState"><i></i>服务正常</span>
+          <button class="iconbtn" id="bellBtn" aria-label="通知"></button>
+          <span class="acctwrap">
+            <button class="uchip" id="acctChip"></button>
+            <span class="acctmenu" id="acctMenu"></span>
+          </span>
+        </div>
+        <main id="view" aria-live="polite"></main>
+        <div class="foot">QFRemote · 让远程连接更简单</div>
+      </div>
+    </div>
+    <div class="dscrim" id="drawerScrim" aria-hidden="true"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true"></aside>
+    <nav class="bnav" id="bnav"></nav>
+  </div>
+
+  <!-- 提示层（恒在最上层）与弹窗层 -->
+  <div id="toasts" role="status"></div>
+  <div id="modalRoot"></div>
+
+<script src="app.js?v=20261026-24"></script>
+</body>
+</html>

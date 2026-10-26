@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>模拟：MeshCentral 登录页</title></head>
+<body style="font-family:sans-serif;background:#16283f;color:#dfe9f7;">
+  <div id="loginpanel">
+    <form id="loginpanelform" method="post" action="/do-login">
+      <input type="hidden" name="action" value="login">
+      <div id="message1"></div>
+      <div id="loginuserpassdiv">
+        <table style="width:100%">
+          <tr><td><input id="username" name="username" type="text" placeholder="账号" autocomplete="username"></td></tr>
+          <tr><td><input id="password" name="password" type="password" placeholder="密码" autocomplete="current-password"></td></tr>
+          <tr><td><label style="box-sizing:border-box;width:280px;display:block;text-align:left;font-size:13px;padding:6px 2px 0 2px;cursor:pointer"><input id="qfRememberDevice" name="qfrememberdevice" type="checkbox" style="vertical-align:-2px;margin-right:6px">记住此设备</label></td></tr>
+          <tr><td><input id="loginButton" type="button" value="登录" onclick="submitButtonClicked('loginpanelform')"></td></tr>
+        </table>
+      </div>
+      <input id="loginformargs" name="urlargs" type="hidden" value="">
+    </form>
+  </div>
+<script>
+  // 与真实登录页同名同义：点按钮即原生 submit（不触发 submit 事件）
+  function submitButtonClicked(v) { document.getElementById(v).submit(); }
+  if (location.search.indexOf('err=1') >= 0) {
+    document.getElementById('message1').innerHTML = '<span class="msg error">登录失败，请检查账号和密码后重试。</span>';
+  }
+</script>
+</body>
+</html>

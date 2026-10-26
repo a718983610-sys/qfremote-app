@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>注册 QFRemote 账号</title>
+<style>
+  :root{
+    --bg1:#E8F1FE; --bg2:#F7FAFF; --bg3:#FFFFFF;
+    --glow:rgba(63,140,255,.16);
+    --card:#FFFFFF; --card-border:rgba(13,49,112,.07);
+    --ink:#0B2B5B; --body:#243B5E; --sub:#6B7A90; --foot:#8494AC;
+    --field-bg:#FBFCFE; --field-border:#D7E1F2; --field-ink:#10294D;
+    --ok-ink:#12753C; --ok-bg:#E7F8EE; --ok-border:#B7E8C8;
+    --bad-ink:#D92D20; --bad-bg:#FDECEA; --bad-border:#F3B8B2; --bad-field:#E5484D;
+    --ring:rgba(36,112,224,.15);
+    --shadow:0 12px 40px rgba(13,49,112,.12);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg1:#0D1420; --bg2:#12161D; --bg3:#171B23;
+      --glow:rgba(36,112,224,.22);
+      --card:#22262E; --card-border:rgba(255,255,255,.07);
+      --ink:#EAF1FD; --body:#EDF2F9; --sub:#9AA7BC; --foot:#77839A;
+      --field-bg:#2B3038; --field-border:#3A4150; --field-ink:#EDF2F9;
+      --ok-ink:#5EEAA0; --ok-bg:#173527; --ok-border:#265C40;
+      --bad-ink:#FF9D8F; --bad-bg:#3A2320; --bad-border:#6E3A33; --bad-field:#FF8A7A;
+      --ring:rgba(63,140,255,.25);
+      --shadow:0 12px 40px rgba(0,0,0,.45);
+    }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; overflow-x:hidden; } /* 顶部光晕伪元素宽 640px 居中，窄屏会撑出横向滚动（M2 弹窗普查修复），裁掉横向溢出、视觉不变 */
+  body {
+    min-height:100dvh;
+    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    color:var(--body);
+    background:linear-gradient(180deg,var(--bg1) 0%,var(--bg2) 55%,var(--bg3) 100%);
+    display:flex; justify-content:center;
+    padding:36px 16px calc(40px + env(safe-area-inset-bottom));
+    position:relative;
+  }
+  body::before{
+    content:""; position:absolute; left:50%; top:-140px; transform:translateX(-50%);
+    width:640px; max-width:120vw; height:340px; border-radius:50%;
+    background:radial-gradient(closest-side,var(--glow),transparent 72%);
+    pointer-events:none;
+  }
+  .wrap { width:100%; max-width:448px; position:relative; }
+  .brand { text-align:center; }
+  .brand .logo { width:56px; height:56px; margin:0 auto; filter:drop-shadow(0 8px 20px rgba(13,49,112,.28)); }
+  .brand .logo svg { display:block; width:100%; height:100%; }
+  h1 { margin:16px 0 0; font-size:26px; font-weight:800; letter-spacing:.4px; color:var(--ink); }
+  .ds { margin-top:8px; font-size:14px; line-height:1.6; color:var(--sub); }
+  .card {
+    margin-top:24px; padding:28px 28px 24px;
+    background:var(--card); border:1px solid var(--card-border); border-radius:14px;
+    box-shadow:var(--shadow); text-align:left;
+  }
+  .field { margin-top:18px; }
+  .field:first-child { margin-top:0; }
+  label { display:block; font-size:14px; font-weight:600; color:var(--body); margin:0 2px 8px; }
+  input {
+    width:100%; height:52px; padding:0 16px; font-size:16px; font-family:inherit;
+    color:var(--field-ink); background:var(--field-bg);
+    border:1.5px solid var(--field-border); border-radius:12px; outline:none;
+    -webkit-appearance:none; appearance:none;
+  }
+  input::placeholder { color:var(--sub); opacity:.75; }
+  input:focus { border-color:#2470E0; box-shadow:0 0 0 4px var(--ring); }
+  input.invalid { border-color:var(--bad-field); }
+  input.invalid:focus { box-shadow:0 0 0 4px rgba(229,72,77,.16); }
+  .hint { font-size:12.5px; color:var(--sub); margin:7px 2px 0; line-height:1.6; }
+  .err { display:none; font-size:13px; line-height:1.55; color:var(--bad-ink); margin:7px 2px 0; }
+  .err.show { display:block; }
+  .btn {
+    width:100%; height:52px; margin-top:24px; border:none; cursor:pointer; font-family:inherit;
+    font-size:16.5px; font-weight:600; color:#fff; letter-spacing:1px;
+    border-radius:12px;
+    background:linear-gradient(180deg,#3F8CFF,#2470E0);
+    box-shadow:0 10px 22px rgba(20,90,220,.35), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  .btn:active { transform:scale(.99); }
+  .btn:disabled { opacity:.6; cursor:default; transform:none; }
+  .agree { margin-top:14px; text-align:center; font-size:12.5px; line-height:1.7; color:var(--sub); }
+  .agree a { color:#2470E0; text-decoration:none; font-weight:600; }
+  @media (prefers-color-scheme: dark){ .agree a { color:#7FB8F5; } }
+  .res { display:none; margin-top:18px; padding:12px 14px; border-radius:12px;
+         font-size:14px; line-height:1.65; text-align:center; border:1px solid transparent; }
+  .res.show { display:block; }
+  .res.ok  { background:var(--ok-bg);  border-color:var(--ok-border);  color:var(--ok-ink); }
+  .res.bad { background:var(--bad-bg); border-color:var(--bad-border); color:var(--bad-ink); }
+  .res .ok, .res .bad { font-weight:600; }
+  .foot { margin-top:20px; text-align:center; font-size:12.5px; line-height:1.8; color:var(--foot); }
+  @media (max-width:480px){
+    body { padding:26px 16px calc(32px + env(safe-area-inset-bottom)); }
+    h1 { font-size:24px; }
+    .card { padding:24px 18px 20px; border-radius:16px; margin-top:20px; }
+    .brand .logo { width:52px; height:52px; }
+  }
+  @media (min-width:1024px){
+    .wrap { max-width:480px; }
+    .card { padding:40px 40px 34px; }
+    h1 { font-size:28px; }
+    .brand .logo { width:60px; height:60px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs><linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0A3566"/><stop offset="1" stop-color="#1460B4"/></linearGradient></defs><rect x="0" y="0" width="1024" height="1024" rx="205" fill="url(#tile)"/><text x="450" y="553" font-family="Noto Sans, Arial, sans-serif" font-weight="bold" font-size="614" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">Q</text><g fill="none" stroke="#7FB8F5" stroke-width="36" stroke-linecap="round"><path d="M 682 184 A 90 90 0 0 1 772 274" transform="rotate(0 753 271) translate(-71 -87)"/><path d="M 830 112 A 232 232 0 0 1 985 267" transform="translate(-232 -159)"/><path d="M 762 178 A 160 160 0 0 1 885 301" transform="translate(-132 -137)"/></g><circle cx="760" cy="44" r="31" fill="#FF9E2C"/></svg>
+    </div>
+    <h1>注册 QFRemote 账号</h1>
+    <div class="ds">填写账号和密码即可注册，注册后可直接登录 QFRemote</div>
+  </div>
+
+  <div class="card">
+    <div class="field">
+      <label for="fUser">账号名</label>
+      <input id="fUser" autocomplete="off" autocapitalize="none" placeholder="例如 zhangsan88">
+      <div class="hint">账号须为字母与数字的组合，至少 8 位。账号名仅可修改一次，请谨慎填写。</div>
+      <div class="err" id="errUser"></div>
+    </div>
+
+    <div class="field">
+      <label for="fPw">设置密码</label>
+      <input id="fPw" type="password" autocomplete="new-password" placeholder="至少 8 位">
+      <div class="hint">至少 8 位。密码以后随时能改、不限次数。</div>
+      <div class="err" id="errPw"></div>
+    </div>
+
+    <div class="field">
+      <label for="fPw2">再输一次密码</label>
+      <input id="fPw2" type="password" autocomplete="new-password" placeholder="请再次输入密码">
+      <div class="err" id="errPw2"></div>
+    </div>
+
+    <button class="btn" id="go">注册</button>
+    <div class="agree">注册即代表同意《<a id="lnkTerms" href="/terms#agreement" target="_blank" rel="noopener">用户协议</a>》与《<a id="lnkPrivacy" href="/terms#privacy" target="_blank" rel="noopener">隐私说明</a>》</div>
+    <div class="res" id="res"></div>
+    <a href="/purchase" style="display:block;text-align:center;background:#111;color:#fff;font-size:14px;font-weight:600;border-radius:9px;padding:11px 6px;margin-top:14px;text-decoration:none">购买密钥</a>
+    <div style="text-align:center;padding-top:8px"><a href="/license/status" style="color:#2470E0;font-size:13.5px;text-decoration:none">查询密钥</a></div>
+  </div>
+
+  <div class="foot">注册遇到问题？<a href="/support" style="color:#2470E0;text-decoration:none;font-weight:600">智能客服</a> 可以帮您解答，也可以转人工。</div>
+  <div class="foot">注册失败次数过多，本设备今日将暂停注册，次日自动恢复。<br>注册成功后，请打开 QFRemote 软件，使用新注册的账号和密码登录。</div>
+</div>
+
+<script>
+  // 协议页在控制台（同源 /terms）；经 8444 直连打开本页时，改指同主机的 8443。
+  if (location.port === '8444') {
+    var tBase = location.protocol + '//' + location.hostname + ':8443/terms';
+    document.getElementById('lnkTerms').href = tBase + '#agreement';
+    document.getElementById('lnkPrivacy').href = tBase + '#privacy';
+  }
+  var res = document.getElementById('res');
+  var btn = document.getElementById('go');
+  function val(id) { return document.getElementById(id).value; }
+  function clearAll() {
+    ['fUser','fPw','fPw2'].forEach(function (id) { document.getElementById(id).classList.remove('invalid'); });
+    ['errUser','errPw','errPw2'].forEach(function (id) { var e = document.getElementById(id); e.textContent = ''; e.classList.remove('show'); });
+    res.className = 'res'; res.innerHTML = '';
+  }
+  function fieldError(inputId, errId, msg) {
+    var inp = document.getElementById(inputId);
+    var e = document.getElementById(errId);
+    inp.classList.add('invalid'); e.textContent = msg; e.classList.add('show');
+    inp.focus();
+  }
+  function show(html, kind) { res.className = 'res show ' + kind; res.innerHTML = html; }
+  ['fUser','fPw','fPw2'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', function () {
+      this.classList.remove('invalid');
+      var e = document.getElementById('err' + id.slice(1));
+      if (e) { e.textContent = ''; e.classList.remove('show'); }
+    });
+  });
+  btn.addEventListener('click', async function () {
+    clearAll();
+    var user = val('fUser').trim().toLowerCase();
+    var pw = val('fPw'), pw2 = val('fPw2');
+    if (user.length < 8) { fieldError('fUser', 'errUser', '账号须为字母与数字的组合，至少 8 位，请检查后重试。'); return; }
+    if (user.length > 32) { fieldError('fUser', 'errUser', '账号最多 32 位，请检查后重试。'); return; }
+    if (!/^[a-z0-9]+$/.test(user)) { fieldError('fUser', 'errUser', '账号须为字母与数字的组合，至少 8 位，请检查后重试。'); return; }
+    if (!/[a-z]/.test(user)) { fieldError('fUser', 'errUser', '账号须为字母与数字的组合，至少 8 位，请检查后重试。'); return; }
+    if (!/[0-9]/.test(user)) { fieldError('fUser', 'errUser', '账号须为字母与数字的组合，至少 8 位，请检查后重试。'); return; }
+    if (pw.length < 8) { fieldError('fPw', 'errPw', '密码至少 8 位，请检查后重试。'); return; }
+    if (pw !== pw2) { fieldError('fPw2', 'errPw2', '两次输入的密码不一致，请检查后重试。'); return; }
+    btn.disabled = true; btn.textContent = '正在注册…';
+    try {
+      var r = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pw, password2: pw2 })
+      });
+      var d = await r.json();
+      if (d.ok) {
+        show('<span class="ok">注册成功！</span>' + d.msg.replace(/^注册成功。/, ''), 'ok');
+        btn.textContent = '注册成功';
+      } else {
+        show('<span class="bad">' + d.msg + '</span>', 'bad');
+        btn.disabled = false; btn.textContent = '注册';
+      }
+    } catch (e) {
+      show('<span class="bad">无法连接服务器，请检查网络后重试。</span>', 'bad');
+      btn.disabled = false; btn.textContent = '注册';
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>模拟：桌面会话</title></head>
+<body style="font-family:sans-serif;background:#16283f;color:#dfe9f7;">
+  <h3>远程桌面（模拟页）</h3>
+  <div>状态：<span id="st">已断线</span></div>
+  <p><button id="btn">连接</button></p>
+<script>
+  window.__clicks = 0;
+  document.getElementById('btn').addEventListener('click', function () {
+    window.__clicks++;
+    document.getElementById('st').textContent = '正在连接';
+    document.getElementById('btn').style.display = 'none';
+    setTimeout(function () {
+      document.getElementById('st').textContent = '已连接';
+    }, 900);
+  });
+</script>
+</body>
+</html>

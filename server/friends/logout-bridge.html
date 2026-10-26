@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>正在退出 · QFRemote</title>
+<style>
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; background:#F4F7FB; color:#1F2D47; }
+  .wrap { max-width:430px; margin:0 auto; padding:40px 16px; }
+  .card { background:#fff; border:1px solid #DFE7F2; border-radius:14px; padding:24px 20px; }
+  h1 { font-size:18px; color:#0B2B5B; margin:0 0 10px; }
+  p { font-size:14px; line-height:1.8; color:#43536a; margin:6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap"><div class="card">
+  <h1>正在退出登录</h1>
+  <p id="msg">正在结束各页面的登录状态，请稍候…</p>
+</div></div>
+<script>
+/* QFRemote 网页退出桥（2.3.0 M2 线）
+   直连 IP 控制台页受上游 CSP 限制（connect-src 只许同源），跨源退出
+   请求发不出去；本页长在好友服务源（8445，与控制台同主机、无此限
+   制），由控制台退出确认时以弹窗打开，逐站终止子会话：
+   ① 本站（好友/聊天）POST /api/friends/logout（同源 fetch）；
+   ② 顶层跳论坛导航退出（顶层 GET 能带上论坛会话 cookie），论坛
+      处理完 302 回本页第二步；
+   ③ 顶层跳站长管理现成的 GET /admin/logout，其「已退出」页即终点。
+   任一步失败都继续往下走，绝不把人卡在桥上；隧道源控制台同源可直
+   接级联，不经本桥。 */
+(function () {
+  'use strict';
+  var PRODUCT_JSON = 'https://a718983610-sys.github.io/qfremote-website/product.json';
+  var step = new URLSearchParams(location.search).get('step') || '1';
+  var msg = document.getElementById('msg');
+
+  function tunnelBase() {
+    try {
+      var cached = localStorage.getItem('qfWrapForumUrl') || '';
+      if (cached) return Promise.resolve(cached.replace(/\/forum\/?$/, ''));
+    } catch (e) {}
+    return fetch(PRODUCT_JSON, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var fu = (j && j.web && j.web.forumUrl) || '';
+        var au = (j && j.web && j.web.adminUrl) || '';
+        var base = fu ? fu.replace(/\/forum\/?$/, '') : (au ? au.replace(/\/admin\/?$/, '') : '');
+        if (fu) { try { localStorage.setItem('qfWrapForumUrl', fu); } catch (e) {} }
+        return base;
+      })
+      .catch(function () { return ''; });
+  }
+
+  if (step === 'admin') {
+    msg.textContent = '好友与论坛已退出，正在结束站长管理…';
+    tunnelBase().then(function (base) {
+      if (base) { location.href = base + '/admin/logout'; }
+      else { msg.textContent = '已退出好友与论坛。站长管理暂时联系不上，可直接关闭本窗口。'; }
+    });
+    return;
+  }
+
+  // 第一步：本站退出（好友/聊天同服务）
+  var done = fetch('/api/friends/logout', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .catch(function () { return null; });
+  var raced = Promise.race([done, new Promise(function (res) { setTimeout(res, 4000); })]);
+  raced.then(function () {
+    msg.textContent = '好友与聊天已退出，正在结束论坛…';
+    return tunnelBase();
+  }).then(function (base) {
+    if (base) {
+      location.href = base + '/api/forum/logout-nav?next=' + encodeURIComponent(location.origin + '/logout-bridge.html?step=admin');
+    } else {
+      msg.textContent = '好友与聊天已退出。论坛暂时联系不上，可直接关闭本窗口。';
+    }
+  });
+})();
+</script>
+</body>
+</html>
