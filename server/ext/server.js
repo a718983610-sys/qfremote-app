@@ -2076,7 +2076,10 @@ const server = http.createServer(async (req, res) => {
         const r = lic.reclaimAccountKeys(username, Date.now(), { actor: auth.user });
         if (!r.ok) return sendJson(res, 400, { ok: false, code: r.code, msg: r.msg });
         log({ ev: 'admin-reclaim-keys', target: username, keyIds: r.reclaimed.map((x) => x.keyId), by: auth.user });
-        return sendJson(res, 200, { ok: true, msg: '已收回「' + username + '」名下的 ' + r.reclaimed.length + ' 把密钥，立即失效，账号回到未激活状态。', reclaimed: r.reclaimed });
+        // 回执带释放名额数：与台账 key-admin-reclaimed 的 releasedSlots 同源
+        // （同为逐钥 releasedSlots 之和，C-05 口径），站长在回执即可核对。
+        const relTot = r.reclaimed.reduce((a, x) => ({ pc: a.pc + ((x.releasedSlots && x.releasedSlots.pc) || 0), mobile: a.mobile + ((x.releasedSlots && x.releasedSlots.mobile) || 0) }), { pc: 0, mobile: 0 });
+        return sendJson(res, 200, { ok: true, msg: '已收回「' + username + '」名下的 ' + r.reclaimed.length + ' 把密钥，立即失效，账号回到未激活状态。释放设备名额：电脑 ' + relTot.pc + ' · 手机 ' + relTot.mobile + '。', reclaimed: r.reclaimed });
       }
       if (req.method === 'POST' && p === '/admin/api/license/review-decide') {
         const body = await readJsonBody(req);

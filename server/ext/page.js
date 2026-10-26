@@ -340,10 +340,26 @@ function fmtTime(ts){
   if (!ts) return '';
   try { return new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }); } catch (e) { return ''; }
 }
+// ===== 状态代码 → 中文展示（P11-08，DeepSeek 成稿；仅显示层，查不到原样兜底） =====
+var TXT_LIFE = { unactivated: '未激活', activated: '已激活', expired: '已过期', revoked: '已收回' };
+var TXT_LINK = { normal: '正常', frozen: '已冻结', banned: '已封禁' };
+var TXT_TIMING = { none: '不计时', active: '计时中', paused: '已暂停', exhausted: '已走完' };
+var TXT_BAN_TARGET = { account: '账号', device: '设备' };
+var TXT_BAN_STATUS = { active: '生效中', lifted: '已解除', expired: '已失效', purged: '已清除' };
+var TXT_RV_STATUS = { pending: '待审核', closed: '已处理' };
+var TXT_RV_DECISION = { violation: '违规成立', dismissed: '不成立', escalate: '转站长' };
+var TXT_CHANNEL = { android: '安卓', windows: '电脑版', web: '网页版' };
+var TXT_APPEAL_STATUS = { pending: '处理中', approved: '已通过', rejected: '已驳回', done: '已通过并改密' };
+var TXT_RESULT = { 'approve': '通过', 'reject': '驳回', 'review1-approve': '一审通过', 'review1-reject': '一审驳回', 'override-approve': '改判通过', 'override-reject': '改判驳回', 'b1-approve': 'B1申诉通过', 'b1-reject': 'B1申诉驳回', 'release': '已放行', 'violation': '违规成立', 'dismissed': '不成立', 'escalate': '转站长', 'closed': '已关闭', 'replied': '已回复' };
+function adminLabel(map, code) {
+  if (code === null || code === undefined) return code;
+  if (Object.prototype.hasOwnProperty.call(map, code)) return map[code];
+  return code;
+}
 function appealRow(a, pending){
   var h = '<div class="row"><div class="who"><div class="login">' + esc(a.username || '') + (a.type === 'rebind' ? ' <span class="tag owner">换绑设备</span>' : '') + '</div>'
     + '<div class="meta">' + (a.email ? '联系邮箱：' + esc(a.email) + '<br>' : '') + '提交时间：' + esc(fmtTime(a.createdAt)) + '</div>'
-    + (a.type === 'rebind' ? '<div class="meta">换绑槽位：' + (a.platform === 'mobile' ? '手机' : '电脑') + ' · 提交通道：' + esc(a.channel || '') + '<br>旧设备码（哈希前 12 位）：' + esc(String(a.oldDeviceCode || '').slice(0, 12)) + '<br>新设备码（哈希前 12 位）：' + esc(String(a.newDeviceCodeHash || '').slice(0, 12)) + '</div>' : '')
+    + (a.type === 'rebind' ? '<div class="meta">换绑槽位：' + (a.platform === 'mobile' ? '手机' : '电脑') + ' · 提交通道：' + esc(adminLabel(TXT_CHANNEL, a.channel || '')) + '<br>旧设备码（哈希前 12 位）：' + esc(String(a.oldDeviceCode || '').slice(0, 12)) + '<br>新设备码（哈希前 12 位）：' + esc(String(a.newDeviceCodeHash || '').slice(0, 12)) + '</div>' : '')
     + (a.executionNote ? '<div class="meta" style="color:#a40000">审核备注：' + esc(a.executionNote) + '</div>' : '')
     + (a.desc ? '<div class="appeal-desc">' + esc(a.desc) + '</div>' : '') + '</div>';
   if (a.reasonCode) h = h.replace('</div>', '<div class="meta">事由：' + esc(a.reasonCode) + ' · 申诉编号：' + esc(a.id || '') + '</div></div>');
@@ -351,7 +367,7 @@ function appealRow(a, pending){
     h += '<button class="btn" data-appeal-act="approve" data-u="' + esc(a.username || '') + '" data-id="' + esc(a.id || '') + '" data-rc="' + esc(a.reasonCode || '') + '">通过</button>'
       + '<button class="btn danger" data-appeal-act="reject" data-u="' + esc(a.username || '') + '" data-id="' + esc(a.id || '') + '" data-rc="' + esc(a.reasonCode || '') + '">驳回</button>';
   } else {
-    h += '<span class="tag">' + esc(a.status === 'approved' ? '已通过' : (a.status === 'rejected' ? '已驳回' : (a.status === 'done' ? '已通过并改密' : a.status))) + '</span>';
+    h += '<span class="tag">' + esc(adminLabel(TXT_APPEAL_STATUS, a.status)) + '</span>';
     // #38：统一申诉（带编号与事由）已裁定后站长可改判；B1 改密闭环不在此列。
     if (a.id && a.reasonCode && (a.status === 'approved' || a.status === 'rejected')) {
       if (a.status === 'approved') h += ' <button class="btn danger" data-appeal-override="reject" data-u="' + esc(a.username || '') + '" data-id="' + esc(a.id || '') + '">改判驳回</button>';
@@ -419,19 +435,19 @@ function loadLicense(){
     var kh = '';
     if (!shownKeys.length) kh = '<p class="empty">暂无密钥记录。</p>';
     shownKeys.forEach(function(k){
-      kh += '<div class="row"><div class="who"><div class="login">' + (k.unbound ? '生成密钥（未绑账号）' : esc(k.username)) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
+      kh += '<div class="row"><div class="who"><div class="login">' + (k.unbound ? '生成密钥（未绑账号）' : esc(k.username)) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(adminLabel(TXT_LIFE, k.lifecycle)) + ' · 账号：' + esc(adminLabel(TXT_LINK, k.link)) + ' · 计时：' + esc(adminLabel(TXT_TIMING, k.timing)) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
     });
     $('lic-keys').innerHTML = '<h2 class="foldhead" id="keys-fold-head" style="margin-top:18px">已发放密钥（' + shownKeys.length + ' 条' + (r.keys.length > shownKeys.length ? '，共 ' + r.keys.length + ' 条' : '') + '）<span class="foldchev">展开 ▾</span></h2><div class="foldbody" id="keys-fold-body">' + kh + '</div>';
     bindFold('keys-fold-head', 'keys-fold-body');
     var hb = '';
-    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ hb += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(b.targetType) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(b.status) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; hb += '</div>'; }); }
+    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ hb += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(adminLabel(TXT_BAN_TARGET, b.targetType)) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(adminLabel(TXT_BAN_STATUS, b.status)) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; hb += '</div>'; }); }
     $('lic-bans').innerHTML = hb;
     var hd = '';
     var pendDevices = 0;
     if (r.deviceReviews && r.deviceReviews.length) {
       r.deviceReviews.slice().reverse().forEach(function(rv){
         if (rv.status === 'pending') pendDevices++;
-        hd += '<div class="row"><div class="who"><div class="login">' + esc(rv.id) + '</div><div class="meta">涉事账号：' + esc((rv.accounts || []).join('、')) + ' · 设备（前 12 位）：' + esc(rv.deviceHashShort || String(rv.deviceHash || '').slice(0, 12)) + ' · 状态：' + esc(rv.status) + (rv.escalated ? ' · 已标转站长' : '') + (rv.decision ? ' · 结论：' + esc(rv.decision) : '') + '</div></div>';
+        hd += '<div class="row"><div class="who"><div class="login">' + esc(rv.id) + '</div><div class="meta">涉事账号：' + esc((rv.accounts || []).join('、')) + ' · 设备（前 12 位）：' + esc(rv.deviceHashShort || String(rv.deviceHash || '').slice(0, 12)) + ' · 状态：' + esc(adminLabel(TXT_RV_STATUS, rv.status)) + (rv.escalated ? ' · 已标转站长' : '') + (rv.decision ? ' · 结论：' + esc(adminLabel(TXT_RV_DECISION, rv.decision)) : '') + '</div></div>';
         if (rv.status === 'pending') {
           hd += '<button class="btn danger" data-review-act="violation" data-r="' + esc(rv.id) + '">违规成立（永封）</button>'
             + '<button class="btn ghost" data-review-act="dismissed" data-r="' + esc(rv.id) + '">不成立（关闭）</button>'
@@ -477,7 +493,10 @@ $('lic-issue-btn').onclick = function(){
   var src = document.querySelector('input[name="lic-source"]:checked');
   if (!u) { toast('请先填写账号。'); return; }
   if (!src) { toast('必须选择密钥来源（付费购买入账 / 免费发放）。'); return; }
-  showModal('发放密钥', '确定给「' + u + '」发放 ' + plan + ' 密钥吗？来源：' + (src.value === 'paid' ? '付费购买入账（开通网页版）' : '免费发放（不开通网页版）') + '。', { okText: '确认发放', onOk: function(){
+  var licSel = $('lic-plan');
+  var licPlanLabel = plan;
+  if (licSel && licSel.selectedIndex > -1 && licSel.options[licSel.selectedIndex]) licPlanLabel = licSel.options[licSel.selectedIndex].textContent;
+  showModal('发放密钥', '确定给「' + u + '」发放 ' + licPlanLabel + ' 密钥吗？来源：' + (src.value === 'paid' ? '付费购买入账（开通网页版）' : '免费发放（不开通网页版）') + '。', { okText: '确认发放', onOk: function(){
     api('/admin/api/license/issue', { username: u, plan: plan, source: src.value }).then(function(r){ toast(r.msg || (r.ok ? '已发放。' : '发放未成功。')); if (r.ok) loadLicense(); });
   }});
 };
@@ -649,7 +668,7 @@ function loadAssistantApi(){
   api('/admin/api/assistant').then(function(r){
     var box = $('assistantApi');
     if (!r.ok) { box.innerHTML = '<p class="empty">加载失败。</p>'; return; }
-    var names = { order: '付款订单', appeal: '申诉', rebind: '换绑申请', device_review: '设备异常', forum: '论坛待审', support: '客服工单' };
+    var names = { order: '付款订单', appeal: '申诉', rebind: '换绑申请', device_review: '设备异常', forum: '论坛待审', support: '客服工单', profile_mod: '资料审核' };
     var h = '<div class="row"><div class="who"><div class="meta">待处理计数</div><div>' + Object.keys(names).map(function(k){ return names[k] + ' ' + (r.counts[k] || 0); }).join(' · ') + '</div></div></div>';
     var t = r.token || {};
     h += '<div class="row"><div class="who"><div class="meta">助手令牌</div><div>状态：' + esc(t.status === 'active' ? '已启用' : (t.status === 'revoked' ? '已吊销' : '未生成'))
@@ -660,7 +679,7 @@ function loadAssistantApi(){
       + (t.status === 'active' ? '<button class="btn danger" id="tokRev" type="button">吊销</button>' : '') + '</div>';
     if (r.recentDone && r.recentDone.length) {
       h += '<h2 style="margin-top:14px">最近已处理</h2>';
-      r.recentDone.forEach(function(e){ h += '<div class="row"><div class="who"><div class="meta">' + esc(names[e.type] || e.type) + ' · ' + esc(e.refId) + ' · ' + esc(e.handledBy || '') + ' · ' + esc(e.result || '') + ' · ' + (e.handledAt ? new Date(e.handledAt).toLocaleString('zh-CN', { hour12: false }) : '') + '</div></div></div>'; });
+      r.recentDone.forEach(function(e){ h += '<div class="row"><div class="who"><div class="meta">' + esc(names[e.type] || e.type) + ' · ' + esc(e.refId) + ' · ' + esc(e.handledBy || '') + ' · ' + esc(adminLabel(TXT_RESULT, e.result || '')) + ' · ' + (e.handledAt ? new Date(e.handledAt).toLocaleString('zh-CN', { hour12: false }) : '') + '</div></div></div>'; });
     }
     box.innerHTML = h;
     var g = $('tokGen'); if (g) g.onclick = function(){ if (!confirm('生成/重置令牌后，旧令牌立即失效，助手需重新经 SSH 领取新令牌。继续？')) return; api('/admin/api/assistant/token', { action: 'generate' }).then(function(rr){ toast(rr.ok ? '令牌已生成，明文已写入服务器文件。' : '生成失败。'); loadAssistantApi(); }); };
