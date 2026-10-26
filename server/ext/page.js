@@ -47,6 +47,14 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
 .modal .btns .btn{flex:1}
 .newpass{font-size:19px;font-weight:700;color:#0B2B5B;background:#F4F7FB;border:1px solid #DFE7F2;border-radius:9px;padding:12px;text-align:center;word-break:break-all;margin-top:10px}
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#0B2B5B;color:#fff;font-size:14px;border-radius:9px;padding:11px 18px;display:none;z-index:100;max-width:90vw;text-align:center;line-height:1.6}
+.adminnav{position:sticky;top:0;z-index:60;background:#F4F7FB;padding:8px 0 4px}
+.adminnav .nrow{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
+.adminnav a{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid #2470E0;background:#fff;color:#2470E0;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 13px;text-decoration:none}
+.adminnav a.on{background:#2470E0;color:#fff}
+.adminnav .cnt{min-width:20px;text-align:center;font-size:11.5px;line-height:1.6;border-radius:10px;padding:0 6px;background:#c0271a;color:#fff}
+.adminnav a.on .cnt{background:#fff;color:#c0271a}
+.view{display:none}
+.view.on{display:block}
 </style>
 </head>
 <body>
@@ -55,12 +63,27 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
   <p class="sub">这里只给站长本人使用。可以冻结、解封、重置密码、改名、封禁，以及处理登录申诉。</p>
   <p style="margin:0 2px 16px"><button class="btn ghost" id="btnExtLogout" type="button">退出站长管理</button></p>
 
+  <nav class="adminnav"><div class="nrow">
+    <a href="#users" data-nav="users">账号列表</a>
+    <a href="#license" data-nav="license">密钥发放</a>
+    <a href="#orders" data-nav="orders">付款订单审核<span class="cnt" id="cnt-orders" style="display:none"></span></a>
+    <a href="#appeals" data-nav="appeals">登录申诉<span class="cnt" id="cnt-appeals" style="display:none"></span></a>
+    <a href="#rebind" data-nav="rebind">换绑申诉<span class="cnt" id="cnt-rebind" style="display:none"></span></a>
+    <a href="#bans" data-nav="bans">封禁台账</a>
+    <a href="#devices" data-nav="devices">设备异常<span class="cnt" id="cnt-devices" style="display:none"></span></a>
+    <a href="#support" data-nav="support">客服收件箱<span class="cnt" id="cnt-support" style="display:none"></span></a>
+    <a href="#api" data-nav="api">站长 API</a>
+  </div></nav>
+
+  <section class="view" data-view="users">
   <div class="card">
     <h2>账号列表</h2>
     <p class="hint">冻结后对方暂时无法登录，账号与数据保留，可随时解封。封禁将禁用账号、保留数据，对方可以申诉（2.3.1 起不再删号）。</p>
     <div id="users"><p class="empty">正在加载…</p></div>
   </div>
+  </section>
 
+  <section class="view" data-view="license">
   <div class="card">
     <h2>密钥发放</h2>
     <p class="hint">给账号发放密钥（入许可台账）。来源必须选：付费购买入账＝真实付费，开通网页版；免费发放＝试用/赠送类，不开通网页版。此处不设默认，选错会影响对方网页权益。</p>
@@ -70,34 +93,62 @@ h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="lic-source" value="paid"> 付费购买入账（开通网页版）</label>
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="lic-source" value="free"> 免费发放（不开通网页版）</label></div>
     <button class="btn" id="lic-issue-btn" type="button">发放密钥</button></div>
-    <div id="lic-overview"><p class="empty">正在加载许可概览…</p></div>
+    <div id="lic-keys"><p class="empty">正在加载许可概览…</p></div>
   </div>
+  </section>
 
+  <section class="view" data-view="bans">
+  <div class="card">
+    <h2>近期封禁台账</h2>
+    <div id="lic-bans"></div>
+    <h2 style="margin-top:18px" id="lic-devices-h">设备异常待审（B6 新规）</h2>
+    <div id="lic-devices"></div>
+  </div>
+  </section>
+
+  <section class="view" data-view="support">
   <div class="card">
     <h2>客服收件箱</h2>
     <p class="hint">智能客服转人工的工单在这里处理。回复后，用户会在客服会话中以「人工客服」的名义看到；关闭工单后，该会话结束转人工状态。工单数据由好友服务（8445）的客服模块提供，本页经同源 /support/api 调用。</p>
     <div id="supportInbox"><p class="empty">正在加载…</p></div>
   </div>
+  </section>
 
+  <section class="view" data-view="appeals">
   <div class="card">
     <h2>登录申诉待审</h2>
-    <p class="hint">通过后，对方可在申诉进度页自行设置新密码；驳回须写明原因，对方可见。带「换绑设备」标记的为换绑申诉：通过后立即执行换绑（同类旧设备解绑、新设备绑入）。</p>
+    <p class="hint">通过后，对方可在申诉进度页自行设置新密码；驳回须写明原因，对方可见。</p>
     <div id="appeals"><p class="empty">正在加载…</p></div>
     <h2 style="margin-top:18px">近期已处理</h2>
     <div id="appeals-done"><p class="empty">正在加载…</p></div>
   </div>
+  </section>
 
+  <section class="view" data-view="rebind">
+  <div class="card">
+    <h2>换绑申诉</h2>
+    <p class="hint">带「换绑设备」标记的为换绑申诉：通过后立即执行换绑（同类旧设备解绑、新设备绑入）。驳回须写明原因，对方可见。</p>
+    <div id="rebind-list"><p class="empty">正在加载…</p></div>
+    <h2 style="margin-top:18px">近期已处理</h2>
+    <div id="rebind-done"><p class="empty">正在加载…</p></div>
+  </div>
+  </section>
+
+  <section class="view" data-view="orders">
   <div class="card">
     <h2>付款订单审核</h2>
     <p class="hint">截图审核付款：一审（助手或此处）核对收款人、金额与套餐、订单号齐全，通过即发钥；二审由站长核对实际到账，通过结案；确认假图点「判假封禁」将封禁该账号并回收密钥。订单号一号一钥，台账永久保留。</p>
     <div id="payOrders"><p class="empty">正在加载…</p></div>
   </div>
+  </section>
 
+  <section class="view" data-view="api">
   <div class="card">
     <h2>站长 API</h2>
     <p class="hint">助手专用事件接口：全部审核队列（订单/申诉/换绑/设备异常/论坛/客服）统一入队，助手凭令牌拉取并回写裁定（留痕「助手接口」）。令牌只存哈希；明文仅在生成时写入服务器文件供助手经 SSH 自取，本页不显示明文。</p>
     <div id="assistantApi"><p class="empty">正在加载…</p></div>
   </div>
+  </section>
 </div>
 
 <div class="modal-mask" id="mask">
@@ -140,6 +191,13 @@ function showModal(title, text, opt){
 function hideModal(){ $('mask').style.display = 'none'; modalCb = null; }
 $('m-cancel').onclick = hideModal;
 $('m-ok').onclick = function(){ var cb = modalCb; var v = $('m-input').value; hideModal(); if (cb) cb(v); };
+
+function setPill(view, n){
+  var el = $('cnt-' + view);
+  if (!el) return;
+  if (n > 0) { el.textContent = n; el.style.display = 'inline-block'; }
+  else { el.style.display = 'none'; el.textContent = ''; }
+}
 
 var RESTART_NOTE = '操作时服务器将短暂重启数秒，期间所有人将断线并自动重连，请确认当前可以操作。';
 
@@ -244,11 +302,19 @@ function appealRow(a, pending){
 function loadAppeals(){
   api('/admin/api/appeals').then(function(r){
     if (!r.ok) { $('appeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; return; }
-    $('appeals').innerHTML = r.pending.length ? r.pending.map(function(a){ return appealRow(a, true); }).join('') : '<p class="empty">现在没有待审的申诉。</p>';
-    $('appeals-done').innerHTML = r.recent.length ? r.recent.map(function(a){ return appealRow(a, false); }).join('') : '<p class="empty">暂时没有已处理的申诉。</p>';
-    var btns = document.querySelectorAll('#appeals button[data-appeal-act]');
+    var pendLogin = r.pending.filter(function(a){ return a.type !== 'rebind'; });
+    var pendRebind = r.pending.filter(function(a){ return a.type === 'rebind'; });
+    var doneLogin = r.recent.filter(function(a){ return a.type !== 'rebind'; });
+    var doneRebind = r.recent.filter(function(a){ return a.type === 'rebind'; });
+    $('appeals').innerHTML = pendLogin.length ? pendLogin.map(function(a){ return appealRow(a, true); }).join('') : '<p class="empty">现在没有待审的申诉。</p>';
+    $('appeals-done').innerHTML = doneLogin.length ? doneLogin.map(function(a){ return appealRow(a, false); }).join('') : '<p class="empty">暂时没有已处理的申诉。</p>';
+    $('rebind-list').innerHTML = pendRebind.length ? pendRebind.map(function(a){ return appealRow(a, true); }).join('') : '<p class="empty">现在没有待审的换绑申诉。</p>';
+    $('rebind-done').innerHTML = doneRebind.length ? doneRebind.map(function(a){ return appealRow(a, false); }).join('') : '<p class="empty">暂时没有已处理的换绑申诉。</p>';
+    setPill('appeals', pendLogin.length);
+    setPill('rebind', pendRebind.length);
+    var btns = document.querySelectorAll('button[data-appeal-act]');
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onAppealAction;
-    var obtns = document.querySelectorAll('#appeals-done button[data-appeal-override]');
+    var obtns = document.querySelectorAll('button[data-appeal-override]');
     for (var j = 0; j < obtns.length; j++) obtns[j].onclick = onAppealOverride;
   }).catch(function(){ $('appeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
 }
@@ -287,31 +353,37 @@ function onAppealOverride(){
 
 function loadLicense(){
   api('/admin/api/license/overview').then(function(r){
-    if (!r.ok) { $('lic-overview').innerHTML = '<p class="empty">许可概览加载失败。</p>'; return; }
+    if (!r.ok) { $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; $('lic-bans').innerHTML = ''; $('lic-devices').innerHTML = ''; return; }
     var h = '';
     if (!r.keys.length) h += '<p class="empty">暂无密钥记录。</p>';
     r.keys.slice(-20).reverse().forEach(function(k){
       h += '<div class="row"><div class="who"><div class="login">' + esc(k.username) + '</div><div class="meta">' + esc(k.planName) + ' · 来源：' + (k.source === 'paid' ? '付费' : '免费发放') + ' · ' + esc(k.masked) + '<br>状态：' + esc(k.lifecycle) + '/' + esc(k.link) + '/' + esc(k.timing) + (k.everBanned ? ' · 曾被封禁' : '') + '</div></div></div>';
     });
-    if (r.bans && r.bans.length) { h += '<h2 style="margin-top:14px">近期封禁台账</h2>'; r.bans.slice(-10).reverse().forEach(function(b){ h += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(b.targetType) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(b.status) + '</div></div>'; if (b.status === 'active' && b.id) h += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; h += '</div>'; }); }
+    $('lic-keys').innerHTML = h;
+    var hb = '';
+    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ hb += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(b.targetType) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(b.status) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; hb += '</div>'; }); }
+    $('lic-bans').innerHTML = hb;
+    var hd = '';
+    var pendDevices = 0;
     if (r.deviceReviews && r.deviceReviews.length) {
-      h += '<h2 style="margin-top:14px">设备异常待审（B6 新规）</h2>';
       r.deviceReviews.slice().reverse().forEach(function(rv){
-        h += '<div class="row"><div class="who"><div class="login">' + esc(rv.id) + '</div><div class="meta">涉事账号：' + esc((rv.accounts || []).join('、')) + ' · 设备（前 12 位）：' + esc(rv.deviceHashShort || String(rv.deviceHash || '').slice(0, 12)) + ' · 状态：' + esc(rv.status) + (rv.escalated ? ' · 已标转站长' : '') + (rv.decision ? ' · 结论：' + esc(rv.decision) : '') + '</div></div>';
+        if (rv.status === 'pending') pendDevices++;
+        hd += '<div class="row"><div class="who"><div class="login">' + esc(rv.id) + '</div><div class="meta">涉事账号：' + esc((rv.accounts || []).join('、')) + ' · 设备（前 12 位）：' + esc(rv.deviceHashShort || String(rv.deviceHash || '').slice(0, 12)) + ' · 状态：' + esc(rv.status) + (rv.escalated ? ' · 已标转站长' : '') + (rv.decision ? ' · 结论：' + esc(rv.decision) : '') + '</div></div>';
         if (rv.status === 'pending') {
-          h += '<button class="btn danger" data-review-act="violation" data-r="' + esc(rv.id) + '">违规成立（永封）</button>'
+          hd += '<button class="btn danger" data-review-act="violation" data-r="' + esc(rv.id) + '">违规成立（永封）</button>'
             + '<button class="btn ghost" data-review-act="dismissed" data-r="' + esc(rv.id) + '">不成立（关闭）</button>'
             + '<button class="btn ghost" data-review-act="escalate" data-r="' + esc(rv.id) + '">拿不准·转站长</button>';
         } else if (rv.decision === 'violation') {
-          h += '<button class="btn" data-review-override="dismissed" data-r="' + esc(rv.id) + '">改判不成立（解封恢复）</button>';
+          hd += '<button class="btn" data-review-override="dismissed" data-r="' + esc(rv.id) + '">改判不成立（解封恢复）</button>';
         } else if (rv.decision === 'dismissed') {
-          h += '<button class="btn danger" data-review-override="violation" data-r="' + esc(rv.id) + '">改判违规成立</button>';
+          hd += '<button class="btn danger" data-review-override="violation" data-r="' + esc(rv.id) + '">改判违规成立</button>';
         }
-        h += '</div>';
+        hd += '</div>';
       });
     }
-    $('lic-overview').innerHTML = h;
-    var rbtns = document.querySelectorAll('#lic-overview button[data-review-act]');
+    $('lic-devices').innerHTML = hd;
+    setPill('devices', pendDevices);
+    var rbtns = document.querySelectorAll('button[data-review-act]');
     for (var j = 0; j < rbtns.length; j++) rbtns[j].onclick = function(){
       var act = this.getAttribute('data-review-act'), rid = this.getAttribute('data-r');
       var labels = { violation: '裁决违规成立：将对涉事两个账号永久封禁并封禁该设备码。', dismissed: '裁决不成立：关闭记录，不留封禁。', escalate: '标记为拿不准、转站长裁决（记录保持待审）。' };
@@ -319,7 +391,7 @@ function loadLicense(){
         api('/admin/api/license/review-decide', { reviewId: rid, decision: act }).then(function(r){ toast(r.msg || (r.ok ? '已处理。' : '处理未成功。')); loadLicense(); loadUsers(); });
       }});
     };
-    var obtns2 = document.querySelectorAll('#lic-overview button[data-review-override]');
+    var obtns2 = document.querySelectorAll('button[data-review-override]');
     for (var k2 = 0; k2 < obtns2.length; k2++) obtns2[k2].onclick = function(){
       var act2 = this.getAttribute('data-review-override'), rid2 = this.getAttribute('data-r');
       var labels2 = { violation: '改判违规成立：将对涉事账号永久封禁并封禁该设备码（原不成立结论留痕）。', dismissed: '改判不成立：将解除本记录产生的封禁并恢复被回收密钥（原违规结论留痕）。' };
@@ -327,14 +399,14 @@ function loadLicense(){
         api('/admin/api/license/review-decide', { reviewId: rid2, decision: act2, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadLicense(); loadUsers(); });
       }});
     };
-    var ubtns = document.querySelectorAll('#lic-overview button[data-ban-unban]');
+    var ubtns = document.querySelectorAll('button[data-ban-unban]');
     for (var k3 = 0; k3 < ubtns.length; k3++) ubtns[k3].onclick = function(){
       var bid = this.getAttribute('data-ban-unban'), tgt = this.getAttribute('data-t');
       showModal('直接解封', '确定直接解除对「' + tgt + '」的这条封禁吗？关联回收密钥将按规恢复，全程留痕。', { okText: '确认解封', onOk: function(){
         api('/admin/api/license/unban', { banId: bid }).then(function(r){ toast(r.msg || (r.ok ? '已解封。' : '解封未成功。')); loadLicense(); loadUsers(); });
       }});
     };
-  }).catch(function(){ $('lic-overview').innerHTML = '<p class="empty">许可概览加载失败。</p>'; });
+  }).catch(function(){ $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; });
 }
 $('lic-issue-btn').onclick = function(){
   var u = String($('lic-user').value || '').trim();
@@ -366,6 +438,7 @@ function loadSupportInbox(){
   api('/support/api/admin/tickets').then(function(r){
     if (!r.ok) { $('supportInbox').innerHTML = '<p class="empty">' + esc(r.msg || '收件箱暂时无法打开。请确认已在同一浏览器中登录站长账号后刷新。') + '</p>'; return; }
     var open = r.tickets.filter(function(t){ return t.status === 'open'; });
+    setPill('support', open.length);
     var closed = r.tickets.filter(function(t){ return t.status !== 'open'; }).slice(0, 10);
     var h = open.length ? open.map(supportTicketRow).join('') : '<p class="empty">现在没有待处理的客服工单。</p>';
     if (closed.length) h += '<h2 style="margin-top:18px">近期已关闭</h2>' + closed.map(supportTicketRow).join('');
@@ -400,6 +473,7 @@ function loadPayOrders(){
     if (!r.ok) { box.innerHTML = '<p class="empty">订单加载失败。</p>'; return; }
     var list = (r.orders || []).filter(function(o){ return o.status === 'reviewing' || o.status === 'pending_pay'; });
     var done = (r.orders || []).filter(function(o){ return o.status !== 'reviewing' && o.status !== 'pending_pay'; }).slice(0, 8);
+    setPill('orders', list.filter(function(o){ return o.status === 'reviewing'; }).length);
     var h = '<p class="hint">截图付款通道：' + (r.enabled ? '已开放' : '未开放（点火时开启）') + '。审核中 ' + list.filter(function(o){return o.status==='reviewing';}).length + ' 单。</p>';
     if (!list.length) h += '<p class="empty">暂无待处理订单。</p>';
     list.forEach(function(o){
@@ -458,21 +532,27 @@ loadLicense();
 loadPayOrders();
 loadAssistantApi();
 
-/* 锚点定位（控制台站长管理跳转带 #区段时落到对应区）：各区数据异步填充会改变页高，
-   故在 load 事件与两次延时各重定位一次；用户一旦手动滚动即不再干预。 */
-(function () {
-  var moved = false;
-  window.addEventListener('wheel', function () { moved = true; }, { passive: true });
-  window.addEventListener('touchmove', function () { moved = true; }, { passive: true });
-  function go() {
-    if (moved || !location.hash) return;
-    var el = document.getElementById(location.hash.slice(1));
-    if (el) el.scrollIntoView({ block: 'start' });
-  }
-  window.addEventListener('load', go);
-  setTimeout(go, 700);
-  setTimeout(go, 1800);
-})();
+/* 分视图路由（站长 2026-10-26 13:25 令：功能拆开，一个页面只放一个功能）：
+   hash 决定当前视图，刷新与直达都落在本视图；兼容旧锚点——控制台内嵌站长页
+   跳转所用的 #users / #lic-user / #lic-overview / #payOrders / #appeals 在此映射。 */
+var VIEW_ALIAS = { 'users': 'users', 'license': 'license', 'lic-user': 'license', 'lic-plan': 'license', 'orders': 'orders', 'payOrders': 'orders', 'appeals': 'appeals', 'appeals-done': 'appeals', 'rebind': 'rebind', 'bans': 'bans', 'lic-overview': 'bans', 'devices': 'bans', 'lic-devices': 'bans', 'support': 'support', 'supportInbox': 'support', 'api': 'api', 'assistantApi': 'api' };
+function applyView(){
+  var h = (location.hash || '').replace(/^#/, '');
+  var v = VIEW_ALIAS[h] || 'users';
+  var secs = document.querySelectorAll('.view');
+  for (var i = 0; i < secs.length; i++) secs[i].className = 'view' + (secs[i].getAttribute('data-view') === v ? ' on' : '');
+  var links = document.querySelectorAll('.adminnav a[data-nav]');
+  var primary = null, k;
+  for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === h) primary = links[k];
+  if (!primary) for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === v) primary = links[k];
+  for (k = 0; k < links.length; k++) links[k].className = (links[k] === primary ? 'on' : '');
+  setTimeout(function(){
+    if (v === 'bans' && (h === 'devices' || h === 'lic-devices')) { var dh = $('lic-devices-h'); if (dh) dh.scrollIntoView({ block: 'start' }); }
+    else window.scrollTo(0, 0);
+  }, 0);
+}
+window.addEventListener('hashchange', applyView);
+applyView();
 </script>
 </body>
 </html>`;
