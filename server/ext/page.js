@@ -69,6 +69,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <nav class="adminnav"><div class="nrow">
     <a href="#users" data-nav="users">账号列表</a>
     <a href="#license" data-nav="license">密钥发放</a>
+    <a href="#genkey" data-nav="genkey">生成密钥（不绑账号）</a>
     <a href="#orders" data-nav="orders">付款订单审核<span class="cnt" id="cnt-orders" style="display:none"></span></a>
     <a href="#appeals" data-nav="appeals">登录申诉<span class="cnt" id="cnt-appeals" style="display:none"></span></a>
     <a href="#rebind" data-nav="rebind">换绑申诉<span class="cnt" id="cnt-rebind" style="display:none"></span></a>
