@@ -159,6 +159,21 @@ function addMaxAge(setCookies) {
     return v;
   });
 }
+function xidHashFromSetCookies(setCookies) {
+  // DS-R02-③ 配套：与 ext 侧验真缓存键同构造 sha256(xid + '.' + xid.sig)，
+  // 只上报哈希、不上报明文；取不到 xid 时回 null（ext 侧对非法/缺失落 null 兼容）。
+  const list = Array.isArray(setCookies) ? setCookies : (setCookies ? [setCookies] : []);
+  const jar = {};
+  for (const v of list) {
+    const first = String(v).split(';', 1)[0];
+    const i = first.indexOf('=');
+    if (i <= 0) continue;
+    const name = first.slice(0, i).trim().toLowerCase();
+    if (name === 'xid' || name === 'xid.sig') jar[name] = first.slice(i + 1).trim();
+  }
+  if (!jar.xid) return null;
+  return crypto.createHash('sha256').update(String(jar.xid) + '.' + String(jar['xid.sig'] || '')).digest('hex');
+}
 function appendCookie(headers, cookie) {
   const sc = headers['set-cookie'];
   if (Array.isArray(sc)) sc.push(cookie);
@@ -315,7 +330,7 @@ function handleLogin(req, res) {
             // 一笔成功登录记入扩展服务，供个人中心「登录设备」显示来源；
             // 不改判定、不计绑定，失败不影响登录主流程。
             if (/(?:^|;\s*)qfr_src=qfclash(?:;|$)/.test(req.headers.cookie || '')) {
-              licInternal('/internal/license/qfclash-login-note', { username: key, ua: req.headers['user-agent'] || '' });
+              licInternal('/internal/license/qfclash-login-note', { username: key, ua: req.headers['user-agent'] || '', xidHash: xidHashFromSetCookies(h['set-cookie']) });
             }
             res.writeHead(ur.statusCode, h);
             return res.end(ubody);

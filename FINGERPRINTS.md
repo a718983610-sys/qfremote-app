@@ -76,7 +76,7 @@
 | server/loginshim/appeal-admin.js | /opt/qfremote-loginshim/appeal-admin.js | `1fa8a05e0835f680b1916b886f90e85c` |
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
 | server/loginshim/apply-pass.js | /opt/qfremote-loginshim/apply-pass.js | `07b4158257b9aa7a1ca01a537bd5be7c` |
-| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `6cd9ef5677d6e82795029bf1019873d2` |
+| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3e0fdada963070eb2d40b2ece88bf0e2` |
 | server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `b71f43f02879ddcdf86932a975f57392` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
