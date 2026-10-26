@@ -447,6 +447,7 @@ function parseRoute() {
 async function render() {
   const seq = ++renderSeq;
   S.route = parseRoute();
+  if (S.route.name !== 'forum' && S.route.name !== 'post') { forumListMemo = null; forumMemoArmed = false; }
   renderNavs();
   const view = $('#view');
   const fn = Views[S.route.name] || Views.home;
@@ -1229,7 +1230,12 @@ Views.forum = async function (view) {
     const box = $('#foPosts', view);
     const pr = await api('/api/forum/posts?board=' + encodeURIComponent(forumBoard || ''));
     const posts = (pr.json && (pr.json.posts || pr.json.list)) || [];
-    box.innerHTML = `<div class="card"><h3>${esc(forumBoard || '帖子')}</h3>${posts.length ? posts.map(p => `<div class="row"><span class="tile">${ic('forum')}</span><span><b>${esc(p.title || '')}</b><small>${esc(p.author || p.nickname || '')} · ${esc(p.createdAt ? fmtDate(p.createdAt) : (p.time || ''))} · ${p.replies != null ? p.replies + ' 条回复' : ''}</small></span>${p.official ? '<span class="tag">公告</span>' : ''}</div>`).join('') : '<div class="statebox"><b>暂无帖子</b><p>来发布第一篇帖子吧。</p></div>'}</div>`;
+    box.innerHTML = `<div class="card"><h3>${esc(forumBoard || '帖子')}</h3>${posts.length ? posts.map(p => `<div class="row" data-pid="${esc(p.id || '')}"><span class="tile">${ic('forum')}</span><span><b>${esc(p.title || '')}</b><small>${esc(p.authorName || p.author || p.nickname || '')} · ${esc(p.createdAt ? fmtDate(p.createdAt) : (p.time || ''))} · ${p.replyCount != null ? p.replyCount + ' 条回复' : ''}</small></span>${p.board === 'announcements' ? '<span class="tag">公告</span>' : ''}</div>`).join('') : '<div class="statebox"><b>暂无帖子</b><p>来发布第一篇帖子吧。</p></div>'}</div>`;
+    box.querySelectorAll('[data-pid]').forEach(el => el.onclick = () => { forumListMemo = { board: forumBoard, scrollY: window.scrollY }; forumMemoArmed = true; navigate('post', el.getAttribute('data-pid')); });
+    if (forumMemoArmed && forumListMemo && forumListMemo.board === forumBoard) {
+      const y = forumListMemo.scrollY; forumListMemo = null; forumMemoArmed = false;
+      requestAnimationFrame(() => window.scrollTo(0, y));
+    }
   };
   paintPosts();
   $('#fo-pub', view).onclick = async () => {
@@ -1237,10 +1243,174 @@ Views.forum = async function (view) {
     // 发帖前走一次性 SSO 换论坛会话（与现行口径一致）
     const so = await api('/api/forum/sso-token', { method: 'POST', json: {} });
     if (so.json && so.json.loginPath) await api(so.json.loginPath);
-    const r = await api('/api/forum/posts', { method: 'POST', json: { board: forumBoard, title: $('#fo-title', view).value.trim(), body: $('#fo-body', view).value.trim() } });
+    const r = await forumFetch('/api/forum/posts', { method: 'POST', json: { board: forumBoard, title: $('#fo-title', view).value.trim(), body: $('#fo-body', view).value.trim() } });
     msg.textContent = (r.json && (r.json.msg || (r.json.ok ? '已提交，审核通过后显示。' : '发布未成功，请稍后再试。'))) || '发布未成功，请稍后再试。';
     if (r.json && r.json.ok) { $('#fo-title', view).value = ''; $('#fo-body', view).value = ''; paintPosts(); }
   };
+};
+
+/* ================= 论坛帖子详情（P2-037） ================= */
+var forumListMemo = null;      // {board, scrollY}：帖行点击时写入，返回列表恢复一次
+var forumMemoArmed = false;    // 武装标记：仅刚从详情返回的列表渲染可消费 memo
+let postReloadSeq = 0;         // 详情整帖重拉序号（防乱序覆盖）
+
+/* 论坛写操作单次请求助手：与 api() 同形、同 init，唯不自动重试——
+   发帖/回帖非幂等，网络异常自动重试会重复落库（服务端无幂等键）。 */
+async function forumFetch(path, opts) {
+  opts = opts || {};
+  const init = { credentials: 'include', method: opts.method || 'GET', headers: {} };
+  if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
+  if (opts.headers) Object.assign(init.headers, opts.headers);
+  try {
+    const r = await fetch(path, init);
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch (e) { /* 非 JSON 响应按文本处理 */ }
+    return { status: r.status, ok: r.ok, json, text };
+  } catch (e) { return { status: 0, ok: false, json: null, text: '', networkError: e }; }
+}
+
+/* 论坛会话建立（与发帖流同一对调用）。返回：
+   {state:'live', me} 已登录（me 含 muted/accountStatus）｜
+   {state:'notice', msg} 只读提示（msg 为服务端原文，可为 null）｜
+   {state:'open'} 网络不定态（显示侧 fail-open，终裁在提交回执）。
+   onCookieReady 在 sso-login 落 cookie 后回调，详情 GET 须带会话先行。 */
+async function forumEnsureSession(onCookieReady) {
+  const done = () => { if (onCookieReady) onCookieReady(); };
+  const so = await api('/api/forum/sso-token', { method: 'POST', json: {} });
+  if (so.status === 0) { done(); return { state: 'open' }; }
+  if (!so.json || !so.json.ok) {
+    done();
+    if (so.json && so.json.msg) return { state: 'notice', msg: so.json.msg };
+    return { state: 'open' };
+  }
+  if (so.json.loginPath) await api(so.json.loginPath);
+  done();
+  const me = await api('/api/forum/me');
+  if (me.status === 0) return { state: 'open' };
+  if (me.json && me.json.user) return { state: 'live', me: me.json };
+  return { state: 'notice', msg: null };
+}
+
+function pfStatusTags(x) {
+  let s = '';
+  if (x.status === 'pending') s += '<span class="tag pf-t-pend">待审核</span>';
+  if (x.status === 'rejected') s += '<span class="tag pf-t-rej">已驳回' + (x.reviewCategory ? '：' + esc(x.reviewCategory) : '') + '</span>';
+  if (x.banHidden) s += '<span class="tag pf-t-hid">暂不可见</span>';
+  return s;
+}
+function pfAuthor(x) {
+  return esc(x.authorName || x.author || '') + (x.authorOfficial ? ' <span class="tag pf-off">官方</span>' : '');
+}
+
+Views.post = async function (view, param, seq) {
+  const id = String(param || '');
+  view.innerHTML = `<div class="pf-backrow"><button class="btn ghost sm" id="pf-back">← 返回</button></div>
+    <div id="pfPost"><div class="card"><div class="skel" style="height:52px"></div></div></div>
+    <div id="pfReplies"></div>
+    <div id="pfComposer"><div class="card"><div class="skel" style="height:40px"></div></div></div>`;
+  const backBtn = $('#pf-back', view);
+  if (backBtn) backBtn.onclick = () => { if (forumListMemo) forumBoard = forumListMemo.board; navigate('forum'); };
+  const alive = () => seq === renderSeq && S.route.name === 'post' && S.route.param === id;
+  if (!/^p\d+$/.test(id)) {
+    $('#pfPost', view).innerHTML = stateBox('帖子不存在或不可见。', '请返回帖子列表查看其他帖子。', false);
+    $('#pfComposer', view).innerHTML = '';
+    return;
+  }
+  let sessState = null;
+  let boardNames = null;
+  const paintMain = (post, replies) => {
+    const boardName = (boardNames && boardNames[post.board]) || post.board || '';
+    $('#pfPost', view).innerHTML = `<div class="card"><h2 class="pf-title">${esc(post.title || '')} ${pfStatusTags(post)}</h2>
+      <div class="pf-meta">${pfAuthor(post)} · ${esc(boardName)} · ${fmtDate(post.createdAt)} · 浏览 ${post.views || 0} · 回复 ${post.replyCount != null ? post.replyCount : (replies || []).length}</div>
+      ${post.mine && post.status === 'pending' ? '<div class="note warn" style="margin-top:10px">本帖正在审核中，审核通过后其他用户可见。</div>' : ''}
+      <div class="pf-body">${esc(post.body || '')}</div></div>`;
+    const items = replies || [];
+    $('#pfReplies', view).innerHTML = `<div class="card"><h3>回复（${items.length}）</h3>${items.length ? items.map(r => `<div class="pf-reply"><div class="pf-meta">${pfAuthor(r)} · ${fmtDate(r.createdAt)} ${pfStatusTags(r)}</div><div class="pf-rbody">${esc(r.body || '')}</div></div>`).join('') : '<div class="statebox"><b>暂无回复</b><p id="pf-empty-sub" hidden>来发表第一条回复吧。</p></div>'}</div>`;
+  };
+  const reloadPost = async () => {
+    const my = ++postReloadSeq;
+    const det = await api('/api/forum/posts/' + encodeURIComponent(id));
+    if (my !== postReloadSeq || !alive() || det.status !== 200 || !det.json || !det.json.ok) return;
+    paintMain(det.json.post, det.json.replies || []);
+    const items = view.querySelectorAll('.pf-reply');
+    if (items.length) items[items.length - 1].scrollIntoView({ block: 'nearest' });
+  };
+  const paintComposer = () => {
+    const box = $('#pfComposer', view);
+    const hint = $('#pf-empty-sub', view);
+    const setHint = (on) => { if (hint) hint.hidden = !on; };
+    const renderEditor = () => {
+      box.innerHTML = `<div class="card"><h3>发表回复</h3>
+        <div class="field"><textarea id="pf-text" rows="3" placeholder="请输入回复内容"></textarea><div class="hint">回复内容为 1 至 2000 字，提交后先审后发。</div></div>
+        <button class="btn sm" id="pf-send">发表回复</button> <span id="pf-msg" style="font-size:13px"></span></div>`;
+      const btn = $('#pf-send', view), ta = $('#pf-text', view), msg = $('#pf-msg', view);
+      let sending = false;
+      btn.onclick = async () => {
+        if (sending) return;
+        const body = (ta.value || '').trim();
+        if (!body) { msg.textContent = '请填写回复内容，长度为 1 至 2000 字。'; msg.style.color = 'var(--err)'; return; }
+        sending = true; btn.disabled = true; ta.disabled = true; msg.textContent = '';
+        const fail = (text) => { msg.textContent = text; msg.style.color = 'var(--err)'; };
+        try {
+          let r = await forumFetch('/api/forum/posts/' + encodeURIComponent(id) + '/replies', { method: 'POST', json: { body } });
+          if (r.status === 401) {
+            // 无会话 401 发生在服务端落库之前（路由闸门），重交换后可安全单次重提
+            const re = await forumEnsureSession();
+            if (re.state === 'live') { sessState = re; r = await forumFetch('/api/forum/posts/' + encodeURIComponent(id) + '/replies', { method: 'POST', json: { body } }); }
+            else { fail(re.state === 'notice' ? (re.msg || '登录后可回复。') : '网络暂时不可用，请稍后再试。'); return; }
+          }
+          if (r.status === 0) { fail('网络暂时不可用，请稍后再试。'); return; }
+          const j = r.json || {};
+          if (j.ok) { msg.textContent = j.msg || '回复成功。'; msg.style.color = 'var(--ok)'; ta.value = ''; reloadPost(); }
+          else fail(j.msg || '提交未成功，请稍后再试。');
+        } finally { sending = false; btn.disabled = false; ta.disabled = false; }
+      };
+    };
+    if (!sessState || sessState.state === 'open') { renderEditor(); setHint(true); return; }
+    if (sessState.state === 'notice') { box.innerHTML = `<div class="card"><div class="note warn" style="margin:0">${esc(sessState.msg || '登录后可回复。')}</div></div>`; setHint(false); return; }
+    const me = sessState.me || {};
+    // 状态呈现顺序与服务端门 runGatesAndReview 一致：账号冻结/封禁先于禁言（DS 实现稿偏离#1 采纳）
+    if (me.accountStatus && me.accountStatus !== 'ok') {
+      box.innerHTML = `<div class="card"><div class="note err" style="margin:0">您的账号已被冻结或封禁，无法发帖。申诉请联系官方客服，或前往官网留言。</div></div>`;
+      setHint(false); return;
+    }
+    if (me.muted) {
+      const until = me.muted.permanent ? '永久禁言' : fmtDate(me.muted.until);
+      box.innerHTML = `<div class="card"><div class="note warn" style="margin:0">您已被论坛禁言（至 ${esc(until)}），仅限制论坛发言，账号与设备不受影响。申诉请联系官方客服，或前往官网留言。</div></div>`;
+      setHint(false); return;
+    }
+    renderEditor(); setHint(true);
+  };
+  // 会话先行落 cookie，详情 GET 随即带会话发（作者可见自己的待审内容）
+  let detResolve;
+  const detP = new Promise(r => { detResolve = r; });
+  const sessP = forumEnsureSession(() => { api('/api/forum/posts/' + encodeURIComponent(id)).then(detResolve); });
+  const boardsP = api('/api/forum/boards');
+  const det = await detP;
+  if (!alive()) return;
+  if (det.status === 0) {
+    $('#pfPost', view).innerHTML = stateBox('网络暂时不可用', '与服务器的连接出现问题，请检查网络后重新加载。', true);
+    bindRetry(view, () => Views.post(view, param, seq));
+    $('#pfComposer', view).innerHTML = '';
+    return;
+  }
+  if (det.status !== 200 || !det.json || !det.json.ok) {
+    const is404 = det.status === 404;
+    $('#pfPost', view).innerHTML = stateBox((det.json && det.json.msg) || '帖子不存在或不可见。', is404 ? '请返回帖子列表查看其他帖子。' : '请稍后重新加载。', !is404);
+    if (!is404) bindRetry(view, () => Views.post(view, param, seq));
+    $('#pfComposer', view).innerHTML = '';
+    return;
+  }
+  const bres = await boardsP;
+  if (bres.json && (bres.json.boards || bres.json.list)) {
+    boardNames = {};
+    (bres.json.boards || bres.json.list).forEach(b => { boardNames[b.key || b.id] = b.name || b.title || b.key || b.id; });
+  }
+  if (!alive()) return;
+  paintMain(det.json.post, det.json.replies || []);
+  sessState = await sessP;
+  if (!alive()) return;
+  paintComposer();
 };
 
 /* ================= 智能客服（AI 通道 + 知识库兜底 + 转人工） ================= */

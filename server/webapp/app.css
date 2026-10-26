@@ -150,3 +150,17 @@ table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;colo
   .chatback svg{width:16px;height:16px;transform:scaleX(-1)}
   .chatwrap .framebox iframe{height:min(560px,calc(100dvh - 380px));min-height:400px}
 }
+
+/* 论坛帖子详情（P2-037） */
+.pf-backrow{margin-bottom:12px}
+.pf-title{font-size:19px;line-height:1.5;color:var(--navy)}
+.pf-meta{color:var(--sub);font-size:12.5px;margin-top:6px}
+.pf-body{font-size:15px;line-height:1.8;white-space:pre-wrap;word-break:break-word;margin-top:10px}
+.pf-reply{padding:11px 2px;border-bottom:1px solid var(--line)}
+.pf-reply:last-child{border-bottom:none}
+.pf-rbody{font-size:14.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;margin-top:4px}
+.pf-off{background:#FF8A1E;color:#fff}
+.pf-t-pend{background:var(--warnbg);color:var(--warn)}
+.pf-t-rej{background:var(--errbg);color:var(--err)}
+.pf-t-hid{background:var(--tint);color:var(--sub)}
+#foPosts .row{cursor:pointer}
