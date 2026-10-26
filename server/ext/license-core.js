@@ -483,6 +483,16 @@ function createLicenseCore(opts) {
       return Object.assign(base, { allow: false, code: 'BAN_UNTIL', banId: b.id, banCode: b.code, endsAt: b.endsAt, msgCode: b.code === 'B10' ? 'L12' : 'L5' });
     }
     const keys = activeKeys(username, now);
+    // DS-R01 P0 修复（2026-10-26）：门控只认已激活钥。未激活钥 effectiveExpiry
+    // ＝Infinity（未起算），若计入门控集，买钥/发钥后不激活即可三面放行且
+    // 计时永不启动（实证 PROOF.md S1/S2/S7/S8）。activeKeys 本身保留未激活
+    // 语义供展示与主钥选取（DK 口径不动）；此处派生门控集 gateKeys 与待激活
+    // 集 pendingKeys——待激活集命中时回 G1 未激活（激活入口在 G1 面内，
+    // #46/#48 合法面不受影响），排在 G5/G2 之前：名下有待激活新钥时先引导
+    // 激活，不误报过期/试用结束。与双池设计（DESIGN-dualkey §8「在用钥＝
+    // 已激活」）同向。
+    const gateKeys = keys.filter((k) => k.lifecycle === 'activated');
+    const pendingKeys = keys.filter((k) => k.lifecycle === 'unactivated');
     const hasAnyKey = accountKeys(username).length > 0;
     const expiredDaily = accountKeys(username).some((k) => k.lifecycle === 'expired' && k.plan !== 'trial');
     // G5 附带最近到期点，供三端拦截面渲染「已于 X 到期」（裁决批①）
@@ -496,9 +506,10 @@ function createLicenseCore(opts) {
       return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9', forceLogout: true, transferOutGate: true });
     }
     if (ctx.channel === 'web') {
-      const paidValid = keys.some((k) => k.source === 'paid');
+      const paidValid = gateKeys.some((k) => k.source === 'paid');
       if (paidValid) return Object.assign(base, { allow: true, code: 'OK' });
-      if (expiredDaily && !keys.length) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
+      if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
+      if (expiredDaily && !gateKeys.length) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
       // 存量老用户（无试用、无任何密钥记录）在网页端同样走 G1（设计稿 G1 拦截面含网页版）；
       // 试用/免费来源持钥者走 G4。
       if (!hasAnyKey && !acct.trial) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
@@ -508,23 +519,25 @@ function createLicenseCore(opts) {
     // （有效密钥或试用在期即放行），但永不带 deviceCode——不判槽位、
     // 不记设备绑定、不触发设备类风控；封禁台账在上方已先判。
     if (ctx.channel === 'qfclash') {
-      if (keys.length) return Object.assign(base, { allow: true, code: 'OK' });
+      if (gateKeys.length) return Object.assign(base, { allow: true, code: 'OK' });
       if (acct.trial && acct.trial.expiresMs > now) return Object.assign(base, { allow: true, code: 'OK', trial: true, trialExpiresMs: acct.trial.expiresMs });
+      if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
       if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
       if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
       return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     }
     // software 渠道
-    if (keys.length) {
+    if (gateKeys.length) {
       if (ctx.deviceCode && ctx.platform) {
-        const mine = keys.find((k) => slotHas(k, ctx.platform, deviceHash));
+        const mine = gateKeys.find((k) => slotHas(k, ctx.platform, deviceHash));
         // #26：名额按容量判——该类槽位全部绑满才算 G3（pc 满 2 台、mobile 满 1 台）
-        const slotFull = keys.some((k) => slotCount(k, ctx.platform) >= (SLOT_CAPS[ctx.platform] || 1));
+        const slotFull = gateKeys.some((k) => slotCount(k, ctx.platform) >= (SLOT_CAPS[ctx.platform] || 1));
         if (!mine && slotFull) return Object.assign(base, { allow: false, code: 'G3', msgCode: 'L10' });
       }
       return Object.assign(base, { allow: true, code: 'OK' });
     }
     if (acct.trial && acct.trial.expiresMs > now) return Object.assign(base, { allow: true, code: 'OK', trial: true, trialExpiresMs: acct.trial.expiresMs });
+    if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     // 付费钥过期优先判 G5（已付费用户），无付费钥过期才落 G2——两状态严格区分（17:01 定版）
     if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
     if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
@@ -1344,7 +1357,9 @@ function createLicenseCore(opts) {
       else if (ev.code === 'G2') { displayStatus = '试用已到期'; statusNote = '3 天免费试用已到期，购买密钥后即可继续使用。'; }
       else if (ev.code === 'G5') { displayStatus = '密钥已过期'; const exp = primary && primary.expiresBaseMs ? effectiveExpiry(primary, now) : null; statusNote = (exp ? '密钥已于 ' + fmtDateCn(exp) + ' 到期并收回，' : '密钥已到期并收回，') + '购买新密钥后即可继续使用。'; }
     }
-    const validPaid = activeKeys(username, now).some((k) => k.source === 'paid');
+    // DS-R01 P0 修复：网页开通只认已激活付费钥（未激活付费钥不再开通网页版，
+    // 与 evaluate web 渠道同口径；原实现用 activeKeys 含未激活钥，与门控同漏）。
+    const validPaid = activeKeys(username, now).some((k) => k.source === 'paid' && k.lifecycle === 'activated');
     return {
       username, projectName: 'QFRemote',
       planName: primary ? primary.planName : 'QFRemote 试用套餐', // 16:56 命名口径：无密钥账号套餐名一律此名
