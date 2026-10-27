@@ -29,7 +29,7 @@
 | server/ext/page.js | /opt/qfremote-ext/page.js | `a5f47d3f9b032766c524e913f27ed2df` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `b9f620cce791160575ce99afc4878874` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `4b092fc022bfefbcb4acdd43c1ac0997` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
@@ -37,11 +37,11 @@
 | server/forum/feedback.js | /opt/qfremote-forum/feedback.js | `782c79a26b81925c66d0f6e202c0a673` |
 | server/forum/forum.html | /opt/qfremote-forum/forum.html | `ba8aeb4ed18a990deb7f56ae6fc643fd` |
 | server/forum/review.js | /opt/qfremote-forum/review.js | `f89d5827d1a715ff5ede0bc4b03fe0b4` |
-| server/forum/server.js | /opt/qfremote-forum/server.js | `35ebb38787b5c23014f099cec7f06f3e` |
+| server/forum/server.js | /opt/qfremote-forum/server.js | `e9e4a529185fb07f291d20cfd3d55d17` |
 | server/forum/words-seed.js | /opt/qfremote-forum/words-seed.js | `90a0d9235addc857aa3788955795dfcc` |
 | server/friends/chat/DESIGN.md | /opt/qfremote-friends/chat/DESIGN.md | `beb5c7c870e019486360165b0595a920` |
 | server/friends/chat/chat-client.js | /opt/qfremote-friends/chat/chat-client.js | `29ea090152d52a66462b686737782ec3` |
-| server/friends/chat/chat-server.js | /opt/qfremote-friends/chat/chat-server.js | `b14a4248e51d532d29ff001e54d0f72a` |
+| server/friends/chat/chat-server.js | /opt/qfremote-friends/chat/chat-server.js | `bf225d1e5615a4a0df22600f1a005d44` |
 | server/friends/chat/chat.html | /opt/qfremote-friends/chat/chat.html | `3f7927b30e399d4a4239f99b3fd30b57` |
 | server/friends/chat/config.sample.json | /opt/qfremote-friends/chat/config.sample.json | `f65f35754ca2c30bb8df3832390fb881` |
 | server/friends/chat/crypto-core.js | /opt/qfremote-friends/chat/crypto-core.js | `d826dd146dae5832b5c4cbe18d7c6805` |
@@ -77,19 +77,19 @@
 | server/loginshim/appeal-admin.js | /opt/qfremote-loginshim/appeal-admin.js | `1fa8a05e0835f680b1916b886f90e85c` |
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
 | server/loginshim/apply-pass.js | /opt/qfremote-loginshim/apply-pass.js | `07b4158257b9aa7a1ca01a537bd5be7c` |
-| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3e0fdada963070eb2d40b2ece88bf0e2` |
+| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `8679a01bb4e50ae9a4ef5e081cefcff7` |
 | server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `b71f43f02879ddcdf86932a975f57392` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
 | server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
 | server/meshcentral/views/translations/login2_zh-cht.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-cht.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
-| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `e816a2bf3fd2ac6f07387718296e9baa` |
+| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `e0dc99febb2b546b742088005f2ce6f7` |
 | server/register/README.md | /opt/qfremote-register/README.md | `527556ba06903beaeb3959cf728ef23f` |
 | server/register/register.html | /opt/qfremote-register/register.html | `4094a720db44d5172feda7cb02fa9f49` |
 | server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
-| server/webapp/app.css | /opt/qfremote-webapp/app.css | `b9c1723087a4a1462c428a659c5ef1df` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `6ed04073396f02798a016c010aabbaae` |
+| server/webapp/app.css | /opt/qfremote-webapp/app.css | `7c271ce686271c2cff0d0dda11f204e3` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `ae794dd098dcdf08ecac6214a6f8c2c0` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
@@ -99,7 +99,7 @@
 | server/webapp/assets/pay-wechat-6.png | /opt/qfremote-webapp/assets/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/webapp/assets/pay-wechat-9.9.png | /opt/qfremote-webapp/assets/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/webapp/favicon.ico | /opt/qfremote-webapp/favicon.ico | `cfd4ec9c9cd234732a5294b01e33e17f` |
-| server/webapp/index.html | /opt/qfremote-webapp/index.html | `d82928fd6c6c6b43b14d221d037bc6ce` |
+| server/webapp/index.html | /opt/qfremote-webapp/index.html | `f2c3d23c25d1726bd845903aab7aa71b` |
 
 ## 二、Windows 壳（windows/）
 
@@ -111,7 +111,7 @@
 | windows/README.md | ~/workspace/qfremote/app-src/README.md | `d209fabbe74c74d8c777d6290479e196` |
 | windows/about-preload.js | ~/workspace/qfremote/app-src/about-preload.js | `4bc54efbadb87aa4035517b1f3795387` |
 | windows/about.html | ~/workspace/qfremote/app-src/about.html | `bd07415e1208bfb8a3be0b96f3824a51` |
-| windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `9a7acdb02451e7f083f01bd44d45bb56` |
+| windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `8aa462a5cdd94d823220688b334be0a3` |
 | windows/build-info.json | ~/workspace/qfremote/app-src/build-info.json | `aeb6679d53e66faf56f147cd3086c09c` |
 | windows/build/icon-1024.png | ~/workspace/qfremote/app-src/build/icon-1024.png | `987af6e99ce6049324c9307d5f4e1d46` |
 | windows/build/icon.ico | ~/workspace/qfremote/app-src/build/icon.ico | `b2b0772ea612319f45cce8f029d68889` |
@@ -137,7 +137,7 @@
 | windows/lock-preload.js | ~/workspace/qfremote/app-src/lock-preload.js | `5456d32be105b2d326c8a448f099ed80` |
 | windows/lock.html | ~/workspace/qfremote/app-src/lock.html | `b3c644faa35f5d9668227054471d846d` |
 | windows/lock.js | ~/workspace/qfremote/app-src/lock.js | `b9a94176485698a9fce9378c69c0f474` |
-| windows/main.js | ~/workspace/qfremote/app-src/main.js | `afaadf7437d37975ced849f657d361f5` |
+| windows/main.js | ~/workspace/qfremote/app-src/main.js | `b384cd8d7ed56f9cfafd8602deb8788e` |
 | windows/offline.html | ~/workspace/qfremote/app-src/offline.html | `37a5f6cb50b88546b666647b8d84d0a6` |
 | windows/package-lock.json | ~/workspace/qfremote/app-src/package-lock.json | `125095ca0d81179b6fe49dcbcfe3e044` |
 | windows/package.json | ~/workspace/qfremote/app-src/package.json | `6ca998fe1b440b5ad5b5ef2fc94fde1f` |
@@ -146,7 +146,7 @@
 | windows/splash.html | ~/workspace/qfremote/app-src/splash.html | `05a350561ced1370a657b9e36fa8c2bf` |
 | windows/svc-urls.js | ~/workspace/qfremote/app-src/svc-urls.js | `2927023519d612cf94c95d0b3d6c05a6` |
 | windows/test/autologin-page-test.js | ~/workspace/qfremote/app-src/test/autologin-page-test.js | `ff5cd7b0a082b4886e2e938663c83aaa` |
-| windows/test/autologin-test.js | ~/workspace/qfremote/app-src/test/autologin-test.js | `7d1304123e6b7707145046ab3fc9cb8e` |
+| windows/test/autologin-test.js | ~/workspace/qfremote/app-src/test/autologin-test.js | `20ddbef5cdfa9be5ccaef4257611d097` |
 | windows/test/client-version-test.js | ~/workspace/qfremote/app-src/test/client-version-test.js | `b5e5aa8e1dc0a04548e036c2cb8a5a82` |
 | windows/test/creds-test.js | ~/workspace/qfremote/app-src/test/creds-test.js | `0e9a1ef4ae71eef2e6dd1111730b6611` |
 | windows/test/device-unlock-test.js | ~/workspace/qfremote/app-src/test/device-unlock-test.js | `a9d597b1a497f50f8196c0a59b01a454` |
