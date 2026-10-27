@@ -534,11 +534,13 @@ function statusFormPage(username, resultHtml) {
 function handleAppeal(req, res, pathname) {
   const q = new URL(req.url, 'http://localhost').searchParams;
   if (pathname === '/appeal') {
-    if (req.method === 'GET') return sendHtml(res, 200, appealFormPage(q.get('u') || '', ''));
+    // 收编二期收口（2026-10-26）：独立申诉页退役，活路只剩控制台 SPA 的申诉视图（/#appeal）；
+    // POST /appeal 提交、POST /appeal/status 进度、/appeal/reset 一次性改密页原样保留。
+    if (req.method === 'GET') { res.writeHead(302, { 'Location': '/#appeal', 'Cache-Control': 'no-store' }); return res.end(); }
     if (req.method === 'POST') return readForm(req, (p) => handleAppealSubmit(req, res, p));
   }
   if (pathname === '/appeal/status') {
-    if (req.method === 'GET') return sendHtml(res, 200, statusFormPage(q.get('u') || '', ''));
+    if (req.method === 'GET') { res.writeHead(302, { 'Location': '/#appeal', 'Cache-Control': 'no-store' }); return res.end(); }
     if (req.method === 'POST') return readForm(req, (p) => handleStatusQuery(req, res, p));
   }
   if (pathname === '/appeal/reset') {

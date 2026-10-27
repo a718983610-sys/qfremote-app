@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../core/client_header.dart';
 import '../core/constants.dart';
 import 'probe.dart' show trustedHttpClient;
 
@@ -155,6 +156,7 @@ class LockClient {
       } else {
         req = await client.postUrl(url);
       }
+      applyClientVersionHeader(req);
       final cookieHeader = await _cookieHeader();
       if (cookieHeader != null && cookieHeader.isNotEmpty) {
         req.headers.set(HttpHeaders.cookieHeader, cookieHeader);
@@ -187,7 +189,7 @@ class LockClient {
     } on LockException {
       rethrow;
     } catch (e) {
-      throw LockException('暂时连不上隐私锁服务，请检查网络后重试。');
+      throw LockException('暂时无法连接隐私锁服务，请检查网络后重试。');
     } finally {
       client.close(force: true);
     }

@@ -250,6 +250,25 @@ function main() {
   let sessions = loadJson(files.sessions, {});
   let wordsDb = loadJson(files.words, null);
   if (!wordsDb) { wordsDb = JSON.parse(JSON.stringify(WORDS_SEED)); saveJson(files.words, wordsDb); }
+
+  // B 设计 4.1/S1 就绪闸：posts/replies 两库文件独立 read+parse 成功才为真，闸假时每次调用先懒重试。
+  // 单独 parse 而不用 loadJson（loadJson 失败会给默认值、无法判定成功）；结构不含 items 同样视为未就绪，
+  // 防止坏文件被当成空库导致 exists 全量 false → 误销账。
+  let forumDbReady = false;
+  let forumDbCheckAt = 0;
+  function checkForumDbReady() {
+    if (forumDbReady) return true;
+    const nowCk = Date.now();
+    if (nowCk - forumDbCheckAt < 1000) return false; // 门二 F4：未就绪重试节流，避免每次请求都同步重读两库
+    forumDbCheckAt = nowCk;
+    try {
+      const p = JSON.parse(fs.readFileSync(files.posts, 'utf8'));
+      const r = JSON.parse(fs.readFileSync(files.replies, 'utf8'));
+      if (p && p.items && typeof p.items === 'object' && !Array.isArray(p.items) && r && r.items && typeof r.items === 'object' && !Array.isArray(r.items)) forumDbReady = true;
+    } catch (e) { /* 未就绪：保持假，下次 exists 调用再试 */ }
+    return forumDbReady;
+  }
+  checkForumDbReady();
   let compiled = R.compileWords(wordsDb);
   // 补齐新增账本：浏览去重 {postId:{actorHash:ms}}、分享账本 {byPost:{postId:{actorHash:ms}}, byActor:{actorHash:[ms]}}
   let viewsDb = loadJson(files.views, {});
@@ -1037,6 +1056,8 @@ function main() {
       if (req.method === 'POST' && sub === '/internal/review') {
         const secret = licInternalSecret();
         if (!secret || req.headers['x-qf-internal-secret'] !== secret) return sendJson(res, 403, { ok: false, msg: '内部鉴权失败。' });
+        // 门二复审闭环：与 exists 同闸——库未就绪时不许给出「内容不存在」类裁定，防 ext 挂点丙在坏库/空库冷启动时误销账
+        if (!checkForumDbReady()) return sendJson(res, 503, { ok: false, code: 'DB_NOT_READY' });
         const data = await readBody(req);
         const kind = data.kind === 'reply' ? 'reply' : 'post';
         const rawRef = String(data.id || '');
@@ -1044,6 +1065,26 @@ function main() {
         const decision = data.action === 'approve' ? 'approve' : (data.action === 'reject' ? 'reject' : '');
         if (!decision || !idOnly) return sendJson(res, 400, { ok: false, msg: '参数不正确。' });
         return adminReview(req, res, { reviewer: String(data.actor || '助手接口') }, { type: kind, id: idOnly, decision, category: data.category });
+      }
+      // 内部只读存在性探测（B 设计 4.1）：供 ext 自动销账判据，与 adminReview 不存在判据同义，只读、不写 modlog。
+      if (req.method === 'POST' && sub === '/internal/exists') {
+        const secret = licInternalSecret();
+        if (!secret || req.headers['x-qf-internal-secret'] !== secret) return sendJson(res, 403, { ok: false, msg: '内部鉴权失败。' });
+        if (!checkForumDbReady()) return sendJson(res, 503, { ok: false, code: 'DB_NOT_READY' });
+        const data = await readBody(req);
+        const kind = String(data.kind || '');
+        if (kind !== 'post' && kind !== 'reply') return sendJson(res, 400, { ok: false, msg: '参数不正确。' });
+        const rawRef = String(data.id || '');
+        const idOnly = rawRef.includes(':') ? rawRef.split(':').slice(1).join(':') : rawRef;
+        if (!idOnly) return sendJson(res, 400, { ok: false, msg: '参数不正确。' });
+        // 门二 F2：id 前缀与 kind 必须一致，错位查询一律拒绝，防查错库误判不存在
+        if (rawRef.startsWith('reply:') && kind !== 'reply') return sendJson(res, 400, { ok: false, msg: '参数不正确。' });
+        if (rawRef.startsWith('post:') && kind !== 'post') return sendJson(res, 400, { ok: false, msg: '参数不正确。' });
+        const db = kind === 'reply' ? repliesDb : postsDb;
+        // 门二 F1：内存库未就绪/结构异常/空库一律按未就绪答复，绝不以空库判「不存在」
+        if (!db || !db.items || typeof db.items !== 'object' || Array.isArray(db.items) || Object.keys(db.items).length === 0) return sendJson(res, 503, { ok: false, code: 'DB_NOT_READY' });
+        const it = Object.prototype.hasOwnProperty.call(db.items, String(idOnly)) ? db.items[String(idOnly)] : null;
+        return sendJson(res, 200, { ok: true, exists: !!it && !it.deleted });
       }
       // 管理面
       if (sub.startsWith('/admin')) {

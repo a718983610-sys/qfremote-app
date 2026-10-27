@@ -7,13 +7,17 @@ import 'theme.dart';
 class SplashView extends StatelessWidget {
   final QfPalette palette;
   final String version;
-  const SplashView({super.key, required this.palette, required this.version});
+
+  /// 附加小字（如自动恢复登录中），为空不显示。
+  final String? note;
+  const SplashView({super.key, required this.palette, required this.version, this.note});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       color: palette.pageColor,
-      child: Center(
+      child: SafeArea(
+        child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -66,6 +70,16 @@ class SplashView extends StatelessWidget {
                 ),
               ),
             ),
+            if (note != null) ...[
+              const SizedBox(height: 14),
+              Text(
+                note!,
+                style: TextStyle(
+                  color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90),
+                  fontSize: 13,
+                ),
+              ),
+            ],
             const SizedBox(height: 26),
             Text('v$version',
                 style: TextStyle(
@@ -74,13 +88,14 @@ class SplashView extends StatelessWidget {
                 )),
           ],
         ),
+        ),
       ),
     );
   }
 }
 
 /// 整页断线友好页（与 Windows 版断线页同行为）：
-/// 白卡（深色 #22262E）＋「连不上服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
+/// 白卡（深色 #22262E）＋「无法连接服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
 class OfflineView extends StatelessWidget {
   final QfPalette palette;
   final int secondsLeft;
@@ -96,7 +111,8 @@ class OfflineView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color: palette.pageColor,
-      child: Center(
+      child: SafeArea(
+        child: Center(
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 28),
           padding: const EdgeInsets.fromLTRB(26, 30, 26, 26),
@@ -125,7 +141,7 @@ class OfflineView extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               Text(
-                '连不上服务器，正在重试',
+                '无法连接服务器，正在重试',
                 style: TextStyle(color: palette.onCard, fontSize: 17, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 8),
@@ -146,6 +162,7 @@ class OfflineView extends StatelessWidget {
               ),
             ],
           ),
+        ),
         ),
       ),
     );

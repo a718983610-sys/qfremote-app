@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/client_header.dart';
 import '../core/svc_urls.dart';
 
 /// 积分信息（扩展服务 /points 的 /api/me 返回）。
@@ -11,19 +12,34 @@ class PointsInfo {
   /// 积分（服务器按总时长折算），缺失为 null。
   final int? points;
 
-  const PointsInfo({required this.displayText, required this.points});
+  /// 账号名（「我的」页个人卡用），缺失为 null。
+  final String? user;
+
+  /// 已用天数（「我的」页统计卡用），缺失为 null。
+  final int? daysUsed;
+
+  const PointsInfo({
+    required this.displayText,
+    required this.points,
+    this.user,
+    this.daysUsed,
+  });
 
   /// 纯解析（供自测）：字段缺失/类型不对一律给 null，调用方显示「—」。
   static PointsInfo parse(String body) {
     final root = jsonDecode(body);
     if (root is! Map<String, dynamic>) {
-      throw const FormatException('积分信息格式不对');
+      throw const FormatException('积分信息格式不正确');
     }
     final dt = root['displayText'];
     final p = root['points'];
+    final u = root['user'];
+    final d = root['daysUsed'];
     return PointsInfo(
       displayText: dt is String && dt.isNotEmpty ? dt : null,
       points: p is int ? p : (p is num ? p.toInt() : null),
+      user: u is String && u.isNotEmpty ? u : null,
+      daysUsed: d is int ? d : (d is num ? d.toInt() : null),
     );
   }
 }
@@ -59,6 +75,7 @@ class ExtService {
       final req = method == 'POST'
           ? await client.postUrl(uri).timeout(const Duration(seconds: 8))
           : await client.getUrl(uri).timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.cookieHeader, cookie);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (jsonBody != null) {
@@ -81,6 +98,28 @@ class ExtService {
     final r = await _send('POST', '${urls.pointsApiBase}/api/heartbeat',
         jsonBody: {'client': 'android'});
     return r != null && r.$1 == 200;
+  }
+
+  /// 心跳＋强制下线信号（2.3.1 契约 §7.5.7）：心跳响应顶层带
+  /// forceLogout:true＋gateCode 时，壳须立即登出本机会话并落拦截态。
+  /// 返回 null＝本拍没打通（安静跳过，不当作任何许可结论）。
+  Future<({bool forceLogout, String? gateCode})?> heartbeatSignal() async {
+    final r = await _send('POST', '${urls.pointsApiBase}/api/heartbeat',
+        jsonBody: {'client': 'android'});
+    if (r == null || r.$1 != 200) return null;
+    try {
+      final root = jsonDecode(r.$2);
+      if (root is Map<String, dynamic>) {
+        final gc = root['gateCode'];
+        return (
+          forceLogout: root['forceLogout'] == true,
+          gateCode: gc is String && gc.isNotEmpty ? gc : null,
+        );
+      }
+    } catch (_) {
+      // 响应不是 JSON：只当心跳成功，不解读信号
+    }
+    return (forceLogout: false, gateCode: null);
   }
 
   /// 我的积分/使用时长：取不到返回 null（关于页显示「—」）。

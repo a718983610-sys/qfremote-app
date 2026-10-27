@@ -5,12 +5,22 @@ name: Android 截图与看护实测
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   shots:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      - name: 释放 runner 磁盘（模拟器步曾因 No space left on device 失败，2026-10-25 F-2）
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker system prune -af 2>/dev/null || true
+          df -h / | tail -1
 
       - name: 开 KVM 硬件加速（Linux 模拟器必需）
         run: |
@@ -28,7 +38,7 @@ jobs:
       - name: Flutter 3.32.8
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: '3.47.8'
           channel: stable
           cache: true
 
@@ -38,7 +48,7 @@ jobs:
         run: |
           RUN_ID=$(gh run list --repo ${{ github.repository }} --workflow android.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
           echo "build run: $RUN_ID"
-          gh run download "$RUN_ID" --repo ${{ github.repository }} -n QFRemote-v2.1.0-apk -D prod
+          gh run download "$RUN_ID" --repo ${{ github.repository }} -n QFRemote-v2.3.2-apk -D prod
           ls -la prod/
 
       - name: 编译测试包（指向本机夹具服务器）

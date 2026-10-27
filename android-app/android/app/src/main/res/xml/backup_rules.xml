@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 及以下的备份规则（12+ 走 data_extraction_rules.xml）：
+     与之同口径，排除 flutter_secure_storage 的凭据密文文件。 -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    <exclude domain="sharedpref" path="flutter_secure_storage.xml" />
+</full-backup-content>

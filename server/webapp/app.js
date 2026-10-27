@@ -59,15 +59,39 @@ function confirmModal(title, text, okLabel, onOk) {
   showModal(title, `<p>${esc(text)}</p>`, [{ label: '取消' }, { label: okLabel || '确认', primary: true, onClick: onOk }]);
 }
 
-/* ---------------- 接口层：正式失败提示、失败自动重试一次 ---------------- */
+/* ---------------- 接口层：正式失败提示、超时兜底、失败按白名单重试一次 ---------------- */
+/* 超时兜底（perf 线定版，与下述白名单融合）：单项默认上限见 API_TIMEOUT_MS，
+   AbortController 到点中止并以 timeout 标记返回；调用方显式传 opts.retry 时
+   以显式为准（lockApi 等既有调用点口径不改）。 */
+/* 网络层自动重试白名单——只有「重复提交不会产生第二次业务效果」的请求才
+   允许自动重发：
+   · 全部 GET/HEAD：安全方法，服务端仅读；
+   · POST /appeal/status：只读查询（服务端契约）；
+   · POST /chat/api/vault：按 msgId 幂等（服务端契约：同 msgId 重复提交
+     直接返回 {ok:true, dup:true} 不重复落账）；
+   · POST /chat/api/read：按会话写 marks[我]=max(原值, uptoSeq)，单调幂等。
+   其余一概不自动重发——尤其 POST /appeal：服务端按提交次数计数（永久
+   封禁 2 次/其他 3 次），「已落库但响应丢失」时重发会白白消耗一次额度；
+   POST /chat/api/send 会重复投递消息，同样不在白名单内。 */
 const API_TIMEOUT_MS = 30000;   // 默认单项上限【施工偏差 D1：DS 稿 12000 → 30000；现行本无超时，截图上传等大 POST 弱网可合法超 12s，关键路径另有显式超时（lockApi 表/raceNodeId），抬高默认值只防回归】
 const API_RETRY_DELAY_MS = 600; // 与原文案一致的退避间隔
+const API_RETRY_SAFE = [
+  ['POST', '/appeal/status'],
+  ['POST', '/chat/api/vault'],
+  ['POST', '/chat/api/read']
+];
+function apiRetrySafe(method, path) {
+  const m = String(method || 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD') return true;
+  const p = String(path || '').split('?')[0];
+  return API_RETRY_SAFE.some(x => x[0] === m && x[1] === p);
+}
 async function api(path, opts) {
   opts = opts || {};
   const method = (opts.method || 'GET').toUpperCase();
   const timeoutMs = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : API_TIMEOUT_MS;
   // 只对幂等方法自动重试：写操作（启停锁/重置/更新）重试会导致重复投递信封（幂等防呆）
-  const retryable = opts.retry !== undefined ? !!opts.retry : (method === 'GET' || method === 'HEAD');
+  const retryable = opts.retry !== undefined ? !!opts.retry : apiRetrySafe(method, path);
   const maxAttempts = retryable ? 2 : 1;
   let lastErr = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -417,12 +441,15 @@ setInterval(heartbeat, 60000);                    // 在线计时/强制下线�
 setInterval(() => { if (S.auth === 'in') checkSession(true); }, 240000); // 凭证静默续期校验
 function forceGate(code) {
   S.auth = 'out'; Cache.clear();
+  try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
   showAuth('gate', { code: code || 'G1' });
   toast('本设备已被退出登录，请重新登录后在「我的 · 兑换 KEY」中处理激活。', 'warn');
 }
 async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
     await api('/logout'); Cache.clear();
+    try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
+    try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
     S.auth = 'out'; S.license = null; S.points = null;
     showAuth('login', { notice: '您已退出登录。' });
   });
@@ -449,9 +476,58 @@ const BTABS = [
   { icon: 'chat', label: '消息', route: 'chat' },
   { icon: 'user', label: '我的', route: 'profile' }
 ];
+/* ===== P7-016 好友申请角标：模块级状态 ===== */
+let friendReqCount = -1;   // -1 未知/隐藏；>=0 最近一次确认的待处理申请数
+let badgeEpoch = 0;        // 角标数据代次，用于丢弃过期回包
+let badgeFlight = null;    // 正在飞行中的请求（并发去重）
+let badgeLastFetch = 0;    // 上次请求结束时间戳（节流）
+const FR_BADGE_TTL = 20000;
+
+/* 按当前 friendReqCount 生成角标 span，供 nav 模板复用 */
+function frBdgHtml() {
+  const n = friendReqCount;
+  return n > 0 ? `<span class="fr-bdg">${n}</span>` : `<span class="fr-bdg" hidden></span>`;
+}
+
+/* 写入角标：先镜像确保，再同步全部 .fr-bdg */
+function setFriendBadge(n) {
+  friendReqCount = n;
+  const burger = $('#burgerBtn');
+  if (burger && !burger.querySelector('.fr-bdg')) {
+    const sp = document.createElement('span');
+    sp.className = 'fr-bdg onbtn';
+    burger.appendChild(sp);
+  }
+  document.querySelectorAll('.fr-bdg').forEach(el => {
+    if (friendReqCount > 0) { el.hidden = false; el.textContent = String(friendReqCount); }
+    else { el.hidden = true; el.textContent = ''; }
+  });
+}
+
+/* 拉取 /api/friends/me 并刷新角标；失败永不改角标 */
+async function refreshFriendBadge(force) {
+  if (badgeFlight) return;                                              // 并发去重（force 同样让位）
+  if (!force && Date.now() - badgeLastFetch < FR_BADGE_TTL) return;     // 20s 节流
+  if (S.auth !== 'in') { setFriendBadge(-1); return; }
+  const flight = { epoch: badgeEpoch };
+  badgeFlight = flight;
+  try {
+    const r = await api('/api/friends/me');
+    if (r.status === 200 && r.json && Array.isArray(r.json.requestsIn)) {
+      if (flight.epoch === badgeEpoch) setFriendBadge(r.json.requestsIn.length);  // epoch 不符丢弃
+    }
+  } catch (e) {
+    /* 失败永不改角标：保留最近已知真值 */
+  } finally {
+    if (badgeFlight === flight) { badgeFlight = null; badgeLastFetch = Date.now(); }
+  }
+}
+
+window.addEventListener('focus', () => { refreshFriendBadge(false).catch(() => {}); });
+
 function navBtn(item, activeRoute, cls) {
   const base = cls === undefined ? 'nav' : cls;
-  return `<button class="${base}${item.route === activeRoute ? ' on' : ''}" data-nav="${item.route}">${ic(item.icon)}<span>${item.label}</span></button>`;
+  return `<button class="${base}${item.route === activeRoute ? ' on' : ''}" data-nav="${item.route}">${ic(item.icon)}<span>${item.label}</span>${item.route === 'friends' ? frBdgHtml() : ''}</button>`;
 }
 function menu34Html(activeRoute, cls) {
   return MENU34.map(i => navBtn(i, activeRoute, cls)).join('') +
@@ -474,12 +550,12 @@ function renderNavs() {
     `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
     `<div class="gtitle">主菜单</div>` + menu34Html(a, 'nav');
   $('#acctMenu').innerHTML = MENU34.map(i =>
-    `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span></a>`).join('') +
+    `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span>${i.route === 'friends' ? frBdgHtml() : ''}</a>`).join('') +
     (S.isAdmin ? `<a data-nav="admin" class="${a === 'admin' ? 'on' : ''}">${ic('gear')}<span>站长管理</span></a>` : '') +
     `<a href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>` +
     `<a data-nav="logout" class="red">${ic('logout')}<span>登出</span></a>`;
   $('#bnav').innerHTML = BTABS.map(i => navBtn(i, a, '')).join('');
-  $('#acctChip').innerHTML = `<span class="uava">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><b>${esc(S.displayName || '')}</b>`;
+  $('#acctChip').innerHTML = `<span class="uava">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><b>${esc(S.displayName || '')}</b>${frBdgHtml()}`;
   document.querySelectorAll('[data-nav]').forEach(el => {
     el.addEventListener('click', () => {
       const r = el.getAttribute('data-nav');
@@ -530,6 +606,7 @@ async function render() {
   const seq = ++renderSeq;
   S.route = parseRoute();
   if (S.route.name !== 'forum' && S.route.name !== 'post') { forumListMemo = null; forumMemoArmed = false; }
+  if (S._chatStop) { try { S._chatStop(); } catch (e) {} S._chatStop = null; }
   renderNavs();
   const view = $('#view');
   const fn = Views[S.route.name] || Views.home;
@@ -537,6 +614,7 @@ async function render() {
   try { await fn(view, S.route.param, seq); }
   catch (e) { if (seq === renderSeq) view.innerHTML = stateBox('页面加载失败', '页面组件出现异常，请重新加载。', true), bindRetry(view, render); }
   window.scrollTo(0, 0);
+  refreshFriendBadge(false).catch(() => {});
 }
 window.addEventListener('hashchange', render);
 
@@ -553,7 +631,9 @@ function showAuth(kind, extra) {
   root.hidden = false;
   if (kind === 'register') return Views.register(root, extra);
   if (kind === 'gate') return Views.gate(root, extra);
-  return Views.login(root, extra);
+  const lp = Views.login(root, extra);
+  if (parseRoute().name === 'appeal') authTool(root, 'appeal');
+  return lp;
 }
 function brandBlock() {
   return `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><defs><linearGradient id="qfgrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3F8CFF"/><stop offset="1" stop-color="#2470E0"/></linearGradient></defs><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="url(#qfgrad)" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/></svg></span><span><b style="font-size:19px">QFRemote</b><br><small style="color:var(--sub);letter-spacing:2.4px;font-size:8.5px">REMOTE CONTROL</small></span></div>`;
@@ -613,7 +693,7 @@ Views.login = function (root, extra) {
         + '<button class="btn block" id="li-appeal" type="button" style="margin-top:10px">提交申诉</button>'
         + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-fz-support">智能客服</a>，或在客服中申请转人工。</p>';
       fz.hidden = false;
-      $('#li-appeal', root).onclick = () => showModal('提交申诉', '<div class="framebox"><iframe src="/appeal?u=' + encodeURIComponent(uname) + '" title="申诉"></iframe></div>', [{ label: '关闭' }]);
+      $('#li-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
       const sup = $('#li-fz-support', root);
       if (sup) sup.onclick = (ev) => { ev.preventDefault(); authTool(root, 'support'); };
     } else { err.textContent = r.msg; err.hidden = false; }
@@ -628,7 +708,7 @@ Views.login = function (root, extra) {
   }));
 };
 /* 登录页四入口的同卡工具区（全状态可达：客服/购买/查询/换绑均不要求先登录） */
-function authTool(root, kind) {
+function authTool(root, kind, opts) {
   const box = $('#authTools', root); if (!box) return;
   if (kind === 'support') { box.innerHTML = ''; Views.support(box, null, 0, { guest: true }); return; }
   if (kind === 'purchase') { box.innerHTML = ''; Views.purchase(box, null, 0, { guest: true }); return; }
@@ -656,6 +736,11 @@ function authTool(root, kind) {
       const r = await api('/license/api/rebind/submit', { method: 'POST', json: { username: $('#rb-user', box).value.trim(), password: $('#rb-pass', box).value, desc: $('#rb-desc', box).value, deviceCode: $('#rb-dc', box).value.trim(), platform: $('#rb-platform', box).value, channel: 'web' } });
       $('#rb-out', box).innerHTML = `<div class="note ${r.json && r.json.ok ? 'ok' : 'err'}">${esc(r.json ? (r.json.msg || (r.json.ok ? '已提交，审核进度可在登录后「我的」中查看。' : '提交失败，请核对信息。')) : '服务暂时不可用，请稍后再试。')}</div>`;
     };
+  }
+  if (kind === 'appeal') {
+    box.innerHTML = '';
+    renderAppeal(box, opts || {});
+    return;
   }
 }
 function statusSummary(j) {
@@ -716,7 +801,7 @@ Views.gate = function (root, extra) {
   };
   const buy = $('#gt-buy', root); if (buy) buy.onclick = () => { const b = $('#gt-tools', root); b.innerHTML = ''; Views.purchase(b, null, 0, { guest: S.auth !== 'in' }); };
   const ap = $('#gt-appeal', root);
-  if (ap) ap.onclick = () => showModal('提交申诉', '<div class="framebox"><iframe src="/appeal" title="申诉"></iframe></div>', [{ label: '关闭' }]);
+  if (ap) ap.onclick = () => { const b = $('#gt-tools', root); b.innerHTML = ''; renderAppeal(b, { user: S.user || '' }); };
   $('#gt-support', root).onclick = () => { const b = $('#gt-tools', root); b.innerHTML = ''; Views.support(b, null, 0, { guest: true }); };
   $('#gt-logout', root).onclick = () => doLogout();
 };
@@ -1209,29 +1294,59 @@ Views.remote = async function (view, name) {
 };
 
 /* ================= 好友 ================= */
+let frPaintSeq = 0;   // 好友页 paint 代次，防止旧回包覆盖新渲染
 Views.friends = async function (view) {
   view.innerHTML = `<h1 class="pt">好友</h1><p class="psub">添加好友后，可将自己的设备组共享给对方协助处理。官方客服为系统联系人，不可删除、不参与设备共享。</p>
+    <div class="card"><h3>好友申请 <span class="fr-cnt" id="frReqCnt" hidden></span></h3><div id="frReqs"><div class="skel" style="height:52px"></div></div></div>
     <div class="grid2"><div class="card chatlist"><h3>好友列表</h3><div id="frList"><div class="skel" style="height:52px"></div></div>
       <div class="field" style="margin-top:16px"><label>添加好友（输入对方完整账号）</label><input id="fr-q" placeholder="对方账号"></div>
-      <button class="btn sm" id="fr-add">发送好友申请</button> <span id="fr-msg" style="font-size:13px;color:var(--sub)"></span></div>
+      <button class="btn sm" id="fr-add">发送好友申请</button> <span id="fr-msg" style="font-size:13px;color:var(--sub)"></span>
+      <div id="frOutReq"></div></div>
     <div class="card"><h3>共享给我的设备组</h3><div id="frIn"><div class="skel" style="height:52px"></div></div>
       <h3 style="margin-top:18px">我共享出的</h3><div id="frOut"><div class="skel" style="height:40px"></div></div></div></div>`;
   ensureChatToken(false);
   const paint = async () => {
-    const r = await api('/api/friends/me');
-    if (r.status !== 200 || !r.json) { $('#frList', view).innerHTML = '<div class="statebox"><b>好友服务暂时不可用</b><p>请稍后重新加载。</p></div>'; return; }
-    const j = r.json;
-    const list = $('#frList', view);
-    let h = `<button class="row" data-support="1"><span class="tile">${ic('users')}</span><span><b>官方客服</b><small>智能客服与人工客服的统一入口</small></span><span class="tag">系统</span><span class="chev">${ic('chevR')}</span></button>`;
-    (j.requestsIn || []).forEach(q => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
-    (j.friends || []).forEach(f => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b><small>好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
-    if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
-    list.innerHTML = h;
-    const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
-    list.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-acc'), accept: true } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已同意好友申请。', 'ok'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
-    list.querySelectorAll('[data-rej]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-rej'), accept: false } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已拒绝好友申请。', 'info'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
-    list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); toast('已删除好友。', 'ok'); paint(); }));
-    list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
+    const myPaint = ++frPaintSeq;
+    // 失败分支（catch 与业务失败共用同一渲染，且都不碰角标）
+    const failRender = () => {
+      const l = $('#frList', view); if (l) l.innerHTML = '<div class="statebox"><b>好友服务暂时不可用</b><p>请稍后重新加载。</p></div>';
+      const rq = $('#frReqs', view); if (rq) rq.innerHTML = '<div class="statebox"><b>好友申请暂时无法加载</b><p>请稍后重新加载。</p></div>';
+      const c = $('#frReqCnt', view); if (c) { c.hidden = true; c.textContent = ''; }
+      const o = $('#frOutReq', view); if (o) o.innerHTML = '';
+      const i2 = $('#frIn', view); if (i2) i2.innerHTML = '';
+      const u = $('#frOut', view); if (u) u.innerHTML = '';
+    };
+    try {
+      const r = await api('/api/friends/me');
+      if (myPaint !== frPaintSeq) return;                                // 过期回包直接丢弃
+      if (r.status !== 200 || !r.json || !Array.isArray(r.json.requestsIn)) { failRender(); return; }
+      const j = r.json;
+      const reqN = j.requestsIn.length;
+
+      // ---- 角标与标题计数 ----
+      badgeEpoch++;
+      setFriendBadge(reqN);
+      const cnt = $('#frReqCnt', view);
+      if (cnt) { if (reqN > 0) { cnt.hidden = false; cnt.textContent = String(reqN); } else { cnt.hidden = true; cnt.textContent = ''; } }
+
+      // ---- 好友申请（独立整幅卡）----
+      const reqBox = $('#frReqs', view);
+      let rq = '';
+      j.requestsIn.forEach(q => { rq += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
+      if (!reqN) rq = '<div class="statebox"><b>暂无待处理的好友申请</b><p>有新的好友申请时会显示在这里。</p></div>';
+      reqBox.innerHTML = rq;
+      reqBox.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-acc'), accept: true } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已同意好友申请。', 'ok'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
+      reqBox.querySelectorAll('[data-rej]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-rej'), accept: false } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已拒绝好友申请。', 'info'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
+
+      // ---- 好友列表（删去 requestsIn 段，其余逐字不变）----
+      const list = $('#frList', view);
+      let h = `<button class="row" data-support="1"><span class="tile">${ic('users')}</span><span><b>官方客服</b><small>智能客服与人工客服的统一入口</small></span><span class="tag">系统</span><span class="chev">${ic('chevR')}</span></button>`;
+      (j.friends || []).forEach(f => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b><small>好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
+      if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
+      list.innerHTML = h;
+      const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
+      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); toast('已删除好友。', 'ok'); paint(); }));
+      list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
       const groups = (j.myGroups || []);
       const opts = groups.length ? groups.map(g => `<option value="${esc(g.meshid || g.id || g)}">${esc(g.name || g.meshName || g.meshid || g)}</option>`).join('') : '<option value="">（暂无可共享分组）</option>';
       showModal('共享设备给 ' + b.getAttribute('data-share'),
@@ -1243,9 +1358,20 @@ Views.friends = async function (view) {
           if (r2.json && r2.json.ok) { toast('已共享。', 'ok'); paint(); } else toast((r2.json && r2.json.msg) || '共享未成功，请稍后再试。', 'err');
         } }]);
     });
-    $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
-    $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
-    view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
+
+      // ---- 我发送的申请 ----
+      const outBox = $('#frOutReq', view);
+      outBox.innerHTML = (Array.isArray(j.requestsOut) && j.requestsOut.length)
+        ? `<h3 style="margin-top:18px">我发送的申请</h3>` + j.requestsOut.map(o => `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(o.to || '')}</b></span><span class="tag" style="margin-left:auto">等待对方同意</span></div>`).join('')
+        : '';
+
+      // ---- 共享给我的 / 我共享出的（逐字不变）----
+      $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
+      $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
+      view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
+    } catch (e) {
+      if (myPaint === frPaintSeq) failRender();
+    }
   };
   $('#fr-add', view).onclick = async () => {
     const q = $('#fr-q', view).value.trim(); const msg = $('#fr-msg', view);
@@ -1268,13 +1394,26 @@ Views.friends = async function (view) {
    服务端原因原样交回调用方显示，不许用笼统文案掩盖。并发换票合并
    为一路；换票失败只清本路开始时那张旧票，不误清并发刚换好的新票。 */
 let chatTok = '', chatTokAt = 0, chatTokGen = 0, chatTokFlight = null;
+/* 登出 / 会话失效被踢时的聊天令牌复位：自增代号使任何在飞的换票请求作废，
+   其迟到的成功响应绝不会再把上一个账号的令牌写回 chatTok（C-16）。 */
+function qfChatTokenReset() {
+  chatTok = ''; chatTokAt = 0; chatTokGen++; chatTokFlight = null;
+}
 function ensureChatToken(force) {
   if (!force && chatTok && (Date.now() - chatTokAt) < 11 * 3600 * 1000) return Promise.resolve({ ok: true });
-  if (!force && chatTokFlight) return chatTokFlight;
+  /* 在飞换票一律合并（含 force）：并发 401 只换一次票，避免多个强制换票
+     共享同一 gen0 时，后完成者被 gen 校验误判为「登录状态已变更」（N-1）。
+     登出复位由 qfChatTokenReset 置空 flight＋自增 gen，迟到成功仍被丢弃。 */
+  if (chatTokFlight) return chatTokFlight;
   const gen0 = chatTokGen;
   const flight = (async () => {
     const r = await api('/chat/api/sso', { method: 'POST', json: {} });
-    if (r.status === 200 && r.json && r.json.ok && r.json.token) { chatTok = r.json.token; chatTokAt = Date.now(); chatTokGen++; return { ok: true }; }
+    if (r.status === 200 && r.json && r.json.ok && r.json.token) {
+      /* 换票期间发生过登出/换账号：此票属于上一个账号，直接丢弃，绝不复活。 */
+      if (chatTokGen !== gen0) return { ok: false, msg: '登录状态已变更，请重新打开聊天。' };
+      chatTok = r.json.token; chatTokAt = Date.now(); chatTokGen++;
+      return { ok: true };
+    }
     if (chatTokGen === gen0) { chatTok = ''; chatTokAt = 0; }
     if (r.networkError) return { ok: false, network: true, msg: '网络连接失败，请检查网络后重试。' };
     return { ok: false, msg: (r.json && r.json.msg) || (r.status === 403 ? '该账号不能使用聊天功能。' : '聊天登录失败，请重新登录后再试。') };
@@ -1284,13 +1423,18 @@ function ensureChatToken(force) {
   flight.then(done, done);
   return flight;
 }
+
 async function chatApi(path, opts) {
   opts = opts || {};
+  const method = String(opts.method || 'GET').toUpperCase();
   let t = await ensureChatToken(false);
   if (!t.ok) return { status: 0, ok: false, json: null, text: '', ssoError: t.msg, networkError: !!t.network };
   const call = () => api(path, Object.assign({}, opts, { headers: Object.assign({}, opts.headers || {}, { 'x-qfchat-token': chatTok }) }));
   let r = await call();
-  if (r.status === 401 || (r.status === 200 && !r.json)) {
+  /* 401：服务端未执行业务，换票后重发安全（含非幂等 POST）；
+     200 但响应体非 JSON 时请求可能已被服务端执行，只对幂等白名单重发，
+     否则 POST /chat/api/send 等会被二次投递。 */
+  if (r.status === 401 || (r.status === 200 && !r.json && apiRetrySafe(method, path))) {
     const firstMsg = (r.json && (r.json.msg || r.json.error)) || '';
     t = await ensureChatToken(true);
     if (!t.ok) return { status: 0, ok: false, json: null, text: '', ssoError: t.msg, networkError: !!t.network };
@@ -1300,28 +1444,889 @@ async function chatApi(path, opts) {
   return r;
 }
 
-/* ================= 聊天（会话列表原生；对话区挂载聊天通道，端到端加密不变） ================= */
+/* ================= 聊天对话区（C2 收编二期·变基重建） =================
+   对话区改为控制台原生组件，不再内嵌独立聊天页。加密与解锁机制与
+   独立页完全一致（同一套 /chat/api/* 接口、同一份 crypto-core 加密
+   核心、同一静默解锁主序：托管副本→设备副本→无钥匙静默建钥匙），
+   本组件移植独立页已验证的客户端逻辑，仅把页面级 DOM 换成组件内
+   元素、把登录/单点登录换成控制台既有的聊天令牌通道（chatApi）。
+   服务器只见密文的性质不变；独立 /chat 页在本组件验收后按设计退役。 */
+let chatLibsP = null;
+function ensureChatLibs() {
+  if (window.QFChatCrypto && window.sodium) return Promise.resolve();
+  if (chatLibsP) return chatLibsP;
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src;
+    s.onload = res; s.onerror = () => rej(new Error('lib-load-failed'));
+    document.head.appendChild(s);
+  });
+  chatLibsP = (async () => {
+    await load('/chat/libsodium-sumo.js');
+    await load('/chat/libsodium-wrappers.js');
+    await load('/chat/crypto-core.js');
+    await window.QFChatCrypto.ready();
+  })();
+  chatLibsP.catch(() => { chatLibsP = null; });
+  return chatLibsP;
+}
+const CH = {
+  priv: '', vaultKey: '', pubCache: {}, convKeyCache: {},
+  currentWith: '', lastEventSeq: 0, rendered: new Set(),
+  removedIds: new Set(),   // 已撤回/已删消息 id：防其 msg 事件迟到重处理时复活（见 chHandleEvent）
+  history: {}, traces: {}, pollTimer: null, pollBusy: false,
+  locked: false, pendingWith: '', shellDeviceKey: '',
+  deviceMeta: [], hasSessionCopy: false, convMeta: {},
+  /* C-04：全局轮询游标 lastEventSeq 只由 chPollOnce 实际消费事件后推进；
+     已读一律按会话上报（服务端 /read 写 marks[我]=max(原值, uptoSeq)）。 */
+  convSeenSeq: {},    // with -> 本端已消费到的该会话最大全局 seq（/read 上报用）
+  lastOutSeq: {},     // with -> 我发出的最后一条消息 seq（仅用于「对方已读」显示）
+  pendingEvents: [],  // 已取回但暂无法解密/写入的事件，下轮重放（上限 200）
+  historyLoaded: false,
+  gen: 0              // 账号态代号：登出/复位时自增，在飞异步据此丢弃迟到结果
+};
+let CHV = null; // { view, hooks } 当前挂载点
+let chatBootSeq = 0; // 启动代次：挂载/卸载时自增，迟到的旧 boot 据此收手（N-4）
+const chEl = (id) => CHV ? CHV.view.querySelector('#' + id) : null;
+const CHC = () => window.QFChatCrypto;
+async function cq(method, path, body) {
+  const opts = { method };
+  if (body !== undefined) opts.json = body;
+  const r = await chatApi(path, opts);
+  if (r.ssoError) throw new Error(r.ssoError);
+  if (!r.json) throw new Error('聊天服务暂时不可用，请稍后再试。');
+  if (!r.ok || r.json.ok === false) throw new Error(r.json.msg || ('HTTP ' + r.status));
+  return r.json;
+}
+function chFmt(at) { const d = new Date(at); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+const CH_AV = ['#3E6FB4', '#5B83B8', '#7A93B5', '#4E7396', '#6B8CAE'];
+function chAvatarColor(name) { let h = 0; const s = String(name || '?'); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return CH_AV[h % CH_AV.length]; }
+
+/* ---------- 设备密钥与设备包裹副本（移植独立页，语义不变） ---------- */
+function chDeviceIdFor(kind) {
+  const key = 'qfchat-device-id-' + kind;
+  let id = null;
+  try { id = localStorage.getItem(key); } catch (e) {}
+  if (!id) {
+    const bytes = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    id = kind + '-' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem(key, id); } catch (e) {}
+  }
+  return id;
+}
+function chIdbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error('indexeddb-unavailable'));
+    const rq = indexedDB.open('qfremote-chat', 1);
+    rq.onupgradeneeded = () => { try { rq.result.createObjectStore('kv'); } catch (e) {} };
+    rq.onsuccess = () => resolve(rq.result);
+    rq.onerror = () => reject(rq.error);
+  });
+}
+async function chIdbGet(key) {
+  const db = await chIdbOpen();
+  return new Promise((resolve, reject) => {
+    const rq = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+    rq.onsuccess = () => resolve(rq.result);
+    rq.onerror = () => reject(rq.error);
+  });
+}
+async function chIdbSet(key, val) {
+  const db = await chIdbOpen();
+  return new Promise((resolve, reject) => {
+    const rq = db.transaction('kv', 'readwrite').objectStore('kv').put(val, key);
+    rq.onsuccess = () => resolve();
+    rq.onerror = () => reject(rq.error);
+  });
+}
+let _chWebKeyP = null;
+function chWebDeviceKey(create) {
+  if (!(window.crypto && crypto.subtle && window.indexedDB)) return Promise.resolve(null);
+  if (!_chWebKeyP) {
+    _chWebKeyP = (async () => {
+      let k = null;
+      try { k = await chIdbGet('deviceKey'); } catch (e) {}
+      if (!k && create) {
+        k = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+        try { await chIdbSet('deviceKey', k); } catch (e) { return null; }
+      }
+      return k || null;
+    })().catch(() => null);
+  }
+  return _chWebKeyP;
+}
+async function chWebWrap(secretB64, key) {
+  const C = CHC();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, C.decBytes(secretB64));
+  return { kind: 'webcrypto-aesgcm-v1', iv: C.encBytes(new Uint8Array(iv)), cipher: C.encBytes(new Uint8Array(ct)) };
+}
+async function chWebUnwrap(blob, key) {
+  const C = CHC();
+  try {
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: C.decBytes(blob.iv) }, key, C.decBytes(blob.cipher));
+    return C.encBytes(new Uint8Array(pt));
+  } catch (e) { return null; }
+}
+function chLocalDeviceKey(create) {
+  const C = CHC();
+  let k = null;
+  try { k = localStorage.getItem('qfchat-device-key-v1'); } catch (e) {}
+  if (!k && create) {
+    k = C.newDeviceKey();
+    try { localStorage.setItem('qfchat-device-key-v1', k); } catch (e) {}
+  }
+  return k;
+}
+async function chBuildDeviceCopyFor(kind, privB64, vaultB64) {
+  const C = CHC();
+  try {
+    if (kind === 'shell') {
+      if (!CH.shellDeviceKey) return null;
+      return { deviceId: chDeviceIdFor('shell'), platform: 'shell', wrappedPriv: C.wrapWithKey(privB64, CH.shellDeviceKey), wrappedVault: C.wrapWithKey(vaultB64, CH.shellDeviceKey) };
+    }
+    if (kind === 'web') {
+      const key = await chWebDeviceKey(true);
+      if (!key) return null;
+      const wp = await chWebWrap(privB64, key);
+      const wv = await chWebWrap(vaultB64, key);
+      return { deviceId: chDeviceIdFor('web'), platform: 'web', wrappedPriv: wp, wrappedVault: wv };
+    }
+    if (kind === 'local') {
+      const k = chLocalDeviceKey(true);
+      if (!k) return null;
+      return { deviceId: chDeviceIdFor('local'), platform: 'web', wrappedPriv: C.wrapWithKey(privB64, k), wrappedVault: C.wrapWithKey(vaultB64, k) };
+    }
+  } catch (e) { /* 设备副本是静默增强，失败不影响主流程 */ }
+  return null;
+}
+async function chBuildFirstDeviceCopy(privB64, vaultB64) {
+  if (CH.shellDeviceKey) { const c = await chBuildDeviceCopyFor('shell', privB64, vaultB64); if (c) return c; }
+  const w = await chBuildDeviceCopyFor('web', privB64, vaultB64);
+  if (w) return w;
+  return chBuildDeviceCopyFor('local', privB64, vaultB64);
+}
+async function chEnrollDeviceCopy() {
+  if (!CH.priv || !CH.vaultKey) return false;
+  let any = false;
+  const put = async (kind) => {
+    const copy = await chBuildDeviceCopyFor(kind, CH.priv, CH.vaultKey);
+    if (!copy) return false;
+    try { await cq('POST', '/chat/api/keys/device', copy); return true; } catch (e) { return false; }
+  };
+  if (CH.shellDeviceKey) any = (await put('shell')) || any;
+  const webOk = await put('web');
+  any = webOk || any;
+  if (!webOk) any = (await put('local')) || any;
+  return any;
+}
+async function chFetchDeviceCopy(deviceId) {
+  try { return await cq('GET', '/chat/api/keys/device/' + encodeURIComponent(deviceId)); } catch (e) { return null; }
+}
+async function chTryDeviceUnlock() {
+  const C = CHC();
+  if (CH.priv && CH.vaultKey) return true;
+  const adopt = (p, v) => { if (!p || !v) return false; CH.priv = p; CH.vaultKey = v; CH.locked = false; return true; };
+  try {
+    if (CH.shellDeviceKey) {
+      const c = await chFetchDeviceCopy(chDeviceIdFor('shell'));
+      if (c && adopt(C.unwrapWithKey(c.wrappedPriv, CH.shellDeviceKey), C.unwrapWithKey(c.wrappedVault, CH.shellDeviceKey))) return true;
+    }
+  } catch (e) {}
+  try {
+    const key = await chWebDeviceKey(false);
+    if (key) {
+      const c = await chFetchDeviceCopy(chDeviceIdFor('web'));
+      if (c) { const p = await chWebUnwrap(c.wrappedPriv, key); const v = await chWebUnwrap(c.wrappedVault, key); if (adopt(p, v)) return true; }
+    }
+  } catch (e) {}
+  try {
+    const k = chLocalDeviceKey(false);
+    if (k) {
+      const c = await chFetchDeviceCopy(chDeviceIdFor('local'));
+      if (c && adopt(C.unwrapWithKey(c.wrappedPriv, k), C.unwrapWithKey(c.wrappedVault, k))) return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+/* ---------- 登录状态托管副本与静默解锁（主序与独立页钉死一致） ---------- */
+async function chFetchSessionCopy() {
+  try {
+    const r = await cq('GET', '/chat/api/keys/session-copy');
+    if (r && r.priv && r.vault) { CH.priv = r.priv; CH.vaultKey = r.vault; CH.locked = false; CH.hasSessionCopy = true; return true; }
+  } catch (e) { /* 无副本或网络问题：走下一顺位 */ }
+  return false;
+}
+async function chUploadSessionCopy() {
+  if (!CH.priv || !CH.vaultKey) return false;
+  try { await cq('POST', '/chat/api/keys/session-copy', { priv: CH.priv, vault: CH.vaultKey }); CH.hasSessionCopy = true; return true; }
+  catch (e) { return false; }
+}
+async function chCreateKeysSilently(password) {
+  const C = CHC();
+  const id = C.newIdentity();
+  const vaultKey = C.newVaultKey();
+  const device = await chBuildFirstDeviceCopy(id.privB64, vaultKey);
+  const body = { pub: id.pubB64, sessionCopy: { priv: id.privB64, vault: vaultKey } };
+  if (password) {
+    body.wrappedPriv = C.wrapWithPassword(id.privB64, password);
+    body.wrappedVault = C.wrapWithPassword(vaultKey, password);
+  }
+  if (device) body.device = device;
+  await cq('POST', '/chat/api/keys/setup', body);
+  CH.priv = id.privB64; CH.vaultKey = vaultKey; CH.hasSessionCopy = true; CH.locked = false;
+  return true;
+}
+async function chFinishSilentUnlock() {
+  const gen0 = CH.gen;
+  CH.locked = false;
+  chShowUnavail(false);
+  try {
+    const r = await cq('GET', '/chat/api/keys/me');
+    if (gen0 !== CH.gen) return;         // 期间已登出/换账号：旧链就此终止（N-2）
+    CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
+    if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
+  } catch (e) { /* 设备清单元数据失败不影响本次解锁 */ }
+  if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
+  /* 历史失败已在 chLoadHistory 内部可见化并给出重试入口，这里再兜一层，
+     保证后续的轮询启动与会话恢复一定执行（C-05/C-07）。 */
+  try { await chLoadHistory(); } catch (e) { /* 已在组件内提示 */ }
+  if (gen0 !== CH.gen) return;           // 同上：旧账号链不得为新账号启轮询/开会话（N-2）
+  chRefreshMeta().catch(() => {});
+  chStartPolling();
+  const w = CH.pendingWith || CH.currentWith;
+  CH.pendingWith = '';
+  if (w) chOpenConversation(w);
+}
+async function chAttemptSilentUnlock() {
+  /* C-05：钥匙已在内存（离开再回聊天）时不得直接 return——必须走完 finish，
+     重载历史、重启轮询、恢复会话；否则离开期间的新消息永不到达，
+     首次历史加载失败后重进也永不重试。finish 可安全重入（chStartPolling
+     有定时器在位守卫，监听注册不在此链上）。 */
+  if (CH.priv && CH.vaultKey) { await chFinishSilentUnlock(); return true; }
+  if (await chFetchSessionCopy()) { await chFinishSilentUnlock(); return true; }
+  if (await chTryDeviceUnlock()) { await chFinishSilentUnlock(); return true; }
+  try {
+    const r = await cq('GET', '/chat/api/keys/me');
+    CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
+    if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
+    if (!r.keys) { await chCreateKeysSilently(''); await chFinishSilentUnlock(); return true; }
+  } catch (e) { /* 建钥匙失败不冒充成功，落到不可用提示 */ }
+  return false;
+}
+
+/* ---------- 历史（保险库） ---------- */
+async function chPeerPub(user) {
+  if (CH.pubCache[user]) return CH.pubCache[user];
+  const gen0 = CH.gen;
+  const r = await cq('GET', '/chat/api/keys/' + encodeURIComponent(user));
+  /* 取钥期间发生登出/换账号时不得回写缓存：旧账号的公钥/派生钥一旦落进
+     新账号缓存，该联系人后续全部消息都会用错钥封装（N-3）。 */
+  if (gen0 === CH.gen) CH.pubCache[user] = r.pub;
+  return r.pub;
+}
+async function chConvKey(withUser) {
+  if (CH.convKeyCache[withUser]) return CH.convKeyCache[withUser];
+  const gen0 = CH.gen;
+  const pub = await chPeerPub(withUser);
+  const k = CHC().conversationKey(CH.priv, pub);
+  if (gen0 === CH.gen) CH.convKeyCache[withUser] = k;
+  return k;
+}
+/* C-07：历史加载失败必须被捕获并对用户可见（错误条＋重试），且不得让
+   finish/mount 链卡死。取数失败时不清空已有 history；成功时与本端已有
+   条目按 id 合并（服务端版本优先）——chVaultAppend 存在「服务端未落账
+   但本端已记」的条目，整体替换会把这类已投递消息弄丢且游标已过不再重投。
+   错误条为 chMsgs 的同级元素：finish 后续的 chRenderMessages 只重绘
+   chMsgs，放在消息区内的提示会被当场冲掉，同级错误条可存活。 */
+function chShowHistoryError(msg, retryFn) {
+  const box = chEl('chMsgs');
+  if (!box || !box.parentElement) return;
+  let bar = chEl('chHistErr');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'chHistErr';
+    bar.className = 'note err';
+    box.parentElement.insertBefore(bar, box);
+  }
+  bar.textContent = msg;
+  if (retryFn) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn sm';
+    b.textContent = '重新加载聊天记录';
+    b.onclick = () => { chHideHistoryError(); retryFn(); };
+    bar.appendChild(document.createTextNode(' '));
+    bar.appendChild(b);
+  }
+}
+function chHideHistoryError() {
+  const b = chEl('chHistErr');
+  if (b) b.remove();
+}
+async function chLoadHistory() {
+  const gen0 = CH.gen;
+  let r;
+  try {
+    r = await cq('GET', '/chat/api/vault');
+  } catch (e) {
+    if (gen0 !== CH.gen) return false;   // 已登出/换账号：旧账号的失败不落新账号界面（N-2）
+    CH.historyLoaded = false;
+    chShowHistoryError('聊天记录加载失败：' + (e && e.message ? e.message : '请稍后再试。'), () => {
+      chLoadHistory().then(ok => { if (ok) { chRenderMessages(); chMarkRead(); } }).catch(() => {});
+    });
+    return false;
+  }
+  if (gen0 !== CH.gen) return false;     // 迟到响应不得回写新账号的 traces/history/UI（N-2）
+  const C = CHC();
+  const next = {};
+  /* traces 与 history 同口径合并（B-3）：服务端版本优先，本端刚产生、
+     服务端尚未落账的撤回留证按 msgId 补入，不得被整体替换清掉。 */
+  const mergedTraces = r.traces || {};
+  Object.keys(CH.traces).forEach(cv => {
+    const remote = mergedTraces[cv] || (mergedTraces[cv] = []);
+    const seen = new Set(remote.map(t => t.msgId));
+    (CH.traces[cv] || []).forEach(t => { if (!seen.has(t.msgId)) remote.push(t); });
+  });
+  CH.traces = mergedTraces;
+  (r.entries || []).forEach(e => {
+    if (CH.removedIds.has(e.msgId)) return;   // 本端已知已撤回/已删，不复活
+    let text = null;
+    try { text = C.openVault(CH.vaultKey, e.nonce, e.cipher); } catch (err) { text = null; }
+    if (text !== null) next[e.msgId] = { id: e.msgId, with: e.with, dir: e.dir, at: e.at, text };
+  });
+  /* 合并而非整体替换：本端已写出但服务端 vault 尚未落账的条目不能在重载
+     时丢掉（其事件序号可能已被轮询越过，不会再作为事件回来）。 */
+  Object.keys(CH.history).forEach(id => { if (!next[id] && !CH.removedIds.has(id)) next[id] = CH.history[id]; });
+  CH.history = next;
+  CH.historyLoaded = true;
+  chHideHistoryError();
+  return true;
+}
+async function chVaultAppend(msgId, withUser, dir, at, text) {
+  if (CH.removedIds.has(msgId)) return;   // 纵深防御：已撤回/已删条目在任何入口都不写回保险库（CF-1 R-5）
+  const gen0 = CH.gen;
+  const sealed = CHC().sealVault(CH.vaultKey, text);
+  try { await cq('POST', '/chat/api/vault', { msgId, with: withUser, dir, at, nonce: sealed.nonce, cipher: sealed.cipher }); } catch (e) { /* 下次打开会从传送通道补 */ }
+  /* await 之后必须复核（B-1 TOCTOU）：在飞期间该条可能已被撤回/删除
+     （removedIds 已登记），或发生登出/换账号（gen 已变）——两种情形都不得
+     再写回本地 history（调用方随后还会据此把消息插回 DOM）。 */
+  if (gen0 !== CH.gen || CH.removedIds.has(msgId)) return;
+  CH.history[msgId] = { id: msgId, with: withUser, dir, at, text };
+}
+async function chRefreshMeta() {
+  const gen0 = CH.gen;
+  try {
+    const c = await cq('GET', '/chat/api/conversations');
+    if (gen0 !== CH.gen) return;   // 在飞期间已换账号：旧账号会话元数据不得落进新账号（D-4）
+    const meta = {};
+    (c.conversations || []).forEach(cv => { meta[cv.with] = { lastAt: cv.lastAt || 0, lastSeq: cv.lastSeq || 0, myRead: cv.myRead || 0 }; });
+    CH.convMeta = meta;
+  } catch (e) { /* 会话元数据失败不影响对话本身 */ }
+  if (gen0 !== CH.gen) return;
+  if (CHV && CHV.hooks && CHV.hooks.refreshList) CHV.hooks.refreshList();
+}
+
+/* ---------- 会话界面 ---------- */
+function chShowUnavail(show) {
+  const u = chEl('chUnavail'), m = chEl('chMsgs'), c = chEl('chComp');
+  if (u) u.hidden = !show;
+  if (m) m.style.display = show ? 'none' : '';
+  if (c) c.style.display = show ? 'none' : '';
+}
+function chConvKeyOf(withUser) { return JSON.stringify([S.user || '', withUser].sort()); }
+function chTracesFor(withUser) { return CH.traces[chConvKeyOf(withUser)] || []; }
+function chAddTrace(conv, t) {
+  const list = CH.traces[conv] = CH.traces[conv] || [];
+  if (!list.some(x => x.msgId === t.msgId)) list.push(t);
+}
+function chAppendTraceDom(t) {
+  const key = 'trace:' + t.msgId;
+  if (CH.rendered.has(key)) return;
+  CH.rendered.add(key);
+  const div = document.createElement('div');
+  div.className = 'cht-sys';
+  div.id = 'cht-trace-' + t.msgId;
+  div.textContent = t.by === (S.user || '') ? '您撤回了一条消息' : '对方撤回了一条消息';
+  chEl('chMsgs').appendChild(div);
+}
+function chAppendMessageDom(m) {
+  if (CH.rendered.has(m.id)) return;
+  CH.rendered.add(m.id);
+  const box = chEl('chMsgs'); if (!box) return;
+  const div = document.createElement('div');
+  div.className = 'cht-msg ' + (m.dir === 'out' ? 'me' : 'peer');
+  div.id = 'cht-msg-' + m.id;
+  const act = m.dir === 'out' ? '<span class="cht-recall" data-recall="' + m.id + '">撤回</span>' : '';
+  div.innerHTML = '<div class="cht-bub">' + esc(m.text) + '</div><div class="cht-meta"><span>' + chFmt(m.at) + '</span>' + act + '</div>';
+  const actEl = div.querySelector('[data-recall]');
+  if (actEl) actEl.onclick = () => chRecallMessage(m.id);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+function chRenderMessages() {
+  const box = chEl('chMsgs'); if (!box) return;
+  box.innerHTML = '';
+  CH.rendered = new Set();
+  const msgs = Object.values(CH.history).filter(m => m.with === CH.currentWith).map(m => ({ at: m.at, msg: m }));
+  const trs = chTracesFor(CH.currentWith).map(t => ({ at: t.msgAt != null ? t.msgAt : t.at, trace: t }));
+  msgs.concat(trs).sort((a, b) => a.at - b.at).forEach(item => {
+    if (item.msg) chAppendMessageDom(item.msg); else chAppendTraceDom(item.trace);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+function chShowThreadPane() {
+  if (CHV && CHV.hooks && CHV.hooks.showThread) CHV.hooks.showThread();
+}
+function chOpenConversation(withUser) {
+  if (!withUser) return;
+  if (CH.locked) {
+    CH.pendingWith = withUser;
+    chShowThreadPane();  // C-12：锁定态先切对话面，解锁完成/失败提示都落在对话面
+    chAttemptSilentUnlock().then(ok => {
+      if (!ok && CH.locked && CH.pendingWith === withUser) chShowUnavail(true);
+    }).catch(() => { if (CH.locked) chShowUnavail(true); });
+    return;
+  }
+  CH.currentWith = withUser;
+  chShowThreadPane();    // C-12：一切打开会话的路径（含程序化打开）都切对话面
+  const isSupport = withUser === 'qf-support';
+  const title = chEl('chWith'); if (title) title.textContent = isSupport ? '官方客服' : withUser;
+  const cav = chEl('chAvatar');
+  if (cav) {
+    if (isSupport) { cav.className = 'cht-av sys'; cav.textContent = '客'; cav.style.background = ''; }
+    else { cav.className = 'cht-av'; cav.textContent = withUser.slice(0, 1); cav.style.background = chAvatarColor(withUser); }
+  }
+  const sub = chEl('chSub'); if (sub) sub.textContent = isSupport ? '已迁移至智能客服，本会话只读查看' : '内容经端到端加密';
+  const banner = chEl('chBanner'); if (banner) banner.hidden = !isSupport;
+  const input = chEl('chInput'), send = chEl('chSend');
+  if (input) { input.disabled = isSupport; input.placeholder = isSupport ? '本会话保留只读，请从智能客服咨询' : '输入消息…'; }
+  if (send) send.disabled = isSupport;
+  const rd = chEl('chRead'); if (rd) rd.textContent = '';
+  /* C-04：此处不再用 convMeta.lastSeq 提升全局游标 CH.lastEventSeq——那会把
+     其他会话序号更低、尚未被 poll 消费的事件永久跳过（被跳消息不入保险库）。
+     打开会话的已读改由 chMarkRead 按会话上报该会话的 lastSeq（见下）。 */
+  chShowUnavail(false);
+  chRenderMessages();
+  chMarkRead().then(() => chRefreshMeta()).catch(() => {});
+  if (CHV && CHV.hooks && CHV.hooks.markActive) CHV.hooks.markActive(withUser);
+}
+/* C-16：账号态复位总入口——登出（含会话失效被踢 forceGate）时由 BASE 调用。
+   清理边界：
+   · 清（账号态，与登录身份绑定）：priv/vaultKey（私钥与保险库钥匙）、
+     pubCache/convKeyCache（他人公钥与派生会话钥）、history/traces/rendered
+     （已解历史与撤回记录）、convMeta/convSeenSeq/lastOutSeq、currentWith/
+     pendingWith/lastEventSeq、deviceMeta/hasSessionCopy（本账号的设备清单
+     与副本标记）、shellDeviceKey（壳侧本次会话下发的设备钥匙材料）；
+     chatTok 与在飞换票由 qfChatTokenReset 一并作废（BASE 补丁）。
+   · 留（设备态）：本机设备 id（localStorage）与 IndexedDB 中的设备包裹
+     副本、chDeviceIdFor 的钥匙材料——属「这台设备」的信任，不含账号身份
+     信息；服务端按账号隔离存放，下一位登录者仍走自己的服务端数据，
+     保留不构成跨账号泄漏，删之反而每次换账号都要重建设备副本。
+   · CH.gen 自增：在飞的 poll/发送/换票迟到回调据此丢弃结果。 */
+function chatResetAll() {
+  CH.gen++;
+  chStopPolling();
+  chHideHistoryError();
+  CH.priv = ''; CH.vaultKey = '';
+  CH.pubCache = {}; CH.convKeyCache = {};
+  CH.currentWith = ''; CH.lastEventSeq = 0; CH.pollBusy = false;   // 存疑-1：旧轮在飞标志不得带进新账号
+  CH.rendered = new Set(); CH.removedIds = new Set();
+  CH.history = {}; CH.traces = {};
+  CH.locked = true; CH.pendingWith = '';
+  CH.shellDeviceKey = '';
+  CH.deviceMeta = []; CH.hasSessionCopy = false; CH.convMeta = {};
+  CH.convSeenSeq = {}; CH.lastOutSeq = {}; CH.pendingEvents = [];
+  CH.historyLoaded = false;
+  CHV = null;
+  if (typeof S !== 'undefined' && S) S._chatStop = null;
+  if (typeof qfChatTokenReset === 'function') qfChatTokenReset();
+}
+function chLeaveConversation() {
+  CH.currentWith = '';
+  const title = chEl('chWith'); if (title) title.textContent = '选择左侧联系人开始聊天';
+  const box = chEl('chMsgs');
+  if (box) box.innerHTML = '<div class="statebox"><b>尚未选择会话</b><p>从左侧列表选择联系人即可查看对话。</p></div>';
+  const input = chEl('chInput'); if (input) { input.disabled = true; input.placeholder = '输入消息…'; }
+  const send = chEl('chSend'); if (send) send.disabled = true;
+  if (CHV && CHV.hooks && CHV.hooks.markActive) CHV.hooks.markActive('');
+}
+async function chSendMessage() {
+  /* C-06：进入时刻锁定目标会话快照——会话钥、收件方、本地记录与保险库
+     归属全程以快照为准，await 之后绝不重读 CH.currentWith（用户在发送
+     在飞期间切换会话时，旧写法会把按 A 会话钥封装的密文发给 B）。 */
+  const target = CH.currentWith;
+  if (!target || target === 'qf-support') return;
+  const input = chEl('chInput'); if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  const gen0 = CH.gen;
+  try {
+    const key = await chConvKey(target);
+    if (gen0 !== CH.gen) return;   // 取钥期间已登出/换账号：不得用旧账号钥替新会话投递（N-3）
+    const sealed = CHC().sealMessage(key, text);
+    const r = await cq('POST', '/chat/api/send', { to: target, nonce: sealed.nonce, cipher: sealed.cipher });
+    if (gen0 !== CH.gen) return;                    // 期间已登出/换账号：迟到结果不写任何状态
+    const m = { id: r.id, with: target, dir: 'out', at: r.at, text };
+    await chVaultAppend(r.id, target, 'out', r.at, text);
+    /* C-04：不再用发送回执提升全局游标（会越过 poll 尚未消费的其他会话
+       事件）；回执 seq 只记入本会话的已消费位与「对方已读」判定基准。 */
+    if (Number(r.seq) > (CH.convSeenSeq[target] || 0)) CH.convSeenSeq[target] = Number(r.seq) || 0;
+    CH.lastOutSeq[target] = Math.max(CH.lastOutSeq[target] || 0, Number(r.seq) || 0);
+    if (CH.currentWith === target) { chAppendMessageDom(m); chMarkRead(); }
+    chRefreshMeta().catch(() => {});
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function chRecallMessage(msgId) {
+  confirmModal('撤回消息', '撤回后，您和对方都将看不到这条消息，只会留下一条撤回提示。软件之外的副本（如截图）无法撤回。确定撤回吗？', '撤回', async () => {
+    try {
+      const r = await cq('POST', '/chat/api/recall', { msgId });
+      const m = CH.history[msgId];
+      chRemoveMessageEverywhere(msgId);
+      if (m) chAddTrace(chConvKeyOf(m.with), { msgId, by: S.user || '', at: r.at, msgAt: r.msgAt });
+      if (CH.currentWith && (!m || m.with === CH.currentWith)) chRenderMessages();
+      chRefreshMeta().catch(() => {});
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+async function chDeleteConversation() {
+  if (!CH.currentWith) return;
+  const w = CH.currentWith;
+  /* gen0 必须在打开确认框之前捕获（新-1）：确认框等待期间若发生登出/
+     换账号，回调里再取到的已是新账号代次，守卫形同虚设——届时请求根本
+     不许发，更不许删新账号的同名会话。 */
+  const gen0 = CH.gen;
+  confirmModal('删除整个对话', '确定删除与 ' + w + ' 的整个对话吗？删除后双方都将看不到。软件之外的副本（如截图）无法删除。', '删除', async () => {
+    if (gen0 !== CH.gen) return;
+    try {
+      const r = await cq('POST', '/chat/api/delete-conversation', { with: w });
+      if (gen0 !== CH.gen) return;   // 删除在飞期间已换账号：不得误删新账号同名会话数据（B-2）
+      /* 逐个走 chRemoveMessageEverywhere：同时登记 removedIds，防该会话
+         迟到的 msg 事件把已删条目写回保险库（CF-1 R-2）。 */
+      Object.values(CH.history).filter(m => m.with === w).forEach(m => chRemoveMessageEverywhere(m.id));
+      delete CH.traces[chConvKeyOf(w)];
+      chRenderMessages();
+      chRefreshMeta().catch(() => {});
+      toast('已删除，共清除 ' + r.count + ' 条。', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  });
+}
+function chRemoveMessageEverywhere(msgId) {
+  CH.removedIds.add(msgId);
+  delete CH.history[msgId];
+  const elx = chEl('cht-msg-' + msgId); if (elx) elx.remove();
+  CH.rendered.delete(msgId);
+}
+async function chMarkRead(withUser) {
+  const w = withUser || CH.currentWith;
+  if (!w) return;
+  /* C-04：已读只按会话上报——取「本端实际消费到的该会话 seq」与「该会话
+     已知 lastSeq」的较大者，绝不借全局 poll 游标（旧写法把全局游标报作
+     本会话已读位，会越过本会话尚未处理的消息）。服务端 /read 按会话写
+     marks[我]=max(原值, uptoSeq)，只影响该会话未读数，不动 poll 游标。 */
+  const seen = CH.convSeenSeq[w] || 0;
+  const meta = CH.convMeta[w];
+  const upto = Math.max(seen, (meta && meta.lastSeq) || 0);
+  if (!(upto > 0)) return;
+  try { await cq('POST', '/chat/api/read', { with: w, seq: upto }); } catch (e) {}
+}
+function chSeenTick(withUser, seq) {
+  if (!withUser || !seq) return;
+  if (seq > (CH.convSeenSeq[withUser] || 0)) CH.convSeenSeq[withUser] = seq;
+}
+
+/* ---------- 同步轮询（新消息＋墓碑＋已读） ---------- */
+function chStartPolling() {
+  if (CH.pollTimer) return;
+  CH.pollTimer = setInterval(chPollOnce, 3000);
+  chPollOnce();
+}
+function chStopPolling() {
+  if (CH.pollTimer) { clearInterval(CH.pollTimer); CH.pollTimer = null; }
+}
+async function chPollOnce() {
+  /* 在飞互斥（Q-4/B-1 竞态面）：setInterval 不等上一轮结束，慢请求下两轮
+     重叠会同批事件双处理、并使「撤回处理与在飞写库交错」成为可能。
+     忙时跳过本轮（3 秒后下一轮补上），事件序号不推进、无丢失。 */
+  if (CH.pollBusy) return;
+  const gen0 = CH.gen;
+  CH.pollBusy = true;
+  try { await chPollRound(); } catch (e) { /* 单轮异常吞掉，不外溢为未处理拒绝（存疑-2） */ }
+  /* 复位必须认代次（新-4）：旧账号一轮的 finally 若无条件清位，会击穿
+     新账号正在使用的互斥（chatResetAll 已先行清位让新账号首轮能启动，
+     此处旧轮不得再碰）。 */
+  finally { if (gen0 === CH.gen) CH.pollBusy = false; }
+}
+async function chPollRound() {
+  if (!CHV) return;
+  const gen0 = CH.gen;
+  let r;
+  try { r = await cq('GET', '/chat/api/poll?since=' + CH.lastEventSeq); } catch (e) { return; }
+  if (gen0 !== CH.gen || !CHV) return;            // 期间登出/换账号：整批丢弃
+  let sawNew = false;
+  const fresh = (r.events || []).slice();
+  /* C-04：游标只在本轮「实际取到并即将处理」的位置推进一次。单条处理失败
+     不再靠游标原地不动来重试（那会被一条坏事件卡死整条流），而是进
+     pendingEvents 下轮重放——消息不会因钥匙未就绪被永久跳过。 */
+  for (const ev of fresh) if (ev.seq > CH.lastEventSeq) CH.lastEventSeq = ev.seq;
+  const bucket = CH.pendingEvents.concat(fresh);
+  CH.pendingEvents = [];
+  for (const ev of bucket) {
+    if (gen0 !== CH.gen) return;         // 批处理期间登出/换账号：余下事件整批作废（N-3）
+    try {
+      if (await chHandleEvent(ev)) sawNew = true;
+    } catch (e) {
+      /* 失败重放同样认代次（新-5）：事件在飞期间已换账号时，旧账号事件
+         不得进新账号的 pendingEvents 被按新身份重放。 */
+      if (gen0 === CH.gen) {
+        CH.pendingEvents.push(ev);
+        if (CH.pendingEvents.length > 200) CH.pendingEvents.shift();  // 上限防无限增长
+      }
+    }
+  }
+  if (sawNew) chRefreshMeta().catch(() => {});
+  if (CH.currentWith) {
+    const cv = JSON.stringify([S.user || '', CH.currentWith].sort());
+    const marks = (r.read || {})[cv] || {};
+    const rd = chEl('chRead');
+    /* 「对方已读」以对端在本会话的已读位与我最后发出 seq 比较（旧写法拿
+       全局游标比，C-04 删提升后必然失真）。 */
+    const mine = CH.lastOutSeq[CH.currentWith] || 0;
+    if (rd) rd.textContent = (mine > 0 && (marks[CH.currentWith] || 0) >= mine) ? '对方已读' : '';
+  }
+}
+async function chHandleEvent(ev) {
+  if (!ev) return false;
+  if (ev.type === 'msg') {
+    const m = ev.msg;
+    if (!m || !m.id || !m.from || !m.to) return false;   // 异形事件按已消费跳过，不得抛错毒化 pending（新-3/存疑-D）
+    const other = m.from === (S.user || '') ? m.to : m.from;
+    /* 已撤回/已删的消息即使其 msg 事件迟到（游标未及）也不得再处理：
+       本端 history 判重挡不住「已本地删除」的情形，此时重走解密＋入保险库
+       会把服务端已清的保险库条目重新写回（服务端按 messages∪graveyard
+       验 origin，墓地命中即放行），下次重载历史时消息复活（CF-1）。 */
+    if (CH.history[m.id] || CH.removedIds.has(m.id)) { chSeenTick(other, ev.seq); return false; }
+    const gen0 = CH.gen;
+    const key = await chConvKey(other);              // 抛错 → 事件进 pending 下轮重试
+    if (gen0 !== CH.gen) return false;               // 期间登出/换账号：不落新账号状态（N-3）
+    const text = CHC().openMessage(key, m.nonce, m.cipher);
+    if (text === null) { chSeenTick(other, ev.seq); return false; }   // 锁钥不匹配：与本端无关，视为已消费
+    const dir = m.from === (S.user || '') ? 'out' : 'in';
+    await chVaultAppend(m.id, other, dir, m.at, text);
+    /* 调用侧闭环（新-2）：chVaultAppend 可能因 await 期间被撤回/换账号而
+       落空（未写 history）——此时不得再推进已读、不得拿 undefined 渲染，
+       否则既污染已读位又会抛错把事件毒化进 pending。 */
+    if (gen0 !== CH.gen || CH.removedIds.has(m.id) || !CH.history[m.id]) return false;
+    /* 已消费位只在真正处理完后推进：取钥失败进 pending 的事件不得先行
+       计入已读并上报（N-5）。 */
+    chSeenTick(other, ev.seq);
+    if (dir === 'out') CH.lastOutSeq[other] = Math.max(CH.lastOutSeq[other] || 0, ev.seq);
+    if (CH.currentWith === other) { chAppendMessageDom(CH.history[m.id]); chMarkRead(); }
+    return true;
+  }
+  if (ev.type === 'tomb') {
+    /* msgIds 形态防御（B-4）：字段缺失/异形时不得抛错——抛错会使事件
+       进 pending 每轮重放、永不消费。 */
+    (Array.isArray(ev.msgIds) ? ev.msgIds : []).forEach(id => chRemoveMessageEverywhere(id));
+    return false;
+  }
+  if (ev.type === 'recall') {
+    (Array.isArray(ev.msgIds) ? ev.msgIds : []).forEach(id => chRemoveMessageEverywhere(id));
+    if (ev.trace) chAddTrace(ev.conv, ev.trace);
+    /* 偏差留证（DEV-1）：DS 稿此处以 ev.conv（会话键字符串）记已消费位，
+       与 convSeenSeq 按用户名索引的口径不符，落地改为按对端用户名记。 */
+    const peer = Array.isArray(ev.parties) ? ev.parties.find(x => x !== (S.user || '')) : undefined;
+    if (peer) chSeenTick(peer, ev.seq);
+    if (CH.currentWith && CH.currentWith === peer) chRenderMessages();
+    return false;
+  }
+  return false;
+}
+
+/* ---------- 组件挂载 ---------- */
+function mountChatThread(view, hooks) {
+  chStopPolling();
+  CHV = { view, hooks: hooks || {} };
+  S._chatStop = () => { chStopPolling(); CHV = null; chatBootSeq++; };
+  const send = chEl('chSend'); if (send) send.onclick = chSendMessage;
+  const input = chEl('chInput');
+  if (input) input.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chSendMessage(); } };
+  const del = chEl('chDel'); if (del) del.onclick = chDeleteConversation;
+  const ub = chEl('chUnavailBack');
+  if (ub) ub.onclick = () => { chShowUnavail(false); if (CHV && CHV.hooks && CHV.hooks.backToList) CHV.hooks.backToList(); };
+  /* C-07：启动链独立为 chBootChat 并全程兜底——任何一步失败都有可见
+     提示与重试入口，不再出现未处理 rejection 后界面卡死的形态；
+     重试只重跑 chBootChat，不重跑 mount（监听注册天然幂等亦不重复）。 */
+  chatBootSeq++;
+  chBootChat().catch(() => {
+    const box = chEl('chMsgs');
+    if (box) {
+      box.innerHTML = stateBox('聊天暂时无法打开', '与服务器的连接出现问题，请检查网络后重新加载。', true);
+      bindRetry(box, chBootChat);
+    }
+  });
+}
+async function chBootChat() {
+  /* N-4：box 在 await 前捕获会过期——卸载重挂后 CHV 是新视图的对象，
+     单靠 !CHV 拦不住旧 boot。各检查点以启动代次为准：代次变了（发生过
+     卸载/重挂）即收手，失败提示与重试只写当前视图的节点。
+     B-5：boot 自身入口即推进代次——重试连点时后起的 boot 自动作废先起
+     的一个，同视图内也不会出现两个 boot 并发。 */
+  const seq0 = ++chatBootSeq;
+  const stale = () => (!CHV || seq0 !== chatBootSeq);
+  const box = chEl('chMsgs');
+  try { await ensureChatLibs(); }
+  catch (e) {
+    if (stale()) return;
+    if (box) box.innerHTML = stateBox('聊天组件加载失败', '聊天加密组件未能加载，请检查网络后重新打开本页。', false);
+    return;
+  }
+  let t;
+  try { t = await ensureChatToken(false); }
+  catch (e) { t = { ok: false, msg: '聊天登录失败，请稍后重试。' }; }
+  if (stale()) return;
+  if (!t || !t.ok) {
+    if (t && t.network) { netFail(box, chBootChat); return; }
+    if (box) {
+      box.innerHTML = stateBox('聊天暂时不可用', (t && t.msg) || '聊天登录失败，请重新登录后再试。', true);
+      bindRetry(box, chBootChat);
+    }
+    return;
+  }
+  CH.locked = !(CH.priv && CH.vaultKey);
+  await chRefreshMeta();                       // 内部已吞错并刷新列表
+  if (stale()) return;
+  let ok = false;
+  try { ok = await chAttemptSilentUnlock(); } catch (e) { ok = false; }
+  if (stale()) return;
+  if (!ok) {
+    if (CH.locked) chShowUnavail(true);
+    else chShowHistoryError('聊天记录加载失败，请检查网络后重试。', chBootChat);
+  }
+}
+
+/* ---------- 软件壳静默解锁通道（与独立页同一组全局入口，语义不变） ---------- */
+window.qfChatState = function () {
+  let shellId = '', webId = '';
+  try { shellId = chDeviceIdFor('shell'); webId = chDeviceIdFor('web'); } catch (e) {}
+  const meta = CH.deviceMeta || [];
+  return {
+    hasToken: !!chatTok, user: S.user || '', locked: !!CH.locked, unlocked: !!(CH.priv && CH.vaultKey),
+    shellDeviceId: shellId, webDeviceId: webId,
+    hasShellDeviceCopy: meta.some(d => d.deviceId === shellId),
+    hasWebDeviceCopy: meta.some(d => d.deviceId === webId),
+    hasDeviceCopy: meta.length > 0,
+    hasSessionCopy: !!CH.hasSessionCopy
+  };
+};
+window.qfShellDeviceUnlock = async function (deviceKeyB64) {
+  try {
+    if (!chatTok || !deviceKeyB64) return false;
+    await ensureChatLibs();
+    CH.shellDeviceKey = String(deviceKeyB64);
+    const ok = await chTryDeviceUnlock();
+    if (!ok) return false;
+    await chFinishSilentUnlock();
+    return true;
+  } catch (e) { return false; }
+};
+window.qfShellDeviceEnroll = async function (deviceKeyB64) {
+  try {
+    if (!deviceKeyB64 || !(CH.priv && CH.vaultKey)) return false;
+    await ensureChatLibs();
+    CH.shellDeviceKey = String(deviceKeyB64);
+    return await chEnrollDeviceCopy();
+  } catch (e) { return false; }
+};
+window.qfShellUnlock = async function (password) {
+  try {
+    if (!chatTok || !password) return false;
+    await ensureChatLibs();
+    const C = CHC();
+    const r = await cq('GET', '/chat/api/keys/me');
+    CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
+    if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
+    if (!r.keys) {
+      await chCreateKeysSilently(password);
+    } else {
+      const hasWraps = !!(r.keys.wrappedPriv && r.keys.wrappedVault);
+      const priv = hasWraps ? C.unwrapWithPassword(r.keys.wrappedPriv, password) : null;
+      const vaultKey = hasWraps ? C.unwrapWithPassword(r.keys.wrappedVault, password) : null;
+      if (priv === null || vaultKey === null) {
+        if (!(await chFetchSessionCopy())) return false;
+        try {
+          await cq('POST', '/chat/api/keys/rewrap', {
+            wrappedPriv: C.wrapWithPassword(CH.priv, password),
+            wrappedVault: C.wrapWithPassword(CH.vaultKey, password)
+          });
+        } catch (e) { /* 重新包装失败不影响本次已解开的状态 */ }
+      } else {
+        CH.priv = priv; CH.vaultKey = vaultKey;
+      }
+    }
+    CH.locked = false;
+    chEnrollDeviceCopy().catch(() => {});
+    if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
+    await chFinishSilentUnlock();
+    return true;
+  } catch (e) { return false; }
+};
+
+/* ================= 聊天（会话列表与对话区均为控制台原生组件） ================= */
 Views.chat = async function (view) {
   view.innerHTML = `<h1 class="pt">聊天</h1><p class="psub">好友聊天内容全程加密，钥匙由您的登录状态保管，登录了账号的设备可直接查看记录。左侧选联系人，右侧即对话，不再跳页。</p>
     <div class="grid2 chatwrap" style="grid-template-columns:1fr 1.6fr"><div class="card chatlist chatpane-list"><h3>会话</h3><div id="chList"><div class="skel" style="height:52px"></div></div></div>
-    <div class="card chatpane-thread"><button class="btn sm grey chatback" id="ch-back" type="button">${ic('chevR')} 返回会话列表</button><h3>对话</h3><div class="framebox"><iframe id="ch-frame" src="/chat" title="聊天"></iframe></div>
-    <p style="color:var(--sub);font-size:12.5px;margin-top:8px">对话区为聊天加密通道：密钥由登录状态保管，在本机静默解锁，不再有单独解锁页；修改或重置密码后，以前的聊天记录仍可正常打开。</p></div></div>`;
-  const r = await chatApi('/chat/api/friends');
-  const box = $('#chList', view);
-  if (r.status === 200 && r.json) {
-    const arr = (r.json.peers && r.json.peers.length) ? r.json.peers : (r.json.friends || r.json.list || (Array.isArray(r.json) ? r.json : []));
-    box.innerHTML = arr.length ? arr.map(f => rowHtml('user', (typeof f === 'string' ? f : (f.name || f.username || '')), '点右侧对话区开始聊天', '')).join('') : '<div class="statebox"><b>暂无会话</b><p>添加好友后即可开始聊天。</p></div>';
-  } else {
-    const why = r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。');
-    box.innerHTML = `<div class="statebox"><b>会话列表加载失败</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
-    const rb = $('#ch-retry', view); if (rb) rb.onclick = () => Views.chat(view);
-  }
-  /* P2-028 手机单栏分屏：点会话行进对话面、返回钮回列表（切换类仅 ≤820px CSS 生效） */
+    <div class="card chatpane-thread"><button class="btn sm grey chatback" id="ch-back" type="button">${ic('chevR')} 返回会话列表</button><h3>对话</h3>
+    <div id="chThread">
+      <div class="cht-head"><span class="cht-av" id="chAvatar"></span><div class="cht-hmain"><b id="chWith">选择左侧联系人开始聊天</b><div class="cht-sub" id="chSub"></div></div><span class="cht-read" id="chRead"></span></div>
+      <div class="note warn" id="chBanner" hidden>官方客服已迁移至智能客服，本会话保留只读查看；如需咨询，请使用智能客服。</div>
+      <div class="cht-unavail" id="chUnavail" hidden><div class="statebox"><b>聊天暂时无法打开</b><p>系统暂时无法凭您的登录状态打开聊天记录。聊天钥匙由您的登录状态保管，在已登录账号的设备上通常可直接查看记录。如多次尝试仍无法打开，请联系官方客服协助处理。</p><button class="btn sm grey" id="chUnavailBack" type="button">返回会话列表</button></div></div>
+      <div class="cht-msgs" id="chMsgs"><div class="statebox"><b>尚未选择会话</b><p>从左侧列表选择联系人即可查看对话。</p></div></div>
+      <div class="cht-comp" id="chComp"><textarea id="chInput" rows="2" placeholder="输入消息…" disabled></textarea><button class="btn" id="chSend" disabled>发送</button><button class="btn grey" id="chDel">删除对话</button></div>
+    </div>
+    <p style="color:var(--sub);font-size:12.5px;margin-top:8px">对话内容经端到端加密：密钥由登录状态保管，在本机静默解锁，不再有单独解锁页；修改或重置密码后，以前的聊天记录仍可正常打开。</p></div></div>`;
   const wrap = view.querySelector('.chatwrap');
-  if (wrap) {
-    box.querySelectorAll('.row').forEach(row => row.addEventListener('click', () => wrap.classList.add('showthread')));
-    const back = $('#ch-back', view); if (back) back.onclick = () => wrap.classList.remove('showthread');
-  }
+  const box = $('#chList', view);
+  const paintList = async () => {
+    if (!view.isConnected) return;
+    const r = await chatApi('/chat/api/friends');
+    if (!view.isConnected) return;
+    if (r.status === 200 && r.json) {
+      const arr = (r.json.peers && r.json.peers.length) ? r.json.peers : (r.json.friends || r.json.list || (Array.isArray(r.json) ? r.json : []));
+      const meta = CH.convMeta || {};
+      box.innerHTML = arr.length ? arr.map(f => {
+        const name = typeof f === 'string' ? f : (f.name || f.username || '');
+        const isSys = typeof f !== 'string' && f.type === 'system';
+        const label = isSys ? '官方客服' : name;
+        const m = meta[name] || {};
+        const unread = !!(m.lastSeq && m.lastSeq > (m.myRead || 0) && CH.currentWith !== name);
+        return `<button class="row${CH.currentWith === name ? ' act' : ''}" data-peer="${esc(name)}"><span class="tile">${ic('user')}</span><span><b>${esc(label)}</b><small>${isSys ? '已迁移至智能客服，本会话只读查看' : (m.lastAt ? '最近消息 ' + fmtDate(m.lastAt) : '点此打开对话')}</small></span>${unread ? '<span class="cht-udot"></span>' : ''}<span class="chev">${ic('chevR')}</span></button>`;
+      }).join('') : '<div class="statebox"><b>暂无会话</b><p>添加好友后即可开始聊天。</p></div>';
+      box.querySelectorAll('[data-peer]').forEach(row => row.addEventListener('click', () => {
+        const peer = row.getAttribute('data-peer');
+        if (wrap) wrap.classList.add('showthread');
+        chOpenConversation(peer);
+      }));
+    } else {
+      const why = r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。');
+      box.innerHTML = `<div class="statebox"><b>会话列表加载失败</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
+      const rb = $('#ch-retry', view); if (rb) rb.onclick = () => paintList();
+    }
+  };
+  /* P2-028 手机单栏分屏：点会话行进对话面、返回钮回列表（切换类仅 ≤820px CSS 生效）；
+     C2 起行点击同时打开原生对话组件，返回时一并清当前会话 */
+  const back = $('#ch-back', view);
+  if (back) back.onclick = () => { if (wrap) wrap.classList.remove('showthread'); chLeaveConversation(); paintList(); };
+  mountChatThread(view, {
+    refreshList: () => { paintList(); },
+    markActive: () => { paintList(); },
+    backToList: () => { if (wrap) wrap.classList.remove('showthread'); chLeaveConversation(); paintList(); },
+    showThread: () => { if (wrap) wrap.classList.add('showthread'); }
+  });
+  paintList();
 };
 
 /* ================= 论坛 ================= */
@@ -2181,13 +3186,188 @@ Views.profile = async function (view) {
   const acts = [
     () => toast('更改密码将在新控制台账户安全接口开通后在本页办理；当前可在软件端修改。', 'warn'),
     () => toast('登录记录以本页与首页显示的最近登录为准。', 'info'),
-    () => showModal('我的申诉与进度', '<div class="framebox"><iframe src="/appeal" title="申诉" style="height:480px"></iframe></div>', [{ label: '关闭' }]),
+    () => navigate('appeal'),
     () => navigate('forum'),
     async () => { const r = await api('/release.json'); toast(r.json ? ('当前控制台版本信息：' + (r.json.version || r.json.latest || '已是最新')) : '暂时无法获取版本信息。', 'info'); },
     () => doLogout(),
     () => showModal('删除账户', '<p>删除账户为不可恢复操作。如需办理，请通过智能客服转人工提交申请，核验身份后按规则清除数据。</p>', [{ label: '知道了' }, { label: '联系客服', primary: true, onClick: () => navigate('support') }])
   ];
   secRows.forEach((row, i) => { if (acts[i]) row.onclick = acts[i]; });
+};
+
+/* ================= 申诉（C1 收编二期·变基重建） =================
+   申诉改为控制台原生组件：提交与进度查询都在本组件内完成，不再打开
+   独立页或弹窗内嵌页。服务端接口一字不动——仍按登录垫片的现行契约
+   以表单方式提交（POST /appeal 提交、POST /appeal/status 查进度，
+   均返回整页 HTML），组件解析返回页中的结果块（.ok/.err/.status）
+   后在组件内原生呈现；核验口径不变：仅账号＋密码、失败不透露细节。
+   独立 /appeal 页保留为无脚本环境与直达链接的兜底，不在本组件引用。 */
+function extractAppealResult(pageHtml) {
+  try {
+    const doc = new DOMParser().parseFromString(String(pageHtml || ''), 'text/html');
+    const ok = doc.querySelector('.ok');
+    if (ok) return ok.outerHTML;
+    const st = doc.querySelector('.status');
+    if (st && st.parentElement) return st.parentElement.innerHTML;
+    const err = doc.querySelector('.err');
+    if (err) return err.outerHTML;
+  } catch (e) { /* 解析失败按无结果处理，调用方给正式提示 */ }
+  return '';
+}
+/* 申诉结果块白名单净化（C-01）：垫片返回整页 HTML，组件只取结果块再入 DOM，
+   入 DOM 前一律经此净化——标签/属性白名单＋站内链接白名单，杜绝把组件安全
+   寄托于垫片一侧的转义纪律：
+   · 丢弃子树的高危标签（脚本/样式/框架/表单/媒体/foreign content）；
+   · 非白名单标签拆壳保内容，避免信息静默丢失；
+   · 仅保留 /appeal/status 与 /appeal/reset 两类站内链接，且强制 rel="noreferrer"；
+   · 其余属性（on* 事件、style、id、data-*、src 等）一律不复制。 */
+const APPEAL_OK_TAGS = new Set(['DIV', 'P', 'SPAN', 'B', 'STRONG', 'EM', 'I', 'U', 'SMALL', 'BR', 'HR',
+  'UL', 'OL', 'LI', 'A', 'H3', 'H4', 'H5', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'CODE', 'PRE']);
+const APPEAL_DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'FRAME', 'FRAMESET', 'OBJECT', 'EMBED',
+  'LINK', 'META', 'BASE', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'OPTION', 'SVG', 'MATH',
+  'IMG', 'VIDEO', 'AUDIO', 'SOURCE', 'CANVAS', 'TEMPLATE', 'NOSCRIPT']);
+function appealSafeHref(href) {
+  const raw = String(href == null ? '' : href).trim();
+  if (!raw || raw.charAt(0) !== '/') return '';          // 只认站内绝对路径（同时挡掉 javascript:/data:）
+  if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return '';   // 挡协议相对 //evil.example
+  if (/[\s\\]/.test(raw)) return '';                     // 挡空白 / 反斜杠变形
+  const p = raw.split('?')[0].split('#')[0];
+  if (p !== '/appeal/status' && p !== '/appeal/reset') return '';   // 只放行两类必要的站内链接
+  return raw;
+}
+function appealSafeClass(v) {
+  const s = String(v == null ? '' : v).trim();
+  return /^[A-Za-z0-9_\- ]{1,120}$/.test(s) ? s : '';
+}
+function appealCopySafe(node, parent) {
+  if (!node) return;
+  if (node.nodeType === 3) { parent.appendChild(document.createTextNode(String(node.nodeValue || ''))); return; }
+  if (node.nodeType !== 1) return;                       // 注释 / 处理指令一律丢弃
+  const tag = node.tagName;
+  if (APPEAL_DROP_TAGS.has(tag)) return;                 // 整个子树丢弃
+  if (!APPEAL_OK_TAGS.has(tag)) {                        // 未知标签：拆壳保留安全子内容
+    Array.prototype.slice.call(node.childNodes).forEach(n => appealCopySafe(n, parent));
+    return;
+  }
+  if (tag === 'A') {
+    const href = appealSafeHref(node.getAttribute('href'));
+    if (!href) {                                         // 非法链接降级为纯文本内容
+      Array.prototype.slice.call(node.childNodes).forEach(n => appealCopySafe(n, parent));
+      return;
+    }
+    const a = document.createElement('a');
+    a.setAttribute('href', href);
+    a.setAttribute('rel', 'noreferrer');
+    const cls = appealSafeClass(node.getAttribute('class'));
+    if (cls) a.setAttribute('class', cls);
+    Array.prototype.slice.call(node.childNodes).forEach(n => appealCopySafe(n, a));
+    parent.appendChild(a);
+    return;
+  }
+  const el = document.createElement(tag);
+  const cls = appealSafeClass(node.getAttribute('class'));
+  if (cls) el.setAttribute('class', cls);
+  if (tag === 'TD' || tag === 'TH') {
+    ['colspan', 'rowspan'].forEach(name => {
+      const v = node.getAttribute(name);
+      if (v && /^\d{1,3}$/.test(v)) el.setAttribute(name, v);
+    });
+  }
+  Array.prototype.slice.call(node.childNodes).forEach(n => appealCopySafe(n, el));
+  parent.appendChild(el);
+}
+function sanitizeAppealHtml(html) {
+  const out = document.createElement('div');
+  try {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html || '');
+    Array.prototype.slice.call(tpl.content.childNodes).forEach(n => appealCopySafe(n, out));
+  } catch (e) { return ''; }
+  return out.innerHTML;
+}
+function renderAppeal(box, opts) {
+  opts = opts || {};
+  box.innerHTML = `<div class="card" style="margin-top:16px"><h3>账号申诉</h3>
+    <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">账号被冻结或封禁时可在此提交申诉。身份核验仅使用账号与密码，核验不会登录账号；核验不通过时不会透露具体原因。申诉次数上限：永久封禁 2 次、其他情形 3 次（同一事项）。</p>
+    <div class="tabs" style="margin-bottom:14px"><button type="button" class="on" id="ap-tab-new">提交申诉</button><button type="button" id="ap-tab-q">申诉进度</button></div>
+    <div id="ap-new">
+      <div class="field"><label>账号</label><input id="ap-user" autocomplete="username" placeholder="请输入账号"></div>
+      <div class="field"><label>账号密码（仅用于核验身份）</label><input id="ap-pass" type="password" autocomplete="current-password" placeholder="请输入密码"></div>
+      <div class="field"><label>联系邮箱</label><input id="ap-email" placeholder="用于接收处理结果通知"></div>
+      <div class="field"><label>情况说明</label><textarea id="ap-desc" rows="3" placeholder="请说明账号被冻结或封禁的情况"></textarea></div>
+      <div class="field"><label>新的证据或补充说明（再次申诉时必填，首次申诉可留空）</label><textarea id="ap-newev" rows="2"></textarea></div>
+      <button class="btn block" id="ap-btn" type="button">提交申诉</button>
+      <div id="ap-out" style="margin-top:12px"></div>
+    </div>
+    <div id="ap-q" hidden>
+      <div class="field"><label>账号</label><input id="apq-user" placeholder="请输入账号"></div>
+      <button class="btn block" id="apq-btn" type="button">查询进度</button>
+      <div id="apq-out" style="margin-top:12px"></div>
+    </div>
+  </div>`;
+  const tabNew = $('#ap-tab-new', box), tabQ = $('#ap-tab-q', box);
+  const secNew = $('#ap-new', box), secQ = $('#ap-q', box);
+  const showSec = (q) => {
+    secNew.hidden = !!q; secQ.hidden = !q;
+    tabNew.classList.toggle('on', !q); tabQ.classList.toggle('on', !!q);
+    if (q) { const u = $('#ap-user', box).value.trim(); if (u && !$('#apq-user', box).value) $('#apq-user', box).value = u; }
+  };
+  tabNew.onclick = () => showSec(false);
+  tabQ.onclick = () => showSec(true);
+  if (opts.user) $('#ap-user', box).value = opts.user;
+  const wireStatusLinks = (outBox) => {
+    outBox.querySelectorAll('a[href^="/appeal/status"]').forEach(a => {
+      a.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        let u = '';
+        try { u = new URL(a.getAttribute('href'), location.origin).searchParams.get('u') || ''; } catch (e) { /* 用已填账号兜底 */ }
+        if (u) $('#apq-user', box).value = u;
+        showSec(true);
+        $('#apq-btn', box).click();
+      });
+    });
+  };
+  $('#ap-btn', box).onclick = async () => {
+    const out = $('#ap-out', box);
+    const user = $('#ap-user', box).value.trim();
+    const pass = $('#ap-pass', box).value;
+    const email = $('#ap-email', box).value.trim();
+    const desc = $('#ap-desc', box).value.trim();
+    const newev = $('#ap-newev', box).value.trim();
+    if (!user || !pass || !email || !desc) { out.innerHTML = '<div class="note err">账号、密码、联系邮箱、情况说明均须填写。</div>'; return; }
+    const btn = $('#ap-btn', box); btn.disabled = true; btn.textContent = '正在提交…';
+    const r = await api('/appeal', { method: 'POST', form: { username: user, password: pass, email, desc, newev } });
+    btn.disabled = false; btn.textContent = '提交申诉';
+    if (r.networkError) {
+      /* POST /appeal 非幂等且不自动重发（见 api() 白名单），网络中断时提交可能
+         已被受理；提示先查进度再决定是否重提，避免白白消耗申诉次数。 */
+      out.innerHTML = '<div class="note err">提交结果未知：网络中断，本次提交可能已被服务器受理。请先到「申诉进度」查询，确认未受理后再重新提交，以免消耗申诉次数。</div>';
+      return;
+    }
+    const html = r.text ? extractAppealResult(r.text) : '';
+    const safe = html ? sanitizeAppealHtml(html) : '';
+    if (safe) { out.innerHTML = safe; wireStatusLinks(out); }
+    /* 未能取得明确结果块（5xx/页面形态变化等）：提交可能已受理并计次，
+       一律按「结果未知」引导先查进度，不提示直接重提（N-6，C-02 同口径）。 */
+    else out.innerHTML = '<div class="note err">提交结果未知：未收到明确的提交结果，本次提交可能已被服务器受理。请先到「申诉进度」查询，确认未受理后再重新提交，以免消耗申诉次数。</div>';
+  };
+  $('#apq-btn', box).onclick = async () => {
+    const out = $('#apq-out', box);
+    const user = $('#apq-user', box).value.trim();
+    if (!user) { out.innerHTML = '<div class="note err">请输入账号。</div>'; return; }
+    const btn = $('#apq-btn', box); btn.disabled = true; btn.textContent = '正在查询…';
+    const r = await api('/appeal/status', { method: 'POST', form: { username: user } });
+    btn.disabled = false; btn.textContent = '查询进度';
+    if (r.networkError) { out.innerHTML = '<div class="note err">查询未完成：网络中断，请检查网络后重试。</div>'; return; }
+    const html = r.text ? extractAppealResult(r.text) : '';
+    const safe = html ? sanitizeAppealHtml(html) : '';
+    out.innerHTML = safe || '<div class="note err">未查询到该账号的申诉记录。</div>';
+  };
+  if (opts.openQuery) showSec(true);
+}
+Views.appeal = function (view) {
+  view.innerHTML = `<h1 class="pt">申诉与进度</h1><p class="psub">账号被冻结或封禁时在此提交申诉，并可查询处理进度。身份核验仅使用账号与密码。</p><div id="apRoot"></div>`;
+  renderAppeal($('#apRoot', view), { user: S.user || '' });
 };
 
 /* ================= 站长管理 ================= */

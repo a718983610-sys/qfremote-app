@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import '../core/client_header.dart';
 import '../core/constants.dart';
 import '../core/manifest.dart';
 import 'probe.dart' show trustedHttpClient;
@@ -12,15 +13,28 @@ import 'probe.dart' show trustedHttpClient;
 /// 取服务器 release.json → 用其中 android 条目比版本 → 下载 APK（带进度）
 /// → 自动核对大小与 SHA256 → 对得上才允许打开安装，对不上立刻删文件。
 class UpdateService {
+  /// 等服务器开始回应（响应头）的最长的时间：过了就判失败删文件，
+  /// 不许在「正在下载… 0%」无声挂死（追加十一）。
+  final Duration responseTimeout;
+
+  /// 下载中途无新数据的最长容忍（连接半死判死）。
+  final Duration stallTimeout;
+
+  const UpdateService({
+    this.responseTimeout = const Duration(seconds: 30),
+    this.stallTimeout = const Duration(seconds: 30),
+  });
+
   /// 取清单（8 秒超时）。失败抛异常，调用方安静处理。
   Future<ReleaseManifest> fetchManifest() async {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 8));
     try {
       final req = await client.getUrl(Uri.parse(kReleaseUrl));
+      applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) {
-        throw HttpException('取清单失败：HTTP ${res.statusCode}');
+        throw HttpException('获取更新清单失败：HTTP ${res.statusCode}');
       }
       final body = await utf8.decodeStream(res).timeout(const Duration(seconds: 8));
       return ReleaseManifest.parse(body);
@@ -46,7 +60,8 @@ class UpdateService {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 15));
     try {
       final req = await client.getUrl(Uri.parse(entry.url));
-      final res = await req.close();
+      applyClientVersionHeader(req);
+      final res = await req.close().timeout(responseTimeout);
       if (res.statusCode != 200) {
         throw HttpException('下载失败：HTTP ${res.statusCode}');
       }
@@ -54,7 +69,9 @@ class UpdateService {
       var received = 0;
       final sink = part.openWrite();
       try {
-        await for (final chunk in res) {
+        // 无新数据超过 stallTimeout 视为连接已死：抛错删半截文件，
+        // 不无限挂在「正在下载」
+        await for (final chunk in res.timeout(stallTimeout)) {
           received += chunk.length;
           sink.add(chunk);
           onProgress(
@@ -78,22 +95,22 @@ class UpdateService {
     try {
       final len = await part.length();
       if (entry.size != null && len != entry.size) {
-        throw const FormatException('大小对不上');
+        throw const FormatException('文件大小与清单不一致');
       }
       final digest = await sha256.bind(part.openRead()).first;
       if (digest.toString().toLowerCase() != entry.sha256.toLowerCase()) {
-        throw const FormatException('SHA256 对不上');
+        throw const FormatException('SHA256 校验码不一致');
       }
       await part.rename(dest.path);
       return dest;
     } catch (e) {
       await _quietDelete(part);
       await _quietDelete(dest);
-      if (e is FormatException && e.message == '大小对不上') {
-        throw const FormatException('下载不完整（大小对不上），已删除，请重新下载。');
+      if (e is FormatException && e.message == '文件大小与清单不一致') {
+        throw const FormatException('下载不完整（文件大小与清单不一致），已删除，请重新下载。');
       }
-      if (e is FormatException && e.message == 'SHA256 对不上') {
-        throw const FormatException('完整性核对未通过（SHA256 对不上），已删除该文件，请重新下载。');
+      if (e is FormatException && e.message == 'SHA256 校验码不一致') {
+        throw const FormatException('完整性核对未通过（SHA256 校验码不一致），已删除该文件，请重新下载。');
       }
       rethrow;
     }

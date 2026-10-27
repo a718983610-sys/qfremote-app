@@ -23,10 +23,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Flutter 3.32.8（与本地同版本，避免脚手架漂移）
+      - name: Flutter 3.47.8（2026-10 最新稳定版，Dart 3.13.7）
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: '3.47.8'
           channel: stable
           cache: true
 
@@ -66,6 +66,10 @@ jobs:
         working-directory: android-app
         run: flutter test
 
+      - name: 更新链实测（假清单：全流程＋失败注入）
+        working-directory: android-app
+        run: flutter test test/updater_chain_test.dart --dart-define=QF_CHAIN_TEST=true --dart-define=QF_RELEASE_URL=http://127.0.0.1:18791/release.json
+
       - name: 构建 release APK（专属签名）
         working-directory: android-app
         run: flutter build apk --release
@@ -78,12 +82,12 @@ jobs:
           echo "build-tools: $BT"
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
-          cp "$APK" build/app/outputs/flutter-apk/QFRemote-v2.2.0.apk
+          cp "$APK" build/app/outputs/flutter-apk/QFRemote-v2.3.2.apk
           ls -la build/app/outputs/flutter-apk/
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: QFRemote-v2.2.0-apk
-          path: android-app/build/app/outputs/flutter-apk/QFRemote-v2.2.0.apk
+          name: QFRemote-v2.3.2-apk
+          path: android-app/build/app/outputs/flutter-apk/QFRemote-v2.3.2.apk
           if-no-files-found: error

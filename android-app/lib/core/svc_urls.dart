@@ -21,11 +21,13 @@ class SvcUrls {
   static const _kRegister = 'svc_register_url';
   static const _kPoints = 'svc_points_url';
   static const _kAdmin = 'svc_admin_url';
+  static const _kTerms = 'svc_terms_url';
 
   String? _forum;
   String? _register;
   String? _points;
   String? _admin;
+  String? _terms;
   bool _loaded = false;
   Future<void>? _resolving;
 
@@ -34,6 +36,7 @@ class SvcUrls {
 
   String get forumUrl => _forum ?? kForumUrl;
   String get registerUrl => _register ?? kRegisterUrl;
+  String get termsUrl => _terms ?? kTermsUrl;
   String get pointsUrl => _points ?? kPointsUrlFallback;
   String get adminUrl => _admin ?? kAdminUrlFallback;
 
@@ -46,9 +49,60 @@ class SvcUrls {
   /// 令牌换发地址：拿控制台会话换一次性登录令牌，再打开管理页。
   String get ssoTokenUrl => '$adminUrl/api/sso-token';
 
+  /// 自有服务源集合：控制台直连、好友直连、当前解析到的通道源。
+  /// 导航策略据此识别「自家页面的 /logout」——外站同名路径不许触发
+  /// 本机手动退出（深查修复：防外链 /logout 误清凭据）。
+  Set<String> ownOrigins() {
+    final out = <String>{
+      kServerOrigin,
+      'https://$kServerHost:$kFriendsPort',
+    };
+    for (final u in [forumUrl, registerUrl, pointsUrl, adminUrl, termsUrl]) {
+      try {
+        out.add(Uri.parse(u).origin);
+      } catch (_) {
+        // 解析不了的地址不进集合
+      }
+    }
+    return out;
+  }
+
+  /// 这个地址是不是自有服务源上的（无法解析一律 false）。
+  bool isOwnOrigin(String? url) {
+    if (url == null) return false;
+    try {
+      return ownOrigins().contains(Uri.parse(url).origin);
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 管理页登录地址（带一次性令牌）。
   String adminLoginUrl(String token) =>
       '$adminUrl/login?token=${Uri.encodeQueryComponent(token)}';
+
+  /// 扩展服务同源根（2.3.1 许可/新首页落点）：许可接口、新首页、购买页、
+  /// 状态查询页都挂在扩展服务同一源下（经 nginx 同源 /license/*、/purchase、
+  /// /home），与积分同源——取 pointsUrl 的 origin，不另设地址来源。
+  String get extOrigin => Uri.parse(pointsUrl).origin;
+
+  /// 新版首页（阶段 C-3 网页正本，壳内同框呈现）。
+  String get homeUrl => '$extOrigin/home';
+
+  /// 购买页（真实支付开关关时页面自带正式提示，壳只负责壳内打开）。
+  String get purchaseUrl => '$extOrigin/purchase';
+
+  /// 账户状态查询页（登录页「查询密钥」落点，§十）。
+  String get licenseStatusUrl => '$extOrigin/license/status';
+
+  /// 换绑申诉页（§11.9；打开时由壳带入本机设备码，见 main.dart _openRebind）。
+  String get rebindUrl => '$extOrigin/license/rebind';
+
+  /// 申诉页（既有 /appeal 通道，全状态可达）。
+  String get appealUrl => '$extOrigin/appeal';
+
+  /// 许可接口基址（/license 前缀下 /api/*）。
+  String get licenseApiBase => '$extOrigin/license';
 
   static bool _usable(String? v) =>
       v != null && v.startsWith('https://') && v.length > 10 && !v.contains(' ');
@@ -58,14 +112,14 @@ class SvcUrls {
   static Map<String, String> parseProductWeb(String body) {
     final root = jsonDecode(body);
     if (root is! Map<String, dynamic>) {
-      throw const FormatException('清单格式不对');
+      throw const FormatException('更新清单格式不正确');
     }
     final web = root['web'];
     if (web is! Map<String, dynamic>) {
-      throw const FormatException('清单缺 web 字段');
+      throw const FormatException('更新清单缺少服务地址配置');
     }
     final out = <String, String>{};
-    for (final key in ['forumUrl', 'registerUrl', 'pointsUrl', 'adminUrl']) {
+    for (final key in ['forumUrl', 'registerUrl', 'pointsUrl', 'adminUrl', 'termsUrl']) {
       final v = web[key];
       if (_usable(v is String ? v : null)) out[key] = v as String;
     }
@@ -88,6 +142,7 @@ class SvcUrls {
         }
         if (_usable(prefs.getString(_kPoints))) _points = prefs.getString(_kPoints);
         if (_usable(prefs.getString(_kAdmin))) _admin = prefs.getString(_kAdmin);
+        if (_usable(prefs.getString(_kTerms))) _terms = prefs.getString(_kTerms);
       }
       final fetched = await _fetchProductWeb();
       if (fetched == null) return;
@@ -102,6 +157,7 @@ class SvcUrls {
       apply(_kRegister, fetched['registerUrl'], (v) => _register = v);
       apply(_kPoints, fetched['pointsUrl'], (v) => _points = v);
       apply(_kAdmin, fetched['adminUrl'], (v) => _admin = v);
+      apply(_kTerms, fetched['termsUrl'], (v) => _terms = v);
     } catch (_) {
       // 拉不到/解析失败：一律安静走缓存与兜底，入口永不因此不可用。
     }

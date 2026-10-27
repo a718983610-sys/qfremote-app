@@ -29,6 +29,9 @@ const String kForumUrl = '$kFallbackTunnelOrigin/forum';
 /// 注册入口兜底（运行时以 SvcUrls.registerUrl 为准）。
 const String kRegisterUrl = '$kFallbackTunnelOrigin/register';
 
+/// 协议页入口兜底（运行时以 SvcUrls.termsUrl 为准）。
+const String kTermsUrl = '$kFallbackTunnelOrigin/terms';
+
 /// 积分服务兜底（运行时以 SvcUrls.pointsUrl 为准；product.json 的 web.pointsUrl）。
 const String kPointsUrlFallback = '$kFallbackTunnelOrigin/points';
 

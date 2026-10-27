@@ -59,6 +59,8 @@ class _AboutDialogState extends State<_AboutDialog> {
   bool _checking = false;
   bool _downloading = false;
   int _percent = 0;
+  int _received = 0;
+  int? _total;
   File? _file;
   String? _downloadError;
 
@@ -107,10 +109,17 @@ class _AboutDialogState extends State<_AboutDialog> {
       _downloading = true;
       _downloadError = null;
       _percent = 0;
+      _received = 0;
+      _total = null;
     });
     try {
       final f = await widget.deps.download(entry, (received, total, percent) {
-        if (mounted && percent != null) setState(() => _percent = percent);
+        if (!mounted) return;
+        setState(() {
+          _received = received;
+          _total = total;
+          if (percent != null) _percent = percent;
+        });
       });
       if (!mounted) return;
       setState(() {
@@ -264,14 +273,22 @@ class _AboutDialogState extends State<_AboutDialog> {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: LinearProgressIndicator(
-                    value: _percent / 100,
+                    // 总大小未知时给不确定进度，不假装冻在 0%
+                    value: _file != null
+                        ? 1
+                        : (_total != null && _total! > 0 ? _percent / 100 : null),
                     minHeight: 8,
                     backgroundColor: p.onCardDim.withValues(alpha: 0.2),
                     valueColor: const AlwaysStoppedAnimation<Color>(QfPalette.brand),
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text(_file != null ? '下载完成，完整性核对通过' : '正在下载… $_percent%',
+                Text(
+                    _file != null
+                        ? '下载完成，完整性核对通过'
+                        : (_total != null && _total! > 0
+                            ? '正在下载… $_percent%'
+                            : '正在下载… ${(_received / 1048576).toStringAsFixed(1)} MB'),
                     style: TextStyle(color: p.onCardDim, fontSize: 12)),
               ],
               if (_downloadError != null) ...[

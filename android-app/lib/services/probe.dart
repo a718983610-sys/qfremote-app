@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../core/client_header.dart';
 import '../core/constants.dart';
 
 /// 造一个「只对自家主机放行自签证书」的 HttpClient：
@@ -48,6 +49,7 @@ Future<ProbeResult> probeServer({Duration timeout = const Duration(seconds: 6)})
   final client = trustedHttpClient(connectionTimeout: timeout);
   try {
     final req = await client.getUrl(Uri.parse(kServerOrigin)).timeout(timeout);
+    applyClientVersionHeader(req);
     final res = await req.close().timeout(timeout);
     await res.drain<void>().timeout(timeout);
     sw.stop();

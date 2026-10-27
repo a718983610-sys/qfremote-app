@@ -64,54 +64,58 @@ class QfToolbar extends StatelessWidget {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          // 窄屏（≤430，含 390 宽设备）：探活只留色点、按钮收紧到 40，
-          // 保证一排不溢出、不裁切控制台内容（不设任何固定 min-width）。
-          final compact = constraints.maxWidth < 430;
+          // 按钮位宽按真实渲染宽算账（适配点验 2026-10-25 实测教训）：
+          // IconButton 实际渲染 48 而非 constraints 写的 40——6 导航＋更新＋菜单
+          // ＋状态灯，非紧凑总宽约 451、紧凑（灯只留色点＋位宽 40）约 351。
+          // 故 <470 走紧凑档，并用 SizedBox 紧约束把位宽落实到 40，
+          // 360 宽不溢出、不裁切（整行仍按可用宽排，不设固定 min-width）。
+          final compact = constraints.maxWidth < 470;
+          final slotW = compact ? 40.0 : 48.0;
           const btnBox = BoxConstraints(minWidth: 40, minHeight: 40);
           return Row(
             children: [
-              IconButton(
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '后退',
                 icon: Icon(Icons.arrow_back_ios_new, size: 24, color: canGoBack ? iconColor : iconColor.withValues(alpha: 0.35)),
                 onPressed: canGoBack ? onBack : null,
-              ),
-              IconButton(
+              )),
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '刷新',
                 icon: Icon(Icons.refresh, size: 24, color: iconColor),
                 onPressed: onRefresh,
-              ),
-              IconButton(
+              )),
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '主页',
                 icon: Icon(Icons.home_outlined, size: 24, color: iconColor),
                 onPressed: onHome,
-              ),
-              IconButton(
+              )),
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '好友',
                 icon: Icon(Icons.person_outline, size: 24, color: iconColor),
                 onPressed: onFriends,
-              ),
-              IconButton(
+              )),
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '论坛',
                 icon: Icon(Icons.forum_outlined, size: 24, color: iconColor),
                 onPressed: onForum,
-              ),
-              IconButton(
+              )),
+              SizedBox(width: slotW, child: IconButton(
                 style: btnStyle,
                 constraints: btnBox,
                 tooltip: '注册新账号',
                 icon: Icon(Icons.how_to_reg_outlined, size: 24, color: iconColor),
                 onPressed: onRegister,
-              ),
+              )),
               const Spacer(),
               // 服务器状态灯（真探活，点击看最近一次结果）
               InkWell(
@@ -139,16 +143,16 @@ class QfToolbar extends StatelessWidget {
                 ),
               ),
               if (hasUpdate)
-                Stack(
+                SizedBox(width: slotW, child: Stack(
                   clipBehavior: Clip.none,
                   children: [
-                    IconButton(
+                    SizedBox(width: slotW, child: IconButton(
                       style: btnStyle,
                       constraints: btnBox,
                       tooltip: '有新版本',
                       icon: Icon(Icons.system_update_alt, size: 24, color: iconColor),
                       onPressed: onUpdateTap,
-                    ),
+                    )),
                     Positioned(
                       right: 8,
                       top: 8,
@@ -159,8 +163,8 @@ class QfToolbar extends StatelessWidget {
                       ),
                     ),
                   ],
-                ),
-              PopupMenuButton<String>(
+                )),
+              SizedBox(width: slotW, child: PopupMenuButton<String>(
                 tooltip: '更多',
                 icon: Icon(Icons.more_vert, color: iconColor),
                 onSelected: onMenuAction,
@@ -173,9 +177,10 @@ class QfToolbar extends StatelessWidget {
                   const PopupMenuItem(value: 'screenshot', child: Text('截图保存')),
                   const PopupMenuItem(value: 'checkUpdate', child: Text('检查更新')),
                   const PopupMenuItem(value: 'lock', child: Text('隐私锁')),
+                  const PopupMenuItem(value: 'logout', child: Text('退出账号')),
                   const PopupMenuItem(value: 'about', child: Text('关于')),
                 ],
-              ),
+              )),
             ],
           );
         },
