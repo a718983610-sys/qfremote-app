@@ -113,7 +113,9 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
         const cookie = req.headers.cookie || '';
         const alive = cookie.includes('xid=SESSION123');
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(alive ? '<html><body>控制台</body></html>' : '<html><body><form id="loginpanelform"></form></body></html>');
+        // 2026-10-26 闪烁修复适配：探活新判据要求响应体达到最小体量（防空壳假阳性），
+        // 桩的控制台页按真形状给足量体（真实控制台页约 1.5MB），原 35 字节短串不再合形状。
+        res.end(alive ? '<html><body><div id="masthead"></div>' + '控制台 '.repeat(80) + '</body></html>' : '<html><body><form id="loginpanelform"></form></body></html>');
       }
     });
     await new Promise(r => server.listen(0, '127.0.0.1', r));

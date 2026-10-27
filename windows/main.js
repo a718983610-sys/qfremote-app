@@ -154,6 +154,65 @@ let extReturnGate = false;     // 返回栏回去后是否回到拦截面
 let extReturnRecheck = false;  // 返回后是否复查许可（购买返回照安卓口径复查）
 const authPolicy = autologinMod.createAutoLoginPolicy({ maxAttempts: 2 });
 let authProcessing = false;
+let silentLoginInFlight = false;
+let pendingVerify = null; // { at: number, source: 'startup' | 'page' }
+let authNoticePending = false;
+const PENDING_VERIFY_TTL_MS = 20000;
+
+let pendingVerifyTimer = null;
+function setPendingVerify(source) {
+  pendingVerify = { at: Date.now(), source: source || 'page' };
+  // 复检兜底（门三第 8 项）：若裁定这次静默登录的 did-finish-load 恰好落在
+  // authProcessing 窗口被早退吞掉，3 秒后主动再裁定一次，防 pendingVerify 悬空。
+  if (pendingVerifyTimer) clearTimeout(pendingVerifyTimer);
+  let rechecks = 0;
+  const recheck = () => {
+    pendingVerifyTimer = null;
+    if (!pendingVerify) return;
+    if (authProcessing && rechecks < 5) {
+      // 复检自己又撞上处理中：别白触发，重挂再等一轮（门三 #8-1）
+      rechecks += 1;
+      pendingVerifyTimer = setTimeout(recheck, 3000);
+      return;
+    }
+    processAuthPage().catch(() => {});
+  };
+  pendingVerifyTimer = setTimeout(recheck, 3000);
+}
+function clearPendingVerify() {
+  pendingVerify = null;
+  if (pendingVerifyTimer) { clearTimeout(pendingVerifyTimer); pendingVerifyTimer = null; }
+}
+function isPendingVerifyFresh() {
+  return !!pendingVerify && (Date.now() - pendingVerify.at) <= PENDING_VERIFY_TTL_MS;
+}
+// 振荡熔断（门三第 10 项签收条件，我方增补）：短时窗内反复落登录页，说明会话被
+// 持续失效（服务端会话策略/多端互踢/会话过期），此时「成功清零」会让失败断路器
+// 失效，故单独计数：超阈值停手并提示，计数打进主进程日志备查。
+const OSC_WINDOW_MS = 10 * 60 * 1000;
+const OSC_MAX_LANDINGS = 6;
+let loginLandings = []; // 落登录页时刻（毫秒）
+let oscTripped = false;
+let oscNoticeShown = false;
+function noteLoginLanding() {
+  const now = Date.now();
+  loginLandings = loginLandings.filter((t) => now - t <= OSC_WINDOW_MS);
+  loginLandings.push(now);
+  try { console.log('[auth] login landing x' + loginLandings.length); } catch (e) { /* ignore */ }
+  if (loginLandings.length >= OSC_MAX_LANDINGS) oscTripped = true;
+  return oscTripped;
+}
+function resetOscillation() {
+  loginLandings = [];
+  oscTripped = false;
+  oscNoticeShown = false;
+}
+function safeLoad(wc, url) {
+  try {
+    const p = wc.loadURL(url);
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (e) { /* ignore */ }
+}
 let pendingManualClear = false; // 已命中退出、等回到登录页时把会话 cookie 清干净
 function authSession() { return session.fromPartition('persist:qfremote'); }
 let cookieFlushTimer = null;
@@ -235,46 +294,112 @@ function reloadSocialViewsToStart() {
 async function silentLoginWithCreds(creds) {
   try {
     const r = await autologinMod.httpSilentLogin({
-      baseUrl: CONSOLE_URL, username: creds.username, password: creds.password, timeoutMs: 8000,
+      baseUrl: CONSOLE_URL,
+      username: creds.username,
+      password: creds.password,
+      timeoutMs: 8000,
       clientVersion: clientVersion.getClientVersion()
     });
+
+    // 只有非空 xid 才继续；302/200 的页面形状不再作为成功依据。
     if (!r.ok) return false;
+
     if (r.setCookies && r.setCookies.length) {
-      await autologinMod.applySetCookies(authSession(), r.setCookies, CONSOLE_URL);
+      const applied = await autologinMod.applySetCookies(authSession(), r.setCookies, CONSOLE_URL);
+      // 服务端下发了 cookie 却一条都没写进去 = 会话根本没落地，必须判失败，
+      // 不能静默当成功（门三存疑 1/S4）。个别条目失败但有成功写入则照常往下走，
+      // 最终由页面状态裁定。
+      if (!applied) return false;
     }
     flushConsoleCookies();
+
+    // 探活仅作诊断/快速路径，不参与成败裁定；最终由页面 DETECT_JS 确认。
+    // 不 await，避免探活超时拖慢 reload。
+    (async () => {
+      try {
+        const cookies = await authSession().cookies.get({ url: CONSOLE_URL });
+        const header = cookies.map((c) => c.name + '=' + c.value).join('; ');
+        if (header) {
+          await autologinMod.httpProbeSession({
+            baseUrl: CONSOLE_URL,
+            cookieHeader: header,
+            timeoutMs: 5000,
+            clientVersion: clientVersion.getClientVersion()
+          });
+        }
+      } catch (e) { /* ignore */ }
+    })();
+
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    return false;
+  }
 }
-function showAuthNotice(wc) {
+function showAuthNotice(wc, text) {
+  if (!wc || wc.isDestroyed()) return;
+  const noticeText = text || '自动登录没有成功，请手动输入密码登录；如果密码改过，请用新密码登录一次。';
   const js = "(function(){ if (document.getElementById('qfAuthNotice')) return false;" +
     " var d=document.createElement('div'); d.id='qfAuthNotice';" +
-    " d.textContent='自动登录没有成功，请手动输入密码登录；如果密码改过，请用新密码登录一次。';" +
+    " d.textContent=" + JSON.stringify(noticeText) + ";" +
     " d.style.cssText='box-sizing:border-box;width:280px;margin:0 auto 8px auto;border-radius:4px;padding:8px;background:#FFF3CD;color:#664d03;font-size:13px;text-align:left';" +
-    " var m=document.getElementById('message1'); if(m&&m.parentNode){m.parentNode.insertBefore(d,m.nextSibling);} return true; })()";
+    " var m=document.getElementById('message1');" +
+    " var p=(m&&m.parentNode)?m.parentNode:(document.querySelector('form')||document.body);" +
+    " if(!p) return false;" +
+    " if(m&&m.parentNode){p.insertBefore(d,m.nextSibling);}else{p.insertBefore(d,p.firstChild);}" +
+    " return true; })()";
   wc.executeJavaScript(js, true).catch(() => {});
 }
-// 每次控制台页面加载完都过一遍：进控制台 -> 收割本次登录（存/清保险箱）；
-// 落在登录页 -> 手动退出善后、清框善后、静默恢复、最后注入勾选与回填。
 async function processAuthPage() {
   if (PREVIEW || authProcessing) return;
   if (!view || view.webContents.isDestroyed()) return;
   const wc = view.webContents;
   if (!isTargetUrl(wc.getURL())) return;
+
   authProcessing = true;
   try {
     let det = null;
     try { det = await wc.executeJavaScript(autologinMod.DETECT_JS, true); } catch (e) { return; }
     if (!det || wc.isDestroyed()) return;
+
+    // 先裁定上一次静默登录的 pendingVerify。
+    // 手动退出/用户清框优先，不能误判为假成功。
+    if (pendingVerify) {
+      if (det.state === 'console') {
+        clearPendingVerify(); // console 分支马上 noteSuccess
+      } else if (det.state === 'login') {
+        if (det.manualLogout || settings.auth.manualLogout || det.fieldsCleared) {
+          clearPendingVerify();
+        } else if (isPendingVerifyFresh()) {
+          clearPendingVerify();
+          authPolicy.noteFailure();
+          showAuthNotice(wc);
+          authNoticePending = false;
+        } else {
+          clearPendingVerify();
+        }
+      } else {
+        // token 页说明密码已被接受，只是还要二次验证；不要在这里判失败。
+        clearPendingVerify();
+      }
+    }
+
+    // 振荡监控：非人工信号下又落登录页就计数；超阈值熔断停手并提示（第 10 项）。
+    if (det.state === 'login' && !det.manualLogout && !settings.auth.manualLogout && !det.fieldsCleared) {
+      if (noteLoginLanding() && !oscNoticeShown) {
+        oscNoticeShown = true;
+        authPolicy.noteFailure();
+        showAuthNotice(wc, '登录状态反复失效，已停止自动登录；请手动登录一次，若仍反复请检查账号是否在其他设备上同时使用。');
+      }
+    }
+
     if (det.state === 'console') {
       if (det.pending && det.pending.u && det.pending.p) {
-        // 本次登录凭据只留内存，供许可拦截面领取转赠时核验（§7.5.5 壳带凭据口径）
         gateCredsMemory = { username: det.pending.u, password: det.pending.p };
       }
       if (det.pending) {
         const plan = autologinMod.planHarvest(det.pending, 'success');
         if (plan.save) {
-          try { credStore.save(plan.save.username, plan.save.password); } catch (e) { /* 加密不可用等：不保存、不打扰 */ }
+          try { credStore.save(plan.save.username, plan.save.password); } catch (e) { /* ignore */ }
         } else if (plan.clearVault) {
           try { credStore.clear(); } catch (e) { /* ignore */ }
         }
@@ -283,59 +408,86 @@ async function processAuthPage() {
         saveSettings();
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
       } else if (settings.auth.manualLogout) {
-        // 无暂存也进了控制台 = 会话恢复成功，手动退出标记使命完成
         settings.auth.manualLogout = false;
         saveSettings();
       }
+
       authPolicy.noteSuccess();
+      // 振荡计数只在「页面真实提交进的控制台」才清零（det.pending 在场）；
+      // 壳静默登录进控制台不留 pending、不得清零，否则交替振荡永远攒不满阈值（门三 D-1）。
+      if (det.pending) resetOscillation();
+      authNoticePending = false;
       viewMgr.noteLogin();
       schedulePreload();
-      // 收编落点（2.3.2）：登录成立后默认落新版设备页（每会话一次），
-      // 控制台视图退居登录引导面，用户不再从壳里落进原生页。
+
       if (!devicesLanded) {
         devicesLanded = true;
         try { showView('devices'); } catch (e) { /* ignore */ }
       }
-      // 许可门检查（契约 §3 写死时机：控制台会话建立成功后立即、先于任何
-      // 设备连接动作；每会话一次，函数内自守）。与预加载并行不阻塞页面。
+
       runLicenseGateCheck().catch(() => {});
       flushConsoleCookies();
       try { await wc.executeJavaScript(autologinMod.GUARD_JS, true); } catch (e) { /* ignore */ }
     } else if (det.state === 'login') {
-      if (det.manualLogout && !settings.auth.manualLogout) handleManualLogout();
+      if (authNoticePending) {
+        authNoticePending = false;
+        showAuthNotice(wc);
+      }
+
+      if (det.manualLogout && !settings.auth.manualLogout) {
+        try { await Promise.resolve(handleManualLogout()); } catch (e) { /* ignore */ }
+        gateCredsMemory = null;
+      }
+
       if (settings.auth.manualLogout || pendingManualClear) {
         pendingManualClear = false;
+        gateCredsMemory = null;
         try { await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL); } catch (e) { /* ignore */ }
         flushConsoleCookies();
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
       }
+
       if (det.fieldsCleared) {
-        // 用户亲手清了已回填的输入框：按其意愿忘掉已存凭据
         try { credStore.clear(); } catch (e) { /* ignore */ }
+        gateCredsMemory = null;
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
         det = Object.assign({}, det, { fieldsCleared: false, pending: null });
       }
+
       let failed = !!det.failedBanner;
       if (det.pending) {
-        // 有提交暂存却回到登录页 = 这次没成功：丢弃暂存，绝不据此保存
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
       }
+
       const creds = (!settings.auth.manualLogout && credStore.has()) ? credStore.load() : null;
       const decision = authPolicy.decide({
-        pageState: 'login', hasCreds: !!creds,
-        manualLogout: !!settings.auth.manualLogout, failedBanner: failed
+        pageState: 'login',
+        hasCreds: !!creds,
+        manualLogout: !!settings.auth.manualLogout,
+        failedBanner: failed
       });
-      if (decision.action === 'silent-login' && creds) {
+
+      if (decision.action === 'silent-login' && creds && !oscTripped) {
+        if (silentLoginInFlight) return; // startup 正在登录，等它 reload；不要双发 POST
+        silentLoginInFlight = true;
         authPolicy.noteAttempt();
-        const okLogin = await silentLoginWithCreds(creds);
+        let okLogin = false;
+        try {
+          okLogin = await silentLoginWithCreds(creds);
+        } finally {
+          silentLoginInFlight = false;
+        }
+
         if (okLogin) {
-          authPolicy.noteSuccess();
-          if (!wc.isDestroyed()) wc.loadURL(CONSOLE_URL);
+          setPendingVerify('page');
+          safeLoad(wc, CONSOLE_URL);
           return;
         }
+
         authPolicy.noteFailure();
         showAuthNotice(wc);
       }
+
       const fresh = (!settings.auth.manualLogout && credStore.has()) ? credStore.load() : null;
       try {
         await wc.executeJavaScript(autologinMod.buildInjectScript({
@@ -346,37 +498,74 @@ async function processAuthPage() {
         }), true);
       } catch (e) { /* ignore */ }
     }
-    // token 页（二次验证）不介入：等用户完成验证，进控制台时自然收割
+    // token 页不介入：等用户完成验证，进控制台时自然收割
   } finally {
     authProcessing = false;
   }
 }
-// 启动恢复次序（需求 1）：先探活持久会话，成立直接进；不成立且有已存
-// 凭据、非手动退出 -> 静默直提一次再进——恢复过程不闪登录页。
-// 任何一步失败都安静返回，照常加载控制台（落在登录页由 processAuthPage 兜底）。
 async function startupAuthFlow() {
   try {
     if (settings.auth.manualLogout) return;
+
     let header = '';
     try {
       const cookies = await authSession().cookies.get({ url: CONSOLE_URL });
-      header = cookies.map(c => c.name + '=' + c.value).join('; ');
+      header = cookies.map((c) => c.name + '=' + c.value).join('; ');
     } catch (e) { /* ignore */ }
+
     if (header) {
-      const probe = await autologinMod.httpProbeSession({ baseUrl: CONSOLE_URL, cookieHeader: header, timeoutMs: 5000, clientVersion: clientVersion.getClientVersion() });
+      const probe = await autologinMod.httpProbeSession({
+        baseUrl: CONSOLE_URL,
+        cookieHeader: header,
+        timeoutMs: 5000,
+        clientVersion: clientVersion.getClientVersion()
+      });
+      // 只作快速路径；即使假阳性，页面落登录页后 processAuthPage 仍会兜底。
+      // 这里绝不 noteSuccess。
       if (probe.alive) return;
     }
+
     if (!credStore.has()) return;
     const creds = credStore.load();
     if (!creds) return;
-    const decision = authPolicy.decide({ pageState: 'login', hasCreds: true, manualLogout: false, failedBanner: false });
+    if (silentLoginInFlight) return;
+
+    const decision = authPolicy.decide({
+      pageState: 'login',
+      hasCreds: true,
+      manualLogout: false,
+      failedBanner: false
+    });
     if (decision.action !== 'silent-login') return;
+
+    silentLoginInFlight = true;
     authPolicy.noteAttempt();
-    const okLogin = await silentLoginWithCreds(creds);
-    if (okLogin) authPolicy.noteSuccess(); else authPolicy.noteFailure();
+    let okLogin = false;
+    try {
+      okLogin = await silentLoginWithCreds(creds);
+    } finally {
+      silentLoginInFlight = false;
+    }
+
+    if (okLogin) {
+      setPendingVerify('startup');
+      // 若页面已经加载在目标地址上，主动重载一次让 pendingVerify 得到裁定；
+      // 若尚未加载，后续首次 loadURL 会触发 processAuthPage。
+      try {
+        if (view && !view.webContents.isDestroyed()) {
+          const cur = view.webContents.getURL();
+          if (cur && isTargetUrl(cur)) safeLoad(view.webContents, CONSOLE_URL);
+        }
+      } catch (e) { /* ignore */ }
+    } else {
+      authPolicy.noteFailure();
+      authNoticePending = true;
+      try {
+        if (view && !view.webContents.isDestroyed()) showAuthNotice(view.webContents);
+      } catch (e) { /* ignore */ }
+    }
   } catch (e) { /* ignore */ }
 }
-
 function saveSettings() {
   try {
     fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
