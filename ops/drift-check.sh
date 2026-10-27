@@ -17,9 +17,12 @@ AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
 [ "$AHEAD" != "0" ] && echo "WARN: 本地 HEAD 领先 origin/main $AHEAD 个提交（未推送，线上比对仍以 origin/main 为准）"
 
 # 生成映射清单：repo_path <TAB> live_path
+# 豁免（2026-10-27 漂移对账裁定第 1 项）：server/ext/config-structure.md 是仓库专用
+# 配置结构说明文档、本就不部署到服务器，线上缺失为预期状态，不计漂移。
 MAP=$(mktemp)
 git ls-tree -r --name-only origin/main -- server windows ops | while IFS= read -r p; do
   case "$p" in
+    server/ext/config-structure.md) continue ;;
     server/webapp/*)     live="/opt/qfremote-webapp/${p#server/webapp/}" ;;
     server/ext/*)        live="/opt/qfremote-ext/${p#server/ext/}" ;;
     server/loginshim/*)  live="/opt/qfremote-loginshim/${p#server/loginshim/}" ;;
