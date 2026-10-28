@@ -78,7 +78,7 @@
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
 | server/loginshim/apply-pass.js | /opt/qfremote-loginshim/apply-pass.js | `07b4158257b9aa7a1ca01a537bd5be7c` |
 | server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `8679a01bb4e50ae9a4ef5e081cefcff7` |
-| server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `b71f43f02879ddcdf86932a975f57392` |
+| server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `dd15b8a85cd685cf5fa8ab0631e6ad6a` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
 | server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
