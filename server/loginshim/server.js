@@ -245,6 +245,89 @@ const server = http.createServer((req, res) => {
   return handleGeneric(req, res, isLogout);
 });
 
+// base64url 编码器（Node 内置 Buffer；兼容处理 URL 安全字符）
+function base64UrlEncode(str) {
+  return Buffer.from(str, 'utf8').toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// 2026-10-28 热修（封禁登录误报）：MC 返回 messageid=110（密码验过且账号被锁定）
+// 时，先通过 verify-password 二次验密（排除 maxInvalidLogin 前置 110 路径），再
+// 用 login-check 确认确实存在活动封禁。若成立，给控制台返回 X-QF-Login-Result:
+// banned 与 X-QF-Ban-View（base64url JSON），控制台在登录卡内画封禁/冻结门，
+// 不再把封禁误报成「账号或密码不正确」。任一内网调用失败或条件不满足时，
+// 都原样透传上游响应，确保不过度暴露封禁状态。
+async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, text, statusCode, upstreamHeaders, upstreamBody) {
+  // 只处理 MC 返回 messageid=110 的响应
+  const m = /messageid\s*=\s*parseInt\(\s*'(\d+)'\s*\)/.exec(text);
+  if (!m || m[1] !== '110') return false;
+
+  // 二次验密（走内部许可服务，与锁定位无关）
+  let vp = null;
+  try {
+    vp = await licInternal('/internal/license/verify-password', { username: key, password: passwordRaw });
+  } catch (e) {
+    console.warn('bancheck verify-password error', e);
+  }
+  if (!vp || vp.ok !== true) {
+    // 密码未二次验过：可能是前置 110 路径或 legacy passtype；fail-closed
+    return false;
+  }
+
+  // 查询活动封禁（evaluate 结果）
+  let lc = null;
+  try {
+    lc = await licInternal('/internal/license/login-check', { username: key, channel: 'web' });
+  } catch (e) {
+    console.warn('bancheck login-check error', e);
+  }
+  if (!lc || lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL')) {
+    // 无活动封禁或非预期 code；MC 锁定位可能由其他原因产生，不透传封禁
+    // 值得记异常日志：密码验过、MC 称 locked、台账却无活动封禁
+    if (vp.ok === true && lc && (lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL'))) {
+      console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
+    }
+    return false;
+  }
+
+  // 根据 BAN_* code 和 banCode 映射门型，不暴露原始 banCode
+  let mode;
+  let permanent;
+  let endsAt = null;
+  const banCode = String(lc.banCode || '');
+  if (lc.code === 'BAN_PERM') {
+    mode = 'banned';
+    permanent = true;
+  } else { // BAN_UNTIL
+    permanent = false;
+    endsAt = lc.endsAt || null;
+    if (['B6', 'B7', 'B9'].indexOf(banCode) >= 0) {
+      mode = 'banned';
+    } else if (['B1', 'B8', 'B10'].indexOf(banCode) >= 0) {
+      mode = 'frozen';
+    } else {
+      // 未知冻结/封禁 code；不露状态
+      return false;
+    }
+  }
+
+  // 构造封禁数据头
+  const banView = base64UrlEncode(JSON.stringify({ mode, permanent, endsAt }));
+  const h = Object.assign({}, upstreamHeaders);
+  h['x-qf-login-result'] = 'banned';
+  h['x-qf-ban-view'] = banView;
+  delete h.etag;
+  if (Array.isArray(h['set-cookie'])) {
+    h['set-cookie'] = h['set-cookie'].filter((v) => !/^\s*xid(\.sig)?=/i.test(v));
+    if (!h['set-cookie'].length) delete h['set-cookie'];
+  }
+  appendCookie(h, MARKER_CLEAR); // 防御：清掉旧 qfrem 标记
+  logAttempt(key, null, ip, false); // 不计冻结、不清零，只记日志
+  res.writeHead(statusCode || 200, h);
+  res.end(upstreamBody);
+  return true;
+}
+
 // —— 登录专用：冻结计数 + 摘自家字段 + 转发 MeshCentral 根路径 ——
 function handleLogin(req, res) {
   if (req.method !== 'POST') { res.writeHead(405, { 'Content-Type': 'text/plain' }); return res.end('Method Not Allowed'); }
@@ -255,11 +338,13 @@ function handleLogin(req, res) {
     let body = Buffer.concat(chunks);
     let remember = false;
     let usernameRaw = '';
+    let passwordRaw = '';  // 新增：用于封禁判定中的 verify-password
     const ct = String(req.headers['content-type'] || '');
     if (ct.includes('application/x-www-form-urlencoded')) {
       try {
         const params = new URLSearchParams(body.toString('utf8'));
         usernameRaw = String(params.get('username') || '');
+        passwordRaw = String(params.get('password') || '');  // 新增
         if (params.get('qfrememberdevice') === 'on') {
           remember = true;
           params.delete('qfrememberdevice');
@@ -281,7 +366,7 @@ function handleLogin(req, res) {
         //    控制台据此在登录页显示冻结提示＋申诉入口，不再误报密码错误；
         //    会话 cookie 不下发（serveFrozenPage 另行取登录页并滤掉 xid）。
         // 冻结判定与计数（B1）一概不动：本分支不改 fails/frozen、不落盘。
-        return serveFrozenVerify(req, res, body, usernameRaw, key, ip);
+        return serveFrozenVerify(req, res, body, usernameRaw, passwordRaw, key, ip);
       }
     }
     const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443', 'content-length': body.length });
@@ -290,7 +375,7 @@ function handleLogin(req, res) {
     const up = https.request({ hostname: '127.0.0.1', port: 8443, path: '/', method: 'POST', headers, rejectUnauthorized: false }, (ur) => {
       const uchunks = [];
       ur.on('data', (c) => uchunks.push(c));
-      ur.on('end', () => {
+      ur.on('end', async () => {
         let ubody = Buffer.concat(uchunks);
         const h = Object.assign({}, ur.headers);
         if (remember) {
@@ -301,6 +386,12 @@ function handleLogin(req, res) {
         }
         if (key && st) {
           const text = ubody.toString('utf8');
+          // 新增：先做封禁判定，必须在任何 verdict/冻结计数之前
+          const banHandled = await maybeBanAndRespond(
+            req, res, key, usernameRaw, passwordRaw, ip, text,
+            ur.statusCode, ur.headers, ubody
+          );
+          if (banHandled) return;
           const hasLoginForm = text.includes('loginpanelform');
           let verdict = 'neutral';
           if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
@@ -354,16 +445,24 @@ function handleLogin(req, res) {
 // 分支注释）。判定口径与主路径一致：上游回登录页且含「登录失败」＝密码错；
 // 回非登录页＝密码对。本函数绝不修改冻结状态（fails/frozen 不动、不落盘），
 // 密码对时也不透传会话，改回冻结提示页（serveFrozenPage）。
-function serveFrozenVerify(req, res, body, usernameRaw, key, ip) {
+// 2026-10-28 热修：本函数同样先做封禁判定，封禁优先于冻结。
+function serveFrozenVerify(req, res, body, usernameRaw, passwordRaw, key, ip) {
+  // 前端传入的 passwordRaw 已在调用方解析，可用于封禁二次验密
   const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443', 'content-length': body.length });
   delete headers.connection;
   delete headers['accept-encoding']; // 强制明文回程，便于判定成败
   const up = https.request({ hostname: '127.0.0.1', port: 8443, path: '/', method: 'POST', headers, rejectUnauthorized: false }, (ur) => {
     const uchunks = [];
     ur.on('data', (c) => uchunks.push(c));
-    ur.on('end', () => {
+    ur.on('end', async () => {
       const ubody = Buffer.concat(uchunks);
       const text = ubody.toString('utf8');
+      // 新增：封禁判定（封禁优先于冻结）
+      const banHandled = await maybeBanAndRespond(
+        req, res, key, usernameRaw, passwordRaw, ip, text,
+        ur.statusCode, ur.headers, ubody
+      );
+      if (banHandled) return;
       const hasLoginForm = text.includes('loginpanelform');
       let verdict = 'neutral';
       if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';

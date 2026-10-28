@@ -671,6 +671,22 @@ const SavedCred = {
   save(u, p) { try { localStorage.setItem('qf-console-cred', JSON.stringify({ u, p })); } catch (e) {} },
   clear() { try { localStorage.removeItem('qf-console-cred'); } catch (e) {} }
 };
+function parseBanView(str) {
+  try {
+    let s = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const obj = JSON.parse(atob(s));
+    return {
+      mode: obj.mode === 'frozen' ? 'frozen' : 'banned',
+      permanent: !!obj.permanent,
+      endsAt: obj.endsAt || null
+    };
+  } catch (e) {
+    // 数据缺失或损坏时也能画门，只是没有日期/类型可能偏封禁
+    return { mode: 'banned', permanent: false, endsAt: null };
+  }
+}
+
 async function doLogin(username, password, remember) {
   // 登录一律走自家登录垫片 /qf-login（与原生登录页同口径）：垫片负责登录冻结、
   // 许可门与「记住此设备」——带 qfrememberdevice 字段时给会话 cookie 补 30 天
@@ -689,6 +705,13 @@ async function doLogin(username, password, remember) {
     // 可供 /me 校验，若继续走 /me 必 401 并被误报「账号或密码不正确」。
     // 直接回冻结信号，由登录页呈现冻结提示与申诉入口（与垫片冻结弹窗同口径）。
     if (loginResult === 'frozen') return { ok: false, frozen: true };
+    // 2026-10-28 热修（封禁误报）：密码正确但账号被封禁（B6/B7/B9 或永久封禁）
+    // 或非 B1 冻结（B8/B10）且 MC 锁定位在身时，垫片回封禁门信号与数据。
+    // 直接回 banned，由登录页画门，不再误报密码错误。
+    if (loginResult === 'banned') {
+      const ban = parseBanView(resp.headers.get('x-qf-ban-view'));
+      return { ok: false, banned: true, ban };
+    }
   } catch (e) { return { ok: false, msg: '网络暂时不可用，请检查网络后重试。' }; }
   // 会话校验偶发抖动时多等一轮再判，避免把非密码原因误报成密码错误
   // （2026-10-26 热修：垫片许可门吃会话曾让 /me 必 401 并被一律误报）。
@@ -986,6 +1009,30 @@ Views.login = function (root, extra) {
       $('#li-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
       const sup = $('#li-fz-support', root);
       if (sup) sup.onclick = (ev) => { ev.preventDefault(); authTool(root, 'support'); };
+    } else if (r.banned && fz) {
+      // 2026-10-28 热修（封禁误报）：账号被封禁或非 B1 冻结且密码正确时，
+      // 直接画门：标题/状态/期限/事由/申诉/客服/查询密钥入口，不露原始 code。
+      const b = r.ban || { mode: 'banned', permanent: false, endsAt: null };
+      const dateStr = b.endsAt ? new Date(b.endsAt).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '';
+      const heading = b.mode === 'frozen' ? '账号已被冻结' : '账号已被封禁';
+      let reason = b.mode === 'frozen'
+        ? '您的账号已被冻结，当前无法使用本控制台的各项功能。'
+        : (b.permanent
+            ? '您的账号已被永久封禁，当前无法使用本控制台的各项功能。'
+            : '您的账号已被封禁' + (dateStr ? '，预计于 ' + dateStr + ' 解除' : '') + '，当前无法使用本控制台的各项功能。');
+      fz.innerHTML = '<div class="note err">' + heading + '</div>'
+        + '<div class="note" style="margin-top:4px">' + reason + '</div>'
+        + '<div class="hint" style="margin-top:4px">事由：违反平台规则</div>'
+        + '<div class="hint" style="margin-top:8px">如您认为该处理存在疑问，可提交申诉或联系智能客服。</div>'
+        + '<button class="btn block" id="li-ban-appeal" type="button" style="margin-top:10px">提交申诉</button>'
+        + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-ban-support">智能客服</a>，或在客服中申请转人工。'
+        + ' <a href="#" id="li-ban-status">查询密钥</a></p>';
+      fz.hidden = false;
+      $('#li-ban-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
+      const sup = $('#li-ban-support', root);
+      if (sup) sup.onclick = (ev) => { ev.preventDefault(); authTool(root, 'support'); };
+      const st = $('#li-ban-status', root);
+      if (st) st.onclick = (ev) => { ev.preventDefault(); authTool(root, 'status', { user: uname }); };
     } else { err.textContent = r.msg; err.hidden = false; }
   });
   root.querySelectorAll('[data-act]').forEach(el => el.addEventListener('click', () => {
