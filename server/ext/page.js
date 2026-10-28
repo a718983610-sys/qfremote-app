@@ -245,8 +245,8 @@ function userRow(u){
   var tags = '';
   if (u.isOwner) tags += '<span class="tag owner">站长本人</span>';
   if (u.testMark) tags += '<span class="tag test">测试</span>';
-  if (u.frozen) tags += '<span class="tag frozen">已冻结</span>';
-  if (u.banned) tags += '<span class="tag banned">已封禁</span>';
+  if (u.frozen || u.licFrozen) tags += '<span class="tag frozen">已冻结</span>';
+  if (u.banned || u.licBanned) tags += '<span class="tag banned">已封禁</span>';
   if (!u.exists) tags += '<span class="tag">账号已删除</span>';
   var meta = [];
   if (u.displayName && u.displayName !== u.login) meta.push('显示名：' + esc(u.displayName));
@@ -254,19 +254,38 @@ function userRow(u){
   if (u.template) meta.push('模板：' + esc(u.template));
   meta.push('已改名 ' + (u.renameCount || 0) + ' 次');
   var btns = '';
+  var bannedAny = !!(u.licBanned || u.banned);
   if (!u.exists) {
-    btns = '<button class="btn ghost" disabled>不可操作</button>';
+    // 台账独有行：账号库已无此人，其余操作都无对象；但许可/账号台账
+    // 仍有限制在身时给真「解封账号」钮（服务端按账号解封已放行此
+    // 情形：全清许可记录＋清残留标记），不再是点不动的死行。
+    if (bannedAny || u.licFrozen || u.frozen) {
+      btns = '<button class="btn" data-act="unban" data-u="' + esc(u.login) + '" data-cnt="' + (u.activeBanCount || 0) + '">解封账号</button>';
+    } else {
+      btns = '<button class="btn ghost" disabled>不可操作</button>';
+    }
   } else {
     // #38：站长本人行同样可操作（后台预检 adminGuardCheck 已放行站长账号，
     // mcdb 侧 --admin-override 同口径；仅两个服务账号在服务端继续拒绝）。
-    if (u.frozen) btns += '<button class="btn" data-act="unfreeze" data-u="' + esc(u.login) + '">解封</button>';
-    else btns += '<button class="btn ghost" data-act="freeze" data-u="' + esc(u.login) + '">冻结</button>';
+    // 解封与封禁同排同位（2026-10-26 站长亲令）：有生效封禁（许可口径
+    // licBanned，或 mcdb 旧旗 banned 残留）→行首位「解封账号」；有冻结
+    // （MC bit 或许可冻结类）→「解冻」；两者都有→两个都在；干净账号
+    // 维持「冻结／封禁」。
+    var frozenAny = !!(u.frozen || u.licFrozen);
+    if (bannedAny) {
+      btns += '<button class="btn" data-act="unban" data-u="' + esc(u.login) + '" data-cnt="' + (u.activeBanCount || 0) + '">解封账号</button>';
+      if (frozenAny) btns += '<button class="btn ghost" data-act="unfreeze" data-u="' + esc(u.login) + '">解冻</button>';
+    } else if (frozenAny) {
+      btns += '<button class="btn" data-act="unfreeze" data-u="' + esc(u.login) + '">解冻</button>';
+    } else {
+      btns += '<button class="btn ghost" data-act="freeze" data-u="' + esc(u.login) + '">冻结</button>';
+    }
     btns += '<button class="btn ghost" data-act="resetpass" data-u="' + esc(u.login) + '">重置密码</button>';
     btns += '<button class="btn ghost" data-act="rename" data-u="' + esc(u.login) + '">改名</button>';
     // P6-GK3：收回密钥（不可恢复，危险钮）；名下无在效钥时置灰（服务端 liveKeyCount）
     if (u.liveKeyCount > 0) btns += '<button class="btn danger" data-act="reclaim" data-u="' + esc(u.login) + '">收回密钥</button>';
     else btns += '<button class="btn ghost" disabled>收回密钥</button>';
-    btns += '<button class="btn danger" data-act="ban" data-u="' + esc(u.login) + '">封禁</button>';
+    if (!bannedAny) btns += '<button class="btn danger" data-act="ban" data-u="' + esc(u.login) + '">封禁</button>';
   }
   return '<div class="row' + (u.isOwner ? ' owner-row' : '') + '"><div class="who"><div class="login">' + esc(u.login) + '</div>'
     + '<div class="meta">' + tags + (meta.length ? '<br>' + meta.join(' · ') : '') + '</div></div>' + btns + '</div>';
@@ -322,10 +341,21 @@ function onUserAction(){
     }).catch(function(){ showModal('操作未成功', '网络连接异常，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); });
     return;
   }
-  var titles = { freeze: '冻结账号', unfreeze: '解封账号', resetpass: '重置密码', ban: '封禁账号' };
+  if (act === 'unban') {
+    // 弹窗明写目标账号与将解除的条数（条数由服务端 buildUsersList 按
+    // 许可台账实时计算，随行数据 data-cnt 带入），回执由服务端明写
+    // 实际解除条数。
+    var cnt = parseInt(this.getAttribute('data-cnt') || '0', 10);
+    showModal('解封账号', '确定要解封「' + u + '」吗？' + (cnt > 0 ? '将一次解除该账号全部 ' + cnt + ' 条生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。' : '将一次解除该账号全部生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。'), {
+      okText: '确认解封',
+      onOk: function(){ doOp('/admin/api/license/unban-account', { username: u }); }
+    });
+    return;
+  }
+  var titles = { freeze: '冻结账号', unfreeze: '解冻账号', resetpass: '重置密码', ban: '封禁账号' };
   var texts = {
     freeze: '确定要冻结「' + u + '」吗？冻结后对方立即无法登录，账号与数据保留。' + RESTART_NOTE,
-    unfreeze: '确定要解封「' + u + '」吗？解封后对方可立即正常登录。' + RESTART_NOTE,
+    unfreeze: '确定要解冻「' + u + '」吗？解冻后对方可正常登录；若该账号还有生效中的封禁，将一并解除。',
     resetpass: '确定要给「' + u + '」重置密码吗？会生成一个新密码，只显示一次，请转发给对方。' + RESTART_NOTE,
     ban: '封禁将禁用「' + u + '」的账号，数据保留，对方可以申诉；不再删除账号。确定要封禁吗？' + RESTART_NOTE
   };
@@ -449,7 +479,7 @@ function loadLicense(){
     $('lic-keys').innerHTML = '<h2 class="foldhead" id="keys-fold-head" style="margin-top:18px">已发放密钥（' + shownKeys.length + ' 条' + (r.keys.length > shownKeys.length ? '，共 ' + r.keys.length + ' 条' : '') + '）<span class="foldchev">展开 ▾</span></h2><div class="foldbody" id="keys-fold-body">' + kh + '</div>';
     bindFold('keys-fold-head', 'keys-fold-body');
     var hb = '';
-    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ hb += '<div class="row"><div class="who"><div class="meta">' + esc(b.code) + ' · ' + esc(adminLabel(TXT_BAN_TARGET, b.targetType)) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(adminLabel(TXT_BAN_STATUS, b.status)) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '">直接解封</button>'; hb += '</div>'; }); }
+    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ var cntT = (r.banActiveByTarget && typeof r.banActiveByTarget[b.targetType + '|' + b.target] === 'number') ? r.banActiveByTarget[b.targetType + '|' + b.target] : r.bans.filter(function(x){ return x.status === 'active' && x.targetType === b.targetType && x.target === b.target; }).length; hb += '<div class="row"><div class="who"><div class="login">' + esc(b.target || '') + '</div><div class="meta">' + esc(b.code) + ' · ' + esc(adminLabel(TXT_BAN_TARGET, b.targetType)) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(adminLabel(TXT_BAN_STATUS, b.status)) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '" data-tt="' + esc(b.targetType || '') + '" data-cnt="' + cntT + '">直接解封</button>'; hb += '</div>'; }); }
     $('lic-bans').innerHTML = hb;
     var hd = '';
     var pendDevices = 0;
@@ -489,8 +519,10 @@ function loadLicense(){
     };
     var ubtns = document.querySelectorAll('button[data-ban-unban]');
     for (var k3 = 0; k3 < ubtns.length; k3++) ubtns[k3].onclick = function(){
-      var bid = this.getAttribute('data-ban-unban'), tgt = this.getAttribute('data-t');
-      showModal('直接解封', '确定直接解除对「' + tgt + '」的这条封禁吗？关联回收密钥将按规恢复，全程留痕。', { okText: '确认解封', onOk: function(){
+      var bid = this.getAttribute('data-ban-unban'), tgt = this.getAttribute('data-t'), tt = this.getAttribute('data-tt') || 'account', cntB = parseInt(this.getAttribute('data-cnt') || '1', 10);
+      showModal('直接解封', tt === 'account'
+        ? '确定直接解除对「' + tgt + '」的封禁吗？该账号共有 ' + cntB + ' 条生效中的封禁，确认后将一并全部解除，关联回收密钥将按规恢复，全程留痕。'
+        : '确定直接解除对「' + tgt + '」的这条封禁吗？该对象共有 ' + cntB + ' 条生效中的封禁，本次仅解除所点这一条，其余请逐条解除，全程留痕。', { okText: '确认解封', onOk: function(){
         api('/admin/api/license/unban', { banId: bid }).then(function(r){ toast(r.msg || (r.ok ? '已解封。' : '解封未成功。')); loadLicense(); loadUsers(); });
       }});
     };
