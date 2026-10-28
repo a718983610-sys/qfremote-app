@@ -676,10 +676,29 @@ function createLicenseCore(opts) {
     if (ctx.channel === 'web') {
       const paidValid = gateKeys.some((k) => k.source === 'paid');
       if (paidValid) return Object.assign(base, { allow: true, code: 'OK' });
+      // 2026-10-28 站长令：撤销「试用期不能用网页版」——试用在期账号可登录网页版控制台。
+      // 判据与 software/qfclash 完全同口径：只认账号试用窗 acct.trial.expiresMs > now，
+      // 不看试用钥的 lifecycle/source；返回形状也与两渠道一致（allow/trial/trialExpiresMs）。
+      // 位置：必须排在 pendingKeys(G1) 与 expiredDaily(G5) 之前，与 software 分支的
+      // 「gateKeys → 试用 → pendingKeys → expiredDaily → expiredTrial」顺序对齐；否则
+      // 试用期内买了钥但未激活的用户会被 G1 拦在网页版外（软件端却可用）。此处放行依据是
+      // 试用窗，不是未激活钥，不与 DS-R01「门控只认已激活钥」冲突。
+      // 红线校验：封禁门在上方渠道分支之前，未移动；免费来源钥/积分兑换钥本身不产生放行
+      // （无试用窗即落到下方 G4）；试用到期照旧硬拦（见下方 G2 落点）。
+      if (acct.trial && acct.trial.expiresMs > now) return Object.assign(base, { allow: true, code: 'OK', trial: true, trialExpiresMs: acct.trial.expiresMs });
       if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
       if (expiredDaily && !gateKeys.length) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
+      // 红线（试用到期照旧硬拦）落点单列 G2：G4 文案已改为只针对免费来源钥
+      // （赠送/活动发放/积分兑换），不能再承接「试用到期」，否则会把用户的试用钥
+      // 说成赠送/活动钥，并丢掉到期时间与「购买后继续」引导。
+      // 边界：用 <= now 判过期，与 software/qfclash 等号口径一致，且不依赖 lazyExpireKeys
+      // 何时把试用钥翻成 expired；名下仍有非试用已激活钥（如赠送钥）时不下 G2，让其落 G4
+      // 走「免费来源钥不含网页版」文案。
+      const trialOver = expiredTrial || (acct.trial && acct.trial.expiresMs <= now);
+      const hasActivatedNonTrial = gateKeys.some((k) => k.plan !== 'trial');
+      if (trialOver && !hasActivatedNonTrial) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
       // 存量老用户（无试用、无任何密钥记录）在网页端同样走 G1（设计稿 G1 拦截面含网页版）；
-      // 试用/免费来源持钥者走 G4。
+      // 免费来源持钥者走 G4。
       if (!hasAnyKey && !acct.trial) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
       return Object.assign(base, { allow: false, code: 'G4', msgCode: 'L13' });
     }
@@ -1528,6 +1547,10 @@ function createLicenseCore(opts) {
     // DS-R01 P0 修复：网页开通只认已激活付费钥（未激活付费钥不再开通网页版，
     // 与 evaluate web 渠道同口径；原实现用 activeKeys 含未激活钥，与门控同漏）。
     const validPaid = activeKeys(username, now).some((k) => k.source === 'paid' && k.lifecycle === 'activated');
+    // 2026-10-28 站长令：试用在期同样开通网页版。判据与 evaluate web 分支逐字同口径
+    // （acct.trial.expiresMs > now），使 SPA 状态行、服务端首页 licWeb/TrialBar、
+    // 智能客服状态答复与实际可登录一致。acct 可能为空，故先判空。
+    const trialInPeriod = !!(acct && acct.trial && acct.trial.expiresMs > now);
     return {
       username, projectName: 'QFRemote',
       planName: primary ? primary.planName : 'QFRemote 试用套餐', // 16:56 命名口径：无密钥账号套餐名一律此名
@@ -1540,7 +1563,11 @@ function createLicenseCore(opts) {
         ? { pc: slotCount(primary, 'pc'), mobile: slotCount(primary, 'mobile'), pcUsed: slotCount(primary, 'pc'), pcMax: SLOT_CAPS.pc, mobileUsed: slotCount(primary, 'mobile'), mobileMax: SLOT_CAPS.mobile }
         : { pc: 0, mobile: 0, pcUsed: 0, pcMax: SLOT_CAPS.pc, mobileUsed: 0, mobileMax: SLOT_CAPS.mobile },
       everBanned: !!(primary && primary.everBanned),
-      webEnabled: validPaid,
+      webEnabled: validPaid || trialInPeriod,
+      // 网页版开通依据：'paid' 已激活付费钥、'trial' 账号试用在期、null 未开通。
+      // 供展示/客服文案区分「付费开通」与「试用期内开通」；旧消费端忽略即可。
+      // 注：许可镜像（writeMirror）本轮未纳入此字段，镜像消费端取不到时按未区分处理。
+      webBy: validPaid ? 'paid' : (trialInPeriod ? 'trial' : null),
       trialExpiresMs: acct && acct.trial ? acct.trial.expiresMs : null,
       keyExpiresMs: primary && primary.expiresBaseMs ? effectiveExpiry(primary, now) : null,
       activeBan: bans.length ? { code: bans[0].code, permanent: !!bans[0].permanent, endsAt: bans[0].endsAt, id: bans[0].id } : null,

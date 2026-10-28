@@ -93,7 +93,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <section class="view" data-view="users">
   <div class="card" id="create-card">
     <h2>创建账号</h2>
-    <p class="hint">站长手动开户：创建即发放 3 天试用（与自助注册同待遇，网页版不随试用开通）；设备与权限请按分发规矩另行分配。站长创建不占注册名额、不计注册失败次数。账号须为字母与数字的组合、至少 8 位；密码至少 8 位。</p>
+    <p class="hint">站长手动开户：创建即发放 3 天试用（与自助注册同待遇，试用期内网页版可登录使用）；设备与权限请按分发规矩另行分配。站长创建不占注册名额、不计注册失败次数。账号须为字母与数字的组合、至少 8 位；密码至少 8 位。</p>
     <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="create-user" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qfnew2510a"></div></div>
     <div class="row"><div class="who"><div class="meta">初始密码</div><input id="create-pass" type="password" autocomplete="new-password" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="至少 8 位，创建后交付对方"></div></div>
     <label style="display:block;font-size:14px;line-height:2"><input type="checkbox" id="create-show"> 显示密码（交付前核对）</label>
@@ -110,7 +110,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <section class="view" data-view="license">
   <div class="card">
     <h2>密钥发放</h2>
-    <p class="hint">给账号发放密钥（入许可台账）。来源必须选：付费购买入账＝真实付费，开通网页版；免费发放＝试用/赠送类，不开通网页版。此处不设默认，选错会影响对方网页权益。</p>
+    <p class="hint">给账号发放密钥（入许可台账）。来源必须选：付费购买入账＝真实付费，开通网页版；免费发放＝赠送、活动发放、积分兑换类，不开通网页版（注册自动发放的试用密钥不在此面，试用期内网页版可登录使用）。此处不设默认，选错会影响对方网页权益。</p>
     <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="lic-user" type="text" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qflic2510a"></div></div>
     <div class="row"><div class="who"><div class="meta">套餐</div><select id="lic-plan" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
     <div class="row"><div class="who"><div class="meta">来源（必选）</div>

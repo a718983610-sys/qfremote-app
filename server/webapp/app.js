@@ -752,7 +752,7 @@ function statusSummary(j) {
   if (v.displayStatus) parts.push('状态：' + v.displayStatus);
   if (v.keyExpiresMs) parts.push('到期：' + fmtDate(v.keyExpiresMs));
   else if (v.remainText) parts.push('有效期：' + v.remainText);
-  if (typeof v.webEnabled === 'boolean') parts.push('网页版：' + (v.webEnabled ? '已开通' : '未开通'));
+  if (typeof v.webEnabled === 'boolean') parts.push('网页版：' + (v.webEnabled ? (v.webBy === 'trial' ? '已开通（试用期内）' : '已开通') : '未开通'));
   return parts.length ? parts.join(' · ') : '已查询到您的密钥状态。';
 }
 /* 拦截判定：返回 gate 描述或 null（放行进首页） */
@@ -774,7 +774,7 @@ Views.gate = function (root, extra) {
   const conf = {
     G1: { t: '尚未激活', b: '本账号还没有激活密钥。在下方输入密钥即可激活；没有密钥可以先购买，或使用积分兑换的密钥。' },
     G2: { t: '试用已到期', b: '免费试用已经结束。输入付费密钥或兑换密钥后即可继续使用。' },
-    G4: { t: '网页版尚未开通', b: '网页版需要付费密钥开通（试用与免费来源密钥不含网页版权益）。您仍可在软件端继续使用，或购买付费密钥后回到网页版。' },
+    G4: { t: '网页版尚未开通', b: '网页版需要真实付费购买密钥开通（赠送、活动发放与积分兑换等免费来源密钥不含网页版权益）。您仍可在软件端继续使用，或购买付费密钥后回到网页版。' },
     G5: { t: '密钥已过期', b: '您的密钥已于 ' + fmtDate(me.keyExpiresMs) + ' 到期。重新购买或兑换新密钥后即可继续使用。' },
     BAN: { t: '账号已被封禁', b: '封禁事由类别：' + esc((me.activeBan && (me.activeBan.category || me.activeBan.reason)) || '违反平台规则') + '。如有异议，可以提交申诉，审核结果将在申诉进度中显示。' },
     FROZEN: { t: '账号已被冻结', b: '冻结期间暂时无法登录使用，到期后自动解冻；也可以提交申诉提前处理。' }

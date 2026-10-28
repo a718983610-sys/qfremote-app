@@ -28,9 +28,9 @@ const HISTORY_MAX = 10; // 会话上下文保留最近 10 条（约 5 轮），�
 // 集中一处维护，改口径只改这里与 kb-data 两处。）
 const RULES_231 = [
   '套餐价格：1 日 2 元、7 日 6 元、30 日 9.9 元、永久 18 元。',
-  '新用户注册免费试用 3 天（72 小时），仅限软件端（电脑版/手机版），试用期不能使用网页版。',
+  '新用户注册免费试用 3 天（72 小时），试用期内软件端（电脑版/手机版）与网页版均可使用。',
   '付费密钥自激活之日起计时，未激活不计时、不过期。',
-  '一枚密钥可绑定两台电脑加一台手机；网页版凭付费来源密钥开通。',
+  '一枚密钥可绑定两台电脑加一台手机；网页版凭付费来源密钥开通，账号在免费试用期内亦可使用；免费来源密钥（赠送、活动发放、积分兑换）不开通网页版。',
   '转赠：仅付费密钥可转赠，一把密钥只可转赠一次，方式为粘贴领取；未激活的付费密钥可转售，由买方粘贴激活。',
   '换绑：走登录页申诉换绑，在新设备提交，审核通过后同类替换。',
   '购买流程（截图审核付款）：选套餐 → 在本站支付页扫固定金额卡 → 点「支付成功」→ 上传账单截图（须露出订单号）→ 审核通过后发密钥；订单号一号一钥。',
@@ -223,8 +223,8 @@ function createEngine(deps) {
       if (!providers.getLicenseState) return Promise.resolve(null);
       return providers.getLicenseState(account).then(s => {
         if (!s.available) return null;
-        if (!s.found) return '当前状态：暂无许可记录（未购买密钥时软件端需激活；新注册账号有 3 天免费试用，仅限软件端）';
-        const parts = ['账户状态：' + (s.displayStatus || '正常'), '套餐：' + (s.planName || 'QFRemote 试用套餐'), '密钥：' + (s.maskedKey || '—'), '网页版：' + (s.webEnabled ? '已开通' : '未开通（网页版需真实付费购买密钥后开通）')];
+        if (!s.found) return '当前状态：暂无许可记录（未购买密钥时软件端需激活；新注册账号有 3 天免费试用，试用期内软件端与网页版均可使用）';
+        const parts = ['账户状态：' + (s.displayStatus || '正常'), '套餐：' + (s.planName || 'QFRemote 试用套餐'), '密钥：' + (s.maskedKey || '—'), '网页版：' + (s.webEnabled ? (s.webBy === 'trial' ? '已开通（试用期内；试用到期后需真实付费购买密钥继续使用）' : '已开通') : '未开通（网页版需真实付费购买密钥后开通）')];
         if (s.trialExpiresMs) parts.push('试用到期：' + new Date(s.trialExpiresMs).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }));
         if (s.keyExpiresMs) parts.push('密钥到期：' + new Date(s.keyExpiresMs).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }));
         return parts.join('；');
