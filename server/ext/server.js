@@ -95,7 +95,7 @@ const MCDB = process.env.QFEXT_MCDB || '/opt/meshcentral/account-kit/mcdb.js';
 const RENAME_SH = process.env.QFEXT_RENAME_SH || '/opt/meshcentral/account-kit/rename-account.sh';
 
 const payOrders = createOrdersCore({ dir: LIC_DIR, lic, log });
-const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt' });
+const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt', ownerTokenPlainFile: process.env.QFEXT_OWNER_TOKEN_FILE || '/opt/qfremote-ext/owner-api-token.txt' });
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
 try {
@@ -1450,7 +1450,8 @@ const server = http.createServer(async (req, res) => {
     // 对 /assistant-api/ 挂 limit_req，不会被高频轮询误伤（定版口径）。
     if (p.startsWith('/assistant-api/')) {
       const tok = String(req.headers['x-assistant-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '');
-      if (!reviewEvents.verifyToken(tok)) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
+      const tokenRole = reviewEvents.verifyTokenRole(tok);
+      if (!tokenRole) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
       const nowA = Date.now();
       if (req.method === 'GET' && p === '/assistant-api/events') {
         const evStatus = u.searchParams.get('status') || '';
@@ -1499,17 +1500,22 @@ const server = http.createServer(async (req, res) => {
         // 裁定回写：全部复用既有双通道裁定入口，执行者留痕「助手接口」，不另起平行逻辑
         const body = await readJsonBody(req);
         const type = String(body.type || ''); const refId = String(body.refId || '');
-        const action = String(body.action || ''); const ACTOR = '助手接口';
+        const action = String(body.action || '');
+        const ACTOR = tokenRole === 'owner' ? '站长接口' : '助手接口';
         if (type === 'order') {
           const o = payOrders.getRaw(refId);
           if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
-          if (o.stage !== 1) return sendJson(res, 409, { ok: false, code: 'OWNER_STAGE', msg: '该订单已过一审，二审（到账核对）由站长处理。' });
+          if (o.stage !== 1 && tokenRole !== 'owner') return sendJson(res, 409, { ok: false, code: 'OWNER_STAGE', msg: '该订单已过一审，二审（到账核对）由站长处理。' });
           if (action !== 'approve' && action !== 'reject' && action !== 'fake') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
           // #37：助手一审可判假（action=fake）——orders-core 一审判假分支直接
           // 驳回关单、不封号不到二审，并累计当日判假计数/入口冻结。
           const out = payOrders.decide(refId, action, ACTOR, nowA, {});
-          if (out.ok) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          if (out.ok) {
+            if (out.stage === 1) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
+            // owner 通道 stage2 判假：核心已封禁＋回收钥，补 MC 锁定位联动（与后台口径齐；stage1 判假不补，守 #37）
+            if (tokenRole === 'owner' && out.fake && out.stage === 2) { await licLockAccount(o.username); }
+          }
+          log({ ev: 'assistant-decide', type, refId, action, actor: ACTOR, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out);
         }
         if (type === 'appeal' || type === 'rebind') {
@@ -2750,8 +2756,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/admin/api/assistant/token') {
         const body = await readJsonBody(req);
         const action = String(body.action || '');
-        if (action === 'generate' || action === 'reset') { const out = reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
-        if (action === 'revoke') { const out = reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
+        const tokRole = String(body.role || 'assistant') === 'owner' ? 'owner' : 'assistant';
+        if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
+        if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });
       }
       if (req.method === 'POST' && (p === '/admin/api/appeals/approve' || p === '/admin/api/appeals/reject')) {

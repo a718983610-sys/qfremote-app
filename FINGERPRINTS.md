@@ -19,7 +19,7 @@
 | server/ext/assets/pay-cards/pay-wechat-6.png | /opt/qfremote-ext/assets/pay-cards/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/ext/assets/pay-cards/pay-wechat-9.9.png | /opt/qfremote-ext/assets/pay-cards/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/ext/assets/pay-example.jpg | /opt/qfremote-ext/assets/pay-example.jpg | `838c2588ef99c3cb8d6a638f1a8d57d0` |
-| server/ext/events-core.js | /opt/qfremote-ext/events-core.js | `2924d9ddfda61b4ec83a52e926b0d8a8` |
+| server/ext/events-core.js | /opt/qfremote-ext/events-core.js | `b4015b97c14df27ee9f4f79f638989fe` |
 | server/ext/files-core.js | /opt/qfremote-ext/files-core.js | `847d4c4ec0be3c42624812be2d3f8ccd` |
 | server/ext/home-page.js | /opt/qfremote-ext/home-page.js | `0a2b56ec6c9fdf19c4b129e370acf406` |
 | server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `ae771e2aae880e01b2d6bee8e9f84f36` |
@@ -29,7 +29,7 @@
 | server/ext/page.js | /opt/qfremote-ext/page.js | `fddde75240faff6b26aff04b6346f431` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `b7bee4ac1bbdffc31f7c716f051eb7dc` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `d305d2e95deec85ccd94ebf7b11523ac` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
