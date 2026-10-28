@@ -826,6 +826,7 @@ function postInternalJson(urlStr, obj, timeoutMs) {
 }
 const FORUM_INTERNAL_BASE = process.env.QFEXT_FORUM_URL || 'http://127.0.0.1:8446';
 const SOCIAL_INTERNAL_BASE = process.env.QFEXT_SOCIAL_URL || 'https://127.0.0.1:8445'; // 好友服务为本机自签 HTTPS（与 nginx proxy_ssl_verify off 同口径）
+const REG_INTERNAL_BASE = process.env.QFEXT_REG_URL || 'https://127.0.0.1:8444'; // 注册服务为本机自签 HTTPS（站长创建账号内网口，同上口径）
 
 // ---- B 设计 4.2 探测引擎：refId 前缀强绑定（B1）、超时双保险（B2）、连续失败熔断（B2）----
 const PROBE_REF_RE = /^(post|reply):/;
@@ -2070,6 +2071,67 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && p === '/admin/api/users') {
         try { return sendJson(res, 200, { ok: true, users: buildUsersList() }); }
         catch (e) { log({ ev: 'users-list-error', err: String(e && e.message) }); return sendJson(res, 500, { ok: false, msg: '账号列表暂时无法读取，请稍后再试。' }); }
+      }
+      // ===== 站长创建账号（站长 2026-10-26 15:18 令）=====
+      // 经注册服务内网口复用现行开户链（校验/建号/3 天试用与自助注册同一条链），
+      // 本服务不另写建号逻辑；格式/唯一性/密码强度的权威校验在注册服务单点，
+      // 此处只做边界形状预检防巨包。完成性核对：回执丢失/超时/REG 侧失败后，
+      // 先查 MC 库与许可态再定成败——刚建成（creation 180 秒内）补完许可按成功
+      // 改判，非新鲜的既存号改判重名，无号才报未完成（建成不报失败）。
+      if (req.method === 'POST' && p === '/admin/api/users/create') {
+        const body = await readJsonBody(req);
+        if (body.__tooLarge) return sendJson(res, 400, { ok: false, msg: '填写内容过长，请检查后重试。' });
+        const username = String(body.username || '');
+        const password = String(body.password || '');
+        const displayName = body.displayName == null ? '' : String(body.displayName);
+        if (!username || username.length > 80 || !password || password.length > 256 || displayName.length > 64) {
+          return sendJson(res, 400, { ok: false, msg: '填写不完整或过长，请检查后重试。' });
+        }
+        const completeLic = (name) => {
+          let acct = lic.state().accounts[name];
+          if (!acct || !acct.trial || !acct.trialKeyId) {
+            lic.registerSuccess(name, '', '', Date.now());
+            log({ ev: 'admin-create-lic-repair', target: name, by: auth.user });
+            acct = lic.state().accounts[name];
+          }
+          return acct;
+        };
+        const okOut = (name, late) => {
+          const acct = completeLic(name);
+          // 试用未真落账（如许可侧存量账号无 trial）绝不回「已发试用」：如实标
+          // trialOk=false，页面据此改口径（门二 D2）。
+          const trialOk = !!(acct && acct.trial && acct.trialKeyId);
+          if (!trialOk) log({ ev: 'admin-create-lic-incomplete', target: name, by: auth.user });
+          log({ ev: 'admin-create-account', target: name, by: auth.user, ok: true, late: !!late, trialOk });
+          return sendJson(res, 200, { ok: true, username: name, trialOk, trialExpiresMs: trialOk ? acct.trial.expiresMs : null });
+        };
+        // 超时显式 20000：REG 最坏处理（建号等待 ≤10s＋许可回写 ≤5s）约 15s，
+        // 沿用调用器默认 5000 会把已建成误判成失败（门一 D1）。
+        const out = await postInternalJson(REG_INTERNAL_BASE + '/internal/admin-create', { username, password, displayName, operator: auth.user }, 20000);
+        if (out && out.ok === true && out.username) return okOut(String(out.username), false);
+        const BIZ = ['USERNAME_FORMAT', 'USERNAME_RESERVED', 'USERNAME_TAKEN', 'PASSWORD_WEAK', 'DISPLAYNAME_INVALID', 'USER_LIMIT', 'INTERNAL_AUTH'];
+        if (out && out.ok === false && BIZ.includes(out.code)) {
+          log({ ev: 'admin-create-account', target: username.trim().toLowerCase(), by: auth.user, ok: false, code: out.code });
+          return sendJson(res, 200, { ok: false, code: out.code, msg: out.msg || '创建未成功，请稍后再试。' });
+        }
+        const lookup = username.trim().toLowerCase();
+        let mcUser = null, dbErr = false;
+        try { mcUser = findDbUser(loadDb(), lookup); } catch (e) { dbErr = true; }
+        if (dbErr) {
+          // 读库抖动不静默吞：留痕＋短暂重试一次，仍失败才按无号走（门二 D1）
+          log({ ev: 'admin-create-check-dberror', target: lookup, by: auth.user });
+          await new Promise((r) => setTimeout(r, 400));
+          try { mcUser = findDbUser(loadDb(), lookup); } catch (e) {}
+        }
+        if (mcUser) {
+          const fresh = mcUser.creation && (Date.now() / 1000 - mcUser.creation) < 180;
+          if (fresh) return okOut(lookup, true);
+          log({ ev: 'admin-create-account', target: lookup, by: auth.user, ok: false, code: 'USERNAME_TAKEN' });
+          return sendJson(res, 200, { ok: false, code: 'USERNAME_TAKEN', msg: '该账号已被注册' });
+        }
+        log({ ev: 'admin-create-account', target: lookup, by: auth.user, ok: false, code: (out && out.code) || (out && out.ok === false ? 'CREATE_FAILED' : 'NO_RESPONSE') });
+        if (out && out.ok === false && out.code === 'CREATE_FAILED' && out.msg) return sendJson(res, 200, { ok: false, code: 'CREATE_FAILED', msg: out.msg });
+        return sendJson(res, 200, { ok: false, msg: '创建服务暂时不可用，本次创建未完成，请稍后再试。' });
       }
       if (req.method === 'GET' && p === '/admin/api/appeals') {
         let data = { appeals: [] };

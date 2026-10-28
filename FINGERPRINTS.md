@@ -26,10 +26,10 @@
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `789621923f1f7ce7309de38caa645d49` |
 | server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
-| server/ext/page.js | /opt/qfremote-ext/page.js | `a5f47d3f9b032766c524e913f27ed2df` |
+| server/ext/page.js | /opt/qfremote-ext/page.js | `07757405552ccc4aaef8e7299d3f1bcf` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `4b092fc022bfefbcb4acdd43c1ac0997` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `6ffe61277f7ec59befc4a71892fae19e` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
@@ -86,10 +86,10 @@
 | server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `e0dc99febb2b546b742088005f2ce6f7` |
 | server/register/README.md | /opt/qfremote-register/README.md | `527556ba06903beaeb3959cf728ef23f` |
 | server/register/register.html | /opt/qfremote-register/register.html | `4094a720db44d5172feda7cb02fa9f49` |
-| server/register/server.js | /opt/qfremote-register/server.js | `169d3ae91057803ce67a7eaec8f1ebda` |
+| server/register/server.js | /opt/qfremote-register/server.js | `1446bfdba5b2344b4da0cbbfaf40101c` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
 | server/webapp/app.css | /opt/qfremote-webapp/app.css | `7c271ce686271c2cff0d0dda11f204e3` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `ae794dd098dcdf08ecac6214a6f8c2c0` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `99fa4151dcc1cff367ff6eb13db7dd88` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
@@ -99,7 +99,7 @@
 | server/webapp/assets/pay-wechat-6.png | /opt/qfremote-webapp/assets/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/webapp/assets/pay-wechat-9.9.png | /opt/qfremote-webapp/assets/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/webapp/favicon.ico | /opt/qfremote-webapp/favicon.ico | `cfd4ec9c9cd234732a5294b01e33e17f` |
-| server/webapp/index.html | /opt/qfremote-webapp/index.html | `f2c3d23c25d1726bd845903aab7aa71b` |
+| server/webapp/index.html | /opt/qfremote-webapp/index.html | `fca05ff90490370b360bb63fceb6e4b2` |
 
 ## 二、Windows 壳（windows/）
 

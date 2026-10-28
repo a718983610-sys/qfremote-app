@@ -3407,6 +3407,7 @@ Views.admin = async function (view) {
     <div class="card"><h3>待办队列（申诉）</h3>${appeals.length ? '<table><tr><th>类型</th><th>账号</th><th>内容</th><th>时间</th></tr>' + appeals.slice(0, 10).map(a => `<tr data-go="__admin" data-anchor="appeals" style="cursor:pointer"><td><span class="tag">${esc(a.type === 'rebind' ? '换绑设备' : (a.type || '申诉'))}</span></td><td>${esc(a.username || a.user || '')}</td><td>${esc(a.desc || a.reason || '')}</td><td>${a.createdAt ? fmtDate(a.createdAt) : ''}</td></tr>`).join('') + '</table>' : '<div class="statebox"><b>暂无待办申诉</b><p>新的申诉、换绑与异常登录复核将汇总到这里，并同步进入站长 API 事件队列。</p></div>'}</div>
     <div class="grid2"><div class="card"><h3>账号管理</h3>
       ${rowHtml('users', '用户列表与搜索', '改名、改密、冻结、封禁（危险操作均需二次确认并留痕）', '__admin', 'users')}
+      ${rowHtml('users', '创建账号', '站长手动开户：填账号与初始密码，创建即发 3 天试用', '__admin', 'create')}
       ${rowHtml('key', '发放密钥', '必须选择来源：付费 / 免费（决定网页版权益），无默认', '__admin', 'lic-user')}
       ${rowHtml('key', '生成密钥（不绑账号）', '生成不绑账号的密钥串，复制交付对方，首个兑换的账号即归属', '__admin', 'genkey')}
       ${rowHtml('shield', '封禁与冻结台账', '含设备封禁与异常登录复核', '__admin', 'lic-overview')}</div>

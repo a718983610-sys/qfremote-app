@@ -91,6 +91,15 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 
 
   <section class="view" data-view="users">
+  <div class="card" id="create-card">
+    <h2>创建账号</h2>
+    <p class="hint">站长手动开户：创建即发放 3 天试用（与自助注册同待遇，网页版不随试用开通）；设备与权限请按分发规矩另行分配。站长创建不占注册名额、不计注册失败次数。账号须为字母与数字的组合、至少 8 位；密码至少 8 位。</p>
+    <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="create-user" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qfnew2510a"></div></div>
+    <div class="row"><div class="who"><div class="meta">初始密码</div><input id="create-pass" type="password" autocomplete="new-password" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="至少 8 位，创建后交付对方"></div></div>
+    <label style="display:block;font-size:14px;line-height:2"><input type="checkbox" id="create-show"> 显示密码（交付前核对）</label>
+    <div class="row"><div class="who"><div class="meta">显示名（可选）</div><input id="create-name" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="不填则只显示账号名"></div></div>
+    <button class="btn" id="create-btn" type="button">创建账号</button></div>
+  </div>
   <div class="card">
     <h2>账号列表</h2>
     <p class="hint">冻结后对方暂时无法登录，账号与数据保留，可随时解封。封禁将禁用账号、保留数据，对方可以申诉（2.3.1 起不再删号）。</p>
@@ -487,6 +496,28 @@ function loadLicense(){
     };
   }).catch(function(){ $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; });
 }
+$('create-show').onclick = function(){ $('create-pass').type = this.checked ? 'text' : 'password'; };
+$('create-btn').onclick = function(){
+  var un = String($('create-user').value || '').trim();
+  var pw = String($('create-pass').value || '');
+  var dn = String($('create-name').value || '').trim();
+  if (!un) { toast('请先填写账号。'); return; }
+  if (!pw) { toast('请先填写初始密码。'); return; }
+  var btn = $('create-btn'); btn.disabled = true;
+  api('/admin/api/users/create', { username: un, password: pw, displayName: dn }).then(function(r){
+    btn.disabled = false;
+    if (!r.ok) { showModal('创建未成功', r.msg || '创建未成功，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); return; }
+    $('create-user').value = ''; $('create-pass').value = ''; $('create-name').value = '';
+    $('create-pass').type = 'password'; $('create-show').checked = false;
+    if (r.trialOk === false) {
+      showModal('账号已创建', '账号「' + r.username + '」已创建，但试用发放未成功，请先到账号列表核对处理后再交付对方。', { okText: '知道了', cancelText: '关闭' });
+    } else {
+      var exp = r.trialExpiresMs ? fmtTime(r.trialExpiresMs) : '';
+      showModal('已创建', '账号「' + r.username + '」已创建，3 天试用已发放' + (exp ? '（试用到期：' + exp + '）' : '') + '。请把账号和初始密码交付对方，对方登录后可自行修改密码。设备与权限请按分发规矩另行分配。', { okText: '知道了', cancelText: '关闭' });
+    }
+    loadUsers();
+  }).catch(function(){ btn.disabled = false; showModal('创建未成功', '网络连接异常，请稍后再试。', { okText: '知道了', cancelText: '关闭' }); });
+};
 $('lic-issue-btn').onclick = function(){
   var u = String($('lic-user').value || '').trim();
   var plan = $('lic-plan').value;
@@ -698,7 +729,7 @@ loadAssistantApi();
 /* 分视图路由（站长 2026-10-26 13:25 令：功能拆开，一个页面只放一个功能）：
    hash 决定当前视图，刷新与直达都落在本视图；兼容旧锚点——控制台内嵌站长页
    跳转所用的 #users / #lic-user / #lic-overview / #payOrders / #appeals 在此映射。 */
-var VIEW_ALIAS = { 'users': 'users', 'license': 'license', 'lic-user': 'license', 'lic-plan': 'license', 'genkey': 'license', 'orders': 'orders', 'payOrders': 'orders', 'appeals': 'appeals', 'appeals-done': 'appeals', 'rebind': 'rebind', 'bans': 'bans', 'lic-overview': 'bans', 'devices': 'bans', 'lic-devices': 'bans', 'support': 'support', 'supportInbox': 'support', 'api': 'api', 'assistantApi': 'api' };
+var VIEW_ALIAS = { 'users': 'users', 'create': 'users', 'license': 'license', 'lic-user': 'license', 'lic-plan': 'license', 'genkey': 'license', 'orders': 'orders', 'payOrders': 'orders', 'appeals': 'appeals', 'appeals-done': 'appeals', 'rebind': 'rebind', 'bans': 'bans', 'lic-overview': 'bans', 'devices': 'bans', 'lic-devices': 'bans', 'support': 'support', 'supportInbox': 'support', 'api': 'api', 'assistantApi': 'api' };
 function applyView(){
   var h = (location.hash || '').replace(/^#/, '');
   var v = VIEW_ALIAS[h] || 'users';
@@ -713,6 +744,7 @@ function applyView(){
   setTimeout(function(){
     if (v === 'bans' && (h === 'devices' || h === 'lic-devices')) { var dh = $('lic-devices-h'); if (dh) dh.scrollIntoView({ block: 'start' }); }
     else if (v === 'license' && h === 'genkey') { var gh = $('genkey-card'); if (gh) gh.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); }
+    else if (v === 'users' && h === 'create') { var ch = $('create-card'); if (ch) ch.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); }
     else window.scrollTo(0, 0);
   }, 0);
 }
