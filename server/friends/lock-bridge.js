@@ -41,7 +41,32 @@ const ERR = {
 };
 const RECONCILE_MS = 30000;
 const UPDATE_RECONCILE_MS = 240000; // 下载+替换+重启服务+回滚余量
-const STATUS_TTL_MS = 10000;
+const STATUS_TTL_MS = 15000;              // 机主设备状态展示缓存（原 10s；只用于 GET /lock/devices 读路径）
+const STATUS_TTL_NONOWNER_MS = 300000;    // 非机主判定缓存：只用于「过滤掉别人的设备」，永不下发
+const STATUS_MISS_TTL_MS = 5000;          // 读不到（离线/超时）负缓存：短 TTL，尽快重试，不拖死整表
+
+/* 通道快速失败与读路径调参（perf-lockchain 2026-10-26）
+   取值理由：
+   - SVC_WAIT_MS=400：就绪门。原 svcEnsure(6000) 使每个请求白等 6s（S2）。400ms 足够
+     吸收「握手正在完成」的抖动，又保证通道故障时读路径总耗时 ≤0.5s（目标口径要求）。
+   - SVC_HANDSHAKE_MS=5000：建链到 userinfo 的上限；超时即判失败进退避，避免半开连接挂住就绪门。
+   - 退避 1s 起、×2、封顶 30s；凭据类错误（noauth）封顶 60s，降低对 MC 的认证冲击与日志量。
+   - 节点清单 60s 新鲜期 + 旧值先出（stale-while-revalidate）：节点集合变化是低频事件，
+     60s 内由服务端推送的 nodes 消息与后台刷新兜住。
+   - 读路径单台状态读 1200ms 上限、并发 6、总预算 2400ms：在线机实测数百毫秒可回；
+     离线机一律打到上限，靠并发+预算把最坏情况压到 ≤2.4s（目标「冷查 <3s」），
+     超预算的台数在后台继续读完并回填缓存，供下次请求命中。 */
+const SVC_WAIT_MS = 400;
+const SVC_HANDSHAKE_MS = 5000;
+const SVC_BACKOFF_MIN_MS = 1000;
+const SVC_BACKOFF_MAX_MS = 30000;
+const SVC_BACKOFF_AUTH_MAX_MS = 60000;
+const NODES_TTL_MS = 60000;
+const NODES_REFRESH_MS = 2500;            // 读路径/写路径强制刷新节点清单的等待上限
+const READ_PATH_STATUS_TIMEOUT_MS = 1200;
+const READ_PATH_CONCURRENCY = 6;
+const READ_PATH_BUDGET_MS = 2400;
+const DEVICES_DEDUPE_MS = 1000;           // 同账号请求合并窗口（已在飞的 promise 复用）
 
 function eqFold(a, b) { return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase(); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -86,25 +111,161 @@ function createLockBridge(deps) {
     bridgeCfg = null;
   }
 
-  /* ---------- 投递服务账号的 control 通道（持久连接，断线重连） ---------- */
-  const svc = { ws: null, ready: false, pending: new Map(), seq: 0, waiters: [] };
-  let nodeCache = { at: 0, nodes: [] };
+  /* ---------- 投递服务账号的 control 通道（持久连接・就绪门・退避重连） ----------
+     根因 A：桥配置里的服务账号口令与账号现行口令不一致 → meshauth 被 MC 拒
+     （action:close / cause:noauth / msg:noauth-2d），通道永不就绪。原实现每个
+     svcCall 先 svcEnsure(6000) 白等满 6 秒（S2）。现在：
+       ① 就绪门 SVC_WAIT_MS：未就绪立刻失败（≤400ms），不再逐请求空等；
+       ② 建链→userinfo 有握手超时，半开连接不挂住就绪门；
+       ③ 断线/被拒指数退避（1s→…→30s，凭据类封顶 60s），退避窗口内不建链、不刷认证；
+       ④ 故障/恢复各打一条明确日志（不含任何口令）；凭据由运维修好后通道自动恢复。 */
+  const svc = {
+    ws: null, ready: false, connecting: false, pending: new Map(), seq: 0, waiters: [],
+    failStreak: 0, downSince: 0, nextAttemptAt: 0, reconnectTimer: null, pendingReason: '',
+  };
+  let nodeCache = { at: 0, nodes: [], inflight: null, lastError: '' };
+
+  // 节流日志（同一 key 在窗口内只打一条），避免通道故障时日志被逐请求刷爆
+  const logSeen = new Map();
+  function logThrottled(key, msg, windowMs) {
+    const at = logSeen.get(key) || 0;
+    if (Date.now() - at < (windowMs || 60000)) return;
+    logSeen.set(key, Date.now());
+    log('lock', msg);
+  }
+
+  /* ---------- 机主登记名别名表（账号改名兼容，lock-devices-empty-20261029） ----------
+     组件登记的机主名（被控机 device.json 的 OwnerUsername）在账号改名后成为旧名，
+     服务端改名流程动不了被控机本地文件，桥按现名直认必然失配、/lock/devices 回空。
+     别名表 /opt/qfremote-lock/owner-alias.json 由运维依据改名记录维护：
+       { "aliases": { "<现名>": ["<曾用名>", ...] } }
+     判定语义不变（仍只认「登记名属于请求者本人」），仅把请求者的曾用名纳入比对。
+     文件缺失＝无别名（常态降级）；内容损坏＝保留上次好表＋节流日志，绝不抛错。 */
+  const OWNER_ALIAS_PATH = '/opt/qfremote-lock/owner-alias.json';
+  const OWNER_ALIAS_RELOAD_MS = 30000;
+  let ownerAliasIndex = new Map(); // fold(登记名) -> fold(现名)
+  let ownerAliasMtimeMs = -1;
+  let ownerAliasLastCheck = 0;
+  function foldName(s) { return typeof s === 'string' ? s.trim().toLowerCase() : ''; }
+  function loadOwnerAliases(force) {
+    const now = Date.now();
+    if (!force && (now - ownerAliasLastCheck) < OWNER_ALIAS_RELOAD_MS) return;
+    ownerAliasLastCheck = now;
+    let st;
+    try { st = fs.statSync(OWNER_ALIAS_PATH); } catch (e) {
+      if (ownerAliasMtimeMs !== -1) { ownerAliasIndex = new Map(); ownerAliasMtimeMs = -1; }
+      return;
+    }
+    if (!force && ownerAliasMtimeMs === st.mtimeMs) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(OWNER_ALIAS_PATH, 'utf8'));
+      const src = (raw && typeof raw === 'object' && raw.aliases && typeof raw.aliases === 'object' && !Array.isArray(raw.aliases))
+        ? raw.aliases : raw;
+      const idx = new Map();
+      if (src && typeof src === 'object' && !Array.isArray(src)) {
+        for (const cur of Object.keys(src)) {
+          const c = foldName(cur);
+          const olds = src[cur];
+          if (!c || !Array.isArray(olds)) continue;
+          for (const o of olds) {
+            const k = foldName(o);
+            if (!k || k === c) continue;
+            const prev = idx.get(k);
+            // 【门二 P1】同一曾用名映射到两个不同现名＝表内冲突：整表拒绝（保留上次好表），
+            // 绝不 last-wins 静默串扰到另一个账号。
+            if (prev && prev !== c) throw new Error('别名表冲突：曾用名 ' + o + ' 同时映射到 ' + prev + ' 与 ' + c + '，本版别名表已拒绝加载');
+            idx.set(k, c);
+          }
+        }
+      }
+      ownerAliasIndex = idx;
+      ownerAliasMtimeMs = st.mtimeMs;
+    } catch (e) {
+      logThrottled('alias-bad', 'lock 机主别名表读取失败（保留上次好表继续服务）：' + (e && e.message), 60000);
+    }
+  }
+  // 登记名是否属于请求者：现名直认，或登记名是请求者的曾用名（别名表命中）。
+  // 直认与别名共用同一 fold 语义（trim+小写），避免与 eqFold 无 trim 的口径漂移（门二存疑 1）。
+  function ownerNameMatches(me, recorded) {
+    const recFold = foldName(recorded);
+    if (recFold && recFold === foldName(me)) return true;
+    loadOwnerAliases(false);
+    const target = ownerAliasIndex.get(recFold);
+    if (target && target === foldName(me)) {
+      logThrottled('alias-hit-' + foldName(me), 'lock 机主判定经别名表命中：登记名 ' + recorded + ' → 现名 ' + me + '（账号改名兼容）。', 60000);
+      return true;
+    }
+    return false;
+  }
 
   function svcNotifyReady() {
     const w = svc.waiters.splice(0);
     for (const fn of w) { try { fn(); } catch (e) {} }
   }
+  function svcScheduleReconnect(reason) {
+    const r = String(reason || 'svc-down');
+    if (svc.downSince === 0) svc.downSince = Date.now();
+    svc.failStreak++;
+    const auth = /noauth|auth-failed|bad-credential/.test(r);
+    const cap = auth ? SVC_BACKOFF_AUTH_MAX_MS : SVC_BACKOFF_MAX_MS;
+    const base = Math.min(SVC_BACKOFF_MIN_MS * Math.pow(2, Math.min(svc.failStreak - 1, 6)), cap);
+    const delay = Math.round(base * (0.8 + Math.random() * 0.4)); // ±20% 抖动，避免固定节奏
+    svc.nextAttemptAt = Date.now() + delay;
+    if (!svc.reconnectTimer) {
+      svc.reconnectTimer = setTimeout(() => { svc.reconnectTimer = null; svcConnect(); }, delay);
+    }
+    if (svc.failStreak === 1 || svc.failStreak % 10 === 0) {
+      log('lock', 'svc 通道不可用（' + r + '，连续失败 ' + svc.failStreak + ' 次）：读路径按快速失败处理，'
+        + delay + 'ms 后重连。');
+    }
+  }
   function svcConnect() {
-    if (svc.ws) return;
+    if (!bridgeCfg) return;
+    if (svc.ws || svc.connecting) return;
+    if (Date.now() < svc.nextAttemptAt) { // 退避窗口内：只安排重连，不建链
+      if (!svc.reconnectTimer) {
+        svc.reconnectTimer = setTimeout(() => { svc.reconnectTimer = null; svcConnect(); },
+          Math.max(50, svc.nextAttemptAt - Date.now()));
+      }
+      return;
+    }
+    svc.connecting = true;
     const xauth = Buffer.from(bridgeCfg.svcUser).toString('base64') + ',' + Buffer.from(bridgeCfg.svcPass).toString('base64');
     let ws;
     try {
       ws = new WebSocket(bridgeCfg.mcUrl + '/control.ashx', { rejectUnauthorized: false, headers: { 'x-meshauth': xauth, Origin: 'https://127.0.0.1:8443' } });
-    } catch (e) { setTimeout(svcConnect, 3000); return; }
+    } catch (e) {
+      svc.connecting = false;
+      svcScheduleReconnect('svc-construct-failed');
+      return;
+    }
     svc.ws = ws;
+    const handshakeTimer = setTimeout(() => {
+      if (svc.ready) return;
+      svc.pendingReason = 'svc-handshake-timeout';
+      try { ws.close(); } catch (e) {}
+    }, SVC_HANDSHAKE_MS);
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw.toString()); } catch (e) { return; }
-      if (m.action === 'userinfo') { svc.ready = true; svcNotifyReady(); }
+      if (m && m.action === 'close') {
+        // MeshCentral 明确拒绝（实测 noauth-2d＝口令认证失败）：记原因、断开，交给退避重连。
+        // 日志只写 cause/msg，不打印任何口令或凭据。
+        const cause = String(m.cause || '') + (m.msg ? '/' + String(m.msg) : '');
+        log('lock', 'svc 通道被 MeshCentral 拒绝（' + cause + '）：服务账号凭据可能失效或与账号现行口令不一致，'
+          + '请运维核对部署配置中的 svcUser/svcPass；本进程将持续退避重连，读路径按快速失败处理。');
+        svc.pendingReason = /noauth/.test(cause) ? 'noauth' : 'auth-failed';
+        try { ws.close(); } catch (e) {}
+        return;
+      }
+      if (m && m.action === 'userinfo') {
+        const wasDown = svc.downSince;
+        svc.ready = true; svc.connecting = false;
+        svc.failStreak = 0; svc.downSince = 0; svc.nextAttemptAt = 0; svc.pendingReason = '';
+        clearTimeout(handshakeTimer);
+        log('lock', 'svc 通道已就绪' + (wasDown ? '（中断 ' + (Date.now() - wasDown) + 'ms 后恢复）' : '') + '。');
+        svcNotifyReady();
+        return;
+      }
       if (m.action === 'nodes') updateNodeCache(m.nodes);
       if (m.responseid && svc.pending.has(m.responseid)) {
         const p = svc.pending.get(m.responseid);
@@ -116,23 +277,38 @@ function createLockBridge(deps) {
       }
     });
     ws.on('close', () => {
-      svc.ws = null; svc.ready = false;
+      clearTimeout(handshakeTimer);
+      const reason = svc.pendingReason || (svc.ready ? 'svc-closed' : 'svc-closed-unready');
+      svc.pendingReason = '';
+      svc.ws = null; svc.connecting = false; svc.ready = false;
       for (const [, p] of svc.pending) { clearTimeout(p.timer); p.reject(new Error('svc-down')); }
       svc.pending.clear();
-      setTimeout(svcConnect, 3000);
+      svcScheduleReconnect(reason);
     });
-    ws.on('error', () => { try { ws.close(); } catch (e) {} });
+    ws.on('error', (e) => {
+      logThrottled('svc-err', 'svc 通道连接错误：' + (e && e.message ? e.message : 'unknown') + '（将退避重连）', 30000);
+      try { ws.close(); } catch (err) {}
+    });
   }
+  // 就绪门：就绪立即过；未就绪最多等 SVC_WAIT_MS（≤500ms），到点即失败
   function svcEnsure(timeoutMs) {
     if (svc.ready && svc.ws) return Promise.resolve();
-    svcConnect();
+    const waitMs = Math.max(0, Math.min(timeoutMs == null ? SVC_WAIT_MS : timeoutMs, SVC_WAIT_MS));
+    svcConnect(); // 退避窗口内只是安排重连，不会建链
+    if (!waitMs) return Promise.reject(new Error('svc-down'));
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('svc-down')), timeoutMs || 6000);
-      svc.waiters.push(() => { clearTimeout(t); resolve(); });
+      const cb = () => { clearTimeout(t); resolve(); };
+      const t = setTimeout(() => {
+        const i = svc.waiters.indexOf(cb);
+        if (i >= 0) svc.waiters.splice(i, 1); // 原实现超时后 waiter 泄漏，这里清掉
+        reject(new Error('svc-down'));
+      }, waitMs);
+      svc.waiters.push(cb);
     });
   }
   async function svcCall(obj, timeoutMs) {
-    await svcEnsure(6000);
+    await svcEnsure(SVC_WAIT_MS);
+    if (!svc.ws || !svc.ready) throw new Error('svc-down');
     const rid = 'lb-' + (++svc.seq) + '-' + crypto.randomBytes(3).toString('hex');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { svc.pending.delete(rid); reject(new Error('svc-timeout')); }, timeoutMs || 15000);
@@ -150,15 +326,48 @@ function createLockBridge(deps) {
       for (const v of arr) { if (Array.isArray(v)) flat.push(...v); else if (v) flat.push(v); }
       arr = flat;
     }
-    if (arr.length || nodeCache.nodes.length === 0) nodeCache = { at: Date.now(), nodes: arr };
+    // 原地更新（保留 inflight / lastError 字段，不能整体替换对象）
+    // 【施工偏差 D2】空回包且旧缓存非空时保留旧节点（防瞬时空回包清表），但仍刷新 at，
+    // 否则 60s 内每请求都会再触发一次实打刷新（与 B1 目标相悖）；幽灵节点仍须过
+    // status 实读＋机主过滤才会下发，安全口径不变。
+    nodeCache.at = Date.now(); nodeCache.lastError = '';
+    if (arr.length || nodeCache.nodes.length === 0) nodeCache.nodes = arr;
   }
+  // 节点清单刷新：single-flight（并发/重复请求共用一次 svcCall）
+  function refreshNodes(timeoutMs) {
+    if (nodeCache.inflight) return nodeCache.inflight;
+    const p = (async () => {
+      try {
+        const r = await svcCall({ action: 'nodes' }, timeoutMs || NODES_REFRESH_MS);
+        if (r && r.nodes) { updateNodeCache(r.nodes); return nodeCache.nodes; }
+        nodeCache.lastError = 'nodes-empty';
+      } catch (e) {
+        nodeCache.lastError = (e && e.message) || 'nodes-failed';
+      } finally {
+        nodeCache.inflight = null;
+      }
+      return nodeCache.nodes;
+    })();
+    nodeCache.inflight = p;
+    return p;
+  }
+  // 写路径用：清单新鲜就直接用；不新鲜强制刷新一次（失败回落旧值，与原「缓存兜底」一致）
   async function listNodes() {
-    try {
-      const r = await svcCall({ action: 'nodes' }, 10000);
-      if (r && r.nodes) { updateNodeCache(r.nodes); return nodeCache.nodes; }
-    } catch (e) { /* 用缓存兜底 */ }
+    if (nodeCache.at && (Date.now() - nodeCache.at) < NODES_TTL_MS) return nodeCache.nodes;
+    try { await refreshNodes(NODES_REFRESH_MS); } catch (e) { /* 退回旧值 */ }
     return nodeCache.nodes;
   }
+  // 读路径用：清单先出（旧值也出），过期在后台刷新，不阻塞 /lock/devices
+  async function listNodesForRead() {
+    if (nodeCache.at && (Date.now() - nodeCache.at) < NODES_TTL_MS) return nodeCache.nodes;
+    if (nodeCache.at && nodeCache.nodes.length) {
+      refreshNodes(NODES_REFRESH_MS).catch(() => {});
+      return nodeCache.nodes;
+    }
+    try { await refreshNodes(NODES_REFRESH_MS); } catch (e) { /* 通道故障时 ~400ms 内返回空清单 */ }
+    return nodeCache.nodes;
+  }
+
   // 注：机主判定只认组件 status.json 的登记名（见 isOwner），不查 users 列表——
   // qf-locksvc 保持 siteadmin=0 最小权限，'users' 命令对它本就返回空。
 
@@ -170,26 +379,89 @@ function createLockBridge(deps) {
   }
   const CMD_APPLY = '"C:\\Program Files\\QFRemote\\Lock\\qf-lockctl.exe" apply';
 
-  async function runCommand(nodeId, cmd) {
+  async function runCommand(nodeId, cmd, timeoutMs) {
     // 与 meshctrl 完全同款：cmds 是单个字符串，且必须带 reply:true 服务器才回传输出
-    const r = await svcCall({ action: 'runcommands', nodeids: [nodeId], type: 0, cmds: cmd, reply: true, runAsUser: 0 }, 20000);
+    const r = await svcCall({ action: 'runcommands', nodeids: [nodeId], type: 0, cmds: cmd, reply: true, runAsUser: 0 }, timeoutMs || 20000);
     return (r && typeof r.result === 'string') ? r.result : '';
   }
-  async function readStatus(nodeId, fresh) {
+  // fresh=true 一律实读（写路径 / 对账专用，不因缓存跳过）；fresh=false 走分级 TTL。
+  // 读不到（离线/超时/通道故障）也写缓存，但记 status=null，按 STATUS_MISS_TTL_MS 短负缓存。
+  async function readStatus(nodeId, fresh, opts) {
     const c = statusCache.get(nodeId);
-    if (!fresh && c && (Date.now() - c.at) < STATUS_TTL_MS) return c.status;
+    const ttl = (opts && opts.ttlMs != null) ? opts.ttlMs : (c && c.status ? STATUS_TTL_MS : STATUS_MISS_TTL_MS);
+    if (!fresh && c && (Date.now() - c.at) < ttl) return c.status;
+    const timeoutMs = (opts && opts.timeoutMs) || 20000;
     let status = null;
     try {
-      const out = await runCommand(nodeId, PS_READ_STATUS);
+      const out = await runCommand(nodeId, PS_READ_STATUS, timeoutMs);
       const m = out.replace(/\s+/g, '').match(/[A-Za-z0-9+/=]{80,}/);
       if (m) {
         const parsed = JSON.parse(Buffer.from(m[0], 'base64').toString('utf8'));
         if (parsed && typeof parsed.state === 'string') status = parsed;
       }
     } catch (e) { status = null; }
-    statusCache.set(nodeId, { at: Date.now(), status });
+    if (status) {
+      statusCache.set(nodeId, { at: Date.now(), status });
+    } else if (!(c && c.status)) {
+      statusCache.set(nodeId, { at: Date.now(), status: null }); // negative-cache only when no good entry to preserve
+    }
+    // 【施工偏差 D4】读失败且有旧好值：保留旧条目与时间戳，不被一次失败探活抹掉
+    if (statusCache.size > 512) { // 兜底清理，节点规模本是个位数～两位数，正常不会触发
+      const cutoff = Date.now() - STATUS_TTL_NONOWNER_MS;
+      for (const [k, v] of statusCache) { if (!v || v.at < cutoff) statusCache.delete(k); }
+    }
     return status;
   }
+  // 缓存是否对「本请求者」仍然有效：机主设备 15s（展示用），非机主 300s（仅过滤用），
+  // 读不到 5s（尽快重试）。因此归属判定的最长陈旧窗口＝15s（机主）/300s（非机主）。
+  function statusFresh(entry, me) {
+    if (!entry) return false;
+    let ttl;
+    if (!entry.status) ttl = STATUS_MISS_TTL_MS;
+    else if (entry.status.ownerUsername && ownerNameMatches(me, entry.status.ownerUsername)) ttl = STATUS_TTL_MS;
+    else ttl = STATUS_TTL_NONOWNER_MS;
+    return (Date.now() - entry.at) < ttl;
+  }
+  // 下发结构（字段名/顺序/含义严格照契约，与改造前逐字一致）
+  function deviceFromNode(node, status) {
+    return {
+      id: node._id,
+      name: node.name || '',
+      owner: true,
+      locked: status ? status.state === 'Locked' : false,
+      component: !!status,
+      version: status ? (status.version || null) : null,
+    };
+  }
+  // 预算内的并发实读：到预算点先返回「已实读确认」的部分，剩余台数后台读完回填缓存。
+  // 安全口径不变：没实读到 status 的节点一律不进结果（未核实归属不下发）。
+  function readStatusesBounded(nodes, me, budgetMs, found) {
+    return new Promise((resolve) => {
+      let idx = 0, released = false, done = 0;
+      const release = () => { if (released) return; released = true; clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        logThrottled('read-budget', 'lock/devices 读路径预算 ' + budgetMs + 'ms 用尽，剩余 '
+          + (nodes.length - done) + ' 台状态转后台回填，本次按已实读确认的机主设备返回。', 30000);
+        release();
+      }, budgetMs);
+      const worker = async () => {
+        while (idx < nodes.length) {
+          const node = nodes[idx++];
+          let st = null;
+          try { st = await readStatus(node._id, true, { timeoutMs: READ_PATH_STATUS_TIMEOUT_MS }); } catch (e) { st = null; }
+          // 【门二必修#2】读路径失败记账（成功即清）；写路径不经此函数，不受抑制影响
+          if (st) devicesMissAt.delete(missKey(me, node._id)); else devicesMissAt.set(missKey(me, node._id), Date.now());
+          done++;
+          // released 之后只回填 statusCache（readStatus 内已写），不再改动本次响应
+          if (!released && isOwner(me, node, st)) found.set(node._id, deviceFromNode(node, st));
+          if (done === nodes.length) release();
+        }
+      };
+      const n = Math.min(READ_PATH_CONCURRENCY, nodes.length);
+      for (let i = 0; i < n; i++) worker();
+    });
+  }
+
   async function deliverEnvelope(nodeId, env) {
     const b64 = Buffer.from(JSON.stringify(env), 'utf8').toString('base64');
     await runCommand(nodeId, psWriteInbox(env.id + '.json', b64));
@@ -237,7 +509,7 @@ function createLockBridge(deps) {
   // 只认组件登记机主：status.json 的 ownerUsername 与请求账号大小写不敏感相等。
   // status 读不到或没登记名 → 一律判非机主（保守；写操作本来也要求先读到 status）。
   function isOwner(me, node, status) {
-    return !!(status && status.ownerUsername && eqFold(status.ownerUsername, me));
+    return !!(status && status.ownerUsername && ownerNameMatches(me, status.ownerUsername));
   }
 
   /* ---------- HTTP 小工具 ---------- */
@@ -257,10 +529,26 @@ function createLockBridge(deps) {
   }
 
   async function getDeviceOrFail(res, id, me) {
-    const nodes = await listNodes();
-    const node = nodes.find((n) => n && n._id === id);
-    if (!node) { fail(res, 404, ERR.noDevice); return null; }
+    // 写路径不许用缓存做机主判定：节点清单可用缓存/刷新兜底，status 一律 fresh 实读（下方 readStatus(..., true)）
+    let nodes = await listNodes();
+    let node = nodes.find((n) => n && n._id === id);
+    if (!node) {
+      // 清单可能过期（新建设备/刚授权）：给一次强制刷新，再判
+      try { await refreshNodes(NODES_REFRESH_MS); } catch (e) {}
+      nodes = nodeCache.nodes;
+      node = nodes.find((n) => n && n._id === id);
+    }
+    if (!node) {
+      // 【门二必修#1】清单取不到且通道未就绪：报「连不上」，不误报「未找到设备」（与 D3 同口径，补齐前置分支）
+      if (!svc.ready) { fail(res, 503, ERR.unreachable); return null; }
+      fail(res, 404, ERR.noDevice); return null;
+    }
     const status = await readStatus(node._id, true);
+    if (!status) {
+      // 通道本身不可用 → 明确报「连不上」，不误报「非机主」；设备离线（通道就绪）仍沿用 403 口径
+      if (!svc.ready) { fail(res, 503, ERR.unreachable); return null; }
+      fail(res, 403, ERR.notOwner); return null;
+    }
     if (!isOwner(me, node, status)) { fail(res, 403, ERR.notOwner); return null; }
     return { node, status };
   }
@@ -304,6 +592,52 @@ function createLockBridge(deps) {
     return { ok: false, reason: 'timeout' };
   }
 
+  /* ---------- /lock/devices 专用读路径 ----------
+     B-1 节点清单不再每请求实打（60s 新鲜期 + 旧值先出 + single-flight）；
+     B-2 只对「缓存未命中/过期」的节点实读，非机主节点按 300s 长 TTL 不再每 10s 重读；
+     B-3 并发 6、单台 1200ms、总预算 2400ms，超预算转后台回填；
+     B-4 同账号并发请求合并（客户端实测同页 /lock/devices 连发/被取消 ×3）。
+     契约不变：仍返回 200 {devices:[{id,name,owner,locked,component,version}]}。 */
+  const devicesInflight = new Map(); // me -> { at, promise }
+  const devicesMissAt = new Map(); // 【门二必修#2】读路径专用失败时刻表：离线台在 STATUS_MISS_TTL_MS 内不重复探活；写路径不经此处
+  function missKey(me, id) { return String(me) + '|' + id; } // 【门二增量 N2】失败抑制按账号隔离，共享设备不跨账号串扰
+  async function buildDevicesForUser(me) {
+    const t0 = Date.now();
+    const nodes = await listNodesForRead();
+    const cand = nodes.filter((n) => n && n._id);
+    const found = new Map(); // _id -> device（保持服务端节点顺序）
+    const pending = [];
+    for (const node of cand) {
+      const e = statusCache.get(node._id);
+      if (e && statusFresh(e, me)) {
+        if (isOwner(me, node, e.status)) found.set(node._id, deviceFromNode(node, e.status));
+      } else {
+        const mAt = devicesMissAt.get(missKey(me, node._id));
+        if (mAt && (Date.now() - mAt) < STATUS_MISS_TTL_MS) {
+          // 【门二必修#2】刚探活失败过：本轮跳过实读（探活成功前该台不下发，与「不猜机主」一致）
+        } else {
+          pending.push(node);
+        }
+      }
+    }
+    if (pending.length) {
+      const budget = Math.max(400, READ_PATH_BUDGET_MS - (Date.now() - t0));
+      await readStatusesBounded(pending, me, budget, found);
+    }
+    const devices = [];
+    for (const node of cand) { const d = found.get(node._id); if (d) devices.push(d); }
+    return devices;
+  }
+  function listDevicesFor(me) {
+    const cur = devicesInflight.get(me);
+    if (cur && (Date.now() - cur.at) < DEVICES_DEDUPE_MS) return cur.promise;
+    const rec = { at: Date.now(), promise: null };
+    rec.promise = buildDevicesForUser(me);
+    devicesInflight.set(me, rec);
+    rec.promise.then(() => { rec.at = Date.now(); }, () => { if (devicesInflight.get(me) === rec) devicesInflight.delete(me); });
+    return rec.promise;
+  }
+
   /* ---------- 路由 ---------- */
   async function handle(req, res) {
     const u = new URL(req.url, 'http://x');
@@ -311,23 +645,14 @@ function createLockBridge(deps) {
     if (!bridgeCfg) { fail(res, 503, ERR.notReady); return true; }
     const me = await authUser(req);
     if (!me) { fail(res, 401, ERR.login); return true; }
+    // 封禁门（P5-010，DS 稿 §4.2）：authUser 只验凭证不问许可状态，此处补判定
+    if (typeof deps.isBanLinked === 'function' && deps.isBanLinked(me)) {
+      fail(res, 403, '账号已被封禁。');
+      return true;
+    }
     try {
       if (req.method === 'GET' && p === '/lock/devices') {
-        const nodes = await listNodes();
-        const devices = [];
-        for (const node of nodes) {
-          if (!node || !node._id) continue;
-          const status = await readStatus(node._id, false);
-          if (!isOwner(me, node, status)) continue;
-          devices.push({
-            id: node._id,
-            name: node.name || '',
-            owner: true,
-            locked: status ? status.state === 'Locked' : false,
-            component: !!status,
-            version: status ? (status.version || null) : null,
-          });
-        }
+        const devices = await listDevicesFor(me);
         sendJson(res, 200, { devices });
         return true;
       }
@@ -415,8 +740,20 @@ function createLockBridge(deps) {
     }
   }
 
+  loadOwnerAliases(true);
   if (bridgeCfg) svcConnect();
-  return { handle };
+  // 按用户清 xid 桥缓存（ext ban-purge 联动调用；DS 稿 §4.3）
+  function purgeUser(username) {
+    const target = String(username || '').trim().toLowerCase();
+    if (!target) return 0;
+    let n = 0;
+    for (const [k, v] of xidCache) {
+      if (v && String(v.user || '').trim().toLowerCase() === target) { xidCache.delete(k); n += 1; }
+    }
+    return n;
+  }
+
+  return { handle, purgeUser };
 }
 
 module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent } };
