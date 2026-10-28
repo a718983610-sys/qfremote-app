@@ -1497,7 +1497,7 @@ const server = http.createServer(async (req, res) => {
         return res.end(buf);
       }
       if (req.method === 'POST' && p === '/assistant-api/decide') {
-        // 裁定回写：全部复用既有双通道裁定入口，执行者留痕「助手接口」，不另起平行逻辑
+        // 裁定回写：全部复用既有双通道裁定入口，执行者按令牌角色留痕（助手接口／站长接口），不另起平行逻辑
         const body = await readJsonBody(req);
         const type = String(body.type || ''); const refId = String(body.refId || '');
         const action = String(body.action || '');
@@ -1513,7 +1513,11 @@ const server = http.createServer(async (req, res) => {
           if (out.ok) {
             if (out.stage === 1) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
             // owner 通道 stage2 判假：核心已封禁＋回收钥，补 MC 锁定位联动（与后台口径齐；stage1 判假不补，守 #37）
-            if (tokenRole === 'owner' && out.fake && out.stage === 2) { await licLockAccount(o.username); }
+            // DS 门二 P1-01：联动加异常边界——核心裁定已落账，联动失败只记日志待补锁，绝不让 decide 响应 500/悬挂。
+            if (tokenRole === 'owner' && out.fake && out.stage === 2) {
+              try { await licLockAccount(o.username); }
+              catch (e) { log({ ev: 'owner-stage2-fake-locklink-failed', refId, user: o.username, err: String(e && e.message || e) }); }
+            }
           }
           log({ ev: 'assistant-decide', type, refId, action, actor: ACTOR, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out);
