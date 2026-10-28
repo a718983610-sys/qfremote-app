@@ -1,3 +1,13 @@
+# === DESKTOP-AUTH evidence log (2026-10-28, per DeepSeek gate-1) ===
+# Flags only; cookie values are NEVER logged. Read: WS has_xid=0 -> egress strips cookies (H3);
+# dup_xid=1 -> duplicate xid (H1); full single xid but still noauth -> inspect server session rules.
+# Rollback: restore .bak-cookielog-20261028 then reload nginx.
+map $http_cookie $qf_has_xid   { default 0; "~(^|;\s*)xid=" 1; }
+map $http_cookie $qf_has_sig   { default 0; "~(^|;\s*)xid\.sig=" 1; }
+map $http_cookie $qf_has_qfrem { default 0; "~(^|;\s*)qfrem=" 1; }
+map $http_cookie $qf_dup_xid   { default 0; "~(^|;\s*)xid=[^;]*;.*;\s*xid=" 1; }
+log_format qfcookie '$time_iso8601 "$uri" $status bytes=$bytes_sent has_xid=$qf_has_xid has_sig=$qf_has_sig has_qfrem=$qf_has_qfrem dup_xid=$qf_dup_xid ua="$http_user_agent"';
+
 # QFRemote 临时通道本机反代：只听回环，cloudflared 快速隧道只对它开口。
 # / 及全部路径 -> MeshCentral 控制台(8443)；/register 与 /api/register -> 注册服务(8444)。
 # 记住此设备（控制台面）：带 qfrem=1 标记的请求改走登录垫片(8450)通用转发，
@@ -11,6 +21,7 @@ map $cookie_qfrem $qf_console_upstream {
 server {
     listen 127.0.0.1:8080;
     server_name _;
+    access_log /var/log/nginx/qf-ws-cookie.log qfcookie;
 
     client_max_body_size 512m;
     absolute_redirect off; # P2-010（2026-10-26 巡查）：收口 return 302 一律相对路径，防经隧道生成 http://域名:8080 死链
@@ -221,10 +232,54 @@ server {
         root /opt/qfremote-webapp;
     }
 
-    # 远控入口收口（2026-10-26 丙案）：旧 iframe 挂载点废止，顶层 302 到 CANON 原生入口，
-    # 查询参数原样保留（深链 node/viewmode 不丢）。回滚＝恢复 bak-20261026-rescue2-pre302 后 reload。
+    # 远控入口（2026-10-28 域名修复，取代 2026-10-26 丙案 302）：原顶层 302 跳裸 IP
+    # 8443 废止——用户在 app.qfremote.top 点远程桌面被整页甩到裸 IP、撞自签证书。
+    # 改同源反代：路径改写为 / 后按既有 map 选上游（直达 8443 或记住设备垫片 8450），
+    # 深链 node/viewmode 查询原样透传，桌面会话全程留在当前域名。
+    # 回滚＝恢复 qfremote-proxy.bak-desktopfix-20261028 后 reload。
     location = /console-engine {
-        return 302 https://54.248.9.192:8443/$is_args$args;
+        rewrite ^ / break;
+        proxy_pass $qf_console_upstream;
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+
+    # ===== 404 普查修复（2026-10-28，DS 成稿，work/404-census-20261028）=====
+    # D2：/home/ 尾斜杠归一（精确匹配，不影响 /home/api/* 前缀透传）
+    location = /home/ {
+        return 302 /#home;
+    }
+
+    # D3：/admin/ 尾斜杠归一（精确匹配，不影响 /admin/api/* 前缀透传）
+    location = /admin/ {
+        return 302 /admin;
+    }
+
+    # D6：/index.html 归一到 SPA 根
+    location = /index.html {
+        return 301 /;
+    }
+
+    # D10：/appeal/ 尾斜杠归一（精确匹配，不影响 /appeal/reset|status 前缀透传）
+    location = /appeal/ {
+        return 302 /appeal;
+    }
+
+    # D5：apple-touch 图标静态直发（素材＝MC public favicon-303x303.png 副本）
+    location = /apple-touch-icon.png {
+        alias /opt/qfremote-webapp/apple-touch-icon.png;
+        add_header Cache-Control "public, max-age=86400";
+    }
+    location = /apple-touch-icon-precomposed.png {
+        alias /opt/qfremote-webapp/apple-touch-icon-precomposed.png;
+        add_header Cache-Control "public, max-age=86400";
     }
 
     location / {
