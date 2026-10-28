@@ -350,7 +350,7 @@ function noteLedgerLock(username, locking, by) {
 // 它就是过期残留，不清则「已封禁」标签永不消失且无钮可解）。
 // 仅当台账已有该账号条目且对应标记为 true 时才写，不新建条目、
 // 不动其他字段；写形与 noteLedgerLock 一致（同 tmp 名、同 chown）。
-function clearLedgerResidue(username, by) {
+function clearLedgerResidue(username, by, errBox) {
   try {
     const ledger = loadLedger();
     const e = ledger.accounts[username];
@@ -365,7 +365,18 @@ function clearLedgerResidue(username, by) {
     fs.renameSync(tmp, LEDGER_FILE);
     try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
     return true;
-  } catch (e) { log({ ev: 'ledger-residue-clear-error', target: username, err: String(e && e.message) }); return false; }
+  } catch (e) {
+    // DS-R21：写盘/读盘失败与「无条目/无残留」必须可区分——经 errBox
+    // 如实上抛，调用方不得再把故障误回成 404「账号不存在」。旧调用
+    // 方不传 errBox 时行为不变（仍回 false）。errBox 只带错误码不带
+    // 异常原文（DS 差量审 P3：fs 异常原文含服务器绝对路径，不许透
+    // 传到前端回执，原文只进日志）。失败时不删 .tmp-ext：该 tmp 名
+    // 与 noteLedgerLock 共用固定后缀，无条件删可能误伤并发写盘；残
+    // 留 tmp 会被下一次写盘截断覆盖，无害（DS 差量审 D4）。
+    log({ ev: 'ledger-residue-clear-error', target: username, err: String(e && e.message) });
+    if (errBox) { errBox.failed = true; errBox.err = (e && e.code) || 'UNKNOWN'; }
+    return false;
+  }
 }
 async function liveSetLockBit(username, locking, opts) {
   opts = opts || {};
@@ -490,8 +501,35 @@ async function forceCloseSessionsByLockToggle(username) {
     // 已置位再置一次是幂等的，不触发 close；先清再置强制触发一次
     const off = await setLockBit(target, false, { adminOverride: true });
     if (!off || !off.ok) return { ok: false, detail: 'unlock-step-failed' };
-    const on = await setLockBit(target, true, { adminOverride: true });
-    if (!on || !on.ok) return { ok: false, detail: 'relock-step-failed' }; // DEV-02：删 DS 稿同参补偿重试
+    let on = null;
+    try { on = await setLockBit(target, true, { adminOverride: true }); }
+    catch (e) { on = { ok: false, detail: 'exception:' + String(e && e.message) }; }
+    if (!on || !on.ok) {
+      // DS-R22（恢复 DS 原稿补偿，撤销 DEV-02）：清位已成功而重锁失败
+      // 会把已封账号停在未锁定态——MC 本体登录不经功能门，封禁被绕
+      // 过。补偿重试两次（短退避；setLockBit 每次都走 live→mcdb 全
+      // 链，且 live 通道对已置位回 already-in-state，丢失响应造成的
+      // 假失败也能被补偿识别为已锁定）。任一次成功即最终态锁定成立：
+      // 补偿置位同样走 edituser，会话关闭照常触发，故如实回 ok 并标
+      // compensated，不制造「会话关闭未确认」假警报（参 DEV-21/S-B）。
+      log({ ev: 'ban-enforce-relock-compensate', target, firstDetail: on && on.detail });
+      let back = null;
+      for (const waitMs of [250, 1000]) {
+        await new Promise((r) => setTimeout(r, waitMs));
+        // DS 差量审 D1 加固：setLockBit 若以 throw 形式失败，视作一次
+        // 失败继续下一次补偿，不许抛穿本函数绕过失败告警与失败关闭。
+        try { back = await setLockBit(target, true, { adminOverride: true }); }
+        catch (e) { back = { ok: false, detail: 'exception:' + String(e && e.message) }; }
+        if (back && back.ok) break;
+      }
+      if (back && back.ok) return { ok: true, toggled: true, compensated: true };
+      // 补偿穷尽仍失败＝失败关闭：如实回未锁定事实（relocked:false），
+      // 高等级告警留痕，执行摘要 mc.ok=false 如实入日志与内网回执
+      // （seal 回执的「会话关闭未确认」警告亦由 mc.ok 驱动）；绝不以
+      // ok 假报、绝不静默放行——锁位须由后续封禁动作或人工补锁。
+      log({ ev: 'ban-enforce-relock-failed', target, firstDetail: on && on.detail, lastDetail: back && back.detail });
+      return { ok: false, detail: 'relock-step-failed', relocked: false };
+    }
     return { ok: true, toggled: true };
   }
 
@@ -2624,7 +2662,13 @@ const server = http.createServer(async (req, res) => {
             if (remainingG > 0) msgG += '注意：仍有 ' + remainingG + ' 条封禁未解除，请重试。';
             return sendJson(res, 200, { ok: true, liftedCount: liftedG.length, msg: msgG });
           }
-          if (clearLedgerResidue(username, 'ext-lic-unlock')) return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '已清除「' + username + '」的台账残留标记（该账号已不在账号库，没有生效中的封禁）。' });
+          const residueErr = {};
+          if (clearLedgerResidue(username, 'ext-lic-unlock', residueErr)) return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '已清除「' + username + '」的台账残留标记（该账号已不在账号库，没有生效中的封禁）。' });
+          // DS-R21：清除失败（写盘异常）如实回 500，不许伪装成 404。
+          if (residueErr.failed) {
+            const why = { ENOSPC: '磁盘空间不足', EACCES: '台账文件权限不足', EPERM: '台账文件权限不足', ENOENT: '台账文件不存在', ENOTDIR: '台账路径异常' }[residueErr.err] || '写盘异常';
+            return sendJson(res, 500, { ok: false, code: 'LEDGER_CLEAR_FAILED', msg: '台账残留清除失败（' + why + '），请稍后重试：' + username });
+          }
           return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '账号不存在：' + username });
         }
         const guard = adminGuardCheck(user, username);
@@ -2641,11 +2685,22 @@ const server = http.createServer(async (req, res) => {
           if (unlock && unlock.ledgerCleared) return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '已清除「' + username + '」的台账残留标记（该账号当前没有生效中的封禁）。' });
           return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '该账号当前没有生效中的封禁：' + username });
         }
-        let msg = lifted.length
-          ? '已解封：' + username + '，共解除 ' + lifted.length + ' 条生效中的封禁（关联回收密钥已按规恢复）。'
-          : '已解封：' + username + '（账号锁定已解除，该账号没有生效中的封禁记录）。';
+        // 如实回执（DS-R21）：解除数、剩余数、解锁状态三项独立成句——
+        // 「仍有封禁未解除」与「解锁未成功」可以并存，两条警告不许互
+        // 吞（原 else if 在 remaining>0 时把解锁失败整条丢弃）；before
+        // >0 却一条未解时禁止「没有生效中的封禁记录」的假文案（与事
+        // 实相反），改如实报未完成。
+        let msg;
+        if (lifted.length) {
+          msg = '已解封：' + username + '，共解除 ' + lifted.length + ' 条生效中的封禁（关联回收密钥已按规恢复）。';
+        } else if (before > 0) {
+          msg = '解封未完成：' + username + '，本次未解除任何封禁（操作前有 ' + before + ' 条生效中的封禁）。';
+        } else {
+          msg = '已解封：' + username + '（该账号没有生效中的封禁记录）。';
+        }
         if (remaining > 0) msg += '注意：仍有 ' + remaining + ' 条封禁未解除，请重试。';
-        else if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
+        if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
+        else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
         return sendJson(res, 200, { ok: true, liftedCount: lifted.length, msg });
       }
       if (req.method === 'GET' && p === '/admin/api/license/overview') {
