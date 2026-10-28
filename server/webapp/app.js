@@ -363,10 +363,280 @@ function cacheSave() {
   if (S.auth !== 'in') return;
   Cache.save({ user: S.user, displayName: S.displayName, isAdmin: S.isAdmin, license: S.license, points: S.points, route: S.route, at: Date.now() });
 }
-async function checkSession(silent) {
+/* ============================================================
+ * 会话中途封禁锁定 / 会话已结束呈现（新增区块）
+ * 仅本区块与下列修改点涉及本件，其余函数不动。
+ * ============================================================ */
+const BAN_LOCK_CHECK_MS = 30000;              // 锁定期 /me 复查周期
+const BAN_SIGNAL_PARAM_ACCOUNT_PATHS = [      // 信号③排除：以参数指定目标账号的查询类接口
+  '/license/api/status/query',
+  '/license/api/status/reveal',
+  '/license/api/verify-password'
+];
+
+const BanLock = {
+  state: 'off',        // off | locked | expired
+  reason: '',          // expired 来源：'locked'（锁定中会话被撤销）| 'died'（会话猝死）
+  data: null,          // /me 的 activeBan 原样对象（code/permanent/endsAt/id），不打印 code
+  timer: null,
+  flight: false,       // 复查单飞
+  suppress: false,     // 主动登出等场景下的抑制窗
+
+  active() { return this.state === 'locked' || this.state === 'expired'; },
+
+  enter(ban) {
+    if (this.state === 'expired') return;
+    if (this.state === 'locked') { if (ban) this.data = ban; return; }
+    if (this.suppress) return;
+    if (S.auth !== 'in') return;
+    this.state = 'locked';
+    this.reason = 'api';
+    this.data = ban || null;
+    try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
+    this.paint();
+    this.startTimer();
+  },
+
+  toExpired(reason) {
+    this.stopTimer();
+    this.state = 'expired';
+    this.reason = (reason === 'locked') ? 'locked' : 'died';
+    S.auth = 'out'; S.license = null; S.points = null;
+    try { Cache.clear(); } catch (e) {}
+    try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
+    this.paint();
+  },
+
+  exit() {
+    this.stopTimer();
+    this.state = 'off';
+    this.reason = '';
+    this.data = null;
+    this.flight = false;
+  },
+
+  startTimer() {
+    this.stopTimer();
+    if (this.state !== 'locked') return;
+    this.timer = setInterval(() => { try { this.recheck(false); } catch (e) {} }, BAN_LOCK_CHECK_MS);
+  },
+
+  stopTimer() {
+    if (this.timer != null) {
+      try { clearInterval(this.timer); } catch (e) {}
+      this.timer = null;
+    }
+  },
+
+  async recheck(manual) {
+    if (this.state !== 'locked') return;
+    if (this.flight) return;
+    this.flight = true;
+    try {
+      const me = await api('/license/api/me');
+      if (me.status === 200 && me.json && me.json.ok) {
+        if (me.json.activeBan) {
+          const nb = me.json.activeBan;
+          const od = this.data || {};
+          const changed = (!!od.permanent !== !!nb.permanent) || (String(od.endsAt || '') !== String(nb.endsAt || ''));
+          this.data = nb;
+          if (manual && !changed) { try { toast('账号仍处于封禁状态。', 'warn'); } catch (e) {} }
+          if (manual || changed) this.paint();
+          return;
+        }
+        // 解封：退出锁定，按 checkSession 既有口径回填后回主壳
+        this.exit();
+        const ok = await checkSession(true, { noDied: true });
+        if (this.active()) return;            // 复查期间又被判封禁，保持锁定
+        if (ok && S.auth === 'in') {
+          location.hash = '#home';
+          showShell();
+          try { toast('账号状态已恢复正常，欢迎回来。', 'ok'); } catch (e) {}
+        } else {
+          showAuth('login', { notice: '请重新登录。' });
+        }
+        return;
+      }
+      if (me.status === 401 || me.status === 403) {
+        this.toExpired('locked');
+        return;
+      }
+      if (manual) { try { toast('暂时无法确认账号状态，请稍后再试。', 'warn'); } catch (e) {} }
+    } catch (e) {
+      if (manual) { try { toast('暂时无法确认账号状态，请稍后再试。', 'warn'); } catch (e2) {} }
+    } finally {
+      this.flight = false;
+    }
+  },
+
+  paintStatusTool(box) {
+    if (!box) return;
+    box.innerHTML = '<div class="card" style="margin-top:16px"><h3>查询密钥（账号＋密码核验）</h3>'
+      + '<div class="field"><label>账号</label><input id="bn-sq-user"></div>'
+      + '<div class="field"><label>密码</label><input id="bn-sq-pass" type="password"></div>'
+      + '<button class="btn block" id="bn-sq-btn">查询</button><div id="bn-sq-out" style="margin-top:12px"></div></div>';
+    const btn = $('#bn-sq-btn', box);
+    if (!btn) return;
+    btn.onclick = async () => {
+      const r = await api('/license/api/status/query', {
+        method: 'POST',
+        json: { username: $('#bn-sq-user', box).value.trim(), password: $('#bn-sq-pass', box).value }
+      });
+      const out = $('#bn-sq-out', box);
+      if (!out) return;
+      out.innerHTML = r.json
+        ? '<div class="note ' + (r.json.ok ? 'blue' : 'err') + '">'
+          + esc(r.json.ok ? statusSummary(r.json) : (r.json.msg || '查询失败，请核对账号与密码。')) + '</div>'
+        : stateBox('暂时无法查询', '服务暂时不可用，请稍后再试。', false);
+    };
+  },
+
+  paint() {
+    const root = (typeof $ === 'function') ? $('#authRoot') : document.getElementById('authRoot');
+    if (!root) return;
+    const shell = document.getElementById('shellRoot');
+    if (shell) shell.hidden = true;
+    root.hidden = false;
+    try {
+      const st = this.state;
+      const d = this.data || null;
+      const nm = esc(S.displayName || S.user || '');
+      const isPerm = !!(d && d.permanent);
+      let endsText = '';
+      if (!isPerm && d && d.endsAt) {
+        try { endsText = esc(String(fmtDate(d.endsAt) || '')); } catch (e) { endsText = ''; }
+      }
+      let title, body;
+      if (st === 'expired') {
+        title = '登录状态已结束';
+        body = (this.reason === 'locked')
+          ? '本账号的登录状态已被服务器结束。如您的账号处于封禁状态，重新登录后将显示封禁原因与申诉入口。'
+          : '当前登录状态已失效，请重新登录后继续使用。';
+      } else {
+        title = '账号已被封禁';
+        if (isPerm) body = '您的账号已被永久封禁，当前无法使用本控制台的各项功能。';
+        else if (endsText) body = '您的账号已被封禁，预计于 ' + endsText + ' 解除，当前无法使用本控制台的各项功能。';
+        else body = '您的账号当前处于封禁状态，暂时无法使用本控制台的各项功能。';
+        body += '如您认为该处理存在疑问，可提交申诉或联系智能客服。';
+      }
+
+      let html = '<div class="authwrap"><div class="auth">';
+      try {
+        if (typeof brandBlock === 'function') {
+          const b = brandBlock();
+          if (typeof b === 'string') html += b;
+        }
+      } catch (e) { /* 品牌块异常不影响锁定呈现 */ }
+      html += '<h1>' + esc(title) + '</h1>';
+      if (nm) html += '<div class="psub">' + nm + '</div>';
+      html += '<div class="note err">' + esc(body) + '</div>';
+      if (st === 'locked') html += '<div class="note">事由：违反平台规则</div>';
+      if (st === 'expired') html += '<button class="btn block" id="bn-relogin">重新登录</button>';
+      else html += '<button class="btn block" id="bn-appeal">提交申诉</button>';
+      html += '<div id="bn-links" style="margin-top:10px;text-align:center">';
+      if (st === 'expired') html += '<a class="txtlink" id="bn-appeal-link" style="cursor:pointer">提交申诉</a> ';
+      html += '<a class="txtlink" id="bn-support" style="cursor:pointer">联系智能客服</a> ';
+      html += '<a class="txtlink" id="bn-status" style="cursor:pointer">查询密钥</a> ';
+      if (st === 'locked') html += '<a class="txtlink" id="bn-recheck" style="cursor:pointer">重新检查</a> ';
+      if (S.isAdmin) html += '<a class="txtlink" id="bn-admin" style="cursor:pointer">管理后台</a> ';
+      html += '<a class="txtlink" id="bn-logout" style="cursor:pointer">退出登录</a>';
+      html += '</div><div id="bn-tools" style="margin-top:16px"></div></div></div>';
+      root.innerHTML = html;
+
+      const self = this;
+      const box = $('#bn-tools', root);
+      const bind = (id, fn) => {
+        const el = $('#' + id, root);
+        if (!el) return;
+        el.onclick = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); try { fn(); } catch (e) {} };
+      };
+      const openAppeal = () => {
+        if (!box) return;
+        box.innerHTML = '';
+        if (typeof renderAppeal === 'function') renderAppeal(box, { user: S.user || '' });
+      };
+      bind('bn-appeal', openAppeal);
+      bind('bn-appeal-link', openAppeal);
+      bind('bn-support', () => {
+        if (!box) return;
+        box.innerHTML = '';
+        if (typeof Views !== 'undefined' && Views && typeof Views.support === 'function') {
+          Views.support(box, null, 0, { guest: true });
+        }
+      });
+      bind('bn-status', () => { if (box) self.paintStatusTool(box); });
+      bind('bn-recheck', () => { self.recheck(true); });
+      bind('bn-admin', () => { location.href = '/admin'; });
+      bind('bn-logout', () => { doLogout(); });
+      bind('bn-relogin', () => {
+        self.exit();
+        showAuth('login', { notice: '请重新登录。' });
+      });
+    } catch (e) {
+      root.innerHTML = '<div class="authwrap"><div class="auth">'
+        + '<h1>账号已被封禁</h1>'
+        + '<div class="note err">当前账号暂时无法使用本控制台的各项功能。如需帮助，请提交申诉或联系智能客服。</div>'
+        + '<button class="btn block" id="bn-logout">退出登录</button>'
+        + '</div></div>';
+      const lo = $('#bn-logout', root);
+      if (lo) lo.onclick = () => { try { doLogout(); } catch (e2) {} };
+    }
+  }
+};
+
+/* 信号采集：只报「当前会话」的封禁信号，不误踢 */
+function noteBanSignal(res, path) {
+  if (!res || typeof res !== 'object') return;
+  if (S.auth !== 'in') return;                 // 未登录工具调用不得锁人（R1 守卫）
+  if (BanLock.suppress) return;
+  if (BanLock.active()) return;
+  const j = res.json;
+  if (!j || typeof j !== 'object') return;
+  if (j.code !== 'ACCOUNT_BANNED') return;
+  if (res.status === 403) {                    // 信号①：ext 集中门 / denyIfBanned
+    BanLock.enter(null);
+    return;
+  }
+  if (res.status === 200 && j.ok === false) {  // 信号③：处理器自查发出的 200 形封禁拒绝
+    const p = String(path || '').split('?')[0];
+    if (BAN_SIGNAL_PARAM_ACCOUNT_PATHS.indexOf(p) >= 0) return;  // 参数化账号查询，防误踢
+    BanLock.enter(null);
+  }
+}
+
+/* 会话猝死统一落点（R5）：返回是否已接管呈现 */
+function sessionDied(source) {
+  if (BanLock.suppress) return false;
+  if (BanLock.state === 'expired') return true;
+  if (BanLock.state === 'locked') { BanLock.toExpired('locked'); return true; }
+  BanLock.toExpired('died');
+  return true;
+}
+
+/* api() 零侵入包装：所有调用自动过一遍信号采集 */
+const apiInnerRaw = api;
+api = async function (path, opts) {
+  const res = await apiInnerRaw(path, opts);
+  try { noteBanSignal(res, path); } catch (e) { /* 信号采集异常不得影响业务返回 */ }
+  return res;
+};
+
+async function checkSession(silent, opts) {
+  const o = opts || {};
   const me = await api('/license/api/me');
   if (me.status === 200 && me.json && me.json.ok) {
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
+    // 同一响应只走一条路：先 forceLogout（设备门），再 activeBan（封禁锁定）
+    if (me.json.forceLogout) {
+      forceGate(me.json.gateCode || 'G1');
+      return false;
+    }
+    if (me.json.activeBan) {
+      S.displayName = S.displayName || me.json.username;
+      BanLock.enter(me.json.activeBan);       // 信号②
+      cacheSave();
+      return true;
+    }
     const st = await api('/home/api/stats');
     if (st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || me.json.username; S.isAdmin = !!st.json.isAdmin; }
     else { S.displayName = me.json.username; }
@@ -376,7 +646,14 @@ async function checkSession(silent) {
   if (me.status === 401 || me.status === 403) {
     const wasIn = S.auth === 'in';
     S.auth = 'out'; S.license = null; Cache.clear();
-    if (wasIn && !silent) toast('登录状态已失效，请重新登录。', 'warn');
+    if (wasIn) {
+      if (!o.noDied) {
+        const handled = sessionDied('session');   // 交给统一「会话已结束」落点
+        if (!handled && !silent) toast('登录状态已失效，请重新登录。', 'warn');
+      } else if (!silent) {
+        toast('登录状态已失效，请重新登录。', 'warn');
+      }
+    }
     return false;
   }
   // 网络异常等：不把用户踢下线（手感规格：失败给正式提示、不崩页）
@@ -431,15 +708,19 @@ async function doLogin(username, password, remember) {
 }
 async function heartbeat() {
   if (S.auth !== 'in') return;
+  if (BanLock.active()) return;
   const r = await api('/points/api/heartbeat', { method: 'POST', json: { client: 'web-console-shadow' } });
   if (r.status === 200 && r.json) {
     if (r.json.forceLogout) { forceGate('G1'); return; }
     S.points = r.json; cacheSave();
+    return;
   }
+  if (r.status === 401) { sessionDied('heartbeat'); }
 }
 setInterval(heartbeat, 60000);                    // 在线计时/强制下线通道
-setInterval(() => { if (S.auth === 'in') checkSession(true); }, 240000); // 凭证静默续期校验
+setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true); }, 240000); // 凭证静默续期校验
 function forceGate(code) {
+  BanLock.exit();
   S.auth = 'out'; Cache.clear();
   try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
   showAuth('gate', { code: code || 'G1' });
@@ -447,7 +728,14 @@ function forceGate(code) {
 }
 async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
-    await api('/logout'); Cache.clear();
+    BanLock.suppress = true;
+    try {
+      BanLock.exit();
+      await api('/logout');
+    } finally {
+      BanLock.suppress = false;
+    }
+    Cache.clear();
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
     try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
     S.auth = 'out'; S.license = null; S.points = null;
@@ -603,6 +891,7 @@ function parseRoute() {
   return { name: name || 'home', param: param ? decodeURIComponent(param) : null };
 }
 async function render() {
+  if (BanLock.active()) return;   // 锁定 / 会话已结束呈现期间不得渲回主壳
   const seq = ++renderSeq;
   S.route = parseRoute();
   if (S.route.name !== 'forum' && S.route.name !== 'post') { forumListMemo = null; forumMemoArmed = false; }
@@ -620,6 +909,7 @@ window.addEventListener('hashchange', render);
 
 /* ---------------- 壳与未登录区切换 ---------------- */
 function showShell() {
+  if (BanLock.active()) return;   // 防止 showShell 掀掉锁定界面的 authRoot
   $('#authRoot').hidden = true;
   $('#shellRoot').hidden = false;
   if (!location.hash) location.hash = '#home';
@@ -943,10 +1233,10 @@ function bindDevRows(view) {
    形态 /?node=<裸节点 id>&viewmode=<页签> 冷启 5 秒内即绑定设备数据；
    viewmode 10=设备页 / 11=桌面页签 / 12=终端页签。gotonode 冷启在本构建不绑定
    （gotoStartViewPage 守卫丢弃），不用。 */
-const QF_CANON_ORIGIN = 'https://54.248.9.192:8443';
+const QF_CANON_ORIGIN = location.origin + '/console-engine'; // 2026-10-28 域名修复：原写死裸 IP 8443 废止，改同源 /console-engine（nginx 同源反代到原生页），桌面会话全程留在当前域名
 /* 官网入口（站长 2026-10-26 11:12 令补）：三容器登出上方独立行＋「我的」页独立行，
    不进 MENU34、不占 BTABS，#34 次序不动；新标签打开官网。 */
-const QF_WEBSITE_URL = 'https://a718983610-sys.github.io/qfremote-website/';
+const QF_WEBSITE_URL = 'https://qfremote.top/'; // 2026-10-28 域名修复：官网已迁 qfremote.top，不再跳 GitHub Pages 临时站
 const websiteNavHtml = (cls) => `<a class="${cls || 'nav'}" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>`;
 /* 站长管理入口补齐（站长 2026-10-26 12:58 亲报「网页版找不到站长管理」）：该入口原仅在
    桌面侧边栏（#sidebar）渲染，≤760px 时侧边栏整体隐藏，抽屉/账户菜单/底部标签/「我的」页
@@ -966,7 +1256,7 @@ async function openNativeDevice(name, viewmode) {
      终端/Web-VNC 入口）；桌面形态维持 vm11/vm12 一步直达。此为手机版应用自身
      冷启缺陷的绕行，桌面口径不受影响（2026-10-26 抢修实测）。 */
   if (window.matchMedia && window.matchMedia('(max-width: 820px)').matches) vm = 10;
-  const url = id ? (QF_CANON_ORIGIN + '/?node=' + encodeURIComponent(id) + '&viewmode=' + vm) : (QF_CANON_ORIGIN + '/');
+  const url = id ? (QF_CANON_ORIGIN + '?node=' + encodeURIComponent(id) + '&viewmode=' + vm) : QF_CANON_ORIGIN;
   location.assign(url);
 }
 
@@ -3443,7 +3733,7 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
     S.isAdmin = !!cache.isAdmin; S.license = cache.license; S.points = cache.points;
     location.hash = '#home';
     showShell();
-    checkSession(true).then(ok => {
+    checkSession(true, { noDied: true }).then(ok => {
       if (!ok) showAuth('login', { notice: '登录状态已失效，请重新登录。' });
       else render();
     });
