@@ -187,6 +187,28 @@ function clientIpOf(req) {
 function createChatHandler(configOverrides) {
   const cfg = Object.assign(loadConfig(), configOverrides || {});
   const store = new Store(cfg.dataFile);
+
+  // ===== 封禁功能门（P5-010，DS 稿 §5.1）=====
+  // DEV-15：镜像路径由 dataFile 同级 provider-mirror 推导（与 friends 本体同源镜像）。
+  const BAN_MIRROR_FILE = path.join(path.dirname(cfg.dataFile), 'provider-mirror', 'license', 'status.json');
+  let _banMirrorCache = { mtimeMs: -1, size: -1, data: null };
+  let _banMirrorErrLogAt = 0;
+
+  function readBanLinkSync(username) {
+    const u = String(username || '').trim().toLowerCase();
+    if (!u) return false;
+    try {
+      const st = fs.statSync(BAN_MIRROR_FILE);
+      if (st.mtimeMs !== _banMirrorCache.mtimeMs || _banMirrorCache.size !== st.size || !_banMirrorCache.data) { // DEV-18/G-11：缓存键加 size
+        _banMirrorCache = { mtimeMs: st.mtimeMs, size: st.size, data: JSON.parse(fs.readFileSync(BAN_MIRROR_FILE, 'utf8')) };
+      }
+      const _m = _banMirrorCache.data; let rec = _m ? _m[u] : undefined; // DEV-18/G-08：扁平优先、包裹兜底
+      if (!rec && _m && _m.accounts && typeof _m.accounts === 'object' && !Array.isArray(_m.accounts)) rec = _m.accounts[u];
+      return !!(rec && rec.banLink === true);
+    } catch (e) { // DEV-18/G-04：失败可见（60 秒节流）
+      const t = Date.now(); if (t - _banMirrorErrLogAt > 60000) { _banMirrorErrLogAt = t; try { log({ ev: 'ban-mirror-read-failed', svc: 'chat', err: String(e && e.message) }); } catch (e2) {} }
+      return false; }
+  }
   const gate = new FriendsGate(cfg.friendsFile);
 
   // ---------- 登录状态托管副本（sessionCopy）的主密钥 ----------
@@ -311,6 +333,8 @@ function createChatHandler(configOverrides) {
     if (!tok) return null;
     const rec = store.data.sessions[sha256(tok)];
     if (!rec || rec.exp < Date.now()) return null;
+    // 封禁门（P5-010，DS 稿 §5.2）：每请求判定，已签发令牌封禁后即失效
+    if (readBanLinkSync(rec.user)) return null;
     return rec.user;
   }
   function nextEvent(ev) { ev.seq = ++store.data.eventSeq; store.data.events.push(ev); return ev; }
@@ -355,6 +379,10 @@ function createChatHandler(configOverrides) {
         log({ ev: 'login-blocked-account', user: canonicalUser });
         return sendJson(res, 403, { ok: false, msg: '该账号不能使用聊天功能。' });
       }
+      if (readBanLinkSync(canonicalUser)) {
+        log({ ev: 'login-banlinked', user: canonicalUser });
+        return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁，请联系站长申诉。' });
+      }
       const token = crypto.randomBytes(32).toString('hex');
       store.data.sessions[sha256(token)] = { user: canonicalUser, exp: Date.now() + (body.remember === true ? 30 * 24 * 3600 * 1000 : 12 * 3600 * 1000) }; // 「记住此设备」：30 天
       store.save();
@@ -388,6 +416,10 @@ function createChatHandler(configOverrides) {
       if (!canonicalUser || (blockedChatUsers.has(canonicalUser) && canonicalUser !== OWNER_ACCOUNT) || (v.siteadmin === 4294967295 && canonicalUser !== OWNER_ACCOUNT)) {
         log({ ev: 'sso-blocked-account', user: canonicalUser });
         return sendJson(res, 403, { ok: false, msg: '该账号不能使用聊天功能。' });
+      }
+      if (readBanLinkSync(canonicalUser)) {
+        log({ ev: 'sso-banlinked', user: canonicalUser });
+        return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁，请联系站长申诉。' });
       }
       const token = crypto.randomBytes(32).toString('hex');
       store.data.sessions[sha256(token)] = { user: canonicalUser, exp: Date.now() + 12 * 3600 * 1000 };
@@ -681,6 +713,20 @@ function createChatHandler(configOverrides) {
   }
 
   const handler = (req, res) => { handle(req, res).catch(() => { try { sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' }); } catch (e) {} }); };
+  // 按用户清聊天令牌（ext ban-purge 联动调用；DS 稿 §5.5）
+  function purgeUserSessions(username) {
+    const target = String(username || '').trim().toLowerCase();
+    if (!target) return 0;
+    let n = 0;
+    for (const h of Object.keys(store.data.sessions)) {
+      const rec = store.data.sessions[h];
+      if (rec && String(rec.user || '').trim().toLowerCase() === target) { delete store.data.sessions[h]; n += 1; }
+    }
+    if (n) store.save();
+    return n;
+  }
+  handler.purgeUserSessions = purgeUserSessions;
+
   return handler;
 }
 

@@ -140,19 +140,41 @@ function createLicenseCore(opts) {
   }
   function appendLine(file, obj) { try { fs.appendFileSync(file, JSON.stringify(obj) + '\n', { mode: 0o600 }); } catch (e) {} }
   // 客服只读镜像：掩码级公开状态（无密钥原文、无判定细节）
+  // 封禁链判定（P5-010）：与 syncAccountLinkage 的 link==='banned' 逐字同口径——
+  // 生效封禁中存在「永久」或 code∈{B6,B7,B9} 即为封禁链。功能门只认此判定，
+  // 冻结类（B1/B8 等）不扩大口径。
+  function banLinkOf(username, now) {
+    const bans = activeBansFor(username, now);
+    if (!bans || !bans.length) return false;
+    return bans.some((b) => b.permanent) || bans.some((b) => ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase())); // DEV-18/G-10：code 大小写归一
+  }
   function writeMirror() {
     try {
-      const out = {};
+      const now = Date.now();
+      const out = Object.create(null); // DEV-27（七审 S-2）：镜像映射用无原型对象，'constructor'/'__proto__' 类键名不撞原型链
       for (const u of Object.keys(state.accounts)) {
-        const v = buildStatusView(u, Date.now());
-        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, everBanned: v.everBanned, activeBanCode: v.activeBan ? v.activeBan.code : null };
+        const v = buildStatusView(u, now);
+        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, everBanned: v.everBanned, activeBanCode: v.activeBan ? String(v.activeBan.code || '').toUpperCase() : null, banLink: banLinkOf(u, now) }; // DEV-22/F2：与 account-link 输出统一归一
+      }
+      // 补齐：只有封禁记录、没有许可账号的登录名（纯 MC 账号被封）——不补则
+      // 下游读镜像取不到条目、封禁形同虚设（P5-010 采纳 DS 实现稿 O3）。
+      for (const b of state.bans) {
+        if (!b || b.status !== 'active' || b.targetType !== 'account' || !b.target) continue;
+        if (b.endsAt && b.endsAt <= now) continue;
+        const u = String(b.target); // DEV-26（六审 BUG-A）：键用 target 原样——全链精确匹配（activeBansFor 的 b.target === username），改写大小写会让 banLinkOf 永远查不到本条
+        if (!u || out[u]) continue;
+        if (!(b.permanent || ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase()))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
+        out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
       }
       fs.mkdirSync(path.dirname(mirrorFile), { recursive: true });
-      const tmp = mirrorFile + '.tmp';
+      try { const dir = path.dirname(mirrorFile); const base = path.basename(mirrorFile) + '.tmp-'; const cutoff = Date.now() - 5 * 60 * 1000; for (const f of fs.readdirSync(dir)) { if (!f.startsWith(base)) continue; try { if (fs.statSync(path.join(dir, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, f)); } catch (e) {} } } catch (e) {} // DEV-23/#3＋DEV-24/DEV-25：只清 5 分钟前的残留（含自身 pid 旧残留——清扫在本轮写 tmp 之前，在场的必是旧账），活进程在写的 tmp 不碰
+      const tmp = mirrorFile + '.tmp-' + process.pid; // DEV-22/F4：固定名多写者并发会互踩，pid 后缀隔离
       fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o640 });
-      fs.renameSync(tmp, mirrorFile);
-      try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('qffriends:')); if (pw) { const f = pw.split(':'); fs.chownSync(mirrorFile, Number(f[2]), Number(f[3])); } } catch (e) {}
-    } catch (e) {}
+      // DEV-21：先对 tmp chown 再 rename（原子替换且落位即可读）；原「先 rename 后 chown」有不可读窗口、chown 失败即永久不可读
+      let publishable = false; // DEV-25（五审 BUG-1/P1）：chown 未成绝不发布——宁可保留可读的旧镜像，也不用属主不可读的新镜像覆盖它
+      try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('qffriends:')); if (pw) { const f = pw.split(':'); fs.chownSync(tmp, Number(f[2]), Number(f[3])); publishable = true; } else { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-skip', why: 'qffriends-not-in-passwd' })); } catch (e2) {} } } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-24/S3：无 qffriends 条目时跳过 chown 必须留痕
+      if (publishable) { fs.renameSync(tmp, mirrorFile); } else { try { fs.unlinkSync(tmp); } catch (e) {} try { console.error(JSON.stringify({ ev: 'ban-mirror-not-published', why: 'chown-unavailable-kept-old-mirror' })); } catch (e2) {} }
+    } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-write-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-18/G-05：镜像写失败必须可见（原空 catch 吞噬＝F-02 同类静默机制）
   }
   function queueOwnerMail(subject, bodyObj) {
     appendLine(mailQueue, { at: new Date().toISOString(), to: OWNER_EMAIL, subject, body: bodyObj, status: 'queued' });
@@ -268,11 +290,15 @@ function createLicenseCore(opts) {
   }
   function applyBan(input, now) {
     // input: {targetType, target, code, permanent, days, actor, evidence}
+    // DEV-28（八审 BUG-1）：非永久封禁必须显式给 endsAt（有限数或 null＝手动解除型）或正数 days；漏传直接抛错响亮失败，不许静默生成「非永久但永不过期」记录。现行 10 个调用点全合规（普查在 REPORT），本抛错现行不可达。
+    if (!input || typeof input !== 'object') throw new Error('applyBan: input must be an object'); // DEV-30（十审 S2）
+    if (!Number.isFinite(now)) throw new Error('applyBan: now must be a finite ms number'); // DEV-29（九审存疑 1）
+    if (input.permanent !== true && !(Number.isFinite(input.endsAt) || input.endsAt === null || (Number.isFinite(input.days) && input.days > 0 && Number.isFinite(now + input.days * 86400000) && (now + input.days * 86400000) <= 8640000000000000))) throw new Error('applyBan: non-permanent ban requires finite endsAt, explicit null endsAt, or positive days'); // DEV-29（九审 BUG-1）＋DEV-30（十审 P3-1：days 乘积须有限）：守卫与归一化同一合法口径，能落 null 的只剩显式 null（B8 手动解除型；显式 null 与 days 并传时 null 优先）
     const ban = {
       id: 'ban_' + crypto.randomBytes(6).toString('hex'),
       targetType: input.targetType, target: input.target, code: input.code,
-      permanent: !!input.permanent,
-      startsAt: now, endsAt: input.permanent ? null : (input.endsAt !== undefined ? input.endsAt : (input.days ? now + input.days * 86400000 : null)),
+      permanent: input.permanent === true, // DEV-27（七审 #1）：严格布尔——字符串 "false" 不得被 !! 折成永久封禁；现行调用方全传真布尔，语义不变
+      startsAt: now, endsAt: input.permanent === true ? null : (Number.isFinite(input.endsAt) ? input.endsAt : (input.endsAt === null ? null : (Number.isFinite(input.days) && input.days > 0 ? now + input.days * 86400000 : null))), // DEV-27（七审 #2/#3）：endsAt 只认有限数（ISO 串等异型值回落 days 路径，不再透传成永不过期）；显式 null＝手动解除型（B8 站长冻结既定语义，调用点 server.js admin-freeze 在案）
       status: 'active', actor: input.actor || 'system', evidence: String(input.evidence || '').slice(0, 300),
       appealId: null, liftedAt: null, liftedBy: null,
     };
@@ -449,6 +475,77 @@ function createLicenseCore(opts) {
     appendLine(bansLog, { ev: 'key-generated-voided', keyId: k.id, plan: k.plan, source: k.source, by: actor, at: now });
     save();
     return { ok: true, keyId: k.id, maskedKey: maskKey(k.str) };
+  }
+  // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令，站长后台「账号
+  // 列表」行内「收回密钥」专用）：把账号名下全部在效密钥（unactivated/
+  // activated）一次性置 revoked，revokedReason='admin-reclaim'。
+  // 字段口径复用 applyBan 永封回收支（剩余秒数快照＋timing exhausted）
+  // 与 voidGeneratedKey（revokedAt/revokedBy 落账＋bansLog 台账行）。
+  // 与永封回收的分歧三处（DESIGN.md 三）：①覆盖全部套餐含永久与试用
+  // （无封禁兜底，不全收账号回不到未激活态）；②显式清空绑定槽位并在
+  // 回执/台账留释放数（永封保留 slots 是给 liftBan 恢复保真，本路无
+  // 恢复路径，保留只会让状态视图把已释放名额继续报成占用）；③结构性
+  // 不可恢复——liftBan 恢复支只认 revokedReason∈{permaban,
+  // payment-fraud} 且 revokedBanId===ban.id，本路 reason 不同且
+  // revokedBanId 恒 null，任何现行解封/改判/申诉路径都碰不到。
+  // 该钥名下 pending 转赠（含待领取）随钥死同步以 endTransfer 终结
+  // （与 expireTransfers 对死钥的终态同款）。不建封禁记录、不动账号
+  // 维试用窗（acct.trial）、不碰 keyStrHashes（退役串归档永不再生成）。
+  function reclaimAccountKeys(username, now, meta) {
+    const acct = state.accounts[username];
+    if (!acct) return { ok: false, code: 'ACCOUNT_NOT_FOUND', msg: '该账号没有许可记录，无需收回。' };
+    const actor = (meta && meta.actor) || 'owner-admin';
+    // 先落到期（与 evaluate/buildStatusView 的读时落账同口径）：已过期未落账的钥
+    // 不算在效，收回范围与 activeKeys 的在效判定对齐（DeepSeek 门二确信缺陷 #3 整改）。
+    lazyExpireKeys(username, now);
+    expireDeadPausedKeys(username, now); // 暂停态死钥同批落账（门二复核 S1 整改）
+    const targets = accountKeys(username).filter((k) => k.lifecycle === 'unactivated' || k.lifecycle === 'activated');
+    if (!targets.length) return { ok: false, code: 'NO_LIVE_KEYS', msg: '该账号名下没有可收回的密钥。' };
+    const reclaimed = [];
+    for (const k of targets) {
+      const releasedSlots = { pc: slotCount(k, 'pc'), mobile: slotCount(k, 'mobile') };
+      // 永久钥无期限，快照记 null 而非 0 秒（DeepSeek 门二存疑 D2 核实成立后整改）；
+      // 其余按既有两分支（已定到期点的算剩余秒、未起算的算未起算余量）。
+      k.remainingSecAtRecycle = (PLANS[k.plan] && PLANS[k.plan].days)
+        ? (k.expiresBaseMs
+          ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
+          : unstartedRemainingSec(k))
+        : null;
+      k.recycledWhileUnactivated = (k.activatedAt == null);
+      const wasLifecycle = k.lifecycle;
+      k.lifecycle = 'revoked'; k.revokedReason = 'admin-reclaim'; k.revokedBanId = null;
+      k.revokedAt = now; k.revokedBy = actor; k.timing = 'exhausted'; k.pauseStartMs = null;
+      k.slots = { pc: [], mobile: null };
+      for (const t of state.transfers) {
+        if (t.status === 'pending' && t.keyId === k.id) endTransfer(t, 'key-expired', 'key-reclaimed', now);
+      }
+      reclaimed.push({
+        keyId: k.id, maskedKey: maskKey(k.str), plan: k.plan, planName: k.planName,
+        source: k.source, wasLifecycle, releasedSlots, remainingSec: k.remainingSecAtRecycle,
+      });
+    }
+    // 台账汇总释放数与回执同源（逐钥 releasedSlots 之和），兑现设计 §一
+    // 「释放数写进回执与台账」（写码参与对照 C-05 采纳；§四清单已回填）。
+    const releasedTotal = reclaimed.reduce((a, x) => ({ pc: a.pc + x.releasedSlots.pc, mobile: a.mobile + x.releasedSlots.mobile }), { pc: 0, mobile: 0 });
+    appendLine(bansLog, { ev: 'key-admin-reclaimed', username, keyIds: reclaimed.map((r) => r.keyId), plans: reclaimed.map((r) => r.plan), releasedSlots: releasedTotal, by: actor, at: now });
+    save();
+    return { ok: true, username, reclaimed };
+  }
+  // 暂停态死钥落账：冻结/封禁的联动暂停（syncAccountLinkage）不先落到期，
+  // 钥在名义到期之后才被暂停时，到期点滑动公式下其剩余恒 ≤0、永不复活；
+  // lazyExpireKeys 按既有语义整体跳过 paused，此形态由本函数在本批收回/
+  // 预览口径内单独落为 expired，保证列表计数/preview/core 三处一致
+  // （DeepSeek 门二复核存疑 S1 核实成立后整改）。健康暂停钥的
+  // effectiveExpiry 恒 >now，永不被此函数触碰。
+  function expireDeadPausedKeys(username, now) {
+    let changed = false;
+    for (const k of accountKeys(username)) {
+      if ((k.lifecycle === 'unactivated' || k.lifecycle === 'activated') && k.timing === 'paused' && effectiveExpiry(k, now) <= now) {
+        k.lifecycle = 'expired'; k.timing = 'exhausted'; k.pauseStartMs = null; changed = true;
+        appendLine(bansLog, { ev: 'key-expired', keyId: k.id, username, at: now });
+      }
+    }
+    if (changed) save();
   }
   // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令，站长后台「账号
   // 列表」行内「收回密钥」专用）：把账号名下全部在效密钥（unactivated/

@@ -321,6 +321,90 @@ function main() {
   let BRIDGE_PAGE = null;
   try { BRIDGE_PAGE = fs.readFileSync(path.join(__dirname, 'logout-bridge.html'), 'utf8'); } catch (e) { /* 同上 */ }
   const stateFile = cfg.stateFile, logFile = cfg.logFile, sharesLogFile = cfg.sharesLogFile, friendsFile = cfg.friendsFile;
+  // ===== 封禁功能门（P5-010，主稿 DS 稿 §3.1，偏差 DEV-10/DEV-11）=====
+  // DEV-10：镜像路径由 stateFile 同级 provider-mirror 推导（status-providers.js 同法）。
+  const MIRROR_FILE = path.join(path.dirname(stateFile), 'provider-mirror', 'license', 'status.json');
+
+  let _mirrorCache = { mtimeMs: -1, size: -1, data: null };
+  function readMirror() {
+    try {
+      const st = fs.statSync(MIRROR_FILE);
+      if (st.mtimeMs === _mirrorCache.mtimeMs && st.size === _mirrorCache.size && _mirrorCache.data) return _mirrorCache.data; // DEV-21/S-D：键加 size（与 chat/forum 统一）
+      const data = JSON.parse(fs.readFileSync(MIRROR_FILE, 'utf8'));
+      _mirrorCache = { mtimeMs: st.mtimeMs, size: st.size, data };
+      return data;
+    } catch (e) { // DEV-18/G-04：失败必须可见（60 秒节流），不再静默 false
+      const t = Date.now(); if (t - _mirrorErrLogAt > 60000) { _mirrorErrLogAt = t; try { log({ ev: 'ban-mirror-read-failed', err: String(e && e.message) }); } catch (e2) {} }
+      return null; }
+  }
+
+  let _mirrorErrLogAt = 0;
+  function mirrorBanLink(username) {
+    const u = String(username || '').trim().toLowerCase();
+    if (!u) return false;
+    const m = readMirror();
+    if (!m) return false;
+    let rec = m[u]; // DEV-18/G-08：扁平优先、包裹兜底（原三元在登录名恰为 accounts 时误判）
+    if (!rec && m.accounts && typeof m.accounts === 'object' && !Array.isArray(m.accounts)) rec = m.accounts[u];
+    return !!(rec && rec.banLink === true);
+  }
+
+  // 内存缓存 5s（DS 稿口径）：ban 事件后镜像即时刷新，5s 上限只是防读盘风暴
+  const BANLINK_TTL_MS = 5000;
+  const _banLinkCache = new Map();
+
+  function purgeBanLinkCache(username) {
+    if (username) _banLinkCache.delete(String(username).trim().toLowerCase());
+    else _banLinkCache.clear();
+  }
+  function sweepBanLinkCache(now) { // DEV-18/G-09：原 Map 只增不删，超阈值清过期项
+    if (_banLinkCache.size <= 5000) return;
+    for (const [k, v] of _banLinkCache) { if (!v || now - v.at >= BANLINK_TTL_MS) _banLinkCache.delete(k); }
+  }
+
+  function isBanLinked(username) {
+    const u = String(username || '').trim().toLowerCase();
+    if (!u) return false;
+    const hit = _banLinkCache.get(u);
+    const now = Date.now();
+    sweepBanLinkCache(now);
+    if (hit && (now - hit.at) < BANLINK_TTL_MS) return hit.val;
+    const val = mirrorBanLink(u);
+    _banLinkCache.set(u, { val, at: now });
+    return val;
+  }
+
+  // DEV-11：friends 本体无 postInternalJson，此回源助手按本服务既有内网
+  // 验密式样新写（secret 文件同源、x-qf-internal-secret 头、1.5s 超时）。
+  function callExtAccountLink(username) {
+    return new Promise((resolve) => {
+      let secret = '';
+      try { secret = fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) {}
+      if (!secret) return resolve(null);
+      const payload = JSON.stringify({ username });
+      const rq = http.request({ hostname: '127.0.0.1', port: 8448, path: '/internal/license/account-link', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), 'x-qf-internal-secret': secret }, timeout: 1500 },
+        (rs) => { let d = ''; rs.on('data', (c) => { d += c; }); rs.on('end', () => { try { const j = JSON.parse(d); resolve(j && typeof j.banLink === 'boolean' ? j.banLink : null); } catch (e) { resolve(null); } }); });
+      rq.on('timeout', () => { try { rq.destroy(); } catch (e) {} resolve(null); });
+      rq.on('error', () => resolve(null));
+      rq.write(payload); rq.end();
+    });
+  }
+
+  // 异步版：镜像未命中时向 ext 回源一次，结果回填缓存
+  async function isBanLinkedAsync(username) {
+    const u = String(username || '').trim().toLowerCase();
+    if (!u) return false;
+    if (isBanLinked(u)) return true;
+    const hit = _banLinkCache.get(u);
+    if (hit && hit.val) return true;
+    try {
+      const r = await callExtAccountLink(u);
+      if (typeof r === 'boolean') { _banLinkCache.set(u, { val: r, at: Date.now() }); return r; }
+    } catch (e) {}
+    return false;
+  }
+
   // 二期聊天合入同一进程：共用 8445 与 MeshCentral 验密通道，好友闸口直接
   // 读本服务维护的 friends.json；不另开聊天端口、不另起平行服务。
   const chatHandler = createChatHandler({
@@ -674,6 +758,7 @@ function main() {
     try {
       const info = sess.userinfo || {};
       if ((info.siteadmin || 0) === SITEADMIN_FULL && !isOwnerAccount(user)) { try { sess.ws.close(); } catch (e) {} log({ ev: 'login-admin-refused', user, ip }); return sendJson(res, 403, { ok: false, msg: '该账号不能使用好友功能。' }); }
+      if (await isBanLinkedAsync(user)) { log({ ev: 'login-banlinked', user, ip }); return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁。如果你认为封错了，可以在登录页提交申诉。' }); }
       const onboarded = await runOnboard(sess, info, user);
       log({ ev: 'login', user, ip, groups: onboarded.length });
       issueSession(res, user, data.remember === true);
@@ -847,6 +932,7 @@ function main() {
     mcConnect,
     mcConnectCookie,
     bridgeCfgPath: '/opt/qfremote-lock/bridge-config.json',
+    isBanLinked,
   });
   // 论坛公开基址（直连源同框重定向用）：以官网 product.json 的 web.forumUrl
   // 为唯一准（临时通道轮换由既有巡检同步该文件），内存缓存 10 分钟，
@@ -881,6 +967,35 @@ function main() {
       const p = u.pathname;
       if (p === '/chat' || p.startsWith('/chat/')) return await chatHandler(req, res);
       // 站长 API 内网裁定（#22/#31：助手接口经 ext 转发；与回复台同一 store 操作口径）
+      // 封禁联动 purge（P5-010，DS 稿 §3.5）：ext executeBanEnforcement ④ 调用
+      if (req.method === 'POST' && p === '/internal/ban-purge') {
+        let secret = ''; try { secret = fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) {}
+        if (!secret || req.headers['x-qf-internal-secret'] !== secret) { res.writeHead(403, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, code: 'INTERNAL_AUTH' })); }
+        const body = await readBody(req);
+        const target = String(body.username || '').trim().toLowerCase();
+        if (!target) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, code: 'VALIDATION' })); }
+        let frd = 0;
+        for (const h of Object.keys(state.sessions)) {
+          const sx = state.sessions[h];
+          if (sx && String(sx.user || '').trim().toLowerCase() === target) { delete state.sessions[h]; frd += 1; }
+        }
+        if (frd) saveState();
+        let chat = 0; try { if (typeof chatHandler.purgeUserSessions === 'function') chat = chatHandler.purgeUserSessions(target); } catch (e) {}
+        let lock = 0; try { if (typeof lockBridge.purgeUser === 'function') lock = lockBridge.purgeUser(target); } catch (e) {}
+        purgeBanLinkCache(target);
+        log({ ev: 'ban-purge', user: target, source: String(body.source || ''), frd, chat, lock });
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, cleared: { frd, chat, lock } }));
+      }
+      // 封禁缓存失效（P5-010 DEV-18，DS 门二 Q2 附带项）：ext 在 lift 清位后调用，只清 banLink 缓存、不动会话
+      if (req.method === 'POST' && p === '/internal/ban-cache-flush') {
+        let secret = ''; try { secret = fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) {}
+        if (!secret || req.headers['x-qf-internal-secret'] !== secret) { res.writeHead(403, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, code: 'INTERNAL_AUTH' })); }
+        const body = await readBody(req);
+        const target = String(body.username || '').trim().toLowerCase();
+        if (!target) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, code: 'VALIDATION' })); }
+        purgeBanLinkCache(target);
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true }));
+      }
       if (req.method === 'POST' && p === '/internal/support/decide') {
         let secret = ''; try { secret = fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) {}
         if (!secret || req.headers['x-qf-internal-secret'] !== secret) { res.writeHead(403, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: false, code: 'INTERNAL_AUTH' })); }
@@ -1002,6 +1117,16 @@ function main() {
         ]);
         log({ ev: 'logout', user: me });
         return sendJson(res, 200, { ok: true });
+      }
+      // 封禁门（P5-010，DS 稿 §3.2）：qfr_frd 已签发会话的每请求判定。客服域
+      // （/support/*）与登录/退出在前面已分派，不到此处，天然豁免（定型豁免面）。
+      if (me && isBanLinked(me)) {
+        try {
+          const ck = parseCookies(req);
+          if (ck.qfr_frd) { delete state.sessions[crypto.createHash('sha256').update(ck.qfr_frd).digest('hex')]; saveState(); }
+        } catch (e) {}
+        log({ ev: 'ban-gate-deny', user: me, path: p });
+        return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁。如果你认为封错了，可以在登录页提交申诉。' });
       }
       if (req.method === 'GET' && p === '/api/friends/me') return sendJson(res, 200, Object.assign({ ok: true }, await buildMe(me)));
       if (req.method === 'POST' && p === '/api/friends/search') return await handleSearch(req, res, me);

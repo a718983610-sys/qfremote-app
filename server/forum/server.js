@@ -52,6 +52,73 @@ function licInternalSecret() {
   try { _licSecretCache = fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) {}
   return _licSecretCache;
 }
+// DEV-18/G-02/G-03（DS 门二）：forum 改镜像直读优先（与 friends/chat 同源扁平表），
+// ext 回源仅作镜像不可读时兜底；消除 syncAccounts 串行回源与写口 300 秒窗口。
+const FORUM_MIRROR_FILE = process.env.QFLIC_MIRROR_FILE || '/opt/qfremote-friends/data/provider-mirror/license/status.json'; // DEV-20：与 license-core mirrorFile 默认值同源（原写 /opt/qfremote-license/status.json 不存在，L5b 抓获）
+let _mirrorFCache = { mtimeMs: -1, size: -1, data: null };
+let _mirrorFErrLogAt = 0;
+function readMirrorF() {
+  try {
+    const st = fs.statSync(FORUM_MIRROR_FILE);
+    if (_mirrorFCache.data && _mirrorFCache.mtimeMs === st.mtimeMs && _mirrorFCache.size === st.size) return _mirrorFCache.data;
+    const data = JSON.parse(fs.readFileSync(FORUM_MIRROR_FILE, 'utf8'));
+    _mirrorFCache = { mtimeMs: st.mtimeMs, size: st.size, data };
+    return data;
+  } catch (e) {
+    const t = Date.now(); if (t - _mirrorFErrLogAt > 60000) { _mirrorFErrLogAt = t; try { console.error(JSON.stringify({ ev: 'ban-mirror-read-failed', svc: 'forum', err: String(e && e.message) })); } catch (e2) {} }
+    return null;
+  }
+}
+function mirrorRecF(m, u) {
+  let rec = m ? m[u] : undefined;
+  if (!rec && m && m.accounts && typeof m.accounts === 'object' && !Array.isArray(m.accounts)) rec = m.accounts[u];
+  return rec;
+}
+// DEV-23/Q1：原两态 readBanLinkMirrorF 已无任何调用方（全仓 grep 仅定义行），删除以消除「两态仍被风控误用」的歧义；风控一律走 banLinkTriF/fetchBanLink。
+try { if (fs.existsSync(FORUM_MIRROR_FILE) && !readMirrorF()) console.error(JSON.stringify({ ev: 'ban-mirror-unreadable', svc: 'forum', at: 'startup', file: FORUM_MIRROR_FILE })); } catch (e) {} // DEV-21/Q4(a)＋DEV-22/F5：启动自检；文件尚不存在（首装未生成）不报，存在但不可读才显形
+function banLinkTriF(username) { // DEV-21：三态——true=镜像明示封禁；false=镜像明示未封禁；null=镜像不可读（未知，风控点不得当作未封禁）
+  const u = String(username || '').trim().toLowerCase();
+  if (!u) return null; // DEV-22/F3：空用户名＝未知，不得判「明示未封禁」
+  const m = readMirrorF();
+  if (!m) return null;
+  const rec = mirrorRecF(m, u);
+  if (!rec) return null; // DEV-23/#1：缺条目＝未知（可能写失败/滞后），不得冒充「明示未封禁」让写口门让位
+  return rec.banLink === true;
+}
+function sweepBanLinkCacheF(now) { // G-09 同型
+  if (banLinkCacheF.size <= 5000) return;
+  for (const [k, v] of banLinkCacheF) { if (!v || now - v.at >= BANLINK_TTL_F) banLinkCacheF.delete(k); }
+}
+// ===== 封禁功能门（P5-010，DS 稿 §6.1；DEV-13：forum 无 postInternalJson，
+// 按 pushReviewEvent 同式 raw http 新写 promise 版；失败回落缓存值）=====
+const banLinkCacheF = new Map();
+const BANLINK_TTL_F = 5000;
+function fetchBanLink(username) {
+  const u = String(username || '').trim().toLowerCase();
+  if (!u) return Promise.resolve(false);
+  const hit = banLinkCacheF.get(u);
+  const now = Date.now();
+  sweepBanLinkCacheF(now);
+  if (hit && (now - hit.at) < BANLINK_TTL_F) return Promise.resolve(hit.val);
+  const m = readMirrorF(); // DEV-18：镜像可读即以镜像为准（写盘同步于 applyBan/liftBan，无窗口）
+  if (m) { const rec = mirrorRecF(m, u); const val = !!(rec && rec.banLink === true); banLinkCacheF.set(u, { val, at: now }); return Promise.resolve(val); }
+  return new Promise((resolve) => {
+    const fallback = () => { const v = hit ? hit.val : false; banLinkCacheF.set(u, { val: v, at: Date.now() }); resolve(v); }; // DEV-18/G-03：失败结果也短缓存，防 ext 不可达时逐请求满超时
+    const secret = licInternalSecret();
+    if (!secret) return fallback();
+    const data = Buffer.from(JSON.stringify({ username: u }));
+    const rq = http.request({ hostname: '127.0.0.1', port: 8448, path: '/internal/license/account-link', method: 'POST', timeout: 1500,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, 'x-qf-internal-secret': secret } }, (rs) => {
+      let d = ''; rs.on('data', (c) => { d += c; }); rs.on('end', () => {
+        try { const j = JSON.parse(d); const val = !!(j && j.banLink === true); banLinkCacheF.set(u, { val, at: Date.now() }); resolve(val); }
+        catch (e) { fallback(); }
+      });
+    });
+    rq.on('timeout', () => { try { rq.destroy(); } catch (e) {} fallback(); });
+    rq.on('error', () => fallback());
+    rq.write(data); rq.end();
+  });
+}
 function pushReviewEvent(kind, id, summary) {
   try {
     const secret = licInternalSecret(); if (!secret) return;
@@ -334,7 +401,13 @@ function main() {
 
   // ---- 账号对账（官方通道 users） ----
   let lastUsers = null; // Map name -> {siteadmin, creation, _id}
+  let _syncRunning = false;
   async function syncAccounts(actor) {
+    if (_syncRunning) return { ok: false, skipped: 'running' }; // DEV-18/G-03：防定时器与手动触发重叠
+    _syncRunning = true;
+    try { return await syncAccountsImpl(actor); } finally { _syncRunning = false; }
+  }
+  async function syncAccountsImpl(actor) {
     const res = await controlCommand(cfg.mcUrl, cfg.svcUser, cfg.svcPass, { action: 'users', responseid: 'qffrm-users' });
     if (!res.ok) { modlog({ actor: actor || 'system', action: 'sync-failed', detail: res.error }); return { ok: false, error: res.error }; }
     const map = new Map();
@@ -356,7 +429,8 @@ function main() {
       const p = profileOf(name);
       const u = map.get(name);
       if (u && u.creation) p.accountCreatedAt = toMs(u.creation);
-      const bad = !u ? 'gone' : (isFrozen(u.siteadmin, name) ? 'frozen' : null);
+      const banLinked = await fetchBanLink(name);
+      const bad = banLinked ? 'banned' : (!u ? 'gone' : (isFrozen(u.siteadmin, name) ? 'frozen' : null));
       if (bad && !p.accountBad) {
         // 进入异常集：其内容自动不可见（不删，解冻不自动恢复）
         p.accountBad = true; p.accountStatus = bad; episodes++;
@@ -445,6 +519,7 @@ function main() {
     const ui = v.userinfo || {};
     const username = String(ui._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
     if (!username) return sendJson(res, 401, { ok: false, msg: '未登录控制台。' });
+    if (await fetchBanLink(username)) return sendJson(res, 403, { ok: false, msg: '该账号已被封禁，请联系站长申诉。' });
     if (isFrozen(ui.siteadmin, username)) return sendJson(res, 403, { ok: false, msg: '该账号已被冻结，请联系站长。' });
     const issued = issueForumSession(res, username, ui, false);
     modlog({ actor: 'system', action: 'sso-login', author: username });
@@ -461,18 +536,23 @@ function main() {
     const ui = v.userinfo || {};
     const username = String(ui._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
     if (!username) return sendJson(res, 401, { ok: false, msg: '登录已过期，请重新登录后再试。' }, cors);
+    if (await fetchBanLink(username)) return sendJson(res, 403, { ok: false, msg: '该账号已被封禁，请联系站长申诉。' }, cors);
     if (isFrozen(ui.siteadmin, username)) return sendJson(res, 403, { ok: false, msg: '该账号已被冻结，请联系站长。' }, cors);
     const token = crypto.randomBytes(32).toString('hex');
     ssoTokens.set(token, { user: username, isAdmin: (ui.siteadmin || 0) === SITEADMIN_FULL, accountCreatedAt: toMs(ui.creation), exp: Date.now() + 60000 });
     return sendJson(res, 200, { ok: true, token, expiresIn: 60, loginPath: '/api/forum/sso-login?token=' + token }, cors);
   }
-  function handleSsoLogin(req, res, u) {
+  async function handleSsoLogin(req, res, u) { // DEV-18/S-05：兑换时复验 banLink（原仅签发时验，purge 失败时 60 秒内令牌可换出会话）
     const token = u.searchParams.get('token') || '';
     const entry = ssoTokens.get(token);
     if (entry) ssoTokens.delete(token); // 单次使用：取到即作废
     if (!entry || Date.now() > entry.exp) {
       res.writeHead(401, pageHeadersOf(req));
       return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">这个入口链接已经失效</h1><p style="line-height:1.8;color:#43536a">入口链接仅可使用一次，有效期一分钟。请返回 QFRemote 软件重新打开论坛。</p></div></body></html>');
+    }
+    if (await fetchBanLink(entry.user)) {
+      res.writeHead(403, pageHeadersOf(req));
+      return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>账号已被封禁 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">该账号已被封禁</h1><p style="line-height:1.8;color:#43536a">封禁期间除客服与申诉外，其他功能不可用。如需申诉，请联系官方客服。</p></div></body></html>');
     }
     issueForumSession(res, entry.user, { siteadmin: entry.isAdmin ? SITEADMIN_FULL : 0, creation: entry.accountCreatedAt ? Math.floor(entry.accountCreatedAt / 1000) : null }, false);
     modlog({ actor: 'system', action: 'sso-login-token', author: entry.user });
@@ -577,7 +657,11 @@ function main() {
   // 返回 {blocked:{code,msg}} 或 {status, review}
   function runGatesAndReview(sess, kind, title, body, now) {
     const p = profileOf(sess.user);
-    if (p.accountStatus && p.accountStatus !== 'ok') {
+    if (p.accountStatus && p.accountStatus !== 'ok' && !(p.accountStatus === 'banned' && banLinkTriF(sess.user) === false)) { // DEV-21：让位仅当镜像可读且明示未封禁；不可读（null）维持拦截
+      // DEV-19/G-02 解封侧：'banned' 是周期 sync 维护的滞后状态，镜像（写盘同步于 lift）说已解封时以镜像为准，不等下一轮 sync
+      return { blocked: { code: 403, msg: '您的账号已被冻结或封禁，无法发帖。申诉请联系官方客服，或前往官网留言。' } };
+    }
+    if (banLinkTriF(sess.user) === true) { // DEV-18/G-02＋DEV-21 三态：不依赖周期 sync 的 accountStatus，封禁即时生效、解封即时恢复
       return { blocked: { code: 403, msg: '您的账号已被冻结或封禁，无法发帖。申诉请联系官方客服，或前往官网留言。' } };
     }
     if (isMuted(p, now)) {
@@ -613,6 +697,7 @@ function main() {
       return sendJson(res, 401, { ok: false, msg: '账号或密码不正确，请核对后重试。' });
     }
     const ui = v.userinfo || {};
+    if (await fetchBanLink(username)) return sendJson(res, 403, { ok: false, msg: '该账号已被封禁，请联系站长申诉。' });
     if (isFrozen(ui.siteadmin, username)) return sendJson(res, 403, { ok: false, msg: '该账号已被冻结，请联系站长。' });
     const ttlMs = data.remember === true ? 30 * 24 * 3600 * 1000 : (cfg.sessionTtlMs || 43200000); // 「记住此设备」：30 天
     const tok = crypto.randomBytes(32).toString('hex');
@@ -756,7 +841,8 @@ function main() {
     const data = await readBody(req);
     const nick = String(data.nickname || '').trim();
     const p = profileOf(sess.user);
-    if (p.accountStatus && p.accountStatus !== 'ok') return sendJson(res, 403, { ok: false, msg: '您的账号已被冻结或封禁，无法修改昵称。申诉请联系官方客服，或前往官网留言。' });
+    if (p.accountStatus && p.accountStatus !== 'ok' && !(p.accountStatus === 'banned' && banLinkTriF(sess.user) === false)) return sendJson(res, 403, { ok: false, msg: '您的账号已被冻结或封禁，无法修改昵称。申诉请联系官方客服，或前往官网留言。' }); // DEV-19＋DEV-21 三态：'banned' 仅在镜像可读且明示未封禁时让位
+    if (banLinkTriF(sess.user) === true) return sendJson(res, 403, { ok: false, msg: '您的账号已被冻结或封禁，无法修改昵称。申诉请联系官方客服，或前往官网留言。' }); // DEV-22/F1：镜像即时封禁第二道门（与发帖门同序，补 DEV-18 遗漏）
     if (!nick) { p.nickname = ''; saveProfiles(); modlog({ actor: 'user', action: 'nickname-clear', author: sess.user }); return sendJson(res, 200, { ok: true, nickname: '', msg: '已恢复为账号名显示。' }); }
     if ([...nick].length > 20) return sendJson(res, 400, { ok: false, msg: '昵称长度不得超过 20 个字。' });
     const review = R.reviewContent({ title: '', body: nick }, compiled, {});
@@ -1053,6 +1139,37 @@ function main() {
         return sendJson(res, 200, { ok: true, stats, totalPosts: allMyPosts.length, totalReplies: allMyReplies.length, page, posts: myPosts, replies: myReplies });
       }
       // 站长 API 内网裁定（#22/#31：助手接口经 ext 转发，复用 adminReview 同一裁定逻辑与台账）
+      if (req.method === 'POST' && sub === '/internal/purge-sessions') {
+        const secret = licInternalSecret();
+        if (!secret || req.headers['x-qf-internal-secret'] !== secret) return sendJson(res, 403, { ok: false, msg: '内部鉴权失败。' });
+        const data = await readBody(req);
+        const target = String(data.username || '').trim().toLowerCase();
+        if (!target) return sendJson(res, 400, { ok: false, msg: '参数不完整。' });
+        let nSes = 0;
+        for (const h of Object.keys(sessions)) {
+          const sx = sessions[h];
+          if (sx && String(sx.user || '').trim().toLowerCase() === target) { delete sessions[h]; nSes += 1; }
+        }
+        if (nSes) saveSessions();
+        let nSso = 0;
+        for (const [k2, v2] of ssoTokens) { // DEV-14：ssoTokens 为 Map，DS 稿 Object.keys 写法无效
+          if (v2 && String(v2.user || '').trim().toLowerCase() === target) { ssoTokens.delete(k2); nSso += 1; }
+        }
+        banLinkCacheF.delete(target);
+        const pT = profiles[target]; // DEV-18/G-02：purge 到达即置封禁态，写口门不等下一轮 sync
+        if (pT) { pT.accountBad = true; pT.accountStatus = 'banned'; saveProfiles(); }
+        modlog({ actor: 'system', action: 'ban-purge-sessions', author: target, detail: 'ses=' + nSes + ',sso=' + nSso });
+        return sendJson(res, 200, { ok: true, cleared: { sessions: nSes, sso: nSso } });
+      }
+      if (req.method === 'POST' && sub === '/internal/ban-cache-flush') {
+        const secret = licInternalSecret();
+        if (!secret || req.headers['x-qf-internal-secret'] !== secret) return sendJson(res, 403, { ok: false, msg: '内部鉴权失败。' });
+        const data = await readBody(req);
+        const target = String(data.username || '').trim().toLowerCase();
+        if (!target) return sendJson(res, 400, { ok: false, msg: '参数不完整。' });
+        banLinkCacheF.delete(target); // DEV-18：只清缓存不动会话（lift 侧调用）
+        return sendJson(res, 200, { ok: true });
+      }
       if (req.method === 'POST' && sub === '/internal/review') {
         const secret = licInternalSecret();
         if (!secret || req.headers['x-qf-internal-secret'] !== secret) return sendJson(res, 403, { ok: false, msg: '内部鉴权失败。' });

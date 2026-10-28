@@ -581,6 +581,11 @@ function createLockBridge(deps) {
     if (!bridgeCfg) { fail(res, 503, ERR.notReady); return true; }
     const me = await authUser(req);
     if (!me) { fail(res, 401, ERR.login); return true; }
+    // 封禁门（P5-010，DS 稿 §4.2）：authUser 只验凭证不问许可状态，此处补判定
+    if (typeof deps.isBanLinked === 'function' && deps.isBanLinked(me)) {
+      fail(res, 403, '账号已被封禁。');
+      return true;
+    }
     try {
       if (req.method === 'GET' && p === '/lock/devices') {
         const devices = await listDevicesFor(me);
@@ -672,7 +677,18 @@ function createLockBridge(deps) {
   }
 
   if (bridgeCfg) svcConnect();
-  return { handle };
+  // 按用户清 xid 桥缓存（ext ban-purge 联动调用；DS 稿 §4.3）
+  function purgeUser(username) {
+    const target = String(username || '').trim().toLowerCase();
+    if (!target) return 0;
+    let n = 0;
+    for (const [k, v] of xidCache) {
+      if (v && String(v.user || '').trim().toLowerCase() === target) { xidCache.delete(k); n += 1; }
+    }
+    return n;
+  }
+
+  return { handle, purgeUser };
 }
 
 module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent } };
