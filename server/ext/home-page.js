@@ -130,9 +130,6 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
 .ft-ic{width:46px;height:46px;border-radius:13px;display:inline-flex;align-items:center;justify-content:center}
 .ft-ic svg{width:23px;height:23px}
 .storage{display:flex;justify-content:space-between;font-size:13.5px;color:var(--qf-text-secondary);margin-top:6px}
-.bar{height:8px;border-radius:var(--qf-radius-pill);background:#E7EEF8;margin-top:8px;overflow:hidden}
-.bar i{display:block;height:100%;background:var(--qf-brand);border-radius:var(--qf-radius-pill)}
-.bar.sm{height:5px}
 /* ===== DeviceRow ===== */
 .groups{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 .glabel{font-size:13px;color:var(--qf-text-secondary);margin-right:2px}
@@ -272,7 +269,6 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
         <h3><span class="hicon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>我的文件<a class="go" data-goto="/">进入文件管理 ›</a></h3>
         <div class="ftiles" id="fileTiles"></div>
         <div class="storage"><span>存储空间</span><span id="storageText">正在读取…</span></div>
-        <div class="bar"><i id="storageBar" style="width:0%"></i></div>
         <p class="note" id="storageNote" style="margin-top:8px"></p>
       </section>
     </div>
@@ -481,7 +477,10 @@ function checkUpdate(manual){
     var v=j.version||(j.windows&&j.windows.version)||'';
     var row=document.querySelector('[data-more="update"] .row-t small'); if(row&&v) row.textContent='当前版本 '+v+'，已是最新版本';
     if(manual) showDialog('检查更新','<p>当前版本 ' + esc(v||'未知') + '，已是最新版本。</p>');
-  }).catch(function(){ if(manual) toast('检查更新失败，请稍后再试。'); });
+  }).catch(function(){
+    var row=document.querySelector('[data-more="update"] .row-t small'); if(row) row.textContent='版本信息读取失败，点击重试';
+    if(manual) toast('检查更新失败，请稍后再试。');
+  });
 }
 
 /* ----- 文件四砖 ----- */
@@ -636,18 +635,17 @@ function loadStats(){
     $('heroName').textContent=name; $('chipName').textContent=name;
     var av=(name||'?').slice(0,1).toUpperCase(); $('heroAva').textContent=av; $('chipAva').textContent=av;
     if(j.isAdmin){ $('adminStrip').classList.add('on'); document.querySelectorAll('[data-nav="admin"],[data-quick="admin"]').forEach(function(el){ el.classList.add('on'); }); }
-    allDevices=j.devices||[];
+    allDevices=j.devices||[]; window.__qfAllDevices=allDevices;
     var groups=j.groups||[];
     var gb=$('devGroups');
     if(groups.length){ gb.innerHTML='<span class="glabel">设备组</span>'+[''].concat(groups).map(function(g){ return '<button class="gchip'+(g===curGroup?' on':'')+'" type="button" data-group="'+esc(g)+'">'+(g||'全部设备')+'</button>'; }).join('');
       gb.querySelectorAll('[data-group]').forEach(function(c){ c.addEventListener('click',function(){ curGroup=c.getAttribute('data-group'); gb.querySelectorAll('.gchip').forEach(function(x){ x.classList.toggle('on', x===c); }); renderDevices(); }); });
     } else gb.innerHTML='';
-    renderDevices();
+    applyCurrentSearch();
     $('statOnline').textContent=(j.onlineCount==null?'暂无数据':(j.onlineCount+' 台'));
     var sb=fmtBytes(j.storageBytes);
     $('statStorage').textContent=sb==null?'暂无数据':sb;
     $('storageText').textContent=sb==null?'暂无数据':('已用 '+sb);
-    $('storageBar').style.width='0%';
     $('storageNote').textContent=sb==null?'暂时没有可统计的存储数据。':'已用空间为您的个人文件实际占用。';
     $('statLogin').textContent=j.lastLoginMs?fmtTime(j.lastLoginMs):'暂无记录';
   }).catch(function(){ $('devList').innerHTML='<p class="empty">设备信息暂时无法读取，请刷新重试。</p>'; });
@@ -732,8 +730,13 @@ $('qfSearch').addEventListener('input',function(){
   if(q){
     allDevicesFiltered(q);
   } else if(window.__qfAllDevices){ allDevices=window.__qfAllDevices; renderDevices(); }
-  $('noResult').style.display=(q&&visible===0)?'block':'none';
+  var devShown=allDevices.filter(function(d){ return !curGroup || d.group===curGroup; }).length;
+  $('noResult').style.display=(q&&visible===0&&devShown===0)?'block':'none';
 });
+function applyCurrentSearch(){
+  var s=$('qfSearch'); var q=s? s.value.trim().toLowerCase() : '';
+  if(q) allDevicesFiltered(q); else renderDevices();
+}
 function allDevicesFiltered(q){
   if(!window.__qfAllDevices) window.__qfAllDevices=allDevices;
   allDevices=window.__qfAllDevices.filter(function(d){ return (d.name+' '+(d.os||'')).toLowerCase().indexOf(q)>=0; });

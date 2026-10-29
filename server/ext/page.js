@@ -405,8 +405,8 @@ function appealRow(a, pending){
     + '<div class="meta">' + (a.email ? '联系邮箱：' + esc(a.email) + '<br>' : '') + '提交时间：' + esc(fmtTime(a.createdAt)) + '</div>'
     + (a.type === 'rebind' ? '<div class="meta">换绑槽位：' + (a.platform === 'mobile' ? '手机' : '电脑') + ' · 提交通道：' + esc(adminLabel(TXT_CHANNEL, a.channel || '')) + '<br>旧设备码（哈希前 12 位）：' + esc(String(a.oldDeviceCode || '').slice(0, 12)) + '<br>新设备码（哈希前 12 位）：' + esc(String(a.newDeviceCodeHash || '').slice(0, 12)) + '</div>' : '')
     + (a.executionNote ? '<div class="meta" style="color:#a40000">审核备注：' + esc(a.executionNote) + '</div>' : '')
-    + (a.desc ? '<div class="appeal-desc">' + esc(a.desc) + '</div>' : '') + '</div>';
-  if (a.reasonCode) h = h.replace('</div>', '<div class="meta">事由：' + esc(a.reasonCode) + ' · 申诉编号：' + esc(a.id || '') + '</div></div>');
+    + (a.desc ? '<div class="appeal-desc">' + esc(a.desc) + '</div>' : '')
+    + (a.reasonCode ? '<div class="meta">事由：' + esc(a.reasonCode) + ' · 申诉编号：' + esc(a.id || '') + '</div>' : '') + '</div>';
   if (pending) {
     h += '<button class="btn" data-appeal-act="approve" data-u="' + esc(a.username || '') + '" data-id="' + esc(a.id || '') + '" data-rc="' + esc(a.reasonCode || '') + '">通过</button>'
       + '<button class="btn danger" data-appeal-act="reject" data-u="' + esc(a.username || '') + '" data-id="' + esc(a.id || '') + '" data-rc="' + esc(a.reasonCode || '') + '">驳回</button>';
@@ -422,7 +422,7 @@ function appealRow(a, pending){
 }
 function loadAppeals(){
   api('/admin/api/appeals').then(function(r){
-    if (!r.ok) { $('appeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; return; }
+    if (!r.ok) { $('appeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; setPill('appeals', 0); setPill('rebind', 0); return; }
     var pendLogin = r.pending.filter(function(a){ return a.type !== 'rebind'; });
     var pendRebind = r.pending.filter(function(a){ return a.type === 'rebind'; });
     var doneLogin = r.recent.filter(function(a){ return a.type !== 'rebind'; });
@@ -437,7 +437,7 @@ function loadAppeals(){
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onAppealAction;
     var obtns = document.querySelectorAll('button[data-appeal-override]');
     for (var j = 0; j < obtns.length; j++) obtns[j].onclick = onAppealOverride;
-  }).catch(function(){ $('appeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ $('appeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; setPill('appeals', 0); setPill('rebind', 0); });
 }
 function onAppealAction(){
   var act = this.getAttribute('data-appeal-act'), u = this.getAttribute('data-u');
@@ -446,13 +446,13 @@ function onAppealAction(){
   var isRebind = rc === 'REBIND';
   if (act === 'approve') {
     showModal('通过申诉', isRebind ? '确定通过「' + u + '」的换绑申诉吗？通过后将立即执行换绑：同类旧设备解绑、新设备绑入，绑定名额不变。' : (unified ? '确定通过「' + u + '」的申诉吗？通过后封禁立即解除；若是永久封禁，原密钥将恢复并留下「曾被封禁」记录。' + RESTART_NOTE_MAY : '确定通过「' + u + '」的申诉吗？通过后对方可以自己设置新密码。' + RESTART_NOTE_MAY), { okText: '确认通过', onOk: function(){
-      api('/admin/api/appeals/approve', unified ? { username: u, appealId: aid } : { username: u }).then(function(r){ toast(r.msg || (r.ok ? '已通过。' : '操作未成功。')); loadAppeals(); loadLicense(); });
+      api('/admin/api/appeals/approve', unified ? { username: u, appealId: aid } : { username: u }).then(function(r){ toast(r.msg || (r.ok ? '已通过。' : '操作未成功。')); loadAppeals(); loadLicense(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
     }});
   } else {
     showModal('驳回申诉', '请写清驳回原因，「' + u + '」能在申诉进度页看到。', { input: true, inputPlaceholder: '驳回原因', okText: '确认驳回', validate: function(v){ if (!String(v || '').trim()) return '驳回须填写原因。'; }, onOk: function(v){
       var reason = String(v || '').trim();
       if (!reason) { toast('驳回须填写原因。'); return; }
-      api('/admin/api/appeals/reject', unified ? { username: u, appealId: aid, reason: reason } : { username: u, reason: reason }).then(function(r){ toast(r.msg || (r.ok ? '已驳回。' : '操作未成功。')); loadAppeals(); });
+      api('/admin/api/appeals/reject', unified ? { username: u, appealId: aid, reason: reason } : { username: u, reason: reason }).then(function(r){ toast(r.msg || (r.ok ? '已驳回。' : '操作未成功。')); loadAppeals(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
     }});
   }
 }
@@ -461,13 +461,13 @@ function onAppealOverride(){
   var act = this.getAttribute('data-appeal-override'), u = this.getAttribute('data-u'), aid = this.getAttribute('data-id');
   if (act === 'approve') {
     showModal('改判通过申诉', '确定将「' + u + '」这笔已驳回的申诉改判为通过吗？改判后按通过口径重新执行：封禁解除、原密钥按规恢复，全程留痕。', { okText: '确认改判', onOk: function(){
-      api('/admin/api/appeals/approve', { username: u, appealId: aid, decision: 'approve', override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); });
+      api('/admin/api/appeals/approve', { username: u, appealId: aid, decision: 'approve', override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
     }});
   } else {
     showModal('改判驳回申诉', '请写清改判原因。改判后按驳回口径执行（恢复封禁或回滚换绑），全程留痕。', { input: true, inputPlaceholder: '改判原因（必填）', okText: '确认改判', validate: function(v){ if (!String(v || '').trim()) return '改判驳回须填写原因。'; }, onOk: function(v){
       var reason = String(v || '').trim();
       if (!reason) { toast('改判驳回须填写原因。'); return; }
-      api('/admin/api/appeals/reject', { username: u, appealId: aid, decision: 'reject', reason: reason, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); });
+      api('/admin/api/appeals/reject', { username: u, appealId: aid, decision: 'reject', reason: reason, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
     }});
   }
 }
@@ -538,7 +538,7 @@ function loadLicense(){
       var act = this.getAttribute('data-review-act'), rid = this.getAttribute('data-r');
       var labels = { violation: '裁决违规成立：将对涉事两个账号永久封禁并封禁该设备码。', dismissed: '裁决不成立：关闭记录，不留封禁。', escalate: '标记为拿不准、转站长裁决（记录保持待审）。' };
       showModal('设备异常裁决', labels[act] || '', { okText: '确认', onOk: function(){
-        api('/admin/api/license/review-decide', { reviewId: rid, decision: act }).then(function(r){ toast(r.msg || (r.ok ? '已处理。' : '处理未成功。')); loadLicense(); loadUsers(); });
+        api('/admin/api/license/review-decide', { reviewId: rid, decision: act }).then(function(r){ toast(r.msg || (r.ok ? '已处理。' : '处理未成功。')); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
       }});
     };
     var obtns2 = document.querySelectorAll('button[data-review-override]');
@@ -546,7 +546,7 @@ function loadLicense(){
       var act2 = this.getAttribute('data-review-override'), rid2 = this.getAttribute('data-r');
       var labels2 = { violation: '改判违规成立：将对涉事账号永久封禁并封禁该设备码（原不成立结论留痕）。', dismissed: '改判不成立：将解除本记录产生的封禁并恢复被回收密钥（原违规结论留痕）。' };
       showModal('设备异常改判', labels2[act2] || '', { okText: '确认改判', onOk: function(){
-        api('/admin/api/license/review-decide', { reviewId: rid2, decision: act2, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadLicense(); loadUsers(); });
+        api('/admin/api/license/review-decide', { reviewId: rid2, decision: act2, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
       }});
     };
     var ubtns = document.querySelectorAll('button[data-ban-unban]');
@@ -555,7 +555,7 @@ function loadLicense(){
       showModal('直接解封', tt === 'account'
         ? '确定直接解除对「' + tgt + '」的封禁吗？该账号共有 ' + cntB + ' 条生效中的封禁，确认后将一并全部解除，关联回收密钥将按规恢复，全程留痕。'
         : '确定直接解除对「' + tgt + '」的这条封禁吗？该对象共有 ' + cntB + ' 条生效中的封禁，本次仅解除所点这一条，其余请逐条解除，全程留痕。', { okText: '确认解封', onOk: function(){
-        api('/admin/api/license/unban', { banId: bid }).then(function(r){ toast(r.msg || (r.ok ? '已解封。' : '解封未成功。')); loadLicense(); loadUsers(); });
+        api('/admin/api/license/unban', { banId: bid }).then(function(r){ toast(r.msg || (r.ok ? '已解封。' : '解封未成功。')); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
       }});
     };
   }).catch(function(){ $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; });
@@ -592,7 +592,7 @@ $('lic-issue-btn').onclick = function(){
   var licPlanLabel = plan;
   if (licSel && licSel.selectedIndex > -1 && licSel.options[licSel.selectedIndex]) licPlanLabel = licSel.options[licSel.selectedIndex].textContent;
   showModal('发放密钥', '确定给「' + u + '」发放 ' + licPlanLabel + ' 密钥吗？来源：' + (src.value === 'paid' ? '付费购买入账（开通网页版）' : '免费发放（不开通网页版）') + '。', { okText: '确认发放', onOk: function(){
-    api('/admin/api/license/issue', { username: u, plan: plan, source: src.value }).then(function(r){ toast(r.msg || (r.ok ? '已发放。' : '发放未成功。')); if (r.ok) loadLicense(); });
+    api('/admin/api/license/issue', { username: u, plan: plan, source: src.value }).then(function(r){ toast(r.msg || (r.ok ? '已发放。' : '发放未成功。')); if (r.ok) loadLicense(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
   }});
 };
 
@@ -709,14 +709,14 @@ function onSupportAction(){
   var act = this.getAttribute('data-support-act'), tid = this.getAttribute('data-t');
   if (act === 'close') {
     showModal('关闭工单', '确定关闭这张工单吗？关闭后，该会话结束转人工状态，用户可重新发起咨询。', { okText: '确认关闭', onOk: function(){
-      api('/support/api/admin/close', { ticketId: tid }).then(function(r){ toast(r.msg || (r.ok ? '工单已关闭。' : '关闭没有成功。')); loadSupportInbox(); });
+      api('/support/api/admin/close', { ticketId: tid }).then(function(r){ toast(r.msg || (r.ok ? '工单已关闭。' : '关闭没有成功。')); loadSupportInbox(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
     }});
     return;
   }
   showModal('回复工单', '回复内容将以「人工客服」的名义显示在用户的客服会话中。', { input: true, inputPlaceholder: '请输入回复内容', okText: '发送回复', validate: function(v){ if (!String(v || '').trim()) return '回复内容不能为空。'; }, onOk: function(v){
     var text = String(v || '').trim();
     if (!text) { toast('回复内容不能为空。'); return; }
-    api('/support/api/admin/reply', { ticketId: tid, text: text }).then(function(r){ toast(r.msg || (r.ok ? '回复已发送。' : '回复没有成功。')); loadSupportInbox(); });
+    api('/support/api/admin/reply', { ticketId: tid, text: text }).then(function(r){ toast(r.msg || (r.ok ? '回复已发送。' : '回复没有成功。')); loadSupportInbox(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
   }});
 }
 
@@ -736,7 +736,7 @@ function loadPayOrders(){
     if (!list.length) h += '<p class="empty">暂无待处理订单。</p>';
     list.forEach(function(o){
       h += '<div class="row"><div class="who"><div class="meta">' + esc(o.username || '') + ' · ' + esc(o.planName || '') + ' · ' + o.amount + ' 元 · ' + (o.method === 'wechat' ? '微信' : '支付宝') + ' · ' + esc(o.statusText || '') + (o.stage ? '（第 ' + o.stage + ' 审）' : '') + '</div>'
-        + '<div class="meta">单号 ' + esc(o.id) + (o.orderNo ? ' · 付款订单号 ' + esc(o.orderNo) : '') + ' · ' + new Date(o.createdAt).toLocaleString('zh-CN', { hour12: false }) + '</div></div>';
+        + '<div class="meta">单号 ' + esc(o.id) + (o.orderNo ? ' · 付款订单号 ' + esc(o.orderNo) : '') + ' · ' + fmtTime(o.createdAt) + '</div></div>';
       if (o.status === 'reviewing') {
         h += '<a class="btn ghost" href="/admin/api/orders/' + encodeURIComponent(o.id) + '/screenshot" target="_blank" rel="noopener">看截图</a>'
           + '<button class="btn" data-po-act="approve" data-id="' + esc(o.id) + '">' + (o.stage === 2 ? '二审通过（结案）' : '一审通过（发钥）') + '</button>'
@@ -755,7 +755,7 @@ function loadPayOrders(){
         var act = el.getAttribute('data-po-act'), id = el.getAttribute('data-id');
         var label = act === 'approve' ? '确认裁定通过？' : (act === 'fake' ? '确认判假？将封禁该账号并回收其密钥。' : '确认驳回该订单？');
         if (!confirm(label)) return;
-        api('/admin/api/orders/decide', { orderId: id, decision: act }).then(function(rr){ toast(rr.ok ? '已处理。' : (rr.msg || '处理未成功。')); loadPayOrders(); loadLicense(); });
+        api('/admin/api/orders/decide', { orderId: id, decision: act }).then(function(rr){ toast(rr.ok ? '已处理。' : (rr.msg || '处理未成功。')); loadPayOrders(); loadLicense(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
       };
     });
   }).catch(function(){ $('payOrders').innerHTML = '<p class="empty">订单加载失败，请刷新页面重试。</p>'; });
@@ -768,18 +768,18 @@ function loadAssistantApi(){
     var h = '<div class="row"><div class="who"><div class="meta">待处理计数</div><div>' + Object.keys(names).map(function(k){ return names[k] + ' ' + (r.counts[k] || 0); }).join(' · ') + '</div></div></div>';
     var t = r.token || {};
     h += '<div class="row"><div class="who"><div class="meta">助手令牌</div><div>状态：' + esc(t.status === 'active' ? '已启用' : (t.status === 'revoked' ? '已吊销' : '未生成'))
-      + (t.createdAt ? ' · 生成于 ' + new Date(t.createdAt).toLocaleString('zh-CN', { hour12: false }) : '')
-      + (t.lastUsedAt ? ' · 最近调用 ' + new Date(t.lastUsedAt).toLocaleString('zh-CN', { hour12: false }) : ' · 尚无调用')
+      + (t.createdAt ? ' · 生成于 ' + fmtTime(t.createdAt) : '')
+      + (t.lastUsedAt ? ' · 最近调用 ' + fmtTime(t.lastUsedAt) : ' · 尚无调用')
       + '<br>明文文件：' + esc(t.plainFile || '') + '（600 权限，助手经 SSH 自取）</div></div>'
       + '<button class="btn" id="tokGen" type="button">' + (t.status === 'active' ? '重置令牌' : '生成令牌') + '</button>'
       + (t.status === 'active' ? '<button class="btn danger" id="tokRev" type="button">吊销</button>' : '') + '</div>';
     if (r.recentDone && r.recentDone.length) {
       h += '<h2 style="margin-top:14px">最近已处理</h2>';
-      r.recentDone.forEach(function(e){ h += '<div class="row"><div class="who"><div class="meta">' + esc(names[e.type] || e.type) + ' · ' + esc(e.refId) + ' · ' + esc(e.handledBy || '') + ' · ' + esc(adminLabel(TXT_RESULT, e.result || '')) + ' · ' + (e.handledAt ? new Date(e.handledAt).toLocaleString('zh-CN', { hour12: false }) : '') + '</div></div></div>'; });
+      r.recentDone.forEach(function(e){ h += '<div class="row"><div class="who"><div class="meta">' + esc(names[e.type] || e.type) + ' · ' + esc(e.refId) + ' · ' + esc(e.handledBy || '') + ' · ' + esc(adminLabel(TXT_RESULT, e.result || '')) + ' · ' + (e.handledAt ? fmtTime(e.handledAt) : '') + '</div></div></div>'; });
     }
     box.innerHTML = h;
-    var g = $('tokGen'); if (g) g.onclick = function(){ if (!confirm('生成/重置令牌后，旧令牌立即失效，助手需重新经 SSH 领取新令牌。继续？')) return; api('/admin/api/assistant/token', { action: 'generate' }).then(function(rr){ toast(rr.ok ? '令牌已生成，明文已写入服务器文件。' : '生成失败。'); loadAssistantApi(); }); };
-    var v = $('tokRev'); if (v) v.onclick = function(){ if (!confirm('吊销后助手接口立即不可用。继续？')) return; api('/admin/api/assistant/token', { action: 'revoke' }).then(function(rr){ toast(rr.ok ? '已吊销。' : '吊销失败。'); loadAssistantApi(); }); };
+    var g = $('tokGen'); if (g) g.onclick = function(){ if (!confirm('生成/重置令牌后，旧令牌立即失效，助手需重新经 SSH 领取新令牌。继续？')) return; api('/admin/api/assistant/token', { action: 'generate' }).then(function(rr){ toast(rr.ok ? '令牌已生成，明文已写入服务器文件。' : '生成失败。'); loadAssistantApi(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); }) };
+    var v = $('tokRev'); if (v) v.onclick = function(){ if (!confirm('吊销后助手接口立即不可用。继续？')) return; api('/admin/api/assistant/token', { action: 'revoke' }).then(function(rr){ toast(rr.ok ? '已吊销。' : '吊销失败。'); loadAssistantApi(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); }) };
   }).catch(function(){ $('assistantApi').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
 }
 

@@ -502,6 +502,7 @@ const BanLock = {
     const shell = document.getElementById('shellRoot');
     if (shell) shell.hidden = true;
     root.hidden = false;
+    var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（锁定界面显根路径同口径，门二观察项）
     try {
       const st = this.state;
       const d = this.data || null;
@@ -981,6 +982,7 @@ function showShell() {
   if (BanLock.active()) return;   // 防止 showShell 掀掉锁定界面的 authRoot
   $('#authRoot').hidden = true;
   $('#shellRoot').hidden = false;
+  var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（内联脚本被拦截时的双保险）
   if (!location.hash) location.hash = '#home';
   render();
 }
@@ -988,6 +990,7 @@ function showAuth(kind, extra) {
   $('#shellRoot').hidden = true;
   const root = $('#authRoot');
   root.hidden = false;
+  var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（内联脚本被拦截时的双保险）
   if (kind === 'register') return Views.register(root, extra);
   if (kind === 'gate') return Views.gate(root, extra);
   const lp = Views.login(root, extra);

@@ -118,7 +118,7 @@
                                 </tr>
                                 <tr id="qfBuyKeyRow">
                                     <td>
-                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;background:#111;color:#fff;font-size:14px;font-weight:600;border-radius:4px;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
+                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;color:#fff;font-size:14px;font-weight:600;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
                                     </td>
                                 </tr>
                                 <tr id="qfQueryKeyRow">
@@ -473,7 +473,7 @@
             var i;
             var messageid = parseInt('{{{messageid}}}');
             var okmessages = ['', "如账号有效，重置邮件已发送。", "邮件已发送。", "需要验证邮箱，请查收邮件并点击确认链接。", "短信已发送。", "正在发送通知…", "消息已发送。"];
-            var failmessages = ["无法创建账号。", "账号数量已达上限。", "该邮箱已被注册。", "创建口令不正确，请检查后重试。", "该账号名已被使用。", "密码不符合要求，请换一个重试。", "邮箱格式不正确，请检查后重试。", "账号不存在，请检查后重试。", "验证码不正确，请检查后重试。", "邮件发送失败，请稍后再试。", "账号已被锁定，请联系站长。", "访问被拒绝。", "登录失败，请检查账号和密码后重试。", "已申请修改密码。", "本 IP 已被暂时限制，请稍后再试。", "服务器维护中，请稍后再试。", "设备通知发送失败，请稍后再试。", "安全验证未通过，请检查后重试。"];
+            var failmessages = ["无法创建账号。", "账号数量已达上限。", "该邮箱已被注册。", "创建口令不正确，请检查后重试。", "该账号名已被使用。", "密码不符合要求，请更换后重试。", "邮箱格式不正确，请检查后重试。", "账号不存在，请检查后重试。", "验证码不正确，请检查后重试。", "邮件发送失败，请稍后再试。", "账号已被锁定，请联系站长。", "访问被拒绝。", "登录失败，请检查账号和密码后重试。", "已申请修改密码。", "本 IP 已被暂时限制，请稍后再试。", "服务器维护中，请稍后再试。", "设备通知发送失败，请稍后再试。", "安全验证未通过，请检查后重试。"];
             if (messageid > 0) {
                 var msg = '';
                 if ((messageid < 100) && (messageid < okmessages.length)) { msg = okmessages[messageid]; }
@@ -959,12 +959,12 @@
         function passwordPolicyText(pass) {
             var policy = '<div style=text-align:left>';
             var counts = strCount(pass);
-            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("Minimum length of {0}", passRequirements.min) + '<br />'; }
-            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("Maximum length of {0}", passRequirements.max) + '<br />'; }
-            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("{0} upper case", passRequirements.upper) + '<br />'; }
-            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("{0} lower case", passRequirements.lower) + '<br />'; }
-            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("{0} numeric", passRequirements.numeric) + '<br />'; }
-            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("{0} non-alphanumeric", passRequirements.nonalpha) + '<br />'; }
+            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("至少 {0} 个字符", passRequirements.min) + '<br />'; }
+            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("最多 {0} 个字符", passRequirements.max) + '<br />'; }
+            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("至少 {0} 个大写字母", passRequirements.upper) + '<br />'; }
+            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("至少 {0} 个小写字母", passRequirements.lower) + '<br />'; }
+            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("至少 {0} 个数字", passRequirements.numeric) + '<br />'; }
+            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("至少 {0} 个符号（非字母数字字符）", passRequirements.nonalpha) + '<br />'; }
             policy += '</div>';
             return policy;
         }

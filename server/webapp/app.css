@@ -129,8 +129,8 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 #toasts{position:fixed;top:var(--sp-4);left:50%;transform:translateX(-50%);z-index:var(--z-toast);display:flex;flex-direction:column;gap:var(--sp-2);width:min(440px,92vw)}
 .toast{background:#fff;border:1px solid var(--line);border-left:4px solid var(--brand);border-radius:var(--r);padding:var(--sp-3) var(--sp-4);font-size:var(--fs-14);color:var(--tx);line-height:var(--lh-body);box-shadow:0 10px 30px rgba(11,26,51,.18)}
 .toast.ok{border-left-color:var(--ok)}.toast.err{border-left-color:var(--err)}.toast.warn{border-left-color:var(--warn)}
-#modalRoot .mask{position:fixed;inset:0;background:rgba(11,26,51,.45);z-index:var(--z-modal);display:grid;place-items:center;padding:var(--sp-5)}
-#modalRoot .modal{background:#fff;border-radius:var(--r);max-width:460px;width:100%;padding:var(--sp-6)}
+#modalRoot .mask{position:fixed;inset:0;background:rgba(11,26,51,.45);z-index:var(--z-modal);display:grid;place-items:center;padding:var(--sp-5);overflow-y:auto}
+#modalRoot .modal{background:#fff;border-radius:var(--r);max-width:460px;width:100%;padding:var(--sp-6);max-height:calc(100vh - (var(--sp-5) * 2));max-height:calc(100dvh - (var(--sp-5) * 2));overflow-y:auto}
 #modalRoot .modal h3{font-size:var(--fs-16);color:var(--navy);margin-bottom:var(--sp-3);line-height:var(--lh-title)}#modalRoot .modal p{font-size:var(--fs-14);color:var(--tx);margin-bottom:var(--sp-4);line-height:var(--lh-body)}
 #modalRoot .mops{display:flex;gap:var(--sp-3);justify-content:flex-end}
 @media(max-width:760px){
@@ -159,7 +159,7 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
   .chatwrap.showthread .chatpane-list{display:none}
   .chatback{display:inline-flex;align-items:center;gap:var(--sp-2);margin-bottom:var(--sp-3)}
   .chatback svg{width:16px;height:16px;transform:scaleX(-1)}
-  .chatwrap .framebox iframe{height:min(560px,calc(100dvh - 380px));min-height:400px}
+  .chatwrap .framebox iframe{height:max(0px,min(560px,calc(100dvh - 380px)));min-height:min(400px,max(0px,calc(100dvh - 380px)))}
 }
 
 /* 论坛帖子详情 */
@@ -187,7 +187,7 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 .cht-hmain b{font-size:var(--fs-15);line-height:var(--lh-tight)}
 .cht-sub{font-size:var(--fs-12);color:var(--sub);line-height:var(--lh-body)}
 .cht-read{font-size:var(--fs-12);color:var(--sub);white-space:nowrap;line-height:var(--lh-body)}
-.cht-msgs{height:min(560px,calc(100dvh - 380px));min-height:320px;overflow-y:auto;padding:var(--sp-3) var(--sp-1)}
+.cht-msgs{height:max(0px,min(560px,calc(100dvh - 380px)));min-height:min(320px,max(0px,calc(100dvh - 380px)));overflow-y:auto;padding:var(--sp-3) var(--sp-1)}
 .cht-msg{display:flex;flex-direction:column;margin:var(--sp-3) 0;max-width:100%}
 .cht-msg.me{align-items:flex-end}
 .cht-msg.peer{align-items:flex-start}
