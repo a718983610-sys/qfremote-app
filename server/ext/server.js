@@ -2307,7 +2307,7 @@ const server = http.createServer(async (req, res) => {
       const qname = u.searchParams.get('name');
       if (!qname || !String(qname).trim()) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '请提供要查找的设备名称。' });
       const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req));
-      return sendJson(res, 200, resolveDeviceByName(nodesByMesh, String(qname)));
+      return sendJson(res, 200, resolveDeviceByName(nodesByMesh, String(qname).trim()));   // DS P2-6：校验已 trim、匹配亦须 trim 后统一口径（原传原串致带空格名 NOT_FOUND）
     }
     if (req.method === 'GET' && p === '/home/api/login-devices') {
       const auth = await resolveAuth(req);
