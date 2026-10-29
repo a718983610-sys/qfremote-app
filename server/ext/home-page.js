@@ -418,7 +418,7 @@ document.querySelectorAll('[data-nav]').forEach(function(el){ el.addEventListene
   if(k==='home'){ window.scrollTo({top:0,behavior:'smooth'}); return; }
   if(k==='console'){ goto('/'); return; }
   if(k==='admin'){ goto('/admin'); return; }
-  if(k==='site'){ window.open('https://a718983610-sys.github.io/qfremote-website/','_blank','noopener'); return; }
+  if(k==='site'){ window.open('https://qfremote.top/','_blank','noopener'); return; }
   if(k==='update'){ checkUpdate(true); return; }
   if(k==='logout'){ doLogout(); return; }
   openPanel(k);
@@ -553,7 +553,8 @@ document.querySelectorAll('[data-lic]').forEach(function(el){ el.addEventListene
     return;
   }
   if(k==='slots'){ var m=window.__qfMe||{}; var s=m.slots||{pc:0,mobile:0}; showDialog('我的设备名额','<p>电脑：'+s.pc+' / '+(s.pcMax||2)+' · 手机：'+s.mobile+' / '+(s.mobileMax||1)+'</p><p>一枚密钥可绑定两台电脑与一部手机；超出名额的设备需另行购买密钥。</p>'); return; }
-  if(k==='web'){ var m2=window.__qfMe||{}; var webBody = m2.webEnabled ? (m2.webBy==='trial' ? '您的账号处于免费试用期，网页版已开通，可在任意设备登录使用；试用到期后，网页版需真实付费购买密钥后继续使用。' : '您的账号已真实付费购买密钥，网页版已开通，可在任意设备登录使用。') : '网页版为真实付费购买密钥后开通的权益。您当前尚未开通，真实付费购买后即可在任意设备登录使用。'; showDialog('网页版权益','<p>'+webBody+'</p>'); return; }
+  // DS-R23 P2-2：webBy 缺失/未知时只述开通事实，不再断言已付费购买
+  if(k==='web'){ var m2=window.__qfMe||{}; var webBody = m2.webEnabled ? (m2.webBy==='trial' ? '您的账号处于免费试用期，网页版已开通，可在任意设备登录使用；试用到期后，网页版需真实付费购买密钥后继续使用。' : (m2.webBy==='paid' ? '您的账号已真实付费购买密钥，网页版已开通，可在任意设备登录使用。' : '您的账号已开通网页版，可在任意设备登录使用。')) : '网页版为真实付费购买密钥后开通的权益。您当前尚未开通，真实付费购买后即可在任意设备登录使用。'; showDialog('网页版权益','<p>'+webBody+'</p>'); return; }
 });});
 
 /* ----- #49 付费入口分流（按 keyPlan/keyLifecycle 调整 activate/buy 两行，幂等） ----- */
@@ -580,7 +581,7 @@ $('moreRows').innerHTML=MORE.map(function(m){ return '<button class="row'+(m[0]=
 document.querySelectorAll('[data-more]').forEach(function(el){ el.addEventListener('click',function(){
   var k=el.getAttribute('data-more');
   if(k==='update'){ checkUpdate(true); return; }
-  if(k==='site'){ window.open('https://a718983610-sys.github.io/qfremote-website/','_blank','noopener'); return; }
+  if(k==='site'){ window.open('https://qfremote.top/','_blank','noopener'); return; }
   if(k==='about'){ var v=releaseInfo?(releaseInfo.version||''):''; showDialog('关于 QFRemote','<p>QFRemote · 让远程连接更简单</p><p>当前版本：'+esc(v||'读取中')+'</p>'); return; }
   if(k==='logout'){ doLogout(); return; }
 });});

@@ -2717,7 +2717,7 @@ const server = http.createServer(async (req, res) => {
         const st = lic.state();
         const banActiveByTarget = {};
         for (const b of st.bans) { if (b.status === 'active') { const tk = b.targetType + '|' + b.target; banActiveByTarget[tk] = (banActiveByTarget[tk] || 0) + 1; } }
-        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), banActiveByTarget, orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
+        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans, banActiveByTarget, orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
       }
       // ===== 截图付款订单审核（#21：站长侧含二审到账核对；一审亦可在此处理） =====
       if (req.method === 'GET' && p === '/admin/api/orders') {
@@ -2760,7 +2760,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/admin/api/assistant/token') {
         const body = await readJsonBody(req);
         const action = String(body.action || '');
-        const tokRole = String(body.role || 'assistant') === 'owner' ? 'owner' : 'assistant';
+        const roleRaw = body.role == null ? 'assistant' : String(body.role).trim();
+        if (roleRaw !== 'assistant' && roleRaw !== 'owner') return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'role 参数不合法。' });
+        const tokRole = roleRaw; // DS-R26 P3-1：role 白名单化，非法值显式拒绝、不再静默落 assistant
         if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });

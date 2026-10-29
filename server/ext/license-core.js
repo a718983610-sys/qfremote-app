@@ -666,6 +666,15 @@ function createLicenseCore(opts) {
     // G5 附带最近到期点，供三端拦截面渲染「已于 X 到期」（裁决批①）
     const g5ExpiryMs = (() => { const xs = accountKeys(username).filter((k) => k.lifecycle === 'expired' && k.plan !== 'trial' && k.expiresBaseMs); return xs.length ? Math.max.apply(null, xs.map((k) => effectiveExpiry(k, now))) : null; })();
     const expiredTrial = accountKeys(username).some((k) => k.lifecycle === 'expired' && k.plan === 'trial');
+    // DS-R23 P3-1：试用窗到期时间只认有限数值——expiresMs 缺失/null 时 null 会被 <= 误判为已过期；
+    // G2 携带的到期时间优先取试用窗记录，缺失时从已过期试用钥的实际到期点回收，再缺为 null。
+    const g2TrialExpiresMs = (winExp) => {
+      if (winExp !== null && winExp !== undefined) return winExp;
+      const tk = accountKeys(username).find((x) => x.lifecycle === 'expired' && x.plan === 'trial');
+      if (!tk) return null;
+      const e = effectiveExpiry(tk, now);
+      return (typeof e === 'number' && isFinite(e)) ? e : null;
+    };
     // 转赠领取后原主人回 G1（站长 2026-10-25 17:29 定版）：名下已无有效密钥、
     // 无其他按天过期钥（那是 G5）、试用也不在有效期内时，一律按未激活 G1
     // 拦截并带 forceLogout 标志——不再落 G2/G4。标记在领取落盘时置位
@@ -694,9 +703,10 @@ function createLicenseCore(opts) {
       // 边界：用 <= now 判过期，与 software/qfclash 等号口径一致，且不依赖 lazyExpireKeys
       // 何时把试用钥翻成 expired；名下仍有非试用已激活钥（如赠送钥）时不下 G2，让其落 G4
       // 走「免费来源钥不含网页版」文案。
-      const trialOver = expiredTrial || (acct.trial && acct.trial.expiresMs <= now);
+      const trialWinExp = (acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs)) ? acct.trial.expiresMs : null;
+      const trialOver = expiredTrial || (trialWinExp !== null && trialWinExp <= now);
       const hasActivatedNonTrial = gateKeys.some((k) => k.plan !== 'trial');
-      if (trialOver && !hasActivatedNonTrial) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+      if (trialOver && !hasActivatedNonTrial) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs(trialWinExp) });
       // 存量老用户（无试用、无任何密钥记录）在网页端同样走 G1（设计稿 G1 拦截面含网页版）；
       // 免费来源持钥者走 G4。
       if (!hasAnyKey && !acct.trial) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
@@ -710,7 +720,7 @@ function createLicenseCore(opts) {
       if (acct.trial && acct.trial.expiresMs > now) return Object.assign(base, { allow: true, code: 'OK', trial: true, trialExpiresMs: acct.trial.expiresMs });
       if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
       if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
-      if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+      if (expiredTrial || (acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs) && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs((acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs)) ? acct.trial.expiresMs : null) });
       return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     }
     // software 渠道
@@ -727,7 +737,7 @@ function createLicenseCore(opts) {
     if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     // 付费钥过期优先判 G5（已付费用户），无付费钥过期才落 G2——两状态严格区分（17:01 定版）
     if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
-    if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+    if (expiredTrial || (acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs) && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs((acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs)) ? acct.trial.expiresMs : null) });
     return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
   }
 

@@ -401,7 +401,7 @@ const BanLock = {
     this.stopTimer();
     this.state = 'expired';
     this.reason = (reason === 'locked') ? 'locked' : 'died';
-    S.auth = 'out'; S.license = null; S.points = null;
+    S.auth = 'out'; S.license = null; S.points = null; S.isAdmin = false; // DS-R24 B3：已结束页不得残留管理后台入口
     try { Cache.clear(); } catch (e) {}
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
     this.paint();
@@ -733,6 +733,7 @@ async function heartbeat() {
   if (S.auth !== 'in') return;
   if (BanLock.active()) return;
   const r = await api('/points/api/heartbeat', { method: 'POST', json: { client: 'web-console-shadow' } });
+  if (S.auth !== 'in') return; // DS-R24 B2：等待期间已主动退出登录，迟到响应不再接管呈现（防覆盖登录页）
   if (r.status === 200 && r.json) {
     if (r.json.forceLogout) { forceGate('G1'); return; }
     S.points = r.json; cacheSave();
@@ -1110,7 +1111,7 @@ Views.gate = function (root, extra) {
   extra = extra || {}; const me = extra.me || S.license || {};
   const conf = {
     G1: { t: '尚未激活', b: '本账号还没有激活密钥。在下方输入密钥即可激活；没有密钥可以先购买，或使用积分兑换的密钥。' },
-    G2: { t: '试用已到期', b: '免费试用已经结束。输入付费密钥或兑换密钥后即可继续使用。' },
+    G2: { t: '试用已到期', b: '免费试用已经结束。激活有效付费密钥后，即可继续使用网页版；积分兑换、赠送等免费来源密钥不包含网页版权益，无法用于开通网页版。' },
     G4: { t: '网页版尚未开通', b: '网页版需要真实付费购买密钥开通（赠送、活动发放与积分兑换等免费来源密钥不含网页版权益）。您仍可在软件端继续使用，或购买付费密钥后回到网页版。' },
     G5: { t: '密钥已过期', b: '您的密钥已于 ' + fmtDate(me.keyExpiresMs) + ' 到期。重新购买或兑换新密钥后即可继续使用。' },
     BAN: { t: '账号已被封禁', b: '封禁事由类别：' + esc((me.activeBan && (me.activeBan.category || me.activeBan.reason)) || '违反平台规则') + '。如有异议，可以提交申诉，审核结果将在申诉进度中显示。' },
