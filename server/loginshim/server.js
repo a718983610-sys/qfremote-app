@@ -284,10 +284,129 @@ function injectPopup(html, username) {
   return html + tag;
 }
 
+/* ===== whoami（2.4.0 前置翻牌契约，组装步 1 新增） =====
+ * GET /_qf_whoami —— 供前置 nginx 以 auth_request 子请求回填角色：
+ * 恒回 200，响应头 X-QF-Role: siteadmin|user|anon，绝不回 401/5xx。
+ * 判定机制与 ext/friends 同一：以请求 Cookie 的控制台会话（xid）开
+ * MeshCentral 控制通道，收到服务器主动下发的 userinfo 才算验真；
+ * userinfo.siteadmin === 4294967295（全权）→ siteadmin；其余验真
+ * 用户 → user；无会话/验不过/超时/任何异常 → anon（前置条 17 定案：
+ * 故障 fail-soft 落 anon，前置据此放行 SPA；站长例外在故障期失效、
+ * 可用性优先）。校验结果按 sha256(xid+'.'+xid.sig) 缓存 30 秒
+ * （照 ext 口径）：验真成功与服务器明拒（action=close）才入缓存，
+ * 超时/连接异常不缓存，避免引擎偶发迟缓把角色误冻 30 秒。缓存
+ * 上限 5000 条、写入前剪枝（照 ext DS-R02-① 口径），防根路径文档
+ * 请求每次都新开校验通道。本服务只听回环、nginx 侧 location 标
+ * internal 不对外，本端点只回角色字、不回任何账号信息。
+ */
+const WHOAMI_MC_URL = process.env.QFSHIM_MC_URL || 'wss://127.0.0.1:8443/control.ashx';
+const WHOAMI_SITEADMIN_FULL = 4294967295;
+let _whoamiWebSocket = null;
+function whoamiLoadWebSocket() {
+  if (_whoamiWebSocket) return _whoamiWebSocket;
+  try { _whoamiWebSocket = require('/opt/meshcentral/node_modules/ws'); }
+  catch (e) { _whoamiWebSocket = require('ws'); }
+  return _whoamiWebSocket;
+}
+function whoamiSessionIp(cookieHeader) {
+  try {
+    const jar = {};
+    String(cookieHeader || '').split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim(); });
+    if (!jar.xid) return null;
+    const obj = JSON.parse(Buffer.from(String(jar.xid), 'base64').toString('utf8'));
+    const ip = obj && obj.ip;
+    if (typeof ip === 'string' && ip.length <= 64 && /^[0-9a-fA-F.:%[\]]+$/.test(ip)) return ip;
+  } catch (e) { /* 解不出就走后备候选 */ }
+  return null;
+}
+const whoamiCache = new Map(); // sha256(xid+'.'+xid.sig) -> {at, role}
+const WHOAMI_CACHE_MAX = 5000;
+function whoamiCacheGet(key) {
+  const v = whoamiCache.get(key);
+  if (!v) return null;
+  if (Date.now() - v.at >= 30000) { whoamiCache.delete(key); return null; }
+  return v.role;
+}
+function whoamiCacheSet(key, role) {
+  const now = Date.now();
+  if (whoamiCache.size >= WHOAMI_CACHE_MAX) {
+    for (const [k, v] of whoamiCache) { if (!v || now - v.at >= 30000) whoamiCache.delete(k); }
+    while (whoamiCache.size >= WHOAMI_CACHE_MAX) {
+      const oldest = whoamiCache.keys().next();
+      if (oldest.done) break;
+      whoamiCache.delete(oldest.value);
+    }
+  }
+  whoamiCache.set(key, { at: now, role });
+}
+function whoamiConnectOnce(cookieHeader, timeoutMs, fwdIp) {
+  return new Promise((resolve, reject) => {
+    let WebSocket;
+    try { WebSocket = whoamiLoadWebSocket(); } catch (e) { reject(new Error('ws-unavailable')); return; }
+    const headers = { Cookie: cookieHeader, Origin: 'https://127.0.0.1:8443' };
+    if (fwdIp) headers['X-Forwarded-For'] = fwdIp;
+    const ws = new WebSocket(WHOAMI_MC_URL, { rejectUnauthorized: false, headers });
+    let done = false;
+    const timer = setTimeout(() => finish(new Error('mc-connect-timeout')), timeoutMs);
+    function finish(err, userinfo) {
+      if (done) return; done = true; clearTimeout(timer);
+      try { ws.close(); } catch (e) {}
+      if (err) reject(err); else resolve(userinfo);
+    }
+    ws.on('message', (data) => {
+      let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
+      if (m && m.action === 'userinfo' && m.userinfo) { finish(null, m.userinfo); return; }
+      // 服务器对无效/伪造会话立刻回 action=close：认这个信号秒拒（照 ext 口径）。
+      if (m && m.action === 'close') finish(new Error('mc-session-rejected'));
+    });
+    ws.on('error', () => finish(new Error('mc-conn-error')));
+    ws.on('close', () => finish(new Error('mc-auth-failed')));
+  });
+}
+async function whoamiResolveRole(req) {
+  const cookieHeader = String(req.headers.cookie || '');
+  const jar = {};
+  cookieHeader.split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim(); });
+  if (!jar.xid) return 'anon';
+  const key = crypto.createHash('sha256').update(String(jar.xid) + '.' + String(jar['xid.sig'] || '')).digest('hex');
+  const cached = whoamiCacheGet(key);
+  if (cached) return cached;
+  const candidates = [];
+  const sip = whoamiSessionIp(cookieHeader);
+  if (sip) candidates.push(sip);
+  const cip = clientIp(req);
+  if (cip && !candidates.includes(cip)) candidates.push(cip);
+  candidates.push(null);
+  let role = 'anon', cacheable = false;
+  for (const ip of candidates) {
+    try {
+      const info = await whoamiConnectOnce(cookieHeader, 500, ip);
+      role = (info && info.siteadmin === WHOAMI_SITEADMIN_FULL) ? 'siteadmin' : 'user';
+      cacheable = true;
+      break;
+    } catch (e) {
+      if (e && e.message === 'mc-session-rejected') { cacheable = true; break; }
+      if (e && e.message === 'mc-connect-timeout') break; // 超时不叠试（照 ext 口径）
+    }
+  }
+  if (cacheable) whoamiCacheSet(key, role);
+  return role;
+}
+function handleWhoami(req, res) {
+  const reply = (role) => {
+    try {
+      res.writeHead(200, { 'X-QF-Role': role, 'Cache-Control': 'no-store', 'Content-Length': '0' });
+      res.end();
+    } catch (e) { /* 子请求断开不外溢 */ }
+  };
+  whoamiResolveRole(req).then(reply).catch(() => reply('anon'));
+}
+
 const server = http.createServer((req, res) => {
   let pathname = req.url;
   try { pathname = new URL(req.url, 'http://localhost').pathname; } catch (e) {}
   if (pathname === '/internal/clear-freeze') return handleClearFreeze(req, res);
+  if (pathname === '/_qf_whoami') return handleWhoami(req, res);
   if (pathname === '/qf-login') return handleLogin(req, res);
   if (pathname === '/appeal' || pathname.startsWith('/appeal/')) return handleAppeal(req, res, pathname);
   const isLogout = pathname === '/logout' || pathname.startsWith('/logout/');
