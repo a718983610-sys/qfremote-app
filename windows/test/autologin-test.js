@@ -113,7 +113,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
         const cookie = req.headers.cookie || '';
         const alive = cookie.includes('xid=SESSION123');
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(alive ? '<html><body>控制台</body></html>' : '<html><body><form id="loginpanelform"></form></body></html>');
+        res.end(alive ? '<html><head><title>QFRemote 控制台</title></head><body><div id="masthead"></div><!-- 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding 控制台页面填充 console page padding -->控制台</body></html>' : '<html><body><form id="loginpanelform"></form></body></html>');
       }
     });
     await new Promise(r => server.listen(0, '127.0.0.1', r));
