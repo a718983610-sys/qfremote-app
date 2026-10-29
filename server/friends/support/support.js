@@ -28,9 +28,9 @@ const HISTORY_MAX = 10; // 会话上下文保留最近 10 条（约 5 轮），�
 // 集中一处维护，改口径只改这里与 kb-data 两处。）
 const RULES_231 = [
   '套餐价格：1 日 2 元、7 日 6 元、30 日 9.9 元、永久 18 元。',
-  '新用户注册免费试用 3 天（72 小时），仅限软件端（电脑版/手机版），试用期不能使用网页版。',
+  '新用户注册免费试用 3 天（72 小时），试用期内软件端（电脑版/手机版）与网页版均可使用。',
   '付费密钥自激活之日起计时，未激活不计时、不过期。',
-  '一枚密钥可绑定两台电脑加一台手机；网页版凭付费来源密钥开通。',
+  '一枚密钥可绑定两台电脑加一台手机；网页版凭付费来源密钥开通，账号在免费试用期内亦可使用；免费来源密钥（赠送、活动发放、积分兑换）不开通网页版。',
   '转赠：仅付费密钥可转赠，一把密钥只可转赠一次，方式为粘贴领取；未激活的付费密钥可转售，由买方粘贴激活。',
   '换绑：走登录页申诉换绑，在新设备提交，审核通过后同类替换。',
   '购买流程（截图审核付款）：选套餐 → 在本站支付页扫固定金额卡 → 点「支付成功」→ 上传账单截图（须露出订单号）→ 审核通过后发密钥；订单号一号一钥。',
@@ -174,23 +174,48 @@ function createEngine(deps) {
     if (session.history.length > HISTORY_MAX) session.history = session.history.slice(-HISTORY_MAX);
   }
 
+  // 许可状态（与 /license/api/me 同一事实源：license-core 写入的状态镜像，
+  // 含 displayStatus 与 activeBanCode）。读不到/无记录 → null，调用方回落旧源。
+  function licenseStateOf(account) {
+    if (!providers.getLicenseState) return Promise.resolve(null);
+    return providers.getLicenseState(account)
+      .then(s => (s && s.available && s.found) ? s : null)
+      .catch(() => null);
+  }
+
   function factsFor(kind, account) {
     // 只查本人：account 必须由调用方按身份判定后传入（会话用户或已核对账号）
     if (kind === 'freeze') {
-      return Promise.all([providers.getFreeze(account), providers.getAppeal(account)]).then(([f, a]) => {
-        if (!f.available && !a.available) return null;
+      return Promise.all([providers.getFreeze(account), providers.getAppeal(account), licenseStateOf(account)]).then(([f, a, lic]) => {
+        if (!f.available && !a.available && !lic) return null;
         const parts = [];
-        if (f.available) parts.push(f.frozen ? ('当前状态：今日已冻结（今日密码输错 ' + f.fails + ' 次），冻结至今天结束，次日零点自动解除') : ('当前状态：今日未冻结（今日密码输错 ' + (f.fails || 0) + ' 次）'));
+        if (lic && lic.activeBanCode) {
+          // 许可台账有生效中的封禁/冻结（站长冻结、梯度冻结、封禁）时以许可
+          // 状态为准：登录垫片只记 B1 当日输错冻结，拿它的「未冻结」覆盖
+          // 许可处置会误报（P7-012 同族防线）。文案用 /me 同源 displayStatus。
+          parts.push('当前状态：' + (lic.displayStatus || '账号受限'));
+        } else if (f.available) {
+          parts.push(f.frozen ? ('当前状态：今日已冻结（今日密码输错 ' + f.fails + ' 次），冻结至今天结束，次日零点自动解除') : ('当前状态：今日未冻结（今日密码输错 ' + (f.fails || 0) + ' 次）'));
+        }
         if (a.available) parts.push(a.status ? ('申诉状态：' + ({ pending: '审核中', approved: '已通过', rejected: '已驳回' }[a.status] || a.status)) : '申诉状态：暂无申诉记录');
+        if (!parts.length) return null;
         return parts.join('；');
       });
     }
     if (kind === 'appeal') {
-      return Promise.all([providers.getBan(account), providers.getAppeal(account)]).then(([b, a]) => {
-        if (!b.available && !a.available) return null;
+      return Promise.all([providers.getBan(account), providers.getAppeal(account), licenseStateOf(account)]).then(([b, a, lic]) => {
+        if (!b.available && !a.available && !lic) return null;
         const parts = [];
-        if (b.available) parts.push(b.banned ? '当前状态：账号为封禁状态' : '当前状态：账号未被封禁');
+        if (lic) {
+          // P7-012：封禁真值在许可台账（activeBan），旧 getBan 读的账号账本
+          // 不含此维度，曾把限时封禁误报「未被封禁」。状态文案直接用
+          // license-core 的 displayStatus（与 /me 逐字同源），不自编措辞。
+          parts.push('当前状态：' + (lic.displayStatus || (lic.activeBanCode ? '已封禁' : '正常')));
+        } else if (b.available) {
+          parts.push(b.banned ? '当前状态：账号为封禁状态' : '当前状态：账号未被封禁');
+        }
         if (a.available) parts.push(a.status ? ('申诉/留言处理状态：' + ({ pending: '审核中', approved: '已通过', rejected: '已驳回' }[a.status] || a.status)) : '申诉状态：暂无申诉记录');
+        if (!parts.length) return null;
         return parts.join('；');
       });
     }
@@ -198,8 +223,8 @@ function createEngine(deps) {
       if (!providers.getLicenseState) return Promise.resolve(null);
       return providers.getLicenseState(account).then(s => {
         if (!s.available) return null;
-        if (!s.found) return '当前状态：暂无许可记录（未购买密钥时软件端需激活；新注册账号有 3 天免费试用，仅限软件端）';
-        const parts = ['账户状态：' + (s.displayStatus || '正常'), '套餐：' + (s.planName || 'QFRemote 试用套餐'), '密钥：' + (s.maskedKey || '—'), '网页版：' + (s.webEnabled ? '已开通' : '未开通（网页版需真实付费购买密钥后开通）')];
+        if (!s.found) return '当前状态：暂无许可记录（未购买密钥时软件端需激活；新注册账号有 3 天免费试用，试用期内软件端与网页版均可使用）';
+        const parts = ['账户状态：' + (s.displayStatus || '正常'), '套餐：' + (s.planName || 'QFRemote 试用套餐'), '密钥：' + (s.maskedKey || '—'), '网页版：' + (s.webEnabled ? (s.webBy === 'trial' ? '已开通（试用期内；试用到期后需真实付费购买密钥继续使用）' : '已开通') : '未开通（网页版需真实付费购买密钥后开通）')];
         if (s.trialExpiresMs) parts.push('试用到期：' + new Date(s.trialExpiresMs).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }));
         if (s.keyExpiresMs) parts.push('密钥到期：' + new Date(s.keyExpiresMs).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }));
         return parts.join('；');
@@ -511,8 +536,16 @@ function createEngine(deps) {
     return { ok: true, follow };
   }
 
+  // 开场快捷提问（P7-013）：与独立客服页写死的开场 chips 同一组，保证
+  // 两张客服面同一组入口；形状 {id,label}，前端点选即按 pick 走 handlePick。
+  const WELCOME_PICKS = [
+    { id: 'F05', label: '账号被冻结了' },
+    { id: 'S01', label: '连不上自己的电脑' },
+    { id: 'F04', label: '忘记密码' },
+    { id: 'handoff', label: '转人工客服' }
+  ];
   function welcome(session) {
-    return reply('welcome', sysText('G01', session.tone));
+    return reply('welcome', sysText('G01', session.tone), { picks: WELCOME_PICKS.map(p => ({ id: p.id, label: p.label })) });
   }
 
   return { handleText, handlePick, verifyIdentity, welcome, newSession, rankEntries };

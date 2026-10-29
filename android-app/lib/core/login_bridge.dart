@@ -210,51 +210,58 @@ String buildLoginBridgeJs({
     }
   }
   // 2.3.1 登录页版式（16:37 定版）：登录区最后一行「购买密钥」黑底白字钮，
-  // 其下「查询密钥」蓝色无边框文字链。服务端登录页模板已注入同 id 的两行
-  // （隧道页即用它们），但其相对 href 在直连控制台源上指向本源路径、不可用；
-  // 壳的口径：页面已有这两行时只接管点击（改走原生层壳内打开扩展源的
-  // /purchase 与 /license/status），没有时才补注入同位同式的两行。
-  // 重复注入安全（qfWired / id 守卫）。
+  // 其下「查询密钥」「申诉换绑设备」蓝色无边框文字链。服务端登录页模板
+  // 已注入同 id 的三行（隧道页即用它们），但其相对 href 在直连控制台源
+  // 上指向本源路径、不可用；壳的口径：逐行处理——页面已有的行只接管
+  // 点击（改走原生层壳内打开扩展源的 /purchase、/license/status 与换绑
+  // 页），缺的行逐行补注入同位同式的壳行。逐行守卫保证：三行缺一不漏
+  // 补、只剩一行不重复注入（巡查 A-009，原实现整套二选一存在这两处
+  // 缺口）。重复注入安全（qfWired / id 守卫）。
   var srvBuy = document.getElementById('qfBuyKeyRow');
   var srvQuery = document.getElementById('qfQueryKeyRow');
   var srvRebind = document.getElementById('qfRebindRow');
-  if (srvRebind && !srvRebind.dataset.qfWired) {
-    srvRebind.dataset.qfWired = '1';
-    srvRebind.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'rebind' }); });
+  function wireRow(el, target) {
+    if (el && !el.dataset.qfWired) {
+      el.dataset.qfWired = '1';
+      el.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: target }); });
+    }
   }
-  if (srvBuy || srvQuery) {
-    if (srvBuy && !srvBuy.dataset.qfWired) {
-      srvBuy.dataset.qfWired = '1';
-      srvBuy.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'purchase' }); });
+  wireRow(srvBuy, 'purchase');
+  wireRow(srvQuery, 'status');
+  wireRow(srvRebind, 'rebind');
+  if (!srvBuy || !srvQuery || !srvRebind) {
+    var lbox = document.getElementById('qfLicenseRows');
+    if (!lbox) {
+      lbox = document.createElement('div');
+      lbox.id = 'qfLicenseRows';
+      lbox.style.cssText = 'box-sizing:border-box;width:280px;margin:14px auto 2px auto';
+      panel.appendChild(lbox);
     }
-    if (srvQuery && !srvQuery.dataset.qfWired) {
-      srvQuery.dataset.qfWired = '1';
-      srvQuery.addEventListener('click', function (e) { e.preventDefault(); call('$kHandlerLicenseNav', { target: 'status' }); });
+    if (!srvBuy && !document.getElementById('qfBuyKeyRowShell')) {
+      var buy = document.createElement('button');
+      buy.type = 'button';
+      buy.id = 'qfBuyKeyRowShell';
+      buy.textContent = '购买密钥';
+      buy.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:#111;color:#fff;border:0;border-radius:9px;padding:11px 0;font-size:15px;cursor:pointer';
+      buy.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'purchase' }); });
+      lbox.appendChild(buy);
     }
-  } else if (!document.getElementById('qfLicenseRows')) {
-    var lbox = document.createElement('div');
-    lbox.id = 'qfLicenseRows';
-    lbox.style.cssText = 'box-sizing:border-box;width:280px;margin:14px auto 2px auto';
-    var buy = document.createElement('button');
-    buy.type = 'button';
-    buy.id = 'qfBuyKeyRowShell';
-    buy.textContent = '购买密钥';
-    buy.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:#111;color:#fff;border:0;border-radius:9px;padding:11px 0;font-size:15px;cursor:pointer';
-    buy.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'purchase' }); });
-    var query = document.createElement('div');
-    query.id = 'qfQueryKeyRowShell';
-    query.textContent = '查询密钥';
-    query.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0';
-    query.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'status' }); });
-    var rebind = document.createElement('div');
-    rebind.id = 'qfRebindRowShell';
-    rebind.textContent = '申诉换绑设备';
-    rebind.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:4px 0 2px 0;cursor:pointer;background:none;border:0';
-    rebind.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'rebind' }); });
-    lbox.appendChild(buy);
-    lbox.appendChild(query);
-    lbox.appendChild(rebind);
-    panel.appendChild(lbox);
+    if (!srvQuery && !document.getElementById('qfQueryKeyRowShell')) {
+      var query = document.createElement('div');
+      query.id = 'qfQueryKeyRowShell';
+      query.textContent = '查询密钥';
+      query.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0';
+      query.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'status' }); });
+      lbox.appendChild(query);
+    }
+    if (!srvRebind && !document.getElementById('qfRebindRowShell')) {
+      var rebind = document.createElement('div');
+      rebind.id = 'qfRebindRowShell';
+      rebind.textContent = '申诉换绑设备';
+      rebind.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:4px 0 2px 0;cursor:pointer;background:none;border:0';
+      rebind.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'rebind' }); });
+      lbox.appendChild(rebind);
+    }
   }
   if (!FILL || !HAS_SAVED) return 'hooks-only';
   var uEl = document.getElementById('username');

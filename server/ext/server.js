@@ -95,7 +95,7 @@ const MCDB = process.env.QFEXT_MCDB || '/opt/meshcentral/account-kit/mcdb.js';
 const RENAME_SH = process.env.QFEXT_RENAME_SH || '/opt/meshcentral/account-kit/rename-account.sh';
 
 const payOrders = createOrdersCore({ dir: LIC_DIR, lic, log });
-const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt' });
+const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt', ownerTokenPlainFile: process.env.QFEXT_OWNER_TOKEN_FILE || '/opt/qfremote-ext/owner-api-token.txt' });
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
 try {
@@ -341,6 +341,43 @@ function noteLedgerLock(username, locking, by) {
     try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
   } catch (e) { log({ ev: 'ledger-lock-note-error', target: username, err: String(e && e.message) }); }
 }
+// 解封/解冻收尾写回：许可侧封禁全清后，把 qf-account-ledger 的残留
+// 标记一并清掉——frozen 残留（全权账号在 licUnlockAccount 走
+// guardCheck 早退、在线通道不写台账，残留 frozen=true 会让状态面
+// 继续误报冻结，2026-10-26 站长本人误封案实证：解封后该标记未回
+// 写）与 banned 旧旗（mcdb 时代标志，ext 内现已无写方、仅
+// buildUsersList 读作显示与台账独有行门槛，许可台账无生效封禁时
+// 它就是过期残留，不清则「已封禁」标签永不消失且无钮可解）。
+// 仅当台账已有该账号条目且对应标记为 true 时才写，不新建条目、
+// 不动其他字段；写形与 noteLedgerLock 一致（同 tmp 名、同 chown）。
+function clearLedgerResidue(username, by, errBox) {
+  try {
+    const ledger = loadLedger();
+    const e = ledger.accounts[username];
+    if (!e) return false;
+    let changed = false;
+    e.history = e.history || [];
+    if (e.frozen === true) { e.frozen = false; e.history.push({ ev: 'unfreeze', at: new Date().toISOString(), by }); changed = true; }
+    if (e.banned === true) { e.banned = false; e.history.push({ ev: 'unban', at: new Date().toISOString(), by }); changed = true; }
+    if (!changed) return false;
+    const tmp = LEDGER_FILE + '.tmp-ext';
+    fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
+    fs.renameSync(tmp, LEDGER_FILE);
+    try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
+    return true;
+  } catch (e) {
+    // DS-R21：写盘/读盘失败与「无条目/无残留」必须可区分——经 errBox
+    // 如实上抛，调用方不得再把故障误回成 404「账号不存在」。旧调用
+    // 方不传 errBox 时行为不变（仍回 false）。errBox 只带错误码不带
+    // 异常原文（DS 差量审 P3：fs 异常原文含服务器绝对路径，不许透
+    // 传到前端回执，原文只进日志）。失败时不删 .tmp-ext：该 tmp 名
+    // 与 noteLedgerLock 共用固定后缀，无条件删可能误伤并发写盘；残
+    // 留 tmp 会被下一次写盘截断覆盖，无害（DS 差量审 D4）。
+    log({ ev: 'ledger-residue-clear-error', target: username, err: String(e && e.message) });
+    if (errBox) { errBox.failed = true; errBox.err = (e && e.code) || 'UNKNOWN'; }
+    return false;
+  }
+}
 async function liveSetLockBit(username, locking, opts) {
   opts = opts || {};
   try {
@@ -415,6 +452,180 @@ async function executeClaimForceLogout(fromUser) {
   summary.softwareSignal = 'forceLogout flag via login-check/device-report/points-heartbeat (transferOutGate)';
   log({ ev: 'transfer-force-logout', target: fromUser, revokedXids: summary.revokedXids, extSessionsCleared: cleared, webPush: summary.webPush });
   return summary;
+}
+
+// ===== 封禁功能门（P5-010，主稿＝DeepSeek 实现稿 §1，偏差见 ds-draft/ADOPTION.md DEV 表）=====
+
+// 与许可核心 syncAccountLinkage 的 link==='banned' 判定逐字一致：
+// 生效封禁中存在「永久」或 code∈{B6,B7,B9} → banLink。
+const BAN_LINK_CODES = ['B6', 'B7', 'B9'];
+
+function isBanLinkedName(username, now) {
+  const u = String(username || '').trim().toLowerCase();
+  if (!u) return false;
+  try {
+    const bans = lic.activeBansFor(u, now || Date.now());
+    if (!bans || !bans.length) return false;
+    return bans.some((b) => b.permanent) || bans.some((b) => BAN_LINK_CODES.includes(String(b.code || '').toUpperCase())); // DEV-18/G-10
+  } catch (e) {
+    // 失败开放：宁可漏挡也不能把全站挡死；必须留告警（DS 稿风险 6 口径）
+    log({ ev: 'ban-link-eval-error', user: u, err: String(e && e.message) });
+    return false;
+  }
+}
+
+// MC 侧强制关闭（绕开 mcForceCloseUserSessions 三重早退）
+// 不复用 mcForceCloseUserSessions 的原因（已核实）：它对 ADMIN_EMAIL 直接
+// skipped-guarded-admin、对已锁位目标 already-locked 空转、对全权 skipped。
+// 本函数只做一件事：让 MC 真的走一次 edituser → 触发 'close'。
+// DEV-01：DS 稿附带的 noteLedgerLock 存根与调用不落——noteLedgerLock 是现行
+// 真函数（三参、写台账），且 setLockBit 链内已调真函数留痕。
+async function forceCloseSessionsByLockToggle(username) {
+  const target = String(username || '').trim().toLowerCase();
+  if (!target) return { ok: false, detail: 'empty-target' };
+
+  let user = null;
+  try { user = findDbUser(loadDb(), target); } catch (e) { return { ok: false, detail: 'db-unreadable' }; }
+  if (!user) return { ok: false, detail: 'user-not-found' };
+
+  const sa = user.siteadmin || 0;
+  if (sa === SITEADMIN_FULL) {
+    // MC 本体对全权号豁免 close（edituser 的 siteadmin!==0xFFFFFFFF 条件）。
+    // 不假装成功，如实回 exempt，由功能门承担其余拦截。
+    log({ ev: 'ban-enforce-mc-exempt', target, reason: 'siteadmin-full' });
+    return { ok: false, exempt: true, detail: 'siteadmin-full-mc-exempt' };
+  }
+
+  const locked = (sa & SITEADMIN_LOCKED_BIT) !== 0;
+  if (locked) {
+    // 已置位再置一次是幂等的，不触发 close；先清再置强制触发一次
+    const off = await setLockBit(target, false, { adminOverride: true });
+    if (!off || !off.ok) return { ok: false, detail: 'unlock-step-failed' };
+    let on = null;
+    try { on = await setLockBit(target, true, { adminOverride: true }); }
+    catch (e) { on = { ok: false, detail: 'exception:' + String(e && e.message) }; }
+    if (!on || !on.ok) {
+      // DS-R22（恢复 DS 原稿补偿，撤销 DEV-02）：清位已成功而重锁失败
+      // 会把已封账号停在未锁定态——MC 本体登录不经功能门，封禁被绕
+      // 过。补偿重试两次（短退避；setLockBit 每次都走 live→mcdb 全
+      // 链，且 live 通道对已置位回 already-in-state，丢失响应造成的
+      // 假失败也能被补偿识别为已锁定）。任一次成功即最终态锁定成立：
+      // 补偿置位同样走 edituser，会话关闭照常触发，故如实回 ok 并标
+      // compensated，不制造「会话关闭未确认」假警报（参 DEV-21/S-B）。
+      log({ ev: 'ban-enforce-relock-compensate', target, firstDetail: on && on.detail });
+      let back = null;
+      for (const waitMs of [250, 1000]) {
+        await new Promise((r) => setTimeout(r, waitMs));
+        // DS 差量审 D1 加固：setLockBit 若以 throw 形式失败，视作一次
+        // 失败继续下一次补偿，不许抛穿本函数绕过失败告警与失败关闭。
+        try { back = await setLockBit(target, true, { adminOverride: true }); }
+        catch (e) { back = { ok: false, detail: 'exception:' + String(e && e.message) }; }
+        if (back && back.ok) break;
+      }
+      if (back && back.ok) return { ok: true, toggled: true, compensated: true };
+      // 补偿穷尽仍失败＝失败关闭：如实回未锁定事实（relocked:false），
+      // 高等级告警留痕，执行摘要 mc.ok=false 如实入日志与内网回执
+      // （seal 回执的「会话关闭未确认」警告亦由 mc.ok 驱动）；绝不以
+      // ok 假报、绝不静默放行——锁位须由后续封禁动作或人工补锁。
+      log({ ev: 'ban-enforce-relock-failed', target, firstDetail: on && on.detail, lastDetail: back && back.detail });
+      return { ok: false, detail: 'relock-step-failed', relocked: false };
+    }
+    return { ok: true, toggled: true };
+  }
+
+  const on = await setLockBit(target, true, { adminOverride: true });
+  if (!on || !on.ok) return { ok: false, detail: 'lock-step-failed' };
+  return { ok: true, toggled: false };
+}
+
+// 按用户串行锁（防清位/置位交错）
+const userLocks = new Map();
+function withUserLock(key, fn) {
+  const prev = userLocks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);                    // 前序失败也继续
+  const tail = run.then(() => {}, () => {});
+  userLocks.set(key, tail);
+  tail.then(() => { if (userLocks.get(key) === tail) userLocks.delete(key); }); // 防止 Map 无限增长
+  return run;
+}
+
+// DEV-04：现行 postInternalJson 签名为 (urlStr, obj, timeoutMs)，此处按 DS 稿的
+// (base, path, body, label) 调用形收口，内部拼接全址。
+async function postInternalJsonSafe(base, path, body, label) {
+  try {
+    const r = await postInternalJson(String(base).replace(/\/$/, '') + path, body, 3000);
+    return { ok: !!(r && r.ok === true), detail: r }; // DEV-18/G-12：无 ok 字段不得判成功（防 purge 假成功）
+  } catch (e) {
+    log({ ev: 'ban-enforce-notify-failed', svc: label, path, err: String(e && e.message) });
+    return { ok: false, detail: String(e && e.message) };
+  }
+}
+
+// 封禁落账联动。opts.skipMc：只跑 ①②④（licLockAccount 路径，MC 位已由
+// setLockBit 处理）；opts.mcOnly：只跑 ③（冻结 B8 路径）。
+async function executeBanEnforcement(username, source, opts) {
+  opts = opts || {};
+  const target = String(username || '').trim().toLowerCase();
+  const summary = { target, source: source || 'unknown', at: Date.now() };
+  if (!target) { summary.skipped = 'empty-target'; return summary; }
+
+  // 站长本人：只跳过 ②（清 qfr_ext）。DEV-03：① 撤销 xid 照常执行——resolveAuth
+  // 先认本站会话、后认 xid（:546），isAdmin 不问来源，保住 ② 即保住 /admin
+  // 自解通道；① 是已定型判断 (a)「xid 撤销 + 功能门兜底」的本体（ADOPTION O2）。
+  const ownerKept = (target === String(ADMIN_EMAIL || '').trim().toLowerCase());
+
+  if (!opts.mcOnly) {
+    // ① 撤销控制台 xid 哈希
+    try { summary.revokedXids = revokeXidsForUser(target); }
+    catch (e) { summary.revokedXids = 0; log({ ev: 'ban-enforce-xid-error', target, err: String(e && e.message) }); }
+
+    // ② 清 qfr_ext 落盘会话（站长跳过：/admin 恢复通道依赖它）
+    let cleared = 0;
+    if (!ownerKept) {
+      for (const h of Object.keys(sessions)) {
+        const sx = sessions[h];
+        if (sx && String(sx.user || '').trim().toLowerCase() === target) { delete sessions[h]; cleared += 1; }
+      }
+      if (cleared) {
+        try { saveSessions(); } catch (e) { log({ ev: 'ban-enforce-save-error', target, err: String(e && e.message) }); }
+      }
+    } else {
+      log({ ev: 'ban-enforce-owner-channel-kept', target, note: '保留 ext 会话，/admin 自解通道完整；xid 已照常撤销' });
+    }
+    summary.extSessionsCleared = cleared;
+  }
+
+  // ③ MeshCentral 会话强制关闭
+  if (!opts.skipMc && !opts.mcOnly) {
+    try { summary.mc = await withUserLock(target, () => forceCloseSessionsByLockToggle(target)); }
+    catch (e) { summary.mc = { ok: false, detail: 'exception:' + String(e && e.message) }; log({ ev: 'ban-enforce-mc-error', target, err: String(e && e.message) }); }
+  } else if (opts.mcOnly) {
+    try { summary.mc = await withUserLock(target, () => forceCloseSessionsByLockToggle(target)); }
+    catch (e) { summary.mc = { ok: false, detail: 'exception:' + String(e && e.message) }; log({ ev: 'ban-enforce-mc-error', target, err: String(e && e.message) }); }
+  } else {
+    summary.mc = { ok: true, skipped: true, detail: 'skipped-by-caller' }; // DEV-21/S-B：调用方已 setLockBit 关会话，ok:false 会让 admin /ban 恒报「会话关闭未确认」假警报
+  }
+
+  // ④ 通知下游清会话（失败只记日志，读侧门兜底）
+  if (!opts.mcOnly) {
+    summary.friends = await postInternalJsonSafe(SOCIAL_INTERNAL_BASE, '/internal/ban-purge',
+      { username: target, source: summary.source }, 'friends');
+    summary.forum = await postInternalJsonSafe(FORUM_INTERNAL_BASE, '/api/forum/internal/purge-sessions',
+      { username: target, source: summary.source }, 'forum');
+  }
+
+  log({ ev: 'ban-enforce', target, source: summary.source, ownerKept,
+        revokedXids: summary.revokedXids, extSessionsCleared: summary.extSessionsCleared,
+        mc: summary.mc, friends: summary.friends && summary.friends.ok, forum: summary.forum && summary.forum.ok });
+  return summary;
+}
+
+// /points/api/* 与 /home/api/*：各处理器验完 auth 后逐个加
+function denyIfBanned(res, username) {
+  if (!username) return false;
+  if (!isBanLinkedName(username)) return false;
+  sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '账号已被封禁。' });
+  return true;
 }
 
 async function validateConsoleCookie(cookieHeader, clientIpHint) {
@@ -585,6 +796,17 @@ function loadLedger() {
   try { const v = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8')); if (v && v.accounts) return v; } catch (e) {}
   return { accounts: {} };
 }
+// 许可台账口径的账号封禁态（与 license-core syncAccountLinkage 的 link
+// 维同源）：有永封或 B6/B7/B9 → 封禁类；其余生效封禁 → 冻结类。账号
+// 列表的状态标签与「解封账号／解冻」按钮以此为准，不再单看 mcdb 旧
+// 标志（2026-10-26 站长亲报：许可封禁后列表无标记、无解封入口）。
+function licBanStateOf(login) {
+  try {
+    const bans = lic.activeBansFor(login, Date.now());
+    const licBanned = bans.some((b) => b.permanent || ['B6', 'B7', 'B9'].includes(b.code));
+    return { activeBanCount: bans.length, licBanned, licFrozen: bans.length > 0 && !licBanned };
+  } catch (e) { log({ ev: 'lic-ban-state-error', target: login, err: String(e && e.message) }); return { activeBanCount: 0, licBanned: false, licFrozen: false }; }
+}
 function buildUsersList() {
   const docs = loadDb();
   const ledger = loadLedger();
@@ -597,6 +819,7 @@ function buildUsersList() {
     if (!login) continue;
     seen.add(login);
     const e = ledger.accounts[login] || {};
+    const licSt = licBanStateOf(login);
     users.push({
       login,
       displayName: d.realname || d.name || '',
@@ -608,16 +831,22 @@ function buildUsersList() {
       template: e.template || '',
       renameCount: e.renameCount || 0,
       banned: e.banned === true,
+      activeBanCount: licSt.activeBanCount,
+      licBanned: licSt.licBanned,
+      licFrozen: licSt.licFrozen,
       exists: true,
       // P6-GK3：「收回密钥」行内钮的置灰判定（名下在效钥数，含未激活）
       liveKeyCount: lic.activeKeys(login, Date.now()).length,
     });
   }
-  // 台账里已封号/已删除、库里已无记录的账号也列出来（封禁状态才看得见）
+  // 台账里已封号/已删除、库里已无记录的账号也列出来（封禁状态才看得见）；
+  // 入选口径须与解封可达性一致：仅许可侧有生效封禁、或仅剩 frozen 残留
+  // 的独有行同样要进列表，否则按账号解封对它们没有入口。
   for (const key of Object.keys(ledger.accounts)) {
     const e = ledger.accounts[key] || {};
     if (seen.has(key)) continue;
-    if (!e.banned && !e.deleted) continue;
+    const licSt2 = licBanStateOf(key);
+    if (!e.banned && !e.deleted && e.frozen !== true && licSt2.activeBanCount === 0) continue;
     users.push({
       login: key,
       displayName: e.label || '',
@@ -628,6 +857,9 @@ function buildUsersList() {
       template: e.template || '',
       renameCount: e.renameCount || 0,
       banned: e.banned === true,
+      activeBanCount: licSt2.activeBanCount,
+      licBanned: licSt2.licBanned,
+      licFrozen: licSt2.licFrozen,
       exists: false,
       liveKeyCount: lic.activeKeys(key, Date.now()).length,
     });
@@ -826,6 +1058,7 @@ function postInternalJson(urlStr, obj, timeoutMs) {
 }
 const FORUM_INTERNAL_BASE = process.env.QFEXT_FORUM_URL || 'http://127.0.0.1:8446';
 const SOCIAL_INTERNAL_BASE = process.env.QFEXT_SOCIAL_URL || 'https://127.0.0.1:8445'; // 好友服务为本机自签 HTTPS（与 nginx proxy_ssl_verify off 同口径）
+const REG_INTERNAL_BASE = process.env.QFEXT_REG_URL || 'https://127.0.0.1:8444'; // 注册服务为本机自签 HTTPS（站长创建账号内网口，同上口径）
 
 // ---- B 设计 4.2 探测引擎：refId 前缀强绑定（B1）、超时双保险（B2）、连续失败熔断（B2）----
 const PROBE_REF_RE = /^(post|reply):/;
@@ -916,9 +1149,23 @@ async function licLockAccount(username) {
   try {
     const docs = loadDb(); const user = findDbUser(docs, username);
     if (!user || guardCheck(user, username)) return { state: 'guarded' };
-    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) return { state: 'already-locked' };
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) {
+      // 定型设计 A：此态只跑 ①②④（DEV-05；DS 稿在此跑全套，与设计 A 冲突从设计）。
+      // MC 位此前置位时已触发 close，补跑会话联动即可。
+      let enf = null;
+      try { enf = await executeBanEnforcement(username, 'lic-lock-already', { skipMc: true }); }
+      catch (e) { log({ ev: 'ban-enforce-error', target: username, source: 'lic-lock-already', err: String(e && e.message) }); }
+      return { state: 'already-locked', enforce: enf };
+    }
+
     const out = await setLockBit(String(username).toLowerCase(), true, {});
-    return out && out.ok ? { state: 'locked', via: out.via } : { state: 'failed', detail: (out && out.msg) || '' };
+    if (!out || !out.ok) return { state: 'failed', detail: (out && out.msg) || '' };
+
+    // 成功路径：setLockBit 已让 MC 关会话，只补 ①②④
+    let enf = null;
+    try { enf = await executeBanEnforcement(username, 'lic-lock', { skipMc: true }); }
+    catch (e) { log({ ev: 'ban-enforce-error', target: username, source: 'lic-lock', err: String(e && e.message) }); }
+    return { state: 'locked', via: out.via, enforce: enf };
   } catch (e) { log({ ev: 'lic-lock-error', target: username, err: String(e && e.message) }); return { state: 'failed', detail: String(e && e.message) }; }
 }
 // 返回值如实回显解锁结果（旧调用方忽略返回值不受影响）：解封类入口必须
@@ -927,10 +1174,13 @@ async function licUnlockAccount(username) {
   try {
     if (lic.activeBansFor(username, Date.now()).length) return { state: 'still-banned' };
     const docs = loadDb(); const user = findDbUser(docs, username);
-    if (!user || guardCheck(user, username)) return { state: 'guarded' };
-    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) === 0) return { state: 'already-unlocked' };
+    // 封禁已全清的前提下，guarded（全权/服务账号）与 already-unlocked
+    // 两条早退也必须把 qf-account-ledger 的 frozen 残留写回，否则状态
+    // 面与许可面长期不一致（2026-10-26 站长本人误封案实证）。
+    if (!user || guardCheck(user, username)) return { state: 'guarded', ledgerCleared: clearLedgerResidue(String(username).toLowerCase(), 'ext-lic-unlock') };
+    if (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) === 0) return { state: 'already-unlocked', ledgerCleared: clearLedgerResidue(String(username).toLowerCase(), 'ext-lic-unlock') };
     const out = await setLockBit(String(username).toLowerCase(), false, {});
-    return out && out.ok ? { state: 'unlocked', via: out.via } : { state: 'failed', detail: (out && out.msg) || '' };
+    return out && out.ok ? { state: 'unlocked', via: out.via, ledgerCleared: clearLedgerResidue(String(username).toLowerCase(), 'ext-lic-unlock') } : { state: 'failed', detail: (out && out.msg) || '' };
   } catch (e) { log({ ev: 'lic-unlock-error', target: username, err: String(e && e.message) }); return { state: 'failed', detail: String(e && e.message) }; }
 }
 // 全量解封（解封口径统一）：解掉该账号全部生效中的封禁记录（永久含恢复
@@ -1200,7 +1450,8 @@ const server = http.createServer(async (req, res) => {
     // 对 /assistant-api/ 挂 limit_req，不会被高频轮询误伤（定版口径）。
     if (p.startsWith('/assistant-api/')) {
       const tok = String(req.headers['x-assistant-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '');
-      if (!reviewEvents.verifyToken(tok)) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
+      const tokenRole = reviewEvents.verifyTokenRole(tok);
+      if (!tokenRole) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
       const nowA = Date.now();
       if (req.method === 'GET' && p === '/assistant-api/events') {
         const evStatus = u.searchParams.get('status') || '';
@@ -1246,20 +1497,29 @@ const server = http.createServer(async (req, res) => {
         return res.end(buf);
       }
       if (req.method === 'POST' && p === '/assistant-api/decide') {
-        // 裁定回写：全部复用既有双通道裁定入口，执行者留痕「助手接口」，不另起平行逻辑
+        // 裁定回写：全部复用既有双通道裁定入口，执行者按令牌角色留痕（助手接口／站长接口），不另起平行逻辑
         const body = await readJsonBody(req);
         const type = String(body.type || ''); const refId = String(body.refId || '');
-        const action = String(body.action || ''); const ACTOR = '助手接口';
+        const action = String(body.action || '');
+        const ACTOR = tokenRole === 'owner' ? '站长接口' : '助手接口';
         if (type === 'order') {
           const o = payOrders.getRaw(refId);
           if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
-          if (o.stage !== 1) return sendJson(res, 409, { ok: false, code: 'OWNER_STAGE', msg: '该订单已过一审，二审（到账核对）由站长处理。' });
+          if (o.stage !== 1 && tokenRole !== 'owner') return sendJson(res, 409, { ok: false, code: 'OWNER_STAGE', msg: '该订单已过一审，二审（到账核对）由站长处理。' });
           if (action !== 'approve' && action !== 'reject' && action !== 'fake') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
           // #37：助手一审可判假（action=fake）——orders-core 一审判假分支直接
           // 驳回关单、不封号不到二审，并累计当日判假计数/入口冻结。
           const out = payOrders.decide(refId, action, ACTOR, nowA, {});
-          if (out.ok) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          if (out.ok) {
+            if (out.stage === 1) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
+            // owner 通道 stage2 判假：核心已封禁＋回收钥，补 MC 锁定位联动（与后台口径齐；stage1 判假不补，守 #37）
+            // DS 门二 P1-01：联动加异常边界——核心裁定已落账，联动失败只记日志待补锁，绝不让 decide 响应 500/悬挂。
+            if (tokenRole === 'owner' && out.fake && out.stage === 2) {
+              try { await licLockAccount(o.username); }
+              catch (e) { log({ ev: 'owner-stage2-fake-locklink-failed', refId, user: o.username, err: String(e && e.message || e) }); }
+            }
+          }
+          log({ ev: 'assistant-decide', type, refId, action, actor: ACTOR, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out);
         }
         if (type === 'appeal' || type === 'rebind') {
@@ -1355,18 +1615,59 @@ const server = http.createServer(async (req, res) => {
         const username = String(body.username || '').trim().toLowerCase();
         if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
         if (body.action === 'apply') {
-          const exist = lic.activeBansFor(username, now).find((b) => b.code === body.code);
+          const code = String(body.code || 'B1').toUpperCase(); // DEV-18/G-10
+          const exist = lic.activeBansFor(username, now).find((b) => String(b.code || '').toUpperCase() === code); // DEV-21：与 lift 口径统一归一
           if (!exist) {
             const endsAt = startOfNextDayMs(now);
-            lic.applyBan({ targetType: 'account', target: username, code: String(body.code || 'B1'), permanent: false, endsAt, actor: String(body.actor || 'loginshim') }, now);
+            lic.applyBan({ targetType: 'account', target: username, code, permanent: false, endsAt, actor: String(body.actor || 'loginshim') }, now);
+          }
+          // 幂等：即使台账已有该 code（上次 enforcement 可能失败），也补跑一次
+          if (BAN_LINK_CODES.includes(code)) {
+            try { await executeBanEnforcement(username, 'ban-event:' + code); }
+            catch (e) { log({ ev: 'ban-enforce-error', target: username, source: 'ban-event', err: String(e && e.message) }); }
           }
           return sendJson(res, 200, { ok: true });
         }
         if (body.action === 'lift') {
-          for (const b of lic.activeBansFor(username, now).filter((b) => b.code === body.code)) lic.liftBan(b, now, { by: String(body.actor || 'loginshim') });
-          return sendJson(res, 200, { ok: true });
+          // DEV-18/G-06：原实现不校验 code、过滤集为空也回 ok:true（静默未解封）。
+          if (!body.code) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          const code = String(body.code).toUpperCase();
+          const r = await withUserLock(username, async () => {
+            const matched = lic.activeBansFor(username, now).filter((b) => String(b.code || '').toUpperCase() === code);
+            for (const b of matched) lic.liftBan(b, now, { by: String(body.actor || 'loginshim') });
+            let mcUnlock = null;
+            // DEV-18/G-01(F-01，DS 门二 Q2)：本条 lift 后活动封禁全空（B8/B1 同台账，全集为空即无其它置位来源）
+            // 才清 MC bit；只走 live 通道，失败不回落 mcdb（自动路径回落＝停服），如实降级回报＋告警留痕。
+            if (matched.length && lic.activeBansFor(username, now).length === 0) {
+              try {
+                const lr = await liveSetLockBit(username, false);
+                if (lr && lr.ok) mcUnlock = { ok: true };
+                else if (lr && lr.detail === 'guarded') mcUnlock = { ok: true, skipped: 'guarded' };
+                else { mcUnlock = { ok: false, detail: (lr && lr.detail) || 'unknown' }; log({ ev: 'lock-clear-failed', target: username, source: 'ban-event-lift', detail: mcUnlock }); }
+              } catch (e) { mcUnlock = { ok: false, detail: String(e && e.message) }; log({ ev: 'lock-clear-failed', target: username, source: 'ban-event-lift', detail: mcUnlock }); }
+              // 下游 banLink 缓存失效（只清缓存、不动会话）：把 R9 的 5 秒窗口降为仅 purge 失败时
+              postInternalJsonSafe(SOCIAL_INTERNAL_BASE, '/internal/ban-cache-flush', { username }, 'friends-flush'); // DEV-21：原实参错位（完整路径塞进 base），flush 从未通（DS 差量 #2）
+              postInternalJsonSafe(FORUM_INTERNAL_BASE, '/api/forum/internal/ban-cache-flush', { username }, 'forum-flush'); // DEV-21：同上，且 forum 路径带 /api/forum 前缀（与 purge 同式）
+            }
+            return { matched: matched.length, mcUnlock };
+          });
+          return sendJson(res, 200, { ok: true, lifted: r.matched, noop: r.matched === 0, mcUnlockOk: r.mcUnlock ? r.mcUnlock.ok : null });
         }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+      }
+      if (req.method === 'POST' && p === '/internal/license/account-link') {
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!username) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        const bans = lic.activeBansFor(username, now);
+        const hasPerm = bans.some((b) => b.permanent);
+        const hasHard = bans.some((b) => BAN_LINK_CODES.includes(String(b.code || '').toUpperCase())); // DEV-21
+        const link = (hasPerm || hasHard) ? 'banned' : (bans.length ? 'frozen' : 'normal');
+        const pick = bans.find((b) => b.permanent)
+          || bans.find((b) => BAN_LINK_CODES.includes(String(b.code || '').toUpperCase())) || bans[0] || null; // DEV-21
+        const activeBan = pick
+          ? { code: String(pick.code || '').toUpperCase(), permanent: !!pick.permanent, endsAt: (typeof pick.endsAt === 'number' ? pick.endsAt : null) } // DEV-21：输出亦归一
+          : null;
+        return sendJson(res, 200, { ok: true, banLink: link === 'banned', link, activeBan });
       }
       if (req.method === 'POST' && p === '/internal/license/appeal-check') {
         const username = String(body.username || '').trim().toLowerCase();
@@ -1495,6 +1796,8 @@ const server = http.createServer(async (req, res) => {
     // ===== 许可公开接口（控制台会话鉴权） =====
     if (p.startsWith('/license/api/')) {
       const now = Date.now();
+      // DS 稿 §1.8 路径白名单（状态读 + 申诉换绑提交为救济/状态面）
+      const BAN_GATE_ALLOW = new Set(['/license/api/me', '/license/api/rebind/submit']);
       // 互联窗观察入口：本站会话身份此刻可同步取到就先记（同一请求只记
       // 一行，req._cvLogged 标记）；控制台会话身份在下方 resolveAuth
       // 解析后补记。无头请求不记、行为不变。
@@ -1598,6 +1901,19 @@ const server = http.createServer(async (req, res) => {
       // 密码只核验不签发登录态（口径同状态查询核验，带失败锁定与审计）。
       // 两入口最终都走 lic.claimByKeyString 同一校验：串须命中「正待领取、
       // 收赠方＝当前账号、未过期未撤销」的转赠单。
+      // ===== 封禁门（P5-010，DS 稿 §1.8）：密码核验类豁免端点
+      //   /license/api/status/query、/status/reveal、/verify-password、
+      //   /status/transfer*、/sim-callback
+      // 在上方分派中已 return，天然在本门之前、豁免。本门覆盖其余全部
+      // /license/api/ 处理器（本块内以下分派）。DEV-06：本链无共享已解析
+      // 会话变量（各处理器各自 resolveAuth），门在此自带一次解析。
+      if (!BAN_GATE_ALLOW.has(p)) {
+        const _ga = await resolveAuth(req).catch(() => null);
+        const gateUser = _ga && _ga.user;
+        if (gateUser && isBanLinkedName(gateUser)) {
+          return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '账号已被封禁，仅可使用客服与申诉。' });
+        }
+      }
       if (req.method === 'POST' && p === '/license/api/transfer/claim') {
         const body = await readJsonBody(req);
         const keyStr = String(body.key || body.keyStr || '');
@@ -1901,12 +2217,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/home/api/stats') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (denyIfBanned(res, auth.user)) return;
       const out = await buildHomeStats(req, auth);
       return sendJson(res, 200, out);
     }
     if (req.method === 'GET' && p === '/home/api/login-devices') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (denyIfBanned(res, auth.user)) return;
       const devices = qfclashLogins
         .filter((r) => r.user === auth.user && !r.revokedAt)
         .sort((a, b) => b.at - a.at)
@@ -1916,6 +2234,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/home/api/login-devices/revoke') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (denyIfBanned(res, auth.user)) return;
       const body = await readJsonBody(req);
       const rec = qfclashLogins.find((r) => r.id === String(body.id || '') && r.user === auth.user && !r.revokedAt);
       if (!rec) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '这条登录记录不存在或已下线。' });
@@ -1943,6 +2262,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && (p === '/points/api/sso-token' || p === '/admin/api/sso-token')) {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '登录已过期，请重新登录后再试。' });
+      if (auth.user !== ADMIN_EMAIL && denyIfBanned(res, auth.user)) return;
       const token = crypto.randomBytes(32).toString('hex');
       ssoTokens.set(token, { user: auth.user, siteadmin: auth.siteadmin, exp: Date.now() + SSO_TOKEN_TTL_MS });
       return sendJson(res, 200, { ok: true, token, expiresIn: 60, loginPath: '/admin/login?token=' + token });
@@ -1951,6 +2271,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/points/api/heartbeat') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      if (denyIfBanned(res, auth.user)) return;
       const body = await readJsonBody(req);
       const now = Date.now();
       let rec = pointsData.users[auth.user];
@@ -1970,6 +2291,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/points/api/me') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      if (denyIfBanned(res, auth.user)) return;
       // 无心跳记录时先建档再计算：首次打开积分页即显示「已经 1 天」，不再出现 0 天（F 线 ⑥，总线收口落地）
       let meRec = pointsData.users[auth.user];
       if (!meRec) {
@@ -1984,6 +2306,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/points/api/checkin') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      if (denyIfBanned(res, auth.user)) return;
       const now = Date.now();
       let rec = pointsData.users[auth.user];
       if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; }
@@ -1997,6 +2320,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/points/api/welfare') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      if (denyIfBanned(res, auth.user)) return;
       const now = Date.now();
       let rec = pointsData.users[auth.user];
       if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; try { savePoints(); } catch (e) {} }
@@ -2007,6 +2331,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/points/api/welfare/redeem') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { error: '请先登录后再使用。' });
+      if (denyIfBanned(res, auth.user)) return;
       const body = await readJsonBody(req);
       const plan = String(body.plan || '');
       const cost = plan === 'd1' ? 200 : (plan === 'd7' ? 500 : 0);
@@ -2070,6 +2395,67 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && p === '/admin/api/users') {
         try { return sendJson(res, 200, { ok: true, users: buildUsersList() }); }
         catch (e) { log({ ev: 'users-list-error', err: String(e && e.message) }); return sendJson(res, 500, { ok: false, msg: '账号列表暂时无法读取，请稍后再试。' }); }
+      }
+      // ===== 站长创建账号（站长 2026-10-26 15:18 令）=====
+      // 经注册服务内网口复用现行开户链（校验/建号/3 天试用与自助注册同一条链），
+      // 本服务不另写建号逻辑；格式/唯一性/密码强度的权威校验在注册服务单点，
+      // 此处只做边界形状预检防巨包。完成性核对：回执丢失/超时/REG 侧失败后，
+      // 先查 MC 库与许可态再定成败——刚建成（creation 180 秒内）补完许可按成功
+      // 改判，非新鲜的既存号改判重名，无号才报未完成（建成不报失败）。
+      if (req.method === 'POST' && p === '/admin/api/users/create') {
+        const body = await readJsonBody(req);
+        if (body.__tooLarge) return sendJson(res, 400, { ok: false, msg: '填写内容过长，请检查后重试。' });
+        const username = String(body.username || '');
+        const password = String(body.password || '');
+        const displayName = body.displayName == null ? '' : String(body.displayName);
+        if (!username || username.length > 80 || !password || password.length > 256 || displayName.length > 64) {
+          return sendJson(res, 400, { ok: false, msg: '填写不完整或过长，请检查后重试。' });
+        }
+        const completeLic = (name) => {
+          let acct = lic.state().accounts[name];
+          if (!acct || !acct.trial || !acct.trialKeyId) {
+            lic.registerSuccess(name, '', '', Date.now());
+            log({ ev: 'admin-create-lic-repair', target: name, by: auth.user });
+            acct = lic.state().accounts[name];
+          }
+          return acct;
+        };
+        const okOut = (name, late) => {
+          const acct = completeLic(name);
+          // 试用未真落账（如许可侧存量账号无 trial）绝不回「已发试用」：如实标
+          // trialOk=false，页面据此改口径（门二 D2）。
+          const trialOk = !!(acct && acct.trial && acct.trialKeyId);
+          if (!trialOk) log({ ev: 'admin-create-lic-incomplete', target: name, by: auth.user });
+          log({ ev: 'admin-create-account', target: name, by: auth.user, ok: true, late: !!late, trialOk });
+          return sendJson(res, 200, { ok: true, username: name, trialOk, trialExpiresMs: trialOk ? acct.trial.expiresMs : null });
+        };
+        // 超时显式 20000：REG 最坏处理（建号等待 ≤10s＋许可回写 ≤5s）约 15s，
+        // 沿用调用器默认 5000 会把已建成误判成失败（门一 D1）。
+        const out = await postInternalJson(REG_INTERNAL_BASE + '/internal/admin-create', { username, password, displayName, operator: auth.user }, 20000);
+        if (out && out.ok === true && out.username) return okOut(String(out.username), false);
+        const BIZ = ['USERNAME_FORMAT', 'USERNAME_RESERVED', 'USERNAME_TAKEN', 'PASSWORD_WEAK', 'DISPLAYNAME_INVALID', 'USER_LIMIT', 'INTERNAL_AUTH'];
+        if (out && out.ok === false && BIZ.includes(out.code)) {
+          log({ ev: 'admin-create-account', target: username.trim().toLowerCase(), by: auth.user, ok: false, code: out.code });
+          return sendJson(res, 200, { ok: false, code: out.code, msg: out.msg || '创建未成功，请稍后再试。' });
+        }
+        const lookup = username.trim().toLowerCase();
+        let mcUser = null, dbErr = false;
+        try { mcUser = findDbUser(loadDb(), lookup); } catch (e) { dbErr = true; }
+        if (dbErr) {
+          // 读库抖动不静默吞：留痕＋短暂重试一次，仍失败才按无号走（门二 D1）
+          log({ ev: 'admin-create-check-dberror', target: lookup, by: auth.user });
+          await new Promise((r) => setTimeout(r, 400));
+          try { mcUser = findDbUser(loadDb(), lookup); } catch (e) {}
+        }
+        if (mcUser) {
+          const fresh = mcUser.creation && (Date.now() / 1000 - mcUser.creation) < 180;
+          if (fresh) return okOut(lookup, true);
+          log({ ev: 'admin-create-account', target: lookup, by: auth.user, ok: false, code: 'USERNAME_TAKEN' });
+          return sendJson(res, 200, { ok: false, code: 'USERNAME_TAKEN', msg: '该账号已被注册' });
+        }
+        log({ ev: 'admin-create-account', target: lookup, by: auth.user, ok: false, code: (out && out.code) || (out && out.ok === false ? 'CREATE_FAILED' : 'NO_RESPONSE') });
+        if (out && out.ok === false && out.code === 'CREATE_FAILED' && out.msg) return sendJson(res, 200, { ok: false, code: 'CREATE_FAILED', msg: out.msg });
+        return sendJson(res, 200, { ok: false, msg: '创建服务暂时不可用，本次创建未完成，请稍后再试。' });
       }
       if (req.method === 'GET' && p === '/admin/api/appeals') {
         let data = { appeals: [] };
@@ -2179,6 +2565,54 @@ const server = http.createServer(async (req, res) => {
         const relTot = r.reclaimed.reduce((a, x) => ({ pc: a.pc + ((x.releasedSlots && x.releasedSlots.pc) || 0), mobile: a.mobile + ((x.releasedSlots && x.releasedSlots.mobile) || 0) }), { pc: 0, mobile: 0 });
         return sendJson(res, 200, { ok: true, msg: '已收回「' + username + '」名下的 ' + r.reclaimed.length + ' 把密钥，立即失效，账号回到未激活状态。释放设备名额：电脑 ' + relTot.pc + ' · 手机 ' + relTot.mobile + '。', reclaimed: r.reclaimed });
       }
+      // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令）：「账号列表」
+      // 行内「收回密钥」——preview 只读列名下全部密钥供确认框逐把呈现；
+      // reclaim 执行收回（license-core reclaimAccountKeys，revokedReason
+      // =admin-reclaim，不可恢复、不建封禁、不停服、账号仍可登录）。
+      // 护栏与 /admin/api 账号操作链同款（存在性＋adminGuardCheck）。
+      if (req.method === 'POST' && p === '/admin/api/license/reclaim-preview') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const now = Date.now();
+        lic.lazyExpireKeys(username, now); // 与收回本体同口径先落到期，reclaimable 判定才与在效一致（门二 #3 整改）
+        lic.expireDeadPausedKeys(username, now); // 暂停态死钥同批落账（门二复核 S1 整改）
+        const statusText = { unactivated: '未激活', activated: '已激活', expired: '已过期', revoked: '已收回' };
+        const slotPc = (k) => (k.slots && Array.isArray(k.slots.pc) ? k.slots.pc.filter(Boolean).length : (k.slots && k.slots.pc ? 1 : 0));
+        const raw = lic.accountKeys(username).slice().sort((a, b) => {
+          const la = (a.lifecycle === 'unactivated' || a.lifecycle === 'activated') ? 0 : 1;
+          const lb = (b.lifecycle === 'unactivated' || b.lifecycle === 'activated') ? 0 : 1;
+          return la - lb || (b.createdAt - a.createdAt);
+        });
+        const keys = raw.map((k) => ({
+          keyId: k.id, masked: licMaskKey(k.str), plan: k.plan, planName: k.planName,
+          source: k.source, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
+          expiresMs: k.expiresBaseMs ? lic.effectiveExpiry(k, now) : null,
+          remainText: lic.remainTextForKey(k, now),
+          slots: { pc: slotPc(k), mobile: k.slots && k.slots.mobile ? 1 : 0 },
+          reclaimable: k.lifecycle === 'unactivated' || k.lifecycle === 'activated',
+        }));
+        return sendJson(res, 200, { ok: true, username, liveCount: keys.filter((k) => k.reclaimable).length, keys });
+      }
+      if (req.method === 'POST' && p === '/admin/api/license/reclaim') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const r = lic.reclaimAccountKeys(username, Date.now(), { actor: auth.user });
+        if (!r.ok) return sendJson(res, 400, { ok: false, code: r.code, msg: r.msg });
+        log({ ev: 'admin-reclaim-keys', target: username, keyIds: r.reclaimed.map((x) => x.keyId), by: auth.user });
+        return sendJson(res, 200, { ok: true, msg: '已收回「' + username + '」名下的 ' + r.reclaimed.length + ' 把密钥，立即失效，账号回到未激活状态。', reclaimed: r.reclaimed });
+      }
       if (req.method === 'POST' && p === '/admin/api/license/review-decide') {
         const body = await readJsonBody(req);
         // #38：站长改判（override:true）——已裁定的设备异常记录可反向改判，
@@ -2210,15 +2644,80 @@ const server = http.createServer(async (req, res) => {
           unlock = await licUnlockAccount(ban.target);
         }
         log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user, extraLifted, unlock: unlock && unlock.state });
-        let msg = '已解封：' + ban.target + '（关联回收密钥已按规恢复）。';
-        if (extraLifted.length) msg += '另同步解除了该账号其他 ' + extraLifted.length + ' 条生效中的封禁。';
+        let msg = '已解封：' + ban.target + '，共解除 ' + (1 + extraLifted.length) + ' 条生效中的封禁（关联回收密钥已按规恢复）。';
         if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
         else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
         return sendJson(res, 200, { ok: true, msg });
       }
+      // 账号列表「解封账号」（与「封禁」同排）：按账号一次全清——解掉该
+      // 账号全部生效中的封禁（永久含恢复被回收密钥）＋联动解锁＋台账
+      // 残留写回，回执明写实际解除条数（2026-10-26 站长亲令：解封须
+      // 与封禁同排同位，被封账号在列表里必须有可用解封入口）。
+      if (req.method === 'POST' && p === '/admin/api/license/unban-account') {
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '账号格式不正确，请检查后重试。' });
+        const docs = loadDb();
+        const user = findDbUser(docs, username);
+        const before = lic.activeBansFor(username, Date.now()).length;
+        if (!user) {
+          // 台账独有行（账号库已无此人、许可/账号台账仍有记录）：许可层
+          // 全清＋残留写回仍可办，不让列表行的解封钮点出 404 死钮。
+          if (before > 0) {
+            const liftedG = liftAllActiveBans(username, auth.user);
+            const residueG = clearLedgerResidue(username, 'ext-lic-unlock');
+            const remainingG = lic.activeBansFor(username, Date.now()).length;
+            log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted: liftedG, ghost: true, ledgerCleared: residueG });
+            let msgG = '已解封：' + username + '，共解除 ' + liftedG.length + ' 条生效中的封禁（关联回收密钥已按规恢复；该账号已不在账号库，仅清许可台账与残留标记）。';
+            if (remainingG > 0) msgG += '注意：仍有 ' + remainingG + ' 条封禁未解除，请重试。';
+            return sendJson(res, 200, { ok: true, liftedCount: liftedG.length, msg: msgG });
+          }
+          const residueErr = {};
+          if (clearLedgerResidue(username, 'ext-lic-unlock', residueErr)) return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '已清除「' + username + '」的台账残留标记（该账号已不在账号库，没有生效中的封禁）。' });
+          // DS-R21：清除失败（写盘异常）如实回 500，不许伪装成 404。
+          if (residueErr.failed) {
+            const why = { ENOSPC: '磁盘空间不足', EACCES: '台账文件权限不足', EPERM: '台账文件权限不足', ENOENT: '台账文件不存在', ENOTDIR: '台账路径异常' }[residueErr.err] || '写盘异常';
+            return sendJson(res, 500, { ok: false, code: 'LEDGER_CLEAR_FAILED', msg: '台账残留清除失败（' + why + '），请稍后重试：' + username });
+          }
+          return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '账号不存在：' + username });
+        }
+        const guard = adminGuardCheck(user, username);
+        if (guard) return sendJson(res, 400, { ok: false, msg: guard });
+        const lifted = liftAllActiveBans(username, auth.user);
+        const unlock = await licUnlockAccount(username);
+        const remaining = lic.activeBansFor(username, Date.now()).length;
+        log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted, unlock: unlock && unlock.state, ledgerCleared: !!(unlock && unlock.ledgerCleared) });
+        if (!lifted.length && before === 0 && !(unlock && unlock.state === 'unlocked')) {
+          // 解锁真失败（如账号仍被 bit 锁定且解锁通道失败）必须如实报
+          // 失败，不许落进「没有封禁」的安慰回执把失败盖住。
+          if (unlock && unlock.state === 'failed') return sendJson(res, 400, { ok: false, liftedCount: 0, msg: '账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封：' + username });
+          // 「本来就没有」与「清了残留」分开回执，不拿前者盖住后者。
+          if (unlock && unlock.ledgerCleared) return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '已清除「' + username + '」的台账残留标记（该账号当前没有生效中的封禁）。' });
+          return sendJson(res, 200, { ok: true, liftedCount: 0, msg: '该账号当前没有生效中的封禁：' + username });
+        }
+        // 如实回执（DS-R21）：解除数、剩余数、解锁状态三项独立成句——
+        // 「仍有封禁未解除」与「解锁未成功」可以并存，两条警告不许互
+        // 吞（原 else if 在 remaining>0 时把解锁失败整条丢弃）；before
+        // >0 却一条未解时禁止「没有生效中的封禁记录」的假文案（与事
+        // 实相反），改如实报未完成。
+        let msg;
+        if (lifted.length) {
+          msg = '已解封：' + username + '，共解除 ' + lifted.length + ' 条生效中的封禁（关联回收密钥已按规恢复）。';
+        } else if (before > 0) {
+          msg = '解封未完成：' + username + '，本次未解除任何封禁（操作前有 ' + before + ' 条生效中的封禁）。';
+        } else {
+          msg = '已解封：' + username + '（该账号没有生效中的封禁记录）。';
+        }
+        if (remaining > 0) msg += '注意：仍有 ' + remaining + ' 条封禁未解除，请重试。';
+        if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
+        else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
+        return sendJson(res, 200, { ok: true, liftedCount: lifted.length, msg });
+      }
       if (req.method === 'GET' && p === '/admin/api/license/overview') {
         const st = lic.state();
-        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
+        const banActiveByTarget = {};
+        for (const b of st.bans) { if (b.status === 'active') { const tk = b.targetType + '|' + b.target; banActiveByTarget[tk] = (banActiveByTarget[tk] || 0) + 1; } }
+        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), banActiveByTarget, orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
       }
       // ===== 截图付款订单审核（#21：站长侧含二审到账核对；一审亦可在此处理） =====
       if (req.method === 'GET' && p === '/admin/api/orders') {
@@ -2261,8 +2760,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/admin/api/assistant/token') {
         const body = await readJsonBody(req);
         const action = String(body.action || '');
-        if (action === 'generate' || action === 'reset') { const out = reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
-        if (action === 'revoke') { const out = reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action }); return sendJson(res, 200, out); }
+        const tokRole = String(body.role || 'assistant') === 'owner' ? 'owner' : 'assistant';
+        if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
+        if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });
       }
       if (req.method === 'POST' && (p === '/admin/api/appeals/approve' || p === '/admin/api/appeals/reject')) {
@@ -2316,9 +2816,17 @@ const server = http.createServer(async (req, res) => {
         if (!user) return sendJson(res, 404, { ok: false, msg: '账号不存在：' + username });
         const guard = adminGuardCheck(user, username);
         if (guard) return sendJson(res, 400, { ok: false, msg: guard });
-        const isFrozen = ((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0;
+        // 冻结态口径：全权账号 siteadmin 全位为 1、按 bit 判读恒为已冻
+        // 结（P5-007：冻结预检误判空转、B8 永不落账），改读
+        // qf-account-ledger 的 frozen 标记；普通账号读锁定 bit。
+        const ledEntry = (loadLedger().accounts || {})[username.toLowerCase()];
+        const isFrozen = (user.siteadmin || 0) === SITEADMIN_FULL
+          ? !!(ledEntry && ledEntry.frozen === true)
+          : (((user.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0);
         if (action === 'freeze' && isFrozen) return sendJson(res, 200, { ok: true, msg: '账号已是冻结状态，未重复操作：' + username });
-        if (action === 'unfreeze' && !isFrozen) return sendJson(res, 200, { ok: true, msg: '账号未冻结，未操作：' + username });
+        // 解冻放行条件：冻结态在位，或许可台账有生效封禁（B1 等许可-only
+        // 封禁不置 MC bit，旧预检会误判「未冻结」把解封挡在门外）。
+        if (action === 'unfreeze' && !isFrozen && lic.activeBansFor(username.toLowerCase(), Date.now()).length === 0) return sendJson(res, 200, { ok: true, msg: '账号未冻结，未操作：' + username });
         // 【C-2 重点变更】B9 人工封号改「封禁」（#30 用词定版，原内部称谓「封存」）：不再删号。封禁＝mcdb 冻结（禁用）
         // ＋统一台账永久封禁（B9，数据保留、可申诉）；旧 mcdb ban（删除）下线。
         if (action === 'ban' && lic.activeBansFor(username.toLowerCase(), Date.now()).some((b) => b.code === 'B9' && b.permanent)) {
@@ -2328,21 +2836,38 @@ const server = http.createServer(async (req, res) => {
           const out2 = await setLockBit(username.toLowerCase(), true, { adminOverride: true });
           if (!out2.ok) return sendJson(res, 400, out2);
           lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B9', permanent: true, actor: auth.user, evidence: 'admin-seal' }, Date.now());
-          log({ ev: 'admin-seal', target: username });
-          return sendJson(res, 200, { ok: true, msg: '账号已封禁（禁用＋数据保留＋可申诉，未删除）：' + username, probeBefore: out2.probeBefore, probeAfter: out2.probeAfter });
+          const enf = await executeBanEnforcement(username, 'admin-seal', { skipMc: true }); // DEV-18/G-07：setLockBit 已置位＋关会话，再跑 ③ 只会制造清位窗口（§1.5 已驳回同型）
+          log({ ev: 'admin-seal', target: username, enforce: enf });
+          let sealMsg = '已封禁：' + username + '（禁用＋数据保留＋可申诉，未删除）';
+          const mcConfirmed = enf && enf.mc && (enf.mc.ok || enf.mc.exempt);
+          if (!mcConfirmed) sealMsg += '（注意：MeshCentral 会话关闭未确认，详见服务日志）';
+          return sendJson(res, 200, { ok: true, msg: sealMsg, probeBefore: out2.probeBefore, probeAfter: out2.probeAfter, enforce: enf });
         }
         const out = action === 'resetpass'
           ? await enqueueOp(() => runMcdbOp('resetpass', username.toLowerCase(), { adminOverride: true }))
           : await setLockBit(username.toLowerCase(), action === 'freeze', { adminOverride: true });
         if (out.ok && action === 'freeze') {
           lic.applyBan({ targetType: 'account', target: username.toLowerCase(), code: 'B8', permanent: false, endsAt: null, actor: auth.user, evidence: 'admin-freeze' }, Date.now());
+          // 冻结不扩大口径：只补 MC 侧关闭，不清 ext/friends/forum 会话（DS 稿自相矛盾 3 修正）
+          try { await executeBanEnforcement(username, 'admin-freeze', { mcOnly: true }); }
+          catch (e) { log({ ev: 'ban-enforce-error', target: username, source: 'admin-freeze', err: String(e && e.message) }); }
+          // 成功回执必须明写账号（2026-10-26 站长亲报：点了封禁/冻结没
+          // 有成功反馈、无从确认是否生效）；out 其余字段（mcdb 探针
+          // 等）原样保留，只覆写 msg。
+          return sendJson(res, 200, Object.assign({}, out, { ok: true, msg: '已冻结：' + username + (out.via === 'live' ? '（在线即时生效）' : '') + '。', via: out.via }));
         }
         let unfreezeLifted = [];
         if (out.ok && action === 'unfreeze') {
           unfreezeLifted = liftAllActiveBans(username.toLowerCase(), auth.user);
         }
         if (out.ok && action === 'unfreeze' && unfreezeLifted.length) {
-          return sendJson(res, 200, Object.assign({}, out, { msg: (out.msg || '操作完成。') + '已同步解除该账号全部 ' + unfreezeLifted.length + ' 条生效中的封禁（含永久封禁），账号恢复正常。' }));
+          const remainingU = lic.activeBansFor(username.toLowerCase(), Date.now()).length;
+          return sendJson(res, 200, Object.assign({}, out, { msg: remainingU > 0
+            ? '已解冻：' + username + '，并解除 ' + unfreezeLifted.length + ' 条生效中的封禁；注意：仍有 ' + remainingU + ' 条封禁未解除，请重试。'
+            : '已解冻：' + username + '，并解除 ' + unfreezeLifted.length + ' 条生效中的封禁（含永久封禁），账号恢复正常。' }));
+        }
+        if (out.ok && action === 'unfreeze') {
+          return sendJson(res, 200, Object.assign({}, out, { msg: '已解冻：' + username + '。' }));
         }
         return sendJson(res, out.ok ? 200 : 400, out);
       }

@@ -24,6 +24,9 @@ class MePage extends StatefulWidget {
   /// 「付费与激活」区（2.3.1 阶段 D 注入；为空时整区不出现）。
   final Widget? licenseSection;
 
+  /// 「官网」带字行（收编 P1 补 X-02；为空时整行不出现）。
+  final VoidCallback? onOpenWebsite;
+
   const MePage({
     super.key,
     required this.palette,
@@ -38,6 +41,7 @@ class MePage extends StatefulWidget {
     required this.onAccountAction,
     required this.onLogout,
     this.licenseSection,
+    this.onOpenWebsite,
   });
 
   @override
@@ -154,7 +158,7 @@ class _MePageState extends State<MePage> {
                         label: '我的积分',
                         big: _points?.points != null ? '${_points!.points} 分' : '—',
                         bigColor: QfPalette.accent,
-                        sub: '满 2 小时积 1 分',
+                        sub: '签到得 1 分 · 满 1 小时积 1 分',
                       ),
                     ),
                   ],
@@ -187,6 +191,15 @@ class _MePageState extends State<MePage> {
                   actionLabel: '检查更新',
                   onAction: widget.onCheckUpdate,
                 ),
+                if (widget.onOpenWebsite != null) ...[
+                  const SizedBox(height: 11),
+                  _rowCard(
+                    title: '官网',
+                    sub: 'QFRemote 官方网站',
+                    onTap: widget.onOpenWebsite,
+                    chevron: true,
+                  ),
+                ],
                 const SizedBox(height: 11),
                 _rowCard(
                   title: '退出账号',

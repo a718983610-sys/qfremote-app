@@ -8,8 +8,9 @@ import 'theme.dart';
 /// 数据全走 /license/api/me（同源展示口径与网页首页一致）；取不到数据时
 /// 显示诚实错误态＋重试，绝不填假状态。含：试用提示条（TrialBar）、许可
 /// 概览卡（套餐/状态/密钥掩码/剩余时长/设备名额/网页版权益）、本机绑定框
-/// （契约 §3 bind）、转赠领取框（契约 §7.5.3 已登录入口）、购买/查询入口
-/// （16:37 定版样式：购买黑底白字、查询蓝色无边框文字链，壳内打开）。
+/// （契约 §3 bind）、转赠领取框（契约 §7.5.3 已登录入口）、兑换KEY卡
+/// （决策 #24 统一兑换入口：粘贴兑换＋待兑换列表一键兑换）、购买/查询
+/// 入口（16:37 定版样式：购买黑底白字、查询蓝色无边框文字链，壳内打开）。
 class LicenseSection extends StatefulWidget {
   final QfPalette palette;
   final Future<LicenseMe?> Function() fetchLicense;
@@ -17,6 +18,11 @@ class LicenseSection extends StatefulWidget {
   final Future<LicenseOpResult?> Function(String key) onClaim;
   final VoidCallback onPurchase;
   final VoidCallback onStatusQuery;
+
+  /// 决策 #24 兑换KEY（可选接线：三者齐备才显示兑换卡）。
+  final Future<List<MyLicenseKey>?> Function()? fetchMyKeys;
+  final Future<LicenseOpResult?> Function(String key)? onRedeem;
+  final Future<LicenseOpResult?> Function(String keyId)? onRedeemId;
 
   const LicenseSection({
     super.key,
@@ -26,6 +32,9 @@ class LicenseSection extends StatefulWidget {
     required this.onClaim,
     required this.onPurchase,
     required this.onStatusQuery,
+    this.fetchMyKeys,
+    this.onRedeem,
+    this.onRedeemId,
   });
 
   @override
@@ -38,10 +47,20 @@ class _LicenseSectionState extends State<LicenseSection> {
   bool _failed = false;
   final _bindCtrl = TextEditingController();
   final _claimCtrl = TextEditingController();
+  final _redeemCtrl = TextEditingController();
   bool _bindBusy = false;
   bool _claimBusy = false;
+  bool _redeemBusy = false;
   String? _bindOut;
   String? _claimOut;
+  String? _redeemOut;
+  List<MyLicenseKey> _myKeys = const [];
+  String? _redeemingId;
+
+  bool get _redeemWired =>
+      widget.fetchMyKeys != null &&
+      widget.onRedeem != null &&
+      widget.onRedeemId != null;
 
   @override
   void initState() {
@@ -53,6 +72,7 @@ class _LicenseSectionState extends State<LicenseSection> {
   void dispose() {
     _bindCtrl.dispose();
     _claimCtrl.dispose();
+    _redeemCtrl.dispose();
     super.dispose();
   }
 
@@ -62,12 +82,63 @@ class _LicenseSectionState extends State<LicenseSection> {
       _failed = false;
     });
     final me = await widget.fetchLicense();
+    List<MyLicenseKey>? keys;
+    if (_redeemWired) {
+      keys = await widget.fetchMyKeys!();
+    }
     if (!mounted) return;
     setState(() {
       _loading = false;
       _failed = me == null;
       if (me != null) _me = me;
+      if (keys != null) _myKeys = keys;
     });
+  }
+
+  Future<void> _submitRedeem() async {
+    if (_redeemBusy) return;
+    final input = _redeemCtrl.text;
+    if (!isKeyFormatValid(input)) {
+      setState(() => _redeemOut = '密钥格式不正确，请检查后重新输入。');
+      return;
+    }
+    setState(() {
+      _redeemBusy = true;
+      _redeemOut = null;
+    });
+    final r = await widget.onRedeem!(input.trim());
+    if (!mounted) return;
+    setState(() {
+      _redeemBusy = false;
+      _redeemOut = r == null
+          ? '网络异常，请稍后再试。'
+          : (r.msg.isNotEmpty
+              ? r.msg
+              : (r.ok ? '兑换成功，密钥已激活。' : '兑换未成功，请核对后重试。'));
+    });
+    if (r != null && r.ok) {
+      _redeemCtrl.clear();
+      _load();
+    }
+  }
+
+  Future<void> _redeemById(MyLicenseKey k) async {
+    if (_redeemingId != null) return;
+    setState(() {
+      _redeemingId = k.keyId;
+      _redeemOut = null;
+    });
+    final r = await widget.onRedeemId!(k.keyId);
+    if (!mounted) return;
+    setState(() {
+      _redeemingId = null;
+      _redeemOut = r == null
+          ? '网络异常，请稍后再试。'
+          : (r.msg.isNotEmpty
+              ? r.msg
+              : (r.ok ? '兑换成功，密钥已激活。' : '兑换未成功，请核对后重试。'));
+    });
+    if (r != null && r.ok) _load();
   }
 
   Future<void> _submitBind() async {
@@ -127,6 +198,7 @@ class _LicenseSectionState extends State<LicenseSection> {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final me = _me;
     final trialText = me != null ? trialBarText(me, nowMs) : null;
+    final entryMode = licenseEntryMode(me);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -160,7 +232,7 @@ class _LicenseSectionState extends State<LicenseSection> {
                         _kv('剩余时长',
                             me != null ? licenseRemainText(me, nowMs) : '—'),
                         _kv('设备名额',
-                            '电脑 ${me?.slotsPc ?? 0} / 1 · 手机 ${me?.slotsMobile ?? 0} / 1'),
+                            '电脑 ${me?.slotsPc ?? 0} / ${me?.slotsPcMax ?? 2} · 手机 ${me?.slotsMobile ?? 0} / ${me?.slotsMobileMax ?? 1}'),
                         _kv('网页版权益',
                             (me?.webEnabled ?? false)
                                 ? '已开通'
@@ -169,6 +241,8 @@ class _LicenseSectionState extends State<LicenseSection> {
                       ],
                     ),
         ),
+        // #49 分流：已激活（永久/按天）不再显示「输入密钥激活」卡。
+        if (entryMode == LicenseEntryMode.inactive) ...[
         const SizedBox(height: 12),
         _card(
           child: Column(
@@ -195,6 +269,7 @@ class _LicenseSectionState extends State<LicenseSection> {
             ],
           ),
         ),
+        ],
         const SizedBox(height: 12),
         _card(
           child: Column(
@@ -221,8 +296,42 @@ class _LicenseSectionState extends State<LicenseSection> {
             ],
           ),
         ),
+        // 决策 #24 兑换KEY：一切外来密钥的统一兑换/激活点（粘贴兑换＋
+        // 本人待兑换密钥一键兑换），与网页正本 home-page 同口径。
+        if (_redeemWired) ...[
+        const SizedBox(height: 12),
+        _card(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('兑换KEY',
+                  style: TextStyle(
+                      color: p.onCard, fontSize: 15, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text('在别处获得的密钥（购买转售、积分兑换等）粘贴到这里即可兑换激活；积分福利兑换的密钥会出现在下方待兑换列表中，点「一键兑换」即可激活。',
+                  style: TextStyle(color: p.onCardDim, fontSize: 12.5, height: 1.5)),
+              const SizedBox(height: 10),
+              _keyRow(
+                ctrl: _redeemCtrl,
+                busy: _redeemBusy,
+                btnLabel: '兑换',
+                onSubmit: _submitRedeem,
+              ),
+              if (_redeemOut != null) ...[
+                const SizedBox(height: 8),
+                Text(_redeemOut!,
+                    style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+              ],
+              ..._pendingRedeemRows(p),
+            ],
+          ),
+        ),
+        ],
         const SizedBox(height: 12),
         // 16:37 定版样式：购买密钥黑底白字；其下查询密钥蓝色无边框文字链
+        // #49 分流：永久已激活隐藏购买按钮；按天已激活文案改「购买叠加」
+        //（onPurchase 行为不变）；查询密钥入口不受分流影响、恒显示。
+        if (entryMode != LicenseEntryMode.permanent)
         SizedBox(
           width: double.infinity,
           child: FilledButton(
@@ -234,8 +343,10 @@ class _LicenseSectionState extends State<LicenseSection> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(11)),
             ),
-            child: const Text('购买密钥',
-                style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700)),
+            child: Text(
+                entryMode == LicenseEntryMode.timed ? '购买叠加' : '购买密钥',
+                style: const TextStyle(
+                    fontSize: 15.5, fontWeight: FontWeight.w700)),
           ),
         ),
         Center(
@@ -250,6 +361,48 @@ class _LicenseSectionState extends State<LicenseSection> {
         ),
       ],
     );
+  }
+
+  /// 待兑换列表行（决策 #24）：本人名下未激活密钥，凭 keyId 一键兑换，
+  /// 完整串不出现在列表里（与网页正本同口径）。
+  List<Widget> _pendingRedeemRows(QfPalette p) {
+    final pend = _myKeys.where((k) => k.canRedeem && k.keyId.isNotEmpty).toList();
+    if (pend.isEmpty) return const [];
+    return [
+      const SizedBox(height: 12),
+      Text('待兑换密钥',
+          style: TextStyle(
+              color: p.onCard, fontSize: 13.5, fontWeight: FontWeight.w700)),
+      const SizedBox(height: 6),
+      ...pend.map((k) => Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                      '${k.planName} · ${k.masked}${k.sourceLabel.isNotEmpty ? '（${k.sourceLabel}）' : ''}',
+                      style: TextStyle(color: p.onCard, fontSize: 13)),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed:
+                      _redeemingId == null ? () => _redeemById(k) : null,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: QfPalette.brand,
+                    minimumSize: const Size(0, 38),
+                    padding: const EdgeInsets.symmetric(horizontal: 13),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(9)),
+                  ),
+                  child: Text(
+                      _redeemingId == k.keyId ? '处理中…' : '一键兑换',
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          )),
+    ];
   }
 
   Widget _keyRow({

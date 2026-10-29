@@ -65,6 +65,82 @@ void main() {
     });
   });
 
+  group('会话深链识别 isSessionDeepLink（收编 P1 地基）', () {
+    const own = {
+      'https://54.248.9.192:8443',
+      'https://bookmarks-hunting-rendering-atlas.trycloudflare.com',
+    };
+    test('正例：桌面/终端/手机设备页三形态全命中', () {
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=11',
+              ownOrigins: own),
+          isTrue);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=12',
+              ownOrigins: own),
+          isTrue);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=10',
+              ownOrigins: own),
+          isTrue);
+    });
+    test('正例：带额外参数、node 含转义字符、自有源集合内另一源', () {
+      expect(
+          isSessionDeepLink(
+              'https://54.248.9.192:8443/?node=t3Eza%40Zz%24x&viewmode=11&title=a',
+              ownOrigins: own),
+          isTrue);
+      expect(
+          isSessionDeepLink(
+              'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/?node=abc&viewmode=11',
+              ownOrigins: own),
+          isTrue);
+    });
+    test('反例：SPA 常规导航不误伤（根路径无参/仅 node/模式外 viewmode）', () {
+      expect(isSessionDeepLink('https://54.248.9.192:8443/', ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/home',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=abc',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?viewmode=11',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=&viewmode=11',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=13',
+              ownOrigins: own),
+          isFalse);
+    });
+    test('反例：外源同形、登出址、下载址、空值', () {
+      expect(
+          isSessionDeepLink('https://evil.example.com/?node=abc&viewmode=11',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink(
+              'https://54.248.9.192:8443/logout?node=abc&viewmode=11',
+              ownOrigins: own),
+          isFalse);
+      expect(
+          isSessionDeepLink(
+              'https://54.248.9.192:8443/dl/app.apk?node=abc&viewmode=11',
+              ownOrigins: own),
+          isFalse);
+      expect(isSessionDeepLink(null, ownOrigins: own), isFalse);
+      expect(isSessionDeepLink('', ownOrigins: own), isFalse);
+      expect(isSessionDeepLink('about:blank', ownOrigins: own), isFalse);
+    });
+  });
+
   group('槽位加载账本 SlotLoadTracker', () {
     test('初始全部需要加载；标记后不再需要', () {
       final t = SlotLoadTracker();

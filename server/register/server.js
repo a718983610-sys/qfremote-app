@@ -148,7 +148,9 @@ function main() {
   const shortHash = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 12);
 
   // 经官方控制通道建号（与 MeshCtrl AddUser 同一条命令）
-  function createAccount(username, password) {
+  // realname 为可选第三参（站长创建账号时带显示名）：非空才进 adduser 命令，
+  // 落 MC user.realname；自助注册调用点不传，行为逐字不变。
+  function createAccount(username, password, realname) {
     return new Promise((resolve) => {
       let done = false;
       const finish = (r) => { if (!done) { done = true; try { ws.close(); } catch (e) {} resolve(r); } };
@@ -157,7 +159,9 @@ function main() {
       const ws = new WebSocket(cfg.mcUrl || 'wss://127.0.0.1:8443/control.ashx', { rejectUnauthorized: false, headers: { 'x-meshauth': auth } });
       const timer = setTimeout(() => finish({ ok: false, result: 'timeout' }), 10000);
       ws.on('open', () => {
-        ws.send(JSON.stringify({ action: 'adduser', username, pass: password, responseid: 'qfreg' }));
+        const cmd = { action: 'adduser', username, pass: password, responseid: 'qfreg' };
+        if (realname) cmd.realname = realname;
+        ws.send(JSON.stringify(cmd));
       });
       ws.on('message', (data) => {
         let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
@@ -269,6 +273,63 @@ function main() {
     return sendJson(res, 200, { ok: true, msg: '注册成功。请打开 QFRemote 软件，使用新注册的账号和密码登录。设备与权限由管理员后续为您分配。' });
   }
 
+  // ===== 站长创建账号（内网口，站长 2026-10-26 15:18 令）=====
+  // 与自助注册共用 validateUsernameInput / validatePasswordInput / createAccount /
+  // register-success 回写同一条开户链；风控段物理隔离：不经 ipWindows 限速、
+  // 不建设备记录、不计失败、不查 register-check；成功回写传空 deviceHash/ip，
+  // 许可 regLedger 不落账（站长开户不占「一设备一 IP 一号」名额）。
+  // 鉴权与 ext isInternal 同口径：回环来源＋x-qf-internal-secret 与密钥文件一致，
+  // 且鉴权在读请求体之前。密码只在请求体内存与 MC 哈希落盘间流转，日志绝不记。
+  async function handleAdminCreate(req, res) {
+    const remote = (req.socket && req.socket.remoteAddress) || '';
+    const loop = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    let secret = '';
+    try { secret = fs.readFileSync(LIC_SECRET_FILE, 'utf8').trim(); } catch (e) {}
+    if (!loop || !secret || req.headers['x-qf-internal-secret'] !== secret) {
+      try { req.resume(); } catch (e) {} // 排空请求体再回执，防慢客户端挂住连接（门二 D5）
+      return sendJson(res, 403, { ok: false, code: 'INTERNAL_AUTH', msg: '创建服务暂时不可用，本次创建未完成，请稍后再试。' });
+    }
+    // 读体与 ext readJsonBody 同形态：Buffer 分块收集（多字节不跨块损坏，门二 D4）、
+    // 超限只停累积继续 drain、不销毁连接，保证回单次明确的 BAD_BODY（门二 D3）。
+    const chunks = [];
+    let total = 0, over = false;
+    req.on('data', c => { total += c.length; if (total > 8192) { over = true; return; } chunks.push(c); });
+    await new Promise(r => { req.on('end', r); req.on('close', r); });
+    if (over) return sendJson(res, 400, { ok: false, code: 'BAD_BODY', msg: '请求内容不正确，本次创建未完成。' });
+    let data = {};
+    try { data = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (e) { return sendJson(res, 400, { ok: false, code: 'BAD_BODY', msg: '请求内容不正确，本次创建未完成。' }); }
+    const operator = String(data.operator || '').slice(0, 80);
+    // 显示名预检：可空；非空按 Unicode 码点计 1–32，拒 C0/C1 控制字符、
+    // 零宽与双向控制符（防后台列表显示名视觉欺骗；HTML 转义由渲染侧 esc 负责）。
+    let realname = '';
+    if (data.displayName != null && String(data.displayName).trim() !== '') {
+      const dn = String(data.displayName).trim();
+      if ([...dn].length > 32 || /[\x00-\x1F\x7F-\x9F\u200B-\u200D\uFEFF\u2060\u202A-\u202E\u2066-\u2069]/.test(dn)) {
+        return sendJson(res, 200, { ok: false, code: 'DISPLAYNAME_INVALID', msg: '显示名太长或包含不可用字符，请改一下。' });
+      }
+      realname = dn;
+    }
+    const vu = validateUsernameInput(data.username);
+    if (!vu.ok) return sendJson(res, 200, { ok: false, code: vu.reserved ? 'USERNAME_RESERVED' : 'USERNAME_FORMAT', msg: vu.msg });
+    const vp = validatePasswordInput(data.password, data.password, vu.name);
+    if (!vp.ok) return sendJson(res, 200, { ok: false, code: 'PASSWORD_WEAK', msg: vp.msg });
+    const created = await createAccount(vu.name, String(data.password), realname || undefined);
+    if (!created.ok) {
+      if (created.result === 'User already exists') return sendJson(res, 200, { ok: false, code: 'USERNAME_TAKEN', msg: '该账号已被注册' });
+      if (created.result === 'Invalid password') return sendJson(res, 200, { ok: false, code: 'PASSWORD_WEAK', msg: '密码至少 8 位，请检查后重试。' });
+      if (created.result === 'Invalid username') return sendJson(res, 200, { ok: false, code: 'USERNAME_FORMAT', msg: '账号须为字母与数字的组合，至少 8 位，请检查后重试。' });
+      if (created.result === 'maxUsersExceed') return sendJson(res, 200, { ok: false, code: 'USER_LIMIT', msg: '账号数量已达服务器上限，本次创建未成功。' });
+      log({ ev: 'admin-create-error', user: vu.name, by: operator, result: created.result });
+      return sendJson(res, 200, { ok: false, code: 'CREATE_FAILED', msg: '服务器暂时出现问题，本次创建未成功，请稍后再试。' });
+    }
+    // 成功回写许可台账＋开 3 天试用（与自助注册同一回写，空 deviceHash/ip 不落注册台账）
+    const licRes = await licInternal('/internal/license/register-success', { username: vu.name, deviceHash: '', ip: '' });
+    const licOk = !!(licRes && licRes.ok);
+    try { fs.appendFileSync(accountsFile, JSON.stringify({ username: vu.name, at: new Date().toISOString(), via: 'admin-create', by: operator }) + '\n'); } catch (e) {}
+    log({ ev: 'admin-create', user: vu.name, by: operator, licOk });
+    return sendJson(res, 200, { ok: true, username: vu.name, licOk });
+  }
+
   const server = https.createServer({ key: fs.readFileSync(cfg.tlsKey), cert: fs.readFileSync(cfg.tlsCert) }, (req, res) => {
     const u = new URL(req.url, 'https://localhost');
     if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/register')) {
@@ -289,6 +350,7 @@ function main() {
     }
     if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true });
     if (req.method === 'POST' && u.pathname === '/api/register') { handleRegister(req, res).catch(() => { try { sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' }); } catch (e) {} }); return; }
+    if (req.method === 'POST' && u.pathname === '/internal/admin-create') { handleAdminCreate(req, res).catch(() => { try { sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' }); } catch (e) {} }); return; }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });

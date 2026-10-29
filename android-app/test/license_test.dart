@@ -281,6 +281,158 @@ void main() {
     });
   });
 
+  group('me 新字段解析（名额上限/生命周期/套餐/服务端文案，2.3.2 热修）', () {
+    test('全字段解析：slots 上限、keyLifecycle/keyPlan/时长/remainText', () {
+      final me = LicenseMe.tryParse(
+          '{"ok":true,"planName":"QFRemote 按天套餐",'
+          '"slots":{"pc":2,"mobile":1,"pcMax":2,"mobileMax":1},'
+          '"hasKey":true,"keyLifecycle":"unactivated","keyPlan":"d1",'
+          '"keyDurationHours":24,'
+          '"remainText":"未激活（自激活起 24 小时有效）"}');
+      expect(me, isNotNull);
+      expect(me!.slotsPc, 2);
+      expect(me.slotsMobile, 1);
+      expect(me.slotsPcMax, 2);
+      expect(me.slotsMobileMax, 1);
+      expect(me.keyLifecycle, 'unactivated');
+      expect(me.keyPlan, 'd1');
+      expect(me.keyDurationHours, 24);
+      expect(me.serverRemainText, '未激活（自激活起 24 小时有效）');
+    });
+
+    test('新字段缺失时缺省：名额上限 2/1、其余 null', () {
+      final me = LicenseMe.tryParse(
+          '{"ok":true,"slots":{"pc":1,"mobile":0},"hasKey":true}');
+      expect(me!.slotsPcMax, 2);
+      expect(me.slotsMobileMax, 1);
+      expect(me.keyLifecycle, isNull);
+      expect(me.keyPlan, isNull);
+      expect(me.keyDurationHours, isNull);
+      expect(me.serverRemainText, isNull);
+    });
+
+    test('slots 整段缺失时上限仍缺省 2/1；服务端给了别的值以服务端为准', () {
+      final noSlots = LicenseMe.tryParse('{"ok":true,"hasKey":true}');
+      expect(noSlots!.slotsPcMax, 2);
+      expect(noSlots.slotsMobileMax, 1);
+      final custom = LicenseMe.tryParse(
+          '{"ok":true,"slots":{"pc":0,"mobile":0,"pcMax":3,"mobileMax":2}}');
+      expect(custom!.slotsPcMax, 3);
+      expect(custom.slotsMobileMax, 2);
+    });
+  });
+
+  group('licenseRemainText 分支（服务端文案优先＋同序兜底）', () {
+    final now = DateTime(2026, 10, 26, 12).millisecondsSinceEpoch;
+
+    test('serverRemainText 非空优先（压过 keyExpiresMs 折算）', () {
+      final me = LicenseMe(
+        hasKey: true,
+        keyLifecycle: 'unactivated',
+        keyPlan: 'd1',
+        keyExpiresMs: now + 3600000,
+        serverRemainText: '未激活（自激活起 24 小时有效）',
+      );
+      expect(licenseRemainText(me, now), '未激活（自激活起 24 小时有效）');
+    });
+
+    test('已激活有到期：按 keyExpiresMs 折算', () {
+      final me = LicenseMe(
+        hasKey: true,
+        keyLifecycle: 'activated',
+        keyPlan: 'd7',
+        keyExpiresMs: now + 26 * 3600000,
+      );
+      expect(licenseRemainText(me, now), '1 天 2 小时');
+    });
+
+    test('试用分支保留；无钥显示 —', () {
+      final trial = LicenseMe(
+        planName: 'QFRemote 试用套餐',
+        trialExpiresMs: now + 2 * 3600000,
+      );
+      expect(licenseRemainText(trial, now), '2 小时 0 分钟');
+      expect(licenseRemainText(const LicenseMe(), now), '—');
+    });
+
+    test('未激活按天钥：时长优先 keyDurationHours，缺失按套餐映射（回归：不许误显长期有效）', () {
+      final d1 = LicenseMe(
+          hasKey: true,
+          keyLifecycle: 'unactivated',
+          keyPlan: 'd1',
+          keyDurationHours: 24);
+      expect(licenseRemainText(d1, now), '未激活（自激活起 24 小时有效）');
+      final d7 = LicenseMe(
+          hasKey: true, keyLifecycle: 'unactivated', keyPlan: 'd7');
+      expect(licenseRemainText(d7, now), '未激活（自激活起 168 小时有效）');
+      final d30 = LicenseMe(
+          hasKey: true, keyLifecycle: 'unactivated', keyPlan: 'd30');
+      expect(licenseRemainText(d30, now), '未激活（自激活起 720 小时有效）');
+      final unknown = LicenseMe(
+          hasKey: true, keyLifecycle: 'unactivated', keyPlan: 'trial');
+      expect(licenseRemainText(unknown, now), '未激活');
+    });
+
+    test('未激活永久钥、已过期、已收回、已激活永久', () {
+      final permOff = LicenseMe(
+          hasKey: true, keyLifecycle: 'unactivated', keyPlan: 'permanent');
+      expect(licenseRemainText(permOff, now), '未激活（激活后长期有效）');
+      final expired = LicenseMe(
+          hasKey: true, keyLifecycle: 'expired', keyPlan: 'd30');
+      expect(licenseRemainText(expired, now), '已过期');
+      final revoked = LicenseMe(
+          hasKey: true, keyLifecycle: 'revoked', keyPlan: 'permanent');
+      expect(licenseRemainText(revoked, now), '已收回');
+      final permOn = LicenseMe(
+          hasKey: true, keyLifecycle: 'activated', keyPlan: 'permanent');
+      expect(licenseRemainText(permOn, now), '长期有效');
+    });
+
+    test('旧服务端无 lifecycle：按天套餐有钥按未激活兜底', () {
+      final legacy = LicenseMe(hasKey: true, keyPlan: 'd7');
+      expect(licenseRemainText(legacy, now), '未激活（自激活起 168 小时有效）');
+    });
+  });
+
+  group('licenseEntryMode 三态矩阵（决策 #49）', () {
+    test('permanent＝永久套餐＋已激活', () {
+      expect(
+          licenseEntryMode(const LicenseMe(
+              keyPlan: 'permanent', keyLifecycle: 'activated')),
+          LicenseEntryMode.permanent);
+    });
+
+    test('timed＝按天套餐（d1/d7/d30）＋已激活', () {
+      for (final plan in ['d1', 'd7', 'd30']) {
+        expect(
+            licenseEntryMode(
+                LicenseMe(keyPlan: plan, keyLifecycle: 'activated')),
+            LicenseEntryMode.timed);
+      }
+    });
+
+    test('其余一律 inactive：未激活/过期/试用/无钥/null', () {
+      expect(
+          licenseEntryMode(const LicenseMe(
+              keyPlan: 'permanent', keyLifecycle: 'unactivated')),
+          LicenseEntryMode.inactive);
+      expect(
+          licenseEntryMode(const LicenseMe(
+              keyPlan: 'd7', keyLifecycle: 'unactivated')),
+          LicenseEntryMode.inactive);
+      expect(
+          licenseEntryMode(const LicenseMe(
+              keyPlan: 'd30', keyLifecycle: 'expired')),
+          LicenseEntryMode.inactive);
+      expect(
+          licenseEntryMode(const LicenseMe(
+              keyPlan: 'trial', keyLifecycle: 'activated')),
+          LicenseEntryMode.inactive);
+      expect(licenseEntryMode(const LicenseMe()), LicenseEntryMode.inactive);
+      expect(licenseEntryMode(null), LicenseEntryMode.inactive);
+    });
+  });
+
   group('设备码（生成一次、恒定不变、退出不清）', () {
     test('getOrCreate 幂等且落盘', () async {
       final kv = MemorySecureKvStore();
@@ -321,6 +473,24 @@ void main() {
       expect(js, contains('#111')); // 购买钮黑底
       expect(js, contains('#2470E0')); // 查询链蓝字
       expect(js, contains('qfBuyKeyRow')); // 服务端已有行时接管点击
+    });
+
+    test('A-009 桥脚本逐行接管＋逐行补缺：三行各自守卫齐备', () {
+      final js = buildLoginBridgeJs(
+        savedUsername: null,
+        savedPassword: null,
+        rememberPasswordChecked: false,
+        rememberDeviceChecked: false,
+        fillSaved: false,
+      );
+      // 逐行接管（三行各有 wireRow 调用）
+      expect(js, contains("wireRow(srvBuy, 'purchase')"));
+      expect(js, contains("wireRow(srvQuery, 'status')"));
+      expect(js, contains("wireRow(srvRebind, 'rebind')"));
+      // 逐行补缺（三行各自独立守卫，缺一补一、不重复注入）
+      expect(js, contains("!srvBuy && !document.getElementById('qfBuyKeyRowShell')"));
+      expect(js, contains("!srvQuery && !document.getElementById('qfQueryKeyRowShell')"));
+      expect(js, contains("!srvRebind && !document.getElementById('qfRebindRowShell')"));
     });
 
     test('桥脚本含换绑入口（§11.9）：服务端行接管＋补注入行＋rebind 回传', () {
@@ -451,7 +621,7 @@ void main() {
       await tester.pump();
       expect(find.text('免费试用中 · 剩余 1 天 2 小时'), findsOneWidget);
       expect(find.text('QFRemote 试用套餐'), findsOneWidget);
-      expect(find.text('电脑 1 / 1 · 手机 0 / 1'), findsOneWidget);
+      expect(find.text('电脑 1 / 2 · 手机 0 / 1'), findsOneWidget);
       // 「购买密钥」两处：试用条内钮＋付费区黑底钮（与网页正本同构）
       expect(find.text('购买密钥'), findsNWidgets(2));
       expect(find.text('查询密钥'), findsOneWidget);
@@ -479,6 +649,152 @@ void main() {
       expect(find.text('许可信息读取失败，请检查网络后重试。'), findsOneWidget);
       expect(find.text('重试'), findsOneWidget);
       expect(find.text('QFRemote 试用套餐'), findsNothing);
+    });
+
+    testWidgets('#49 permanent：隐藏激活卡与购买按钮，转赠领取与查询入口保留', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async => const LicenseMe(
+                planName: 'QFRemote 永久套餐',
+                displayStatus: '正常',
+                hasKey: true,
+                keyPlan: 'permanent',
+                keyLifecycle: 'activated',
+                slotsPc: 1,
+                slotsMobile: 1,
+              ),
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('电脑 1 / 2 · 手机 1 / 1'), findsOneWidget);
+      expect(find.text('输入密钥激活'), findsNothing);
+      expect(find.text('绑定本机'), findsNothing);
+      expect(find.text('购买密钥'), findsNothing);
+      expect(find.text('购买叠加'), findsNothing);
+      expect(find.text('领取密钥'), findsOneWidget);
+      expect(find.text('查询密钥'), findsOneWidget);
+    });
+
+    testWidgets('#49 timed：隐藏激活卡，购买按钮改「购买叠加」', (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async => LicenseMe(
+                planName: 'QFRemote 按天套餐',
+                displayStatus: '正常',
+                hasKey: true,
+                keyPlan: 'd7',
+                keyLifecycle: 'activated',
+                keyExpiresMs: now + 3 * 86400000,
+              ),
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('输入密钥激活'), findsNothing);
+      expect(find.text('绑定本机'), findsNothing);
+      expect(find.text('购买叠加'), findsOneWidget);
+      expect(find.text('购买密钥'), findsNothing);
+      expect(find.text('领取密钥'), findsOneWidget);
+      expect(find.text('查询密钥'), findsOneWidget);
+    });
+
+    test('A-003 MyLicenseKey 列表解析：字段与 canRedeem 逐项对', () {
+      final keys = MyLicenseKey.tryParseList(
+          '{"ok":true,"keys":[{"keyId":"key_1","masked":"8EGJB-•••••-•••••-•••••-PXPGT","planName":"1 天套餐","sourceLabel":"付费购买","canRedeem":true},{"keyId":"key_2","masked":"AAAAA-•••••-•••••-•••••-BBBBB","planName":"永久套餐","sourceLabel":"免费发放","canRedeem":false}]}');
+      expect(keys, isNotNull);
+      expect(keys!.length, 2);
+      expect(keys[0].keyId, 'key_1');
+      expect(keys[0].planName, '1 天套餐');
+      expect(keys[0].sourceLabel, '付费购买');
+      expect(keys[0].canRedeem, isTrue);
+      expect(keys[1].canRedeem, isFalse);
+      expect(MyLicenseKey.tryParseList('{"ok":false,"keys":[]}'), isNull);
+      expect(MyLicenseKey.tryParseList('not json'), isNull);
+    });
+
+    testWidgets('A-003 兑换KEY：接线后兑换卡与待兑换列表可见，一键兑换走 keyId',
+        (tester) async {
+      String? redeemedId;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async => LicenseMe(displayStatus: '未激活'),
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+              fetchMyKeys: () async => const [
+                MyLicenseKey(
+                  keyId: 'key_9',
+                  masked: '8EGJB-•••••-•••••-•••••-PXPGT',
+                  planName: '1 天套餐',
+                  sourceLabel: '积分兑换',
+                  canRedeem: true,
+                ),
+              ],
+              onRedeem: (_) async => null,
+              onRedeemId: (id) async {
+                redeemedId = id;
+                return const LicenseOpResult(
+                    ok: true, msg: '兑换成功，密钥已激活并开始计时。');
+              },
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('兑换KEY'), findsOneWidget);
+      expect(find.text('兑换'), findsOneWidget);
+      expect(find.text('待兑换密钥'), findsOneWidget);
+      expect(find.textContaining('8EGJB-'), findsOneWidget);
+      await tester.tap(find.text('一键兑换'));
+      await tester.pump();
+      await tester.pump();
+      expect(redeemedId, 'key_9');
+    });
+
+    testWidgets('A-003 兑换KEY：未接线时不显示兑换卡（旧构造兼容）',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async => LicenseMe(displayStatus: '未激活'),
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('兑换KEY'), findsNothing);
     });
   });
 }

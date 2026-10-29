@@ -67,11 +67,23 @@ class LicenseMe {
   final String? displayStatus;
   final int slotsPc;
   final int slotsMobile;
+
+  /// 名额上限（服务端 slots.pcMax/mobileMax；#26 定版两台电脑＋一部手机，
+  /// 缺省 2/1 与 Windows 壳 license.js slotMax 同口径）。
+  final int slotsPcMax;
+  final int slotsMobileMax;
   final int? trialExpiresMs;
   final int? keyExpiresMs;
   final bool webEnabled;
   final bool everBanned;
   final bool hasKey;
+
+  /// 密钥生命周期/套餐/时长与服务端统一剩余文案（/license/api/me 补齐字段，
+  /// 与 Windows 壳 license.js parseMe 同口径）。
+  final String? keyLifecycle;
+  final String? keyPlan;
+  final int? keyDurationHours;
+  final String? serverRemainText;
   final LicenseDecision? decision;
 
   /// 顶层 forceLogout（§7.5.7）：true 时壳须立即登出并落 G1 拦截。
@@ -85,11 +97,17 @@ class LicenseMe {
     this.displayStatus,
     this.slotsPc = 0,
     this.slotsMobile = 0,
+    this.slotsPcMax = 2,
+    this.slotsMobileMax = 1,
     this.trialExpiresMs,
     this.keyExpiresMs,
     this.webEnabled = false,
     this.everBanned = false,
     this.hasKey = false,
+    this.keyLifecycle,
+    this.keyPlan,
+    this.keyDurationHours,
+    this.serverRemainText,
     this.decision,
     this.forceLogout = false,
     this.gateCode,
@@ -102,7 +120,9 @@ class LicenseMe {
       if (root['ok'] != true) return null;
       final slots = root['slots'];
       int slot(Object? v) => v is num ? v.toInt() : 0;
+      int slotMax(Object? v, int dflt) => v is num ? v.toInt() : dflt;
       int? asMs(Object? x) => x is num ? x.toInt() : null;
+      int? asNum(Object? x) => x is num ? x.toInt() : null;
       String? asStr(Object? x) => x is String && x.isNotEmpty ? x : null;
       return LicenseMe(
         username: asStr(root['username']),
@@ -111,11 +131,17 @@ class LicenseMe {
         displayStatus: asStr(root['displayStatus']),
         slotsPc: slots is Map ? slot(slots['pc']) : 0,
         slotsMobile: slots is Map ? slot(slots['mobile']) : 0,
+        slotsPcMax: slots is Map ? slotMax(slots['pcMax'], 2) : 2,
+        slotsMobileMax: slots is Map ? slotMax(slots['mobileMax'], 1) : 1,
         trialExpiresMs: asMs(root['trialExpiresMs']),
         keyExpiresMs: asMs(root['keyExpiresMs']),
         webEnabled: root['webEnabled'] == true,
         everBanned: root['everBanned'] == true,
         hasKey: root['hasKey'] == true,
+        keyLifecycle: asStr(root['keyLifecycle']),
+        keyPlan: asStr(root['keyPlan']),
+        keyDurationHours: asNum(root['keyDurationHours']),
+        serverRemainText: asStr(root['remainText']),
         decision: LicenseDecision.tryParse(root['decision']),
         forceLogout: root['forceLogout'] == true,
         gateCode: asStr(root['gateCode']),
@@ -177,15 +203,55 @@ String? trialBarText(LicenseMe me, int nowMs) {
   return '免费试用中 · 剩余 ${formatRemainMs(exp - nowMs)}';
 }
 
-/// 「剩余时长」行（与网页正本同序：付费钥到期 → 试用 → 无钥 → 长期有效）。
+/// 按天套餐时长映射（小时；与 Windows 壳 TIMED_PLAN_HOURS 同口径）。
+const Map<String, int> kTimedPlanHours = {'d1': 24, 'd7': 168, 'd30': 720};
+
+/// 「剩余时长」行：服务端 remainText 优先（统一文案），本地兜底与服务端
+/// 同序同文案：付费钥到期 → 试用 → 无钥 → 已过期/已收回 →
+/// 未激活（按天/永久）→ 长期有效。
+/// （旧实现兜底一律落「长期有效」，未激活的按天钥会被误显为长期有效。）
 String licenseRemainText(LicenseMe me, int nowMs) {
+  final serverText = me.serverRemainText;
+  if (serverText != null && serverText.isNotEmpty) return serverText;
   final keyExp = me.keyExpiresMs;
   if (keyExp != null) return formatRemainMs(keyExp - nowMs);
   if (me.planName == 'QFRemote 试用套餐' && me.trialExpiresMs != null) {
     return formatRemainMs(me.trialExpiresMs! - nowMs);
   }
   if (!me.hasKey) return '—';
+  if (me.keyLifecycle == 'expired') return '已过期';
+  if (me.keyLifecycle == 'revoked') return '已收回';
+  final isTimedPlan = kTimedPlanHours.containsKey(me.keyPlan);
+  if (me.keyLifecycle == 'unactivated') {
+    if (me.keyPlan == 'permanent') return '未激活（激活后长期有效）';
+    final h = me.keyDurationHours ??
+        (isTimedPlan ? kTimedPlanHours[me.keyPlan] : null);
+    if (h != null) return '未激活（自激活起 $h 小时有效）';
+    return '未激活';
+  }
+  // 旧服务端未回 lifecycle 时的兜底：按天套餐＋有钥＝尚未激活，不许落长期有效。
+  if (me.keyLifecycle == null && isTimedPlan) {
+    final h = me.keyDurationHours ?? kTimedPlanHours[me.keyPlan];
+    if (h != null) return '未激活（自激活起 $h 小时有效）';
+    return '未激活';
+  }
   return '长期有效';
+}
+
+/// 许可入口分流（决策 #49）：permanent＝已激活永久、timed＝已激活按天、
+/// 其余（含 me 为 null）一律 inactive。与 Windows 壳 licenseEntryMode 同口径。
+enum LicenseEntryMode { permanent, timed, inactive }
+
+LicenseEntryMode licenseEntryMode(LicenseMe? me) {
+  if (me == null) return LicenseEntryMode.inactive;
+  if (me.keyPlan == 'permanent' && me.keyLifecycle == 'activated') {
+    return LicenseEntryMode.permanent;
+  }
+  if (me.keyLifecycle == 'activated' &&
+      (me.keyPlan == 'd1' || me.keyPlan == 'd7' || me.keyPlan == 'd30')) {
+    return LicenseEntryMode.timed;
+  }
+  return LicenseEntryMode.inactive;
 }
 
 /// 日期文案（L8/L12/L14 用）：X 年 X 月 X 日（Asia/Shanghai 与服务端
@@ -367,6 +433,47 @@ GateAction resolveGateAction({
 bool isKeyFormatValid(String raw) {
   final v = raw.trim().toUpperCase();
   return RegExp(r'^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$').hasMatch(v);
+}
+
+/// 本人密钥列表条目（GET /license/api/mykeys；决策 #24 待兑换列表用）。
+/// 列表只带掩码串，完整串不下发；canRedeem＝未激活、可一键兑换。
+class MyLicenseKey {
+  final String keyId;
+  final String masked;
+  final String planName;
+  final String sourceLabel;
+  final bool canRedeem;
+
+  const MyLicenseKey({
+    required this.keyId,
+    required this.masked,
+    required this.planName,
+    required this.sourceLabel,
+    required this.canRedeem,
+  });
+
+  /// 解析 /license/api/mykeys 响应体；格式不合返回 null（调用方落诚实错误态）。
+  static List<MyLicenseKey>? tryParseList(String body) {
+    try {
+      final root = jsonDecode(body);
+      if (root is! Map<String, dynamic>) return null;
+      if (root['ok'] != true) return null;
+      final raw = root['keys'];
+      if (raw is! List) return null;
+      String asStr(Object? x) => x is String ? x : '';
+      return raw.whereType<Map<String, dynamic>>().map((k) {
+        return MyLicenseKey(
+          keyId: asStr(k['keyId']),
+          masked: asStr(k['masked']),
+          planName: asStr(k['planName']),
+          sourceLabel: asStr(k['sourceLabel']),
+          canRedeem: k['canRedeem'] == true,
+        );
+      }).toList();
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 /// 领取/绑定类接口的统一结果（壳侧只显示服务端正式提示，不自编）。

@@ -42,7 +42,8 @@ class DeviceKeyVault {
     return existing != null && _isValidKey(existing);
   }
 
-  /// 清除设备钥匙（手动退出时调用）。
+  /// 清除设备钥匙（预留方法：手动退出账号不调用——口径见类注释，
+  /// 退出不等于换设备；仅明确需要废弃本机设备钥匙时才可调用）。
   Future<void> clear() => _store.delete(storageKey);
 
   static bool _isValidKey(String b64) {

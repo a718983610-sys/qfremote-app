@@ -88,6 +88,32 @@ class LicenseClient {
     return LicenseOpResult.tryParse(r.$2);
   }
 
+  /// 本人密钥列表（决策 #24 待兑换列表；只含掩码串）。
+  /// 端点以服务端现行路由为准：GET /license/api/mykeys（ext-svc server.js
+  /// 唯一注册路由；旧写法 /api/keys 无此路由、恒 404，矩阵 B10 修复）。
+  Future<List<MyLicenseKey>?> fetchMyKeys() async {
+    final r = await _send('GET', '${urls.licenseApiBase}/api/mykeys');
+    if (r == null || r.$1 != 200) return null;
+    return MyLicenseKey.tryParseList(r.$2);
+  }
+
+  /// 兑换KEY·粘贴兑换（决策 #24 统一入口 /license/api/redeem）：
+  /// 外来未激活密钥走归属转移＋激活；本人未激活密钥走同一激活口径。
+  Future<LicenseOpResult?> redeemKey(String key) async {
+    final r = await _send('POST', '${urls.licenseApiBase}/api/redeem',
+        jsonBody: {'key': key.trim()});
+    if (r == null) return null;
+    return LicenseOpResult.tryParse(r.$2);
+  }
+
+  /// 兑换KEY·待兑换列表一键兑换（凭 keyId，完整串不下发到列表）。
+  Future<LicenseOpResult?> redeemKeyId(String keyId) async {
+    final r = await _send('POST', '${urls.licenseApiBase}/api/redeem',
+        jsonBody: {'keyId': keyId});
+    if (r == null) return null;
+    return LicenseOpResult.tryParse(r.$2);
+  }
+
   /// 粘贴领取转赠密钥（契约 §7.5.3 唯一领取端点）。
   /// 已有控制台会话时走已登录入口（只带 key）；无会话时带账号＋密码核验
   /// （凭据只在本次请求体里，不落盘、不签发登录态）。

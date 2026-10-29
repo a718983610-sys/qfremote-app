@@ -236,6 +236,36 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('强制更新页 #43：失败态才有放行出口，点击触发回调', (tester) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    var skipped = 0;
+    Future<File> failing(
+            ReleaseEntry entry, void Function(int, int?, int?) cb) =>
+        Future.error(const HttpException('下载失败：HTTP 500'));
+    await tester.pumpWidget(MaterialApp(
+      home: ForceUpdateView(
+        palette: palette,
+        currentVersion: '2.2.0',
+        entry: fakeEntry(),
+        download: failing,
+        openInstaller: (_) async {},
+        onSkipOnce: () => skipped++,
+      ),
+    ));
+    await tester.pump();
+    // 未失败前不许出现放行出口（能更时拦死）
+    expect(find.text('下载失败？先进入软件，下次再更新'), findsNothing);
+    await tester.tap(find.text('立即更新'));
+    await tester.pumpAndSettle(const Duration(milliseconds: 100), EnginePhase.sendSemanticsUpdate, const Duration(seconds: 30));
+    expect(find.text('下载失败？先进入软件，下次再更新'), findsOneWidget);
+    await tester.tap(find.text('下载失败？先进入软件，下次再更新'));
+    await tester.pump();
+    expect(skipped, 1);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('关于弹窗：下载进度 50% 可见、失败原因可见', (tester) async {
     tester.view.physicalSize = const Size(360, 640);
     tester.view.devicePixelRatio = 1.0;

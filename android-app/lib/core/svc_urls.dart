@@ -40,6 +40,9 @@ class SvcUrls {
   String get pointsUrl => _points ?? kPointsUrlFallback;
   String get adminUrl => _admin ?? kAdminUrlFallback;
 
+  /// 官网根址（收编 P1，X-02）：固定公开站，不走 product.json 解析。
+  String get websiteUrl => kWebsiteUrl;
+
   /// 积分接口基址（pointsUrl 本身即 /points 前缀，接口在其下 /api/*）。
   String get pointsApiBase => pointsUrl;
 

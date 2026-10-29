@@ -257,6 +257,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   LicenseClient get _licenseService => _licenseClient ??=
       LicenseClient(cookieProvider: _consoleCookieHeader);
 
+  /// 许可/积分拉取的未登录短路（SUP-P0-06）：「我的」槽在 IndexedStack 里
+  /// 常驻构建，其许可区与积分会在未登录时也急切拉取、成对空打 401。
+  /// 未检出登录（chrome 未出现）前一律不发请求、按无数据处理；登录检出
+  /// 后 MePage 随 chrome 翻转重建（build 里 key 绑定），届时再真拉。
+  Future<PointsInfo?> _fetchPointsWhenLoggedIn() =>
+      _chromeVisible ? _extService.fetchMe() : Future<PointsInfo?>.value();
+
+  Future<List<MyLicenseKey>?> _fetchMyKeysWhenLoggedIn() => _chromeVisible
+      ? _licenseService.fetchMyKeys()
+      : Future<List<MyLicenseKey>?>.value();
+
   String get _currentVersion => _pkg?.version ?? kAppVersion;
   QfPalette get _palette => QfPalette(_themeMode);
   String get _startUrl => kHasTestUrl ? kTestUrl : kConsoleUrl;
@@ -315,6 +326,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _savedSession = null;
     }
     _autoLogin.credentialBlocked = settings.credentialBlocked;
+    if (settings.credentialBlocked &&
+        (_savedCreds != null || _savedSession != null)) {
+      // 凭据自愈（SUP-P0-06）：拦截标记在册＝本机存档凭据已被服务端明确
+      // 拒过（旧版本只置闸、没清存档）；开机先清掉，免得带着旧名旧密码
+      // 再进恢复链。本版本起置闸时已同步清存档，此处只兜旧版存量。
+      try {
+        await _credStore.clearAll();
+      } catch (_) {}
+      _savedCreds = null;
+      _savedSession = null;
+    }
     final canRecover = (_savedCreds != null ||
             (_savedSession?.isFresh(DateTime.now()) ?? false)) &&
         (settings.rememberDevice || settings.rememberPassword);
@@ -380,16 +402,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 打开站长管理页：先用控制台会话换一次性令牌，再在 WebView 打开管理页；
+  /// 打开站长管理页：先用控制台会话换一次性令牌，再以壳内页打开管理页
+  /// （收编 P1：不再劫持设备槽 WebView，令牌 URL 口径不变）；
   /// 换不到令牌时直接打开管理页（服务端会自行走登录）。
   Future<void> _openAdmin() async {
-    _activateSlot(AppSlot.devices);
     final token = await _extService.fetchSsoToken();
     if (!mounted) return;
     final url = token != null
         ? SvcUrls.instance.adminLoginUrl(token)
         : SvcUrls.instance.adminUrl;
-    _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    await _openShellWeb('管理', url);
   }
 
   // ---------------- 许可全链（2.3.1 阶段 D） ----------------
@@ -757,6 +779,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_forumWeb == null || !_slotLoads.needsLoad(AppSlot.forum)) return;
     _slotLoads.markLoaded(AppSlot.forum);
     final forumUrl = SvcUrls.instance.forumUrl;
+    var loadUrl = forumUrl;
     try {
       final pageUri = Uri.parse(forumUrl);
       final origin = Uri(
@@ -769,17 +792,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (user == null &&
           !(_settings?.credentialBlocked ?? false) &&
           !(_autoLogin.suppressedByManualLogout)) {
-        final creds = _savedCreds ?? await _credStore.loadCredentials();
-        if (creds != null) {
-          final frm = await _forumSso.login(
-              origin, creds.username, creds.password);
-          if (frm != null) {
-            await CookieManager.instance().setCookie(
-              url: WebUri(origin.toString()),
-              name: 'qfr_frm',
-              value: frm,
-              path: '/',
-            );
+        // 先走服务端令牌交接（只认控制台会话，不依赖本机存密码）；
+        // 拿到令牌就改加载交接地址，服务端种 qfr_frm 后自回 /forum。
+        final token = await _forumSso.ssoToken(origin, cookieHeader);
+        if (token != null) {
+          loadUrl = _forumSso.ssoLoginUrl(origin, token);
+        } else {
+          final creds = _savedCreds ?? await _credStore.loadCredentials();
+          if (creds != null) {
+            final frm = await _forumSso.login(
+                origin, creds.username, creds.password);
+            if (frm != null) {
+              await CookieManager.instance().setCookie(
+                url: WebUri(origin.toString()),
+                name: 'qfr_frm',
+                value: frm,
+                path: '/',
+              );
+            }
           }
         }
       }
@@ -787,7 +817,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 免登桥失败不挡路：照常加载论坛页
     }
     if (!mounted) return;
-    _forumWeb?.loadUrl(urlRequest: URLRequest(url: WebUri(forumUrl)));
+    _forumWeb?.loadUrl(urlRequest: URLRequest(url: WebUri(loadUrl)));
   }
 
   /// 启动门（更新政策）：落盘有待更新时先取清单裁决——
@@ -1104,9 +1134,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _stepWaitUntil = null;
     _failureSnackShown = false;
     await _maybeSnapshotSession();
-    // 已登录：框架顶栏/标签出现，并预加载好友/论坛槽
+    // 已登录：框架顶栏/标签出现，并预加载好友/论坛槽。
+    // 落点切回首页槽（阶段 D 定版）：未登录期间 _slot 被收尾逻辑钉在
+    // 设备槽（登录页所在，SUP-P0-06），只在 chrome 由无到有这一拍切回；
+    // 会话中途掉线又恢复时 chrome 未曾收起，不动用户当前所在槽。
     if (mounted && !_chromeVisible) {
-      setState(() => _chromeVisible = true);
+      setState(() {
+        _chromeVisible = true;
+        _slot = AppSlot.home;
+      });
     }
     _preloadSlots();
     // 2.3.1：会话建立成功后立即跑许可门（§3 时机：先于任何设备连接动作；
@@ -1165,6 +1201,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (wasAuto) {
         _autoLogin.credentialBlocked = true;
         await _settings?.setCredentialBlocked(true);
+        // 凭据自愈（SUP-P0-06）：服务端已明确拒了自动提交的这组凭据
+        // （如账号已改名、密码已变更）——本机存档（凭据＋会话快照）一并
+        // 清掉并停手，绝不留着到下次冷启动再拿旧名反复自动提交。
+        await _purgeRejectedAuth();
         debugPrint('QFLOGIN credential auto-login failed -> blocked');
       }
     }
@@ -1242,11 +1282,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _failureSnackShown = true;
         _snack('自动登录未成功，请重新登录。');
       }
-      // 恢复失败、停在登录页：框架收起并回首页槽（登录页无框架，样图 m01）
+      // 恢复失败、停在登录页：框架收起并落设备槽——登录页就在设备槽的
+      // WebView 里；回首页槽会把人晾在未装载的空白槽上（SUP-P0-06 定性，
+      // 此前方向写反了）。登录成功后由 _onConsoleDetected 切回首页槽。
       if (mounted && _chromeVisible) {
         setState(() {
           _chromeVisible = false;
-          _slot = AppSlot.home;
+          _slot = AppSlot.devices;
         });
       }
       return;
@@ -1309,14 +1351,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _stepWaitUntil = null;
     _failureSnackShown = false;
     debugPrint('QFLOGIN manual logout: clearing auth state');
-    // 框架复位：回首页槽、收起顶栏/标签、槽位账本作废（不残留上个账号页面）；
-    // 许可门守卫一并复位，下个会话重新检查。
+    // 框架复位：落设备槽（登录页所在，SUP-P0-06；此前写回首页槽会把人
+    // 晾在空白槽上）、收起顶栏/标签、槽位账本作废（不残留上个账号页面）；
+    // 许可门守卫一并复位，下个会话重新检查。重新登录成功后由
+    // _onConsoleDetected 切回首页槽落地。
     _slotsPreloaded = false;
     _licenseCheckedThisSession = false;
     _slotLoads.invalidateAll();
     if (mounted) {
       setState(() {
-        _slot = AppSlot.home;
+        _slot = AppSlot.devices;
         _chromeVisible = false;
       });
     }
@@ -1327,6 +1371,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _splashVisible = false;
       });
     }
+  }
+
+  /// 凭据自愈（SUP-P0-06）：自动提交的凭据被服务端明确拒绝后，清掉本机
+  /// 存档（凭据＋会话快照）与内存镜像。此后恢复链无凭据可用、只会停手落
+  /// 登录页；用户手动输新凭据登录成功后，按记住勾选重新落盘。
+  /// 与手动退出的 _clearAuthState 分工：这里不动 cookie、不清槽位页面、
+  /// 不置手动退出闸——用户没退出，只是这组存档凭据作废了。
+  Future<void> _purgeRejectedAuth() async {
+    try {
+      await _enqueueAuth(() => _credStore.clearAll());
+    } catch (_) {}
+    _savedCreds = null;
+    _savedSession = null;
   }
 
   Future<void> _clearAuthState() async {
@@ -1611,8 +1668,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _activeWeb?.reload();
         break;
       case 'register':
-        _activateSlot(AppSlot.devices);
-        _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.registerUrl)));
+        // 收编 P1：注册页改走壳内页，不再整页冲掉设备槽的控制台语境。
+        _openShellWeb('注册新账号', SvcUrls.instance.registerUrl);
         break;
       case 'theme':
         final next = _themeMode == QfThemeMode.blue ? QfThemeMode.dark : QfThemeMode.blue;
@@ -1721,8 +1778,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           },
           onOpenTerms: () {
             Navigator.of(context).pop();
-            _activateSlot(AppSlot.devices);
-            _web?.loadUrl(urlRequest: URLRequest(url: WebUri(SvcUrls.instance.termsUrl)));
+            // 收编 P1：协议页改走壳内页，不再劫持设备槽。
+            _openShellWeb('用户协议', SvcUrls.instance.termsUrl);
           },
         ),
       ),
@@ -1789,7 +1846,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         download: _downloadApk,
         openInstaller: _openInstaller,
         diagnosticsText: () async => _diagnosticsText(),
-        fetchPoints: () => _extService.fetchMe(),
+        fetchPoints: _fetchPointsWhenLoggedIn,
       ),
     );
   }
@@ -1809,6 +1866,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           entry: _forceEntry!,
           download: _downloadApk,
           openInstaller: _openInstaller,
+          // 决策 #43：下载失败放行出口——只清本次会话的墙，待更新标记
+          // 保留在设置里，下次启动 _launchGate 仍会拦。
+          onSkipOnce: () => setState(() => _forceEntry = null),
         ),
       );
     }
@@ -1884,7 +1944,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ],
                   Expanded(
                     child: IndexedStack(
-                      index: _slot.index,
+                      // 前台槽裁决（SUP-P0-06）：未登录时强制设备槽，
+                      // 登录页就在那里；选中槽只在登录后生效。
+                      index: foregroundSlot(
+                              chromeVisible: _chromeVisible, selected: _slot)
+                          .index,
                       children: [
                         // 首页槽：网页新首页正本（C-3）壳内同框呈现，空白页
                         // 起步，会话建立后移植 cookie 再加载（保活）
@@ -2009,22 +2073,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _handlePageDownload(request);
                           },
                         ),
-                            if (_offline)
-                              OfflineView(
-                                palette: _palette,
-                                secondsLeft: _offlineSecondsLeft,
-                                onRetryNow: () {
-                                  _offlineTimer?.cancel();
-                                  _web?.reload();
-                                  _scheduleOfflineRetry();
-                                },
-                              ),
-                            if (_splashVisible)
-                              SplashView(
-                                palette: _palette,
-                                version: _currentVersion,
-                                note: _recoveryCover ? '正在恢复登录…' : null,
-                              ),
+                            // 断线卡片/启动画面已提至根 Stack（SUP-P0-06）：
+                            // 不再困在本槽内，前台是哪个槽都看得见。
                           ],
                         ),
                         // 好友槽（聊天也在此槽内打开）：空白页起步，登录后预加载
@@ -2070,8 +2120,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _handlePageDownload(request);
                           },
                         ),
-                        // 我的槽：原生页（样图 m09），常驻保活
+                        // 我的槽：原生页（样图 m09），常驻保活。
+                        // key 绑 chrome：登录检出/登出时整页重建——未登录时
+                        // 许可/积分拉取被短路（见 _fetchPointsWhenLoggedIn），
+                        // 登录后靠这次重建补拉真实数据，不留旧账号残影。
                         MePage(
+                          key: ValueKey<bool>(_chromeVisible),
                           palette: _palette,
                           currentVersion: _currentVersion,
                           hasUpdate: _updateEntry != null,
@@ -2080,7 +2134,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ? '已记住此设备，30 天内不用再登录'
                               : '未记住此设备，下次打开需要重新登录',
                           fallbackUser: _savedCreds?.username,
-                          fetchPoints: () => _extService.fetchMe(),
+                          fetchPoints: _fetchPointsWhenLoggedIn,
                           onOpenSettings: _openSettings,
                           onCheckUpdate: () => _sessionUpdateCheck(manual: true),
                           onAccountAction: () {
@@ -2088,9 +2142,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _snack('账号设置请在设备页中操作。');
                           },
                           onLogout: _manualLogoutFromMenu,
+                          onOpenWebsite: () => _openShellWeb(
+                              '官网', SvcUrls.instance.websiteUrl),
                           licenseSection: LicenseSection(
                             palette: _palette,
                             fetchLicense: () async {
+                              // 未登录短路（SUP-P0-06）：不发请求
+                              if (!_chromeVisible) return null;
                               final me =
                                   await _licenseService.fetchLicenseMe();
                               // §7.5.7：/me 附带 forceLogout 时立即执行
@@ -2107,6 +2165,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   key, _deviceCode!);
                             },
                             onClaim: _claimFromShell,
+                            // 决策 #24 兑换KEY（巡查 A-003 补齐安卓原生入口）
+                            fetchMyKeys: _fetchMyKeysWhenLoggedIn,
+                            onRedeem: _licenseService.redeemKey,
+                            onRedeemId: _licenseService.redeemKeyId,
                             onPurchase: () => _openShellWeb(
                                 '购买密钥', SvcUrls.instance.purchaseUrl),
                             onStatusQuery: () => _openShellWeb(
@@ -2133,6 +2195,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     backgroundColor: Colors.black54,
                     onPressed: _toggleFullscreen,
                     child: const Icon(Icons.fullscreen_exit, color: Colors.white),
+                  ),
+                ),
+              // 状态面根层（SUP-P0-06）：断线卡片与启动/恢复盖子提到根
+              // Stack，与前台槽无关地可见——断网冷启动、恢复进行中都必须
+              // 看得见、点得到重试，不许再困在设备槽里被别的槽盖住。
+              if (_offline)
+                Positioned.fill(
+                  child: OfflineView(
+                    palette: _palette,
+                    secondsLeft: _offlineSecondsLeft,
+                    onRetryNow: () {
+                      _offlineTimer?.cancel();
+                      _web?.reload();
+                      _scheduleOfflineRetry();
+                    },
+                  ),
+                ),
+              if (_splashVisible)
+                Positioned.fill(
+                  child: SplashView(
+                    palette: _palette,
+                    version: _currentVersion,
+                    note: _recoveryCover ? '正在恢复登录…' : null,
                   ),
                 ),
             ],

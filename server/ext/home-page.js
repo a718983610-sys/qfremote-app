@@ -256,7 +256,7 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
 
     <section class="trial" id="trialBar" aria-label="试用提示">
       <span class="tile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
-      <span class="row-t"><b id="trialTitle">免费试用中</b><small>试用结束后，电脑与手机需使用激活密钥继续使用；购买密钥后，网页版免费开通，可在任意设备登录使用。</small></span>
+      <span class="row-t"><b id="trialTitle">免费试用中</b><small>试用期内，电脑、手机与网页版均可使用；试用结束后，需购买密钥激活后继续使用。</small></span>
       <span style="display:flex;gap:10px;flex-wrap:wrap"><button class="gobtn ghost" type="button" id="trialActivate">输入密钥激活</button><button class="gobtn" type="button" data-goto="/purchase">购买密钥</button></span>
     </section>
 
@@ -553,7 +553,7 @@ document.querySelectorAll('[data-lic]').forEach(function(el){ el.addEventListene
     return;
   }
   if(k==='slots'){ var m=window.__qfMe||{}; var s=m.slots||{pc:0,mobile:0}; showDialog('我的设备名额','<p>电脑：'+s.pc+' / '+(s.pcMax||2)+' · 手机：'+s.mobile+' / '+(s.mobileMax||1)+'</p><p>一枚密钥可绑定两台电脑与一部手机；超出名额的设备需另行购买密钥。</p>'); return; }
-  if(k==='web'){ var m2=window.__qfMe||{}; showDialog('网页版权益','<p>'+(m2.webEnabled?'您的账号已真实付费购买密钥，网页版已开通，可在任意设备登录使用。':'网页版为真实付费购买密钥后开通的权益。您当前尚未开通，真实付费购买后即可在任意设备登录使用。')+'</p>'); return; }
+  if(k==='web'){ var m2=window.__qfMe||{}; var webBody = m2.webEnabled ? (m2.webBy==='trial' ? '您的账号处于免费试用期，网页版已开通，可在任意设备登录使用；试用到期后，网页版需真实付费购买密钥后继续使用。' : '您的账号已真实付费购买密钥，网页版已开通，可在任意设备登录使用。') : '网页版为真实付费购买密钥后开通的权益。您当前尚未开通，真实付费购买后即可在任意设备登录使用。'; showDialog('网页版权益','<p>'+webBody+'</p>'); return; }
 });});
 
 /* ----- #49 付费入口分流（按 keyPlan/keyLifecycle 调整 activate/buy 两行，幂等） ----- */
@@ -601,13 +601,13 @@ function loadMe(){
     else if(!j.hasKey){ remain='—'; }
     $('licRemain').textContent=remain;
     $('licSlots').textContent='电脑 '+(j.slots?j.slots.pc:0)+' / '+(j.slots?(j.slots.pcMax||2):2)+' · 手机 '+(j.slots?j.slots.mobile:0)+' / '+(j.slots?(j.slots.mobileMax||1):1);
-    $('licWeb').textContent=j.webEnabled?'已开通':'未开通（真实付费购买后开通）';
+    $('licWeb').textContent=j.webEnabled?(j.webBy==='trial'?'已开通（试用期内）':'已开通'):'未开通（真实付费购买后开通）';
     $('heroStatus').textContent=j.displayStatus||'普通用户';
     var ss=document.querySelector('[data-licsub="slots"] small')||document.querySelector('[data-licsub="slots"]');
     var slotEl=document.querySelector('[data-licsub="slots"]'); if(slotEl) slotEl.textContent='电脑 '+(j.slots?j.slots.pc:0)+' / '+(j.slots?(j.slots.pcMax||2):2)+' · 手机 '+(j.slots?j.slots.mobile:0)+' / '+(j.slots?(j.slots.mobileMax||1):1)+'；超出名额的设备需另行购买';
-    var webEl=document.querySelector('[data-licsub="web"]'); if(webEl) webEl.textContent=j.webEnabled?'已开通，可在任意设备登录使用':'尚未开通，真实付费购买后开通';
+    var webEl=document.querySelector('[data-licsub="web"]'); if(webEl) webEl.textContent=j.webEnabled?(j.webBy==='trial'?'已开通（试用期内），可在任意设备登录使用':'已开通，可在任意设备登录使用'):'尚未开通，真实付费购买后开通';
     // TrialBar：试用套餐且试用未到期才显示
-    if(j.trialExpiresMs && j.trialExpiresMs>now && !j.webEnabled && (j.planName==='QFRemote 试用套餐')){
+    if(j.trialExpiresMs && j.trialExpiresMs>now && (j.planName==='QFRemote 试用套餐')){
       $('trialTitle').textContent='免费试用中 · 剩余 '+fmtRemain(j.trialExpiresMs-now);
       $('trialBar').classList.add('on');
     } else { $('trialBar').classList.remove('on'); }

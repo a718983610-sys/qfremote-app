@@ -36,6 +36,17 @@ BackAction decideBackAction({
   return activeCanGoBack ? BackAction.pageBack : BackAction.exitApp;
 }
 
+/// 前台槽裁决（白屏修复，巡查 SUP-P0-06）：登录页只存在于设备槽的
+/// WebView 里。未登录（框架 chrome 未出现）时，前台必须是设备槽——
+/// 若按选中槽（如默认的首页槽）呈现，未登录用户会落在一个从未装载的
+/// 空白 WebView 上：无顶栏、无标签栏、无任何可点元素，永久困死
+/// （2.3.1/2.3.2 冷启动未登录实拍定性）。登录检出后按选中槽呈现。
+AppSlot foregroundSlot({
+  required bool chromeVisible,
+  required AppSlot selected,
+}) =>
+    chromeVisible ? selected : AppSlot.devices;
+
 /// 槽位加载账本：哪些 WebView 槽已经加载过主页（保活判据）。
 /// 登录成功后预加载、点开时未加载才加载；手动退出后全部作废，
 /// 下次进入按当时登录态重新加载（不许残留上一个账号的页面）。
@@ -65,6 +76,33 @@ bool isShellContentPage(String? url) {
       path.startsWith('/chat/') ||
       path == '/forum' ||
       path.startsWith('/forum/');
+}
+
+/// 会话深链识别（收编 P1 地基，纯函数可单测）：
+/// 控制台 SPA 点「远程桌面 / 远程终端」时产生的引擎会话深链，形态为
+/// 自有源根路径＋`node`＋`viewmode`（10 手机设备页 / 11 桌面 / 12 终端）
+/// 查询参数。P2 起壳在导航策略里据此拦截、改推根层会话面（槽内 SPA
+/// 停留设备详情原地）；P1 只落识别，不接导航策略。
+/// 只认 [ownOrigins] 内的源：外源同形地址一律不认；SPA 常规页内导航
+/// （无 node/viewmode）、登出址、下载址均不命中，不误伤既有口径。
+bool isSessionDeepLink(String? url, {required Set<String> ownOrigins}) {
+  if (url == null) return false;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return false;
+  if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+  final String origin;
+  try {
+    origin = uri.origin;
+  } catch (_) {
+    // 无 authority 等取不到源的地址一律不认（origin 对这类地址会抛错）。
+    return false;
+  }
+  if (!ownOrigins.contains(origin)) return false;
+  if (uri.path.isNotEmpty && uri.path != '/') return false;
+  final node = uri.queryParameters['node'];
+  if (node == null || node.isEmpty) return false;
+  const sessionModes = {'10', '11', '12'};
+  return sessionModes.contains(uri.queryParameters['viewmode']);
 }
 
 /// 藏页面自带框的注入脚本（幂等：同一文档重复注入只留一份样式）。

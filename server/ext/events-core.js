@@ -33,6 +33,7 @@ function createEventsCore(deps) {
   const file = path.join(dataDir, 'events.json');
   const tokenMetaFile = path.join(dataDir, 'assistant-token.json');
   const tokenPlainFile = deps.tokenPlainFile || '/opt/qfremote-ext/assistant-api-token.txt';
+  const ownerTokenPlainFile = deps.ownerTokenPlainFile || '/opt/qfremote-ext/owner-api-token.txt';
   try { fs.mkdirSync(dataDir, { recursive: true }); } catch (e) {}
 
   let store = { seq: 0, items: [] };
@@ -93,7 +94,9 @@ function createEventsCore(deps) {
       .sort((a, b) => (b.handledAt || 0) - (a.handledAt || 0)).slice(0, Math.min(50, Number(limit) || 20));
   }
 
-  // ---------- 助手令牌（只存哈希；明文只落 600 文件） ----------
+  // ---------- 接口令牌（只存哈希；明文只落 600 文件） ----------
+  // 双槽并存：顶层四字段＝助手槽（qfa_，行为不变）；owner 子对象＝站长
+  // 全开槽（qfo_，decide 不受订单阶段限制），两槽独立生成/吊销。
   function readTokenMeta() {
     try { const v = JSON.parse(fs.readFileSync(tokenMetaFile, 'utf8')); if (v && typeof v === 'object') return v; } catch (e) {}
     return { status: 'none', hash: null, createdAt: null, lastUsedAt: null };
@@ -103,13 +106,23 @@ function createEventsCore(deps) {
     fs.writeFileSync(tmp, JSON.stringify(m, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, tokenMetaFile);
   }
+  function ownerSlot(m) {
+    return (m.owner && typeof m.owner === 'object') ? m.owner : null;
+  }
   function tokenStatus() {
     const m = readTokenMeta();
-    return { status: m.status, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt, plainFile: tokenPlainFile };
+    const owner = ownerSlot(m) || { status: 'none', createdAt: null, lastUsedAt: null };
+    return {
+      status: m.status, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt, plainFile: tokenPlainFile,
+      owner: { status: owner.status, createdAt: owner.createdAt, lastUsedAt: owner.lastUsedAt, plainFile: ownerTokenPlainFile },
+    };
   }
   function generateToken() {
+    // 读-改-写单槽：顶层四字段＝助手槽，owner 子对象原样保留（旧版整对象覆写会抹掉 owner 槽）
+    const m = readTokenMeta();
     const plain = 'qfa_' + crypto.randomBytes(32).toString('hex');
-    writeTokenMeta({ status: 'active', hash: sha256(plain), createdAt: Date.now(), lastUsedAt: null });
+    m.status = 'active'; m.hash = sha256(plain); m.createdAt = Date.now(); m.lastUsedAt = null;
+    writeTokenMeta(m);
     fs.writeFileSync(tokenPlainFile, plain + '\n', { mode: 0o600 });
     try { fs.chmodSync(tokenPlainFile, 0o600); } catch (e) {}
     log({ ev: 'assistant-token-generated' });
@@ -117,29 +130,73 @@ function createEventsCore(deps) {
   }
   function revokeToken() {
     const m = readTokenMeta();
-    writeTokenMeta({ status: 'revoked', hash: null, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt });
+    m.status = 'revoked'; m.hash = null; // createdAt/lastUsedAt 保留（与旧版语义一致）
+    writeTokenMeta(m);
     try { fs.unlinkSync(tokenPlainFile); } catch (e) {}
     log({ ev: 'assistant-token-revoked' });
     return { ok: true, status: 'revoked' };
   }
-  let lastUsedWrite = 0;
-  function verifyToken(plain) {
-    if (!plain) return false;
+  function generateOwnerToken() {
     const m = readTokenMeta();
-    if (m.status !== 'active' || !m.hash) return false;
-    const ok = crypto.timingSafeEqual(Buffer.from(sha256(plain)), Buffer.from(m.hash));
-    if (ok) {
-      const now = Date.now();
-      if (now - lastUsedWrite > 30000) { lastUsedWrite = now; m.lastUsedAt = now; try { writeTokenMeta(m); } catch (e) {} }
+    const plain = 'qfo_' + crypto.randomBytes(32).toString('hex');
+    const owner = ownerSlot(m) || {};
+    owner.status = 'active'; owner.hash = sha256(plain); owner.createdAt = Date.now(); owner.lastUsedAt = null;
+    m.owner = owner;
+    writeTokenMeta(m);
+    fs.writeFileSync(ownerTokenPlainFile, plain + '\n', { mode: 0o600 });
+    try { fs.chmodSync(ownerTokenPlainFile, 0o600); } catch (e) {}
+    log({ ev: 'owner-token-generated' });
+    return { ok: true, status: 'active', plainFile: ownerTokenPlainFile };
+  }
+  function revokeOwnerToken() {
+    const m = readTokenMeta();
+    const owner = ownerSlot(m) || {};
+    owner.status = 'revoked'; owner.hash = null; // createdAt/lastUsedAt 保留
+    m.owner = owner;
+    writeTokenMeta(m);
+    try { fs.unlinkSync(ownerTokenPlainFile); } catch (e) {}
+    log({ ev: 'owner-token-revoked' });
+    return { ok: true, status: 'revoked' };
+  }
+  function isSha256Hex(v) { return typeof v === 'string' && /^[0-9a-fA-F]{64}$/.test(v); }
+  let lastUsedWriteAssistant = 0;
+  let lastUsedWriteOwner = 0;
+  function verifyTokenRole(plain) {
+    if (!plain) return null;
+    const m = readTokenMeta();
+    const candidate = Buffer.from(sha256(plain), 'hex');
+    let role = null;
+    let changed = false;
+    if (m.status === 'active' && isSha256Hex(m.hash)) {
+      const buf = Buffer.from(m.hash, 'hex');
+      if (buf.length === candidate.length && crypto.timingSafeEqual(candidate, buf)) {
+        role = 'assistant';
+        const now = Date.now();
+        if (now - lastUsedWriteAssistant > 30000) { lastUsedWriteAssistant = now; m.lastUsedAt = now; changed = true; }
+      }
     }
-    return ok;
+    const owner = ownerSlot(m);
+    if (owner && owner.status === 'active' && isSha256Hex(owner.hash)) {
+      const buf = Buffer.from(owner.hash, 'hex');
+      if (buf.length === candidate.length && crypto.timingSafeEqual(candidate, buf)) {
+        role = 'owner';
+        const now = Date.now();
+        if (now - lastUsedWriteOwner > 30000) { lastUsedWriteOwner = now; owner.lastUsedAt = now; changed = true; }
+      }
+    }
+    if (changed) { try { writeTokenMeta(m); } catch (e) {} }
+    return role;
+  }
+  function verifyToken(plain) {
+    return verifyTokenRole(plain) !== null;
   }
 
   return {
     EVENT_TYPES, TYPE_NAMES,
     enqueue, resolve, list, getById, counts, recentDone,
     tokenStatus, generateToken, revokeToken, verifyToken,
-    tokenPlainFile,
+    generateOwnerToken, revokeOwnerToken, verifyTokenRole,
+    tokenPlainFile, ownerTokenPlainFile,
   };
 }
 

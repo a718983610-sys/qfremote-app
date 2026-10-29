@@ -6,14 +6,19 @@ import '../core/manifest.dart';
 import 'theme.dart';
 
 /// 强制更新页（全家统一更新政策：退出重进时命中待更新 → 先更新才进软件）。
-/// 没有关闭、没有跳过：只有「立即更新」→ 进度 → 验完出「打开安装包」；
-/// 下载失败只给重试（这一页出现的前提是清单已取到、服务器可达）。
+/// 没有关闭、没有跳过：只有「立即更新」→ 进度 → 验完出「打开安装包」。
+/// 唯一例外是决策 #43 定版出口：下载失败时给出「下载失败？先进入软件，
+/// 下次再更新」——能更时拦死、更不了时不锁死人；放行仅限本次会话，
+/// 待更新标记保留，下次启动仍会拦（与 Windows 墙、网页端同口径）。
 class ForceUpdateView extends StatefulWidget {
   final QfPalette palette;
   final String currentVersion;
   final ReleaseEntry entry;
   final Future<File> Function(ReleaseEntry entry, void Function(int, int?, int?) onProgress) download;
   final Future<void> Function(File file) openInstaller;
+
+  /// 决策 #43：下载失败时的放行出口（仅失败态显示）。为空时不显示。
+  final VoidCallback? onSkipOnce;
 
   const ForceUpdateView({
     super.key,
@@ -22,6 +27,7 @@ class ForceUpdateView extends StatefulWidget {
     required this.entry,
     required this.download,
     required this.openInstaller,
+    this.onSkipOnce,
   });
 
   @override
@@ -175,6 +181,14 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                     ),
                     child: Text(_downloading ? '下载中…' : (_error != null ? '重新下载更新' : '立即更新')),
                   ),
+                if (_error != null && widget.onSkipOnce != null) ...[
+                  const SizedBox(height: 4),
+                  TextButton(
+                    onPressed: widget.onSkipOnce,
+                    child: Text('下载失败？先进入软件，下次再更新',
+                        style: TextStyle(color: p.onCardDim, fontSize: 13)),
+                  ),
+                ],
                 const SizedBox(height: 6),
                 Center(
                   child: Text('更新完成后重新打开软件即可使用',

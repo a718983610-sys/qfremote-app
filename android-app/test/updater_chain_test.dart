@@ -1,11 +1,34 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qfremote/core/constants.dart';
 import 'package:qfremote/core/manifest.dart';
+import 'package:qfremote/services/apk_verify.dart';
 import 'package:qfremote/services/updater.dart';
+
+/// 验签替身（VM-02）：假 APK 不是合法 APK 结构，真验签必然失败；
+/// 全链测试注入替身模拟平台验签结果。验签门本身的拒绝路径由
+/// 本文件第 7/8 腿与 apk_verify_test.dart 覆盖。
+class _StubApkVerifier implements ApkIdentityVerifier {
+  final ApkIdentity identity;
+  final Object? error;
+
+  _StubApkVerifier({ApkIdentity? identity, this.error})
+      : identity = identity ??
+            const ApkIdentity(
+              packageName: kExpectedApkPackageName,
+              signerCertSha256s: [kExpectedApkCertSha256],
+            );
+
+  @override
+  Future<ApkIdentity> inspect(File apk) async {
+    final e = error;
+    if (e != null) throw e;
+    return identity;
+  }
+}
 
 /// 更新链实测（假清单，追加十一补齐失败注入）：本机起一个临时服务器发假的
 /// release.json + 假 APK，真走一遍 App 自己的更新服务全流程：
@@ -100,7 +123,7 @@ void main() {
       await req.response.close();
     });
 
-    final svc = UpdateService();
+    final svc = UpdateService(apkIdentityVerifier: _StubApkVerifier());
     final dir = await Directory.systemTemp.createTemp('qf_upd_test');
     addTearDown(() async {
       try {
@@ -181,11 +204,15 @@ void main() {
     final impatient = UpdateService(
       responseTimeout: const Duration(milliseconds: 600),
       stallTimeout: const Duration(milliseconds: 600),
+      apkIdentityVerifier: _StubApkVerifier(),
     );
     final sw = Stopwatch()..start();
+    // VM-03 起下载层异常统一映射为中文 FormatException 展示给用户，
+    // 超时也不再以 TimeoutException 原文上界面；判失败的时限口径不变。
     await expectLater(
       impatient.downloadApk(hangManifest.android!, dir, (_, _, _) {}),
-      throwsA(isA<TimeoutException>()),
+      throwsA(isA<FormatException>().having(
+          (e) => e.message, 'message', contains('下载中断'))),
     );
     expect(sw.elapsed, lessThan(const Duration(seconds: 10)),
         reason: '等响应头超时应在注入时限附近判失败');
@@ -198,5 +225,39 @@ void main() {
       throwsA(anything),
     );
     await expectDirClean('假死失败不许留 .part');
+
+    // 7) 清单自洽但签名指纹不符（VM-02 核心腿）：大小与哈希全过，
+    // 必须被装前验签拦下、文案为签名证书口径、且不留文件。
+    mode = 'normal';
+    final okManifest2 = await svc.fetchManifest();
+    final wrongSigSvc = UpdateService(
+      apkIdentityVerifier: _StubApkVerifier(
+        identity: const ApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: [
+            '0000000000000000000000000000000000000000000000000000000000000000'
+          ],
+        ),
+      ),
+    );
+    await expectLater(
+      wrongSigSvc.downloadApk(okManifest2.android!, dir, (_, _, _) {}),
+      throwsA(isA<FormatException>().having(
+          (e) => e.message, 'message', contains('签名证书核验未通过'))),
+    );
+    await expectDirClean('验签不过的文件（连同 .part）必须删掉');
+
+    // 8) 验签通道不可用（替身抛错）：fail-closed 拒装＋不留文件。
+    final deadSvc = UpdateService(
+      apkIdentityVerifier: _StubApkVerifier(
+        error: const ApkVerificationException('仿真验签通道失败'),
+      ),
+    );
+    await expectLater(
+      deadSvc.downloadApk(okManifest2.android!, dir, (_, _, _) {}),
+      throwsA(isA<FormatException>().having(
+          (e) => e.message, 'message', contains('签名核验未通过'))),
+    );
+    await expectDirClean('验签通道不可用时不许留文件');
   }, timeout: const Timeout(Duration(seconds: 90)));
 }

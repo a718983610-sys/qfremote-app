@@ -42,6 +42,11 @@ const String kAdminUrlFallback = '$kFallbackTunnelOrigin/admin';
 const String kProductJsonUrl =
     'https://a718983610-sys.github.io/qfremote-website/product.json';
 
+/// 官网根址（收编 P1 补「官网」带字入口 X-02）：与 kProductJsonUrl 同站，
+/// 与网页侧入口补丁的 QF_WEBSITE_URL 同值；全仓只许出现在这一处，
+/// 取址走 SvcUrls.websiteUrl 单点。
+const String kWebsiteUrl = 'https://a718983610-sys.github.io/qfremote-website/';
+
 /// 隐私锁接口（与好友同服务族、同端口，路径 /lock；契约见线 B 接缝文件）。
 const int kLockPort = 8445;
 const String kLockApiBase = 'https://$kServerHost:$kLockPort/lock';
@@ -73,3 +78,11 @@ String get kTrustedOrigin {
 String get kTestUrl => _testUrlOverride;
 
 bool get kHasTestUrl => _testUrlOverride.isNotEmpty;
+
+/// 官方 APK 包名（更新器装前验签的期望值，VM-02）。
+const String kExpectedApkPackageName = 'com.qfremote.android';
+
+/// 官方 APK 签名证书 SHA-256 指纹，小写 hex、无冒号（更新器装前验签的
+/// 期望值，VM-02；与现售包 apksigner 实测一致）。
+const String kExpectedApkCertSha256 =
+    'a3fde275f46b4e470648c8e3fbc0594ce496eb17b8fa52f4da9bf2af7bbf141f';
