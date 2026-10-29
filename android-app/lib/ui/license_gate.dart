@@ -96,7 +96,13 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
             ),
             const SizedBox(height: 6),
             Center(
-              child: Text('当前账号：${widget.username}',
+              child: Text(
+                  // C2-09（发版前全量审，DS flash 裁定）：设备级门禁先于账号信息
+                  // 落地且无保存凭据时 username 为空——原样渲染会显示空白账号，
+                  // 改示占位说明，不把空值当真实账号呈现。
+                  widget.username.trim().isEmpty
+                      ? '当前账号：暂未读取到（请以控制台登录账号为准）'
+                      : '当前账号：${widget.username}',
                   style: TextStyle(color: p.onCardDim, fontSize: 13)),
             ),
             const SizedBox(height: 16),

@@ -1944,8 +1944,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           await _openShellWeb('购买密钥', SvcUrls.instance.purchaseUrl);
           await _recheckLicense();
         },
-        onAppeal: () => _openShellWeb('提交申诉',
-            '${SvcUrls.instance.appealUrl}?u=${Uri.encodeQueryComponent(_gateUsername)}'),
+        onAppeal: () {
+          // C2-09（发版前全量审，DS flash 裁定）：申诉链接的账号参数与门禁页
+          // 显示口径一致（_gateUsername 优先、保存凭据兜底）；解析结果为空
+          // 时整段省略 u 参数，不再附空值。
+          final appealUser = _gateUsername.isNotEmpty
+              ? _gateUsername
+              : (_savedCreds?.username ?? '');
+          final appealBase = SvcUrls.instance.appealUrl;
+          return _openShellWeb(
+              '提交申诉',
+              appealUser.trim().isEmpty
+                  ? appealBase
+                  : '$appealBase?u=${Uri.encodeQueryComponent(appealUser)}');
+        },
         onRebind: () => unawaited(_openRebind()),
         onSupport: () =>
             _openShellWeb('智能客服', '${SvcUrls.instance.extOrigin}/support'),
