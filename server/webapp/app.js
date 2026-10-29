@@ -1949,8 +1949,9 @@ function wireSession(view) {
     e.preventDefault();
     const v = field.value;
     if (!v) return;
-    sendTermText(v + '\r');
-    field.value = '';
+    /* DS P2-4：发送失败必须可见——不清空输入行、明示未送达，不静默吞。 */
+    if (sendTermText(v + '\r')) field.value = '';
+    else toast('未能送入终端（终端输入未就绪），内容已保留在输入行，连接稳定后请重试。', 'warn');
   });
   $('#qfKbBtn', view).onclick = () => { field.focus(); };
   field.addEventListener('focus', () => { if (Sess.kbMode === 'auto') updateKbBtn(view); });
@@ -2065,23 +2066,19 @@ function updateKbBtn(view) {
   const b = $('#qfKbBtn', view);
   if (b) b.classList.toggle('sv-iconbtn--brand', Sess.kbMode === 'manual');
 }
-/* 终端输入转发：优先框内终端真实输入元（insertText），其次向框内文档派发按键事件；
-   引擎终端输入元选择器以翻牌日实捕为准（phase-0 SELECTORS 纪律），此处为最佳努力实现。 */
+/* 终端输入转发：只认框内终端真实输入元（insertText 且查其返回值）；
+   引擎终端输入元选择器以翻牌日实捕为准（phase-0 SELECTORS 纪律）。
+   DS P2-4/欠账③降级：无真实输入元命中即 return false，绝不向文档盲派
+   键盘事件假报成功；失败由调用方明示（输入行保留内容＋提示）。 */
 function sendTermText(text) {
-  let doc = null, w = null;
-  try { w = Sess.frame.contentWindow; doc = Sess.frame.contentDocument; } catch (e) { return false; }
+  let doc = null;
+  try { doc = Sess.frame.contentDocument; } catch (e) { return false; }
   if (!doc) return false;
   try {
     const ta = doc.querySelector('#p12 textarea, #p12 input[type="text"], textarea.xterm-helper-textarea, #termInput');
-    if (ta) { ta.focus(); doc.execCommand('insertText', false, text); return true; }
-    Sess.frame.focus();
-    for (const ch of text) {
-      const opts = { key: ch === '\r' ? 'Enter' : ch, bubbles: true, cancelable: true };
-      doc.dispatchEvent(new w.KeyboardEvent('keydown', opts));
-      doc.dispatchEvent(new w.KeyboardEvent('keypress', opts));
-      doc.dispatchEvent(new w.KeyboardEvent('keyup', opts));
-    }
-    return true;
+    if (!ta) return false;
+    ta.focus();
+    return !!doc.execCommand('insertText', false, text);
   } catch (e) { return false; }
 }
 /* 发送到手机（会话邀请）：四态 idle/picking/sending/sent/failed，失败文案照 DS2 §2.6 */
