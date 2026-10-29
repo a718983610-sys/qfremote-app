@@ -4,6 +4,7 @@
 - 入库原则：**以线上现行字节为初始提交**；下表每个文件的 MD5 与线上原件逐项比对一致（87/87，加 ai-config.json 与 dispatcher-pubkey.txt 两件清单外实拉件共 89 件服务端文件全对齐）。
 - 本表为初始对账存档；此后的现行指纹以 `ops/drift-check.sh` 的实时比对为准，本表不手工维护。
 - **2026-10-29 冻结前终轮刷新（freeze-paperwork-20261029）**：批 A／B／C 收口后以 live 字节全行复核 163 行，11 行更新为现行值（ext files-core／license-core／server.js、forum forum.html／server.js、friends chat-server.js／friends.html／lock-bridge.js／server.js、loginshim server.js、nginx qfremote-proxy），余 152 行与现行字节一致；明细见 patrol-20261026/work/freeze-paperwork-20261029/REPORT.md。
+- **2026-10-30 2.4.0 发布刷新（release-240-assembly-20261030）**：本轮部署/构建变更 7 行更新为现行值、新增 1 行（个人资料特性组与 session.css 等）；更新行均与线上部署字节逐字一致（步 1 部署后指纹复核 24/24），明细见 patrol-20261026/work/release-240-assembly-20261030/REPORT.md。
 - 注意：本快照含当日各补丁线的最新部署（如 webapp app.js 已含 13:22 的 adminqueue 补丁，md5 `c0c38b4f…`；ext server.js/license-core.js/page.js 的现行值与巡查台账 SUP 的旧登记不符，以本次实拉为准——这类不一致正是漂移巡查要日日盯住的东西）。
 
 ## 一、服务端与网页端（server/）
@@ -84,7 +85,7 @@
 | server/loginshim/appeal-admin.js | /opt/qfremote-loginshim/appeal-admin.js | `1fa8a05e0835f680b1916b886f90e85c` |
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
 | server/loginshim/apply-pass.js | /opt/qfremote-loginshim/apply-pass.js | `07b4158257b9aa7a1ca01a537bd5be7c` |
-| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3cad00a6ec3308d35643b70056783f10` |
+| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3f10a8412bd9084792ac2957c9c08cc7` |
 | server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `dd15b8a85cd685cf5fa8ab0631e6ad6a` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `2dc19f6fed541495ac29ac2a74a06378` |
@@ -107,8 +108,9 @@
 | server/webapp/assets/pay-wechat-6.png | /opt/qfremote-webapp/assets/pay-wechat-6.png | `f5b69d62521ed969f5ed70fe86a12df7` |
 | server/webapp/assets/pay-wechat-9.9.png | /opt/qfremote-webapp/assets/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/webapp/favicon.ico | /opt/qfremote-webapp/favicon.ico | `cfd4ec9c9cd234732a5294b01e33e17f` |
-| server/webapp/index.html | /opt/qfremote-webapp/index.html | `4463fba8bec54b1ce4030b1fe356abab` |
+| server/webapp/index.html | /opt/qfremote-webapp/index.html | `799648ac8bc06350ec7ad3d6559c7304` |
 
+| server/webapp/session.css | /opt/qfremote-webapp/session.css | `41ebe01fa5d26c60b82c3add31318f89` |
 ## 二、Windows 壳（windows/）
 
 快照来源：本机源码树 `~/workspace/qfremote/app-src`（2026-10-26 13:34 CST 拷贝；该树正被 Windows 收编线施工，快照为拷贝时点的字节，node_modules/ 与 dist/ 不入库）。该面的「线上」即此源码树本体，漂移巡查比对仓库 HEAD 与此树。
@@ -120,7 +122,7 @@
 | windows/about-preload.js | ~/workspace/qfremote/app-src/about-preload.js | `4bc54efbadb87aa4035517b1f3795387` |
 | windows/about.html | ~/workspace/qfremote/app-src/about.html | `899d2e76cd89b3564f920e54700e09e0` |
 | windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `5776054d7a1216e0f5685a5a3981cc7c` |
-| windows/build-info.json | ~/workspace/qfremote/app-src/build-info.json | `aeb6679d53e66faf56f147cd3086c09c` |
+| windows/build-info.json | ~/workspace/qfremote/app-src/build-info.json | `ef24ff9f04f4b7db4414744121e33347` |
 | windows/build/icon-1024.png | ~/workspace/qfremote/app-src/build/icon-1024.png | `987af6e99ce6049324c9307d5f4e1d46` |
 | windows/build/icon.ico | ~/workspace/qfremote/app-src/build/icon.ico | `b2b0772ea612319f45cce8f029d68889` |
 | windows/build/icon.png | ~/workspace/qfremote/app-src/build/icon.png | `7e3dc6436c80eb94b8387642b3c6caa4` |
@@ -137,7 +139,7 @@
 | windows/force-update.html | ~/workspace/qfremote/app-src/force-update.html | `b177e0011a40600142affb6cc46f67a7` |
 | windows/icon.ico | ~/workspace/qfremote/app-src/icon.ico | `b2b0772ea612319f45cce8f029d68889` |
 | windows/installer-launch.js | ~/workspace/qfremote/app-src/installer-launch.js | `ca82a4d9d54e4dc56edce567f4023a81` |
-| windows/installer.nsi | ~/workspace/qfremote/app-src/installer.nsi | `4f87dcdedcd9be75969cb7cedf7ef3cf` |
+| windows/installer.nsi | ~/workspace/qfremote/app-src/installer.nsi | `9f61f4ffa1ece95a4ea03b3e85fbf94e` |
 | windows/license-gate-preload.js | ~/workspace/qfremote/app-src/license-gate-preload.js | `1f4d87039622895436342d829eff6b6d` |
 | windows/license-gate.html | ~/workspace/qfremote/app-src/license-gate.html | `9964472e8435bc142373c5ced1880734` |
 | windows/license.js | ~/workspace/qfremote/app-src/license.js | `40d68dd99c04587de5884332179d52b9` |
@@ -148,14 +150,14 @@
 | windows/main.js | ~/workspace/qfremote/app-src/main.js | `70beadc17e6a0e95a32343da768436d8` |
 | windows/offline.html | ~/workspace/qfremote/app-src/offline.html | `37a5f6cb50b88546b666647b8d84d0a6` |
 | windows/package-lock.json | ~/workspace/qfremote/app-src/package-lock.json | `125095ca0d81179b6fe49dcbcfe3e044` |
-| windows/package.json | ~/workspace/qfremote/app-src/package.json | `6ca998fe1b440b5ad5b5ef2fc94fde1f` |
+| windows/package.json | ~/workspace/qfremote/app-src/package.json | `0d668fe55e8a5cdd25dcc7aad8d84c99` |
 | windows/session-bar-preload.js | ~/workspace/qfremote/app-src/session-bar-preload.js | `c5c03d4ea0b651c2f635797c5ee32196` |
 | windows/session-bar.html | ~/workspace/qfremote/app-src/session-bar.html | `84dc0cd4cf3e6907ba55149d7d2c3fb8` |
 | windows/splash.html | ~/workspace/qfremote/app-src/splash.html | `05a350561ced1370a657b9e36fa8c2bf` |
 | windows/svc-urls.js | ~/workspace/qfremote/app-src/svc-urls.js | `736a33dfd8b82daa49337e58fef85126` |
 | windows/test/autologin-page-test.js | ~/workspace/qfremote/app-src/test/autologin-page-test.js | `ff5cd7b0a082b4886e2e938663c83aaa` |
-| windows/test/autologin-test.js | ~/workspace/qfremote/app-src/test/autologin-test.js | `20ddbef5cdfa9be5ccaef4257611d097` |
-| windows/test/client-version-test.js | ~/workspace/qfremote/app-src/test/client-version-test.js | `b5e5aa8e1dc0a04548e036c2cb8a5a82` |
+| windows/test/autologin-test.js | ~/workspace/qfremote/app-src/test/autologin-test.js | `dcc4435c5539c6e4fe90ab743d908507` |
+| windows/test/client-version-test.js | ~/workspace/qfremote/app-src/test/client-version-test.js | `767fba61106533b3e823d4a56d266088` |
 | windows/test/creds-test.js | ~/workspace/qfremote/app-src/test/creds-test.js | `0e9a1ef4ae71eef2e6dd1111730b6611` |
 | windows/test/device-unlock-test.js | ~/workspace/qfremote/app-src/test/device-unlock-test.js | `a9d597b1a497f50f8196c0a59b01a454` |
 | windows/test/devices-test.js | ~/workspace/qfremote/app-src/test/devices-test.js | `87451ecaf1f98b6862f6c60d20357455` |
