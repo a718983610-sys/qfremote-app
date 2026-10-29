@@ -1440,7 +1440,7 @@ function upgradePreheat(nodeid, vm) {
 /* ---------- 会话运行态 ---------- */
 const Sess = {
   active: false, gen: 0, root: null, frame: null, adopted: false,
-  name: '', nodeid: '', kind: 'desktop', vm: 11, linkedVm: 0,
+  name: '', nodeid: '', kind: 'desktop', vm: 11, linkedVm: 0, pendingVm: 0, pendingGen: 0,
   state: 'idle', t0: 0, connectMs: 0, reloaded: false, guardN: 0, guardToastShown: false,
   discN: 0, blankSince: 0, timers: [], listeners: [], kbMode: 'auto', trapArmed: false,
 };
@@ -1461,6 +1461,7 @@ function teardownSession() {
     const bd = document.getElementById('qfSessBackdrop'); if (bd) bd.remove();
   }
   Sess.active = false; Sess.trapArmed = false; Sess.root = null; Sess.frame = null; Sess.adopted = false; Sess.state = 'idle';
+  Sess.pendingVm = 0;   // DS P2-1：待办形态不跨会话残留
 }
 
 /* 八入口唯一收敛点：kind ∈ desktop/terminal/files；ctx.name 必备，ctx.nodeid 为数据携带 id（可缺） */
@@ -1673,6 +1674,7 @@ function frameNavigate(url) {
 }
 
 function buildSessionFrame(view) {
+  Sess.pendingVm = 0;   // DS P2-1：新一轮构建起算，旧待办形态清零
   Sess.t0 = performance.now(); Sess.state = 'connecting'; Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0;
   /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
   const m0 = view.querySelector('#qfMask'); if (m0) m0.hidden = true; Sess.mask = null;
@@ -1716,9 +1718,12 @@ function syncSessionFrameGeometry() {
 
 function onFrameLoad(view) {
   injectFrameGuard();
-  if (Sess.pendingVm && Sess.pendingVm !== Sess.linkedVm) {
-    Sess.linkedVm = Sess.pendingVm; Sess.pendingVm = 0;
-    tryGo(Sess.linkedVm);
+  if (Sess.pendingVm) {
+    const pv = Sess.pendingVm, pg = Sess.pendingGen;
+    Sess.pendingVm = 0;
+    /* DS P2-1：消费时校验世代——待办形态须为当前会话世代登记者，
+       跨会话/跨构建残留一律丢弃，不把下一会话切去旧形态。 */
+    if (pv !== Sess.linkedVm && pg === Sess.gen) { Sess.linkedVm = pv; tryGo(pv); }
   }
 }
 function injectFrameGuard() {
@@ -2041,7 +2046,7 @@ function setMorph(view, kind) {
       const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
       setBadge(view, 'wait', '连接中');
       frameNavigate(sessionDeepLinkCurrent());
-    } else Sess.pendingVm = Sess.vm;
+    } else { Sess.pendingVm = Sess.vm; Sess.pendingGen = Sess.gen; }
   }
 }
 function updateKbBtn(view) {
