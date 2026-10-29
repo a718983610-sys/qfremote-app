@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="默认头像">
+  <!-- 品牌占位定版（theme.dart QfAvatarPlaceholder）：深蓝圆盘 #0B2B5B＋白色断环＋橙点 #FF8A1E。
+       断环：圆心 (50,50)、半径 30（0.30×画布）、线宽 7.5（0.075×画布）、圆头端点，
+       起始角 0.9 rad、扫过 5.1 rad（与 _AvatarMarkPainter.drawArc 同参）。
+       橙点：圆心 (50+30×0.78, 50−30×0.78)、半径 8.5（0.085×画布）。 -->
+  <circle cx="50" cy="50" r="50" fill="#0B2B5B"/>
+  <path d="M 68.65 73.50 A 30 30 0 1 1 78.81 41.62" fill="none" stroke="#FFFFFF" stroke-width="7.5" stroke-linecap="round"/>
+  <circle cx="73.4" cy="26.6" r="8.5" fill="#FF8A1E"/>
+</svg>

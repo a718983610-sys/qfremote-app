@@ -166,6 +166,135 @@ function fmtRemain(expMs) {
   return '剩余 ' + h + ' 小时' + (m ? ' ' + m + ' 分钟' : '');
 }
 
+/* ---------------- 个人资料（2.3.2：统一档案 ext /profile/*） ----------------
+   契约（ext 定版）：GET /profile/api/me 回 {ok, username, nickname,
+   effectiveNickname, defaultNickname, hasAvatar, avatarMime,
+   avatarUpdatedAt, avatarUrl}；POST /profile/mod/submit 一次只提一项
+   {nickname} 或 {avatar:{mime,dataBase64}|null}，200 回
+   {ok,kind,applied,reviewId,category,msg?,profile}（机审驳回 applied=false
+   且 category 只给大类）；输入校验错误 400 {ok:false,code,msg}（msg 原样
+   回显，不改写）；GET /profile/mod/records（本人近 50 条）；
+   POST /profile/mod/<id>/appeal {note}（说明 ≤200 字，每行至多一次）。
+   登录账号名与昵称是两套东西：界面分行分称，登录名行文案恒为
+   「登录账号名（不可修改，如需变更请联系官方客服）」。 */
+const AVATAR_MAX_BYTES = 200 * 1024;
+const AVATAR_HARD_MAX_BYTES = 20 * 1024 * 1024; // 选图硬顶（核对 D5）：超此值不读文件、直接报定版文案
+const AVATAR_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const AVATAR_TOO_LARGE_TEXT = '头像太大了，请先压缩到 200KB 以内再上传';
+const PROFILE_BUSY_TEXT = '系统繁忙，请稍后再试';
+let MyProfile = null;   // GET /profile/api/me 最近一次回包（统一档案正本视图）
+function b64OfBytes(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes, i, i + 0x8000)); return btoa(s); }
+function avatarFormatOk(mime) { return AVATAR_MIMES.indexOf(mime) >= 0; }
+function avatarDirectOk(size, mime) { return size <= AVATAR_MAX_BYTES && avatarFormatOk(mime); }
+function avatarQualitySteps() { const out = []; let q = 0.85; while (q >= 0.4) { out.push(Math.round(q * 100) / 100); q = Math.round((q - 0.15) * 100) / 100; } return out; }
+function profileAvatarHtml(p, size) {
+  size = size || 40;
+  if (p && p.hasAvatar && p.avatarUrl) return `<img class="qf-avatar" style="width:${size}px;height:${size}px" src="${esc(p.avatarUrl)}" alt="头像">`;
+  return `<img class="qf-avatar qf-avatar-ph" style="width:${size}px;height:${size}px" src="assets/avatar-placeholder.svg" alt="默认头像">`;
+}
+function myAvatarHtml(size) { return profileAvatarHtml(MyProfile, size); }
+function myEffectiveNickname() { return (MyProfile && MyProfile.effectiveNickname) || S.displayName || S.user || ''; }
+function paintIdentity() {
+  document.querySelectorAll('[data-my-avatar]').forEach(el => { el.innerHTML = profileAvatarHtml(MyProfile, Number(el.getAttribute('data-my-avatar')) || 34); });
+  document.querySelectorAll('[data-my-nick]').forEach(el => { el.textContent = myEffectiveNickname(); });
+}
+async function refreshMyProfile() {
+  const r = await api('/profile/api/me');
+  if (r.status === 200 && r.json && r.json.ok) {
+    MyProfile = r.json; S.profile = r.json;
+    if (r.json.effectiveNickname) S.displayName = r.json.effectiveNickname;
+    if (r.json.username) S.user = r.json.username;
+    paintIdentity();
+    return MyProfile;
+  }
+  return null;
+}
+function refreshMyProfileLazy() {
+  if (S.auth !== 'in' || MyProfile || refreshMyProfileLazy._p) return;
+  refreshMyProfileLazy._p = true;
+  refreshMyProfile().then(() => { refreshMyProfileLazy._p = false; }, () => { refreshMyProfileLazy._p = false; });
+}
+// 统一档案失效（核对 S1）：登出/被踢/会话失效/重新登录四处统一清，
+// 防同页切号后身份区串上一账号的昵称与头像（lazy 守卫见 MyProfile 非空即拦）。
+function clearMyProfile() { MyProfile = null; S.profile = null; }
+/* 头像预处理（照 QFClash 网页版 prepareAvatar 定版移植）：≤200KB 且格式
+   合规直传；超限 canvas 缩最长边 512px、先填白底再绘图（防透明 PNG 转
+   黑底）、JPEG 质量 0.85 起每次 −0.15 递减至 ≤200KB（下限 0.4）；
+   仍超限报「头像太大了，请先压缩到 200KB 以内再上传」。 */
+async function prepareAvatar(file) {
+  const MAX = AVATAR_MAX_BYTES;
+  // 核对 D5：先看 file.size 再决定读法——合规小图才全量读入直传；超硬顶直接
+  // 报定版文案不读；其余走 canvas 路径（object URL＋Image 本不需要先整文件读入）。
+  if (typeof file.size === 'number') {
+    if (avatarDirectOk(file.size, file.type)) { const buf = new Uint8Array(await file.arrayBuffer()); return { mime: file.type, dataBase64: b64OfBytes(buf) }; }
+    if (file.size > AVATAR_HARD_MAX_BYTES) { const tooBig = new Error(AVATAR_TOO_LARGE_TEXT); tooBig.code = 'AVATAR_TOO_LARGE'; throw tooBig; }
+  } else {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (avatarDirectOk(buf.length, file.type)) return { mime: file.type, dataBase64: b64OfBytes(buf) };
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const scale = Math.min(1, 512 / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale)); canvas.height = Math.max(1, Math.round(img.height * scale));
+    const actx = canvas.getContext('2d');
+    actx.fillStyle = '#ffffff'; actx.fillRect(0, 0, canvas.width, canvas.height);
+    actx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    let q = 0.85, blob = null;
+    while (q >= 0.4) {
+      blob = await new Promise(res => { canvas.toBlob(res, 'image/jpeg', q); });
+      if (blob && blob.size <= MAX) break;
+      q = Math.round((q - 0.15) * 100) / 100;
+    }
+    if (!blob || blob.size > MAX) { const tooBig = new Error(AVATAR_TOO_LARGE_TEXT); tooBig.code = 'AVATAR_TOO_LARGE'; throw tooBig; }
+    return { mime: 'image/jpeg', dataBase64: b64OfBytes(new Uint8Array(await blob.arrayBuffer())) };
+  } finally { URL.revokeObjectURL(url); }
+}
+function fmtProfileTime(v) {
+  if (v == null || v === '') return '';
+  const n = Number(v);
+  if (isFinite(n) && n > 0) return fmtDate(n < 1e12 ? n * 1000 : n);
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? String(v) : fmtDate(d.getTime());
+}
+/* 「个人资料」卡（纯渲染函数：Views.profile 与本地 harness 共用同一份）。
+   昵称与登录账号名分行分称（C1）：昵称行可编辑，登录名行恒带
+   「登录账号名（不可修改，如需变更请联系官方客服）」。 */
+function profileCardHtml(p) {
+  p = p || {};
+  const eff = p.effectiveNickname || p.nickname || p.username || '';
+  const def = p.defaultNickname || p.username || '';
+  return `<div class="card" id="pfProfileCard"><h3>个人资料</h3>
+    <div class="profile-head"><span id="pfAvatarSlot">${profileAvatarHtml(p, 76)}</span>
+      <span class="pf-names"><b id="pfEffNick">${esc(eff)}</b>
+      <small id="pfDefaultNick">默认昵称：${esc(def)}</small>
+      <small>未设置昵称时显示默认昵称（即登录账号名）。</small></span></div>
+    <div class="profile-login"><span>登录账号名（不可修改，如需变更请联系官方客服）</span><b id="pfLoginName">${esc(p.username || '')}</b></div>
+    <div class="field"><label for="pfNick">昵称 <span class="pf-count"><span id="pfNickCount">0</span> / 20</span></label>
+      <input id="pfNick" maxlength="20" value="${esc(p.nickname || '')}" placeholder="请输入昵称" autocomplete="off">
+      <p class="hint">昵称最多 20 字；提交后经审核，通过即生效。</p></div>
+    <div id="pfNickOut"></div>
+    <div class="pf-ops"><button class="btn sm" id="pf-nick-save">保存昵称</button><button class="btn sm grey" id="pf-nick-clear">清除昵称</button></div>
+    <div class="field" style="margin-top:18px"><label for="pfAvatarFile">头像</label>
+      <input id="pfAvatarFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+      <p class="hint">头像只支持 PNG、JPG、WebP 或 GIF 图片，大小不超过 200KB；超出时将先在本地压缩再上传。</p></div>
+    <div id="pfAvatarOut"></div>
+    <div class="pf-ops"><button class="btn sm" id="pf-avatar-upload">上传头像</button><button class="btn sm grey" id="pf-avatar-del">删除头像</button></div>
+    <h3 style="margin-top:22px">审核记录</h3><div id="pfRecords"><div class="skel" style="height:40px"></div></div>
+  </div>`;
+}
+function profileRecordsHtml(records) {
+  const list = (Array.isArray(records) ? records : []).slice(0, 50);
+  if (!list.length) return '<div class="statebox"><b>暂无审核记录</b><p>修改昵称或头像后，审核结果会显示在这里。</p></div>';
+  const kindLabel = k => k === 'avatar' ? '头像' : (k === 'nickname' ? '昵称' : String(k || '资料'));
+  const statusLabel = s => ({ approved: '已通过', rejected: '未通过', pending: '审核中', appealed: '已申诉', appeal_approved: '申诉通过', appeal_rejected: '申诉未通过' }[s] || String(s || ''));
+  return list.map(r => {
+    const canAppeal = r.status === 'rejected' && !r.appealed && !r.appeal && !r.appealStatus;
+    return `<div class="pfrec"><span class="tag">${esc(kindLabel(r.kind))}</span><span class="pfrec-main"><b>${esc(statusLabel(r.status))}</b>${r.category ? `<small>包含${esc(r.category)}</small>` : ''}</span><span class="pfrec-time">${esc(fmtProfileTime(r.createdAt != null ? r.createdAt : r.created_at))}</span>${canAppeal ? `<button class="btn sm ghost" data-appeal="${esc(r.id)}">申诉</button>` : ''}</div>`;
+  }).join('');
+}
+
 /* ---------------- 屏幕锁（隐私锁）桥：与软件端同一条 8445/lock 桥 ----------------
    契约照双壳正本（app-src/lock.js、安卓 LockClient）：同源路径 /lock/*，
    凭控制台会话（xid）鉴权，服务端按账号逐台核对机主；密码只在提交瞬间
@@ -676,7 +805,7 @@ async function checkSession(silent, opts) {
   }
   if (me.status === 401 || me.status === 403) {
     const wasIn = S.auth === 'in';
-    S.auth = 'out'; S.license = null; Cache.clear();
+    S.auth = 'out'; S.license = null; Cache.clear(); clearMyProfile();
     if (wasIn) {
       if (!o.noDied) {
         const handled = sessionDied('session');   // 交给统一「会话已结束」落点
@@ -719,6 +848,7 @@ function parseBanView(str) {
 }
 
 async function doLogin(username, password, remember) {
+  clearMyProfile(); // 核对 S1：新登录先清上一账号档案，防切号串号
   // 登录一律走自家登录垫片 /qf-login（与原生登录页同口径）：垫片负责登录冻结、
   // 许可门与「记住此设备」——带 qfrememberdevice 字段时给会话 cookie 补 30 天
   // 有效期并种 qfrem 标记，不带则清标记。切勿直连 /login：会绕过垫片，
@@ -784,7 +914,7 @@ setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true)
 function forceGate(code) {
   S.sessGen++; // DS-R49：强制下线＝登出等价落点，递增代数使其余在飞旧响应作废
   BanLock.exit();
-  S.auth = 'out'; Cache.clear();
+  S.auth = 'out'; Cache.clear(); clearMyProfile();
   invalidateNodeMap(); // W1-2：强制下线即清设备映射缓存，防换账号残留
   try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
   showAuth('gate', { code: code || 'G1' });
@@ -807,7 +937,7 @@ async function doLogout() {
     invalidateNodeMap(); // W1-2：主动登出即清设备映射缓存，防换账号残留
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
     try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
-    S.auth = 'out'; S.user = null; S.displayName = ''; S.isAdmin = false; S.license = null; S.points = null; S.stats = null; // 批A-W1-11：身份字段按 S 默认复位，防换账号残留
+    S.auth = 'out'; S.user = null; S.displayName = ''; S.isAdmin = false; S.license = null; S.points = null; S.stats = null; clearMyProfile(); // 批A-W1-11：身份字段按 S 默认复位，防换账号残留
     showAuth('login', { notice: '您已退出登录。' });
   });
 }
@@ -895,6 +1025,7 @@ function renderNavs() {
   const a = S.route.name === 'device' ? 'devices' : (S.route.name === 'remote' ? 'devices' : S.route.name);
   $('#sidebar').innerHTML =
     `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
+    `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
     `<div class="gtitle">主菜单</div>` +
     MENU34.map(i => navBtn(i, a)).join('') +
     `<div class="gtitle">功能</div>` +
@@ -905,6 +1036,7 @@ function renderNavs() {
     `<div class="sidefoot">安全 · 便捷 · 远程连接</div>`;
   $('#drawer').innerHTML =
     `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
+    `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
     `<div class="gtitle">主菜单</div>` + menu34Html(a, 'nav');
   $('#acctMenu').innerHTML = MENU34.map(i =>
     `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span>${i.route === 'friends' ? frBdgHtml() : ''}</a>`).join('') +
@@ -912,7 +1044,8 @@ function renderNavs() {
     `<a href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>` +
     `<a data-nav="logout" class="red">${ic('logout')}<span>登出</span></a>`;
   $('#bnav').innerHTML = BTABS.map(i => navBtn(i, a, '')).join('');
-  $('#acctChip').innerHTML = `<span class="uava">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><b>${esc(S.displayName || '')}</b>${frBdgHtml()}`;
+  $('#acctChip').innerHTML = `<span data-my-avatar="34">${myAvatarHtml(34)}</span><b data-my-nick>${esc(myEffectiveNickname())}</b>${frBdgHtml()}`;
+  refreshMyProfileLazy();
   document.querySelectorAll('[data-nav]').forEach(el => {
     el.addEventListener('click', () => {
       const r = el.getAttribute('data-nav');
@@ -4311,7 +4444,8 @@ Views.points = async function (view) {
 Views.profile = async function (view) {
   const lic = S.license || {};
   view.innerHTML = `<h1 class="pt">我的</h1><p class="psub">账号、密钥与安全设置集中在本页，每项功能只有一个入口。</p>
-    <div class="card"><div class="dev" style="border:none;padding:0"><span class="uava" style="width:52px;height:52px;font-size:19px">${esc((S.displayName || 'U').slice(0, 1).toUpperCase())}</span><span><b style="font-size:17px">${esc(S.displayName || '')}</b><small style="display:block;color:var(--sub)">${esc(lic.displayStatus || '账号状态正常')}</small></span><span class="ops"><button class="btn sm ghost" id="pf-edit">编辑资料</button></span></div></div>
+    <div class="card"><div class="dev" style="border:none;padding:0"><span data-my-avatar="52">${myAvatarHtml(52)}</span><span><b style="font-size:17px" data-my-nick>${esc(myEffectiveNickname())}</b><small style="display:block;color:var(--sub)">${esc(lic.displayStatus || '账号状态正常')}</small></span><span class="ops"><button class="btn sm ghost" id="pf-edit">编辑资料</button></span></div></div>
+    ${profileCardHtml(MyProfile || { username: S.user, effectiveNickname: S.displayName, defaultNickname: S.user })}
     <div class="card"><a class="row" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><span class="tile">${ic('globe')}</span><span><b>官方网站</b><small>打开 QFRemote 官网（软件下载与版本公告）</small></span><span class="chev">${ic('chevR')}</span></a></div>
     ${S.isAdmin ? `<div class="card"><button class="row" id="pf-admin"><span class="tile">${ic('gear')}</span><span><b>站长管理</b><small>待办、审核与账号管理（仅站长账号可见）</small></span><span class="chev">${ic('chevR')}</span></button></div>` : ''}
     <div class="grid2">
@@ -4341,7 +4475,82 @@ Views.profile = async function (view) {
       ${rowHtml('user', '退出登录', '')}
       ${rowHtml('user', '删除账户', '删除后数据按规则清除，此操作不可恢复')}
     </div></div>`;
-  $('#pf-edit', view).onclick = () => showModal('编辑资料', '<p>昵称等资料的修改将随新控制台账户接口一并开通；当前显示名与登录账号一致。</p>', [{ label: '知道了' }]);
+  const pfEditBtn = $('#pf-edit', view); if (pfEditBtn) pfEditBtn.onclick = () => { const c = $('#pfProfileCard', view); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  /* ---- 个人资料（2.3.2）：统一档案展示、昵称/头像提交、审核记录与申诉 ---- */
+  const pfRender = (p) => {
+    if (!p) return;
+    const slot = $('#pfAvatarSlot', view); if (slot) slot.innerHTML = profileAvatarHtml(p, 76);
+    const en = $('#pfEffNick', view); if (en) en.textContent = p.effectiveNickname || '';
+    const dn = $('#pfDefaultNick', view); if (dn) dn.textContent = '默认昵称：' + (p.defaultNickname || p.username || '');
+    const ln = $('#pfLoginName', view); if (ln) ln.textContent = p.username || '';
+    const ni = $('#pfNick', view); if (ni && document.activeElement !== ni) { ni.value = p.nickname || ''; const cc = $('#pfNickCount', view); if (cc) cc.textContent = String([...ni.value].length); }
+  };
+  const loadPfRecords = async () => {
+    const box = $('#pfRecords', view); if (!box) return;
+    const r = await api('/profile/mod/records');
+    if (r.status === 200 && r.json && r.json.ok) {
+      box.innerHTML = profileRecordsHtml(r.json.records || r.json.list || []);
+      box.querySelectorAll('[data-appeal]').forEach(b => { b.onclick = async () => {
+        const note = prompt('请输入申诉说明（最多 200 字）');
+        if (note == null) return;
+        const t = String(note).trim();
+        if ([...t].length > 200) { toast('申诉说明最多 200 字。', 'err'); return; }
+        const rr = await api('/profile/mod/' + encodeURIComponent(b.getAttribute('data-appeal')) + '/appeal', { method: 'POST', json: { note: t } });
+        if (rr.json && rr.json.ok) { toast('申诉已提交。', 'ok'); loadPfRecords(); }
+        else toast((rr.json && rr.json.msg) || PROFILE_BUSY_TEXT, 'err');
+      }; });
+    } else box.innerHTML = '<div class="statebox"><b>审核记录暂时不可用</b><p>请稍后重新加载本页。</p></div>';
+  };
+  const submitProfileField = async (payload, out, kind) => {
+    // 核对 D4 兜底：整体包 try/catch——api() 本身永不 reject，但提交瞬间视图
+    // 拆除等非 api 异常也收口到定版繁忙文案，不留未处理 rejection。
+    try { await submitProfileFieldInner(payload, out, kind); }
+    catch (e) { try { if (out) out.innerHTML = `<div class="note err">${esc(PROFILE_BUSY_TEXT)}</div>`; } catch (e2) {} }
+  };
+  const submitProfileFieldInner = async (payload, out, kind) => {
+    const r = await api('/profile/mod/submit', { method: 'POST', json: payload });
+    if (r.status === 200 && r.json && r.json.ok) {
+      if (r.json.applied) {
+        out.innerHTML = `<div class="note ok">${kind === 'nickname' ? (payload.nickname ? '昵称已保存。' : '昵称已清除。') : (payload.avatar ? '头像已更新。' : '头像已删除。')}</div>`;
+        if (r.json.profile) { MyProfile = r.json.profile; S.profile = r.json.profile; if (r.json.profile.effectiveNickname) S.displayName = r.json.profile.effectiveNickname; }
+        await refreshMyProfile(); pfRender(MyProfile); paintIdentity();
+      } else {
+        const cat = (r.json && r.json.category) || '';
+        out.innerHTML = `<div class="note err">${esc(kind === 'avatar' ? ('这个头像不能用：包含' + cat + '，请换一个') : ('这个昵称不能用：包含' + cat + '，请换一个'))}</div>`;
+      }
+      loadPfRecords();
+    } else if (r.status === 400 && r.json && r.json.msg) {
+      out.innerHTML = `<div class="note err">${esc(r.json.msg)}</div>`;
+    } else {
+      out.innerHTML = `<div class="note err">${esc(PROFILE_BUSY_TEXT)}</div>`;
+    }
+  };
+  const nickIn = $('#pfNick', view);
+  if (nickIn) nickIn.addEventListener('input', () => { const cc = $('#pfNickCount', view); if (cc) cc.textContent = String([...nickIn.value].length); });
+  const nickSaveBtn = $('#pf-nick-save', view);
+  if (nickSaveBtn) nickSaveBtn.onclick = async () => {
+    const out = $('#pfNickOut', view); const val = $('#pfNick', view).value.trim();
+    if ([...val].length > 20) { out.innerHTML = '<div class="note err">昵称最多 20 字</div>'; return; }
+    await submitProfileField({ nickname: val }, out, 'nickname');
+  };
+  const nickClearBtn = $('#pf-nick-clear', view);
+  if (nickClearBtn) nickClearBtn.onclick = async () => { await submitProfileField({ nickname: '' }, $('#pfNickOut', view), 'nickname'); };
+  const avatarUpBtn = $('#pf-avatar-upload', view);
+  if (avatarUpBtn) avatarUpBtn.onclick = async () => {
+    const out = $('#pfAvatarOut', view); const f = $('#pfAvatarFile', view).files[0];
+    if (!f) { out.innerHTML = '<div class="note warn">请先选择图片文件。</div>'; return; }
+    out.innerHTML = '<div class="note blue">正在处理…</div>';
+    try {
+      const payload = await prepareAvatar(f);
+      await submitProfileField({ avatar: payload }, out, 'avatar');
+    } catch (e) {
+      out.innerHTML = `<div class="note err">${esc(e && e.code === 'AVATAR_TOO_LARGE' ? AVATAR_TOO_LARGE_TEXT : PROFILE_BUSY_TEXT)}</div>`;
+    }
+  };
+  const avatarDelBtn = $('#pf-avatar-del', view);
+  if (avatarDelBtn) avatarDelBtn.onclick = async () => { await submitProfileField({ avatar: null }, $('#pfAvatarOut', view), 'avatar'); };
+  refreshMyProfile().then(me => pfRender(me));
+  loadPfRecords();
   if (S.isAdmin) { const pa = $('#pf-admin', view); if (pa) pa.onclick = () => navigate('admin'); }
   $('#pf-claim', view).onclick = async () => {
     const key = $('#pf-key', view).value.trim(); const out = $('#pf-claim-out', view);

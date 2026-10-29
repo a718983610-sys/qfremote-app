@@ -115,6 +115,18 @@ class SvcUrls {
   /// 许可接口基址（/license 前缀下 /api/*）。
   String get licenseApiBase => '$extOrigin/license';
 
+  /// 统一档案接口基址（2.3.2 S4 接驳；与积分/许可同在扩展服务同源，
+  /// 路径口径见 profile-avatar-nickname/DESIGN.md §5.2）。
+  String get profileApiBase => '$extOrigin/profile';
+
+  /// 本人档案（GET /profile/api/me，认控制台会话 cookie）。
+  String get profileMeUrl => '$profileApiBase/api/me';
+
+  /// 本人头像字节（GET /profile/avatar；带版本戳防旧图缓存，无头像 404）。
+  String profileAvatarUrl(int? avatarUpdatedAt) => avatarUpdatedAt == null
+      ? '$profileApiBase/avatar'
+      : '$profileApiBase/avatar?v=$avatarUpdatedAt';
+
   static bool _usable(String? v) =>
       v != null && v.startsWith('https://') && v.length > 10 && !v.contains(' ');
 

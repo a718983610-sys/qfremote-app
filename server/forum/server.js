@@ -33,8 +33,9 @@
  *  - 作者删除自己的帖子/回复（软删，与管理删帖同源，留痕 authorSelf）；
  *  - 浏览计数同主体 6 小时去重；分享计数（同主体同帖 1 小时去重＋每小时
  *    总频控 20 次）；主列表支持 sort=hot（获赞优先，借 QFClash 营地内排序）；
- *  - 论坛昵称（profiles.nickname，过机审才生效，展示代替账号名，账号名
- *    仍是内部与管理口径）；站长作者带「官方」标记；公开作者页；
+ *  - 论坛昵称已收编全站统一档案（2.3.2，BUILD: PROFILE_UNIFIED）：正本在
+ *    ext 服务，论坛 profiles.nickname 停写、仅作影子回退；旧 POST /profile
+ *    直写端点已关停；站长作者带「官方」标记；公开作者页；
  *  - 「我的」补个人统计与回复所属帖标题；管理面加审核日志查询。
  *  未照搬：营地、外站精选、论坛积分与千赞奖励（理由见本线完工回报）。
  */
@@ -391,7 +392,162 @@ function main() {
   const SHARE_DEDUPE_MS = 3600 * 1000;      // 同主体同帖 1 小时内分享只计一次
   const SHARE_HOURLY_CAP = 20;              // 同主体每小时最多计 20 次分享（QFClash 同口径）
   const actorKeyOf = (req, sess) => sha256(sess && sess.user ? 'u:' + sess.user : 'g:' + clientIp(req));
-  const displayNameOf = (name) => { const p = profiles[name]; return (p && p.nickname) ? p.nickname : name; };
+  // ---- 全站统一档案（2.3.2 收编，BUILD: PROFILE_UNIFIED）----
+  // 正本在 ext 服务（本机 127.0.0.1:8448，端口可用环境变量 QFEXT_PORT 覆盖，
+  // 与本服务向 ext 推审核事件同一地址口径）。论坛只读不写：经内部接口
+  // GET /internal/profile/:username（单人）与 GET /internal/profile/view?usernames=
+  // （批量）拉取，请求头 x-qf-internal-secret 用 licInternalSecret() 同一密钥；
+  // view 形如 {username, nickname, effectiveNickname, hasAvatar, avatarMime,
+  // avatarUpdatedAt, avatarUrl}。
+  // 缓存策略：Map 短缓存，TTL 30 秒，含负缓存（ext 无此人/404 也记一条
+  // view=null 的记录，TTL 内不再重复打 ext）。displayNameOf/publicPost 等
+  // 调用方全是同步渲染，不能等网络，故同步读缓存、异步刷新（schedule +
+  // 10ms 合并批量）；刷新 800ms 超时，失败静默——保留旧缓存值，无旧值时
+  // 回退本地影子 profiles[name].nickname（导入后停写），再回退账号名。
+  const EXT_PROFILE_PORT = parseInt(process.env.QFEXT_PORT || '8448', 10) || 8448;
+  const EXT_PROFILE_TTL_MS = 30 * 1000;
+  const EXT_PROFILE_TIMEOUT_MS = 800;
+  const extProfileCache = new Map(); // name -> { view: object|null, fetchedAt: ms, pending: bool }
+  const extRefreshQueue = new Set();
+  let extRefreshTimer = null;
+  function normalizeExtView(raw, fallbackName) {
+    if (!raw || typeof raw !== 'object') return null;
+    const v = (raw.view && typeof raw.view === 'object') ? raw.view : ((raw.profile && typeof raw.profile === 'object') ? raw.profile : raw);
+    if (!v || typeof v !== 'object') return null;
+    const username = String(v.username || fallbackName || '').toLowerCase();
+    if (!username) return null;
+    const hasAvatar = !!v.hasAvatar;
+    return {
+      username,
+      nickname: v.nickname == null ? null : String(v.nickname),
+      effectiveNickname: v.effectiveNickname ? String(v.effectiveNickname) : (v.nickname ? String(v.nickname) : null),
+      hasAvatar,
+      avatarMime: v.avatarMime || null,
+      avatarUpdatedAt: v.avatarUpdatedAt == null ? null : v.avatarUpdatedAt,
+      avatarUrl: hasAvatar && v.avatarUrl ? String(v.avatarUrl) : null
+    };
+  }
+  function extProfileGet(pathname) {
+    return new Promise((resolve) => {
+      const secret = licInternalSecret();
+      if (!secret) return resolve(null);
+      let done = false;
+      const finish = (x) => { if (!done) { done = true; resolve(x); } };
+      let rq;
+      try {
+        rq = http.request({ hostname: '127.0.0.1', port: EXT_PROFILE_PORT, path: pathname, method: 'GET', timeout: EXT_PROFILE_TIMEOUT_MS, headers: { 'x-qf-internal-secret': secret } }, (rs) => {
+          let b = '';
+          // 核对 #6：超限即 destroy 并立即 settle；rs error/close 兜底，杜绝 Promise 永挂、缓存 pending 永卡
+          rs.on('data', (c) => { b += c; if (b.length > 65536) { try { rq.destroy(); } catch (e) {} finish(null); } });
+          rs.on('end', () => { let j = null; try { j = JSON.parse(b || 'null'); } catch (e) {} finish({ status: rs.statusCode, json: j }); });
+          rs.on('error', () => finish(null));
+          rs.on('close', () => finish(null));
+        });
+      } catch (e) { return finish(null); }
+      rq.on('timeout', () => { try { rq.destroy(); } catch (e) {} finish(null); });
+      rq.on('error', () => finish(null));
+      rq.end();
+    });
+  }
+  function settleExtRefresh(name, view, ok) {
+    const entry = extProfileCache.get(name) || { view: null, fetchedAt: 0, pending: false };
+    if (ok) entry.view = view; // ok 含 404 负缓存（view=null）；失败时保留旧值不动
+    entry.fetchedAt = Date.now();
+    entry.pending = false;
+    extProfileCache.set(name, entry);
+  }
+  async function flushExtRefresh() {
+    const names = [...extRefreshQueue];
+    extRefreshQueue.clear();
+    if (!names.length) return;
+    if (names.length === 1) {
+      const name = names[0];
+      const r = await extProfileGet('/internal/profile/' + encodeURIComponent(name));
+      if (!r) return settleExtRefresh(name, null, false);
+      if (r.status === 404) return settleExtRefresh(name, null, true);
+      if (r.status !== 200) return settleExtRefresh(name, null, false);
+      return settleExtRefresh(name, normalizeExtView(r.json, name), true);
+    }
+    // 核对 #20：ext 批量端点单次上限 50 → 按 50 分片逐片请求；片内批量失败回退逐人单查，
+    // 不再出现「50 人之后被 settle 负缓存、正本有昵称却显示不出」。
+    for (let off = 0; off < names.length; off += 50) {
+      const chunk = names.slice(off, off + 50);
+      const r = await extProfileGet('/internal/profile/view?usernames=' + encodeURIComponent(chunk.join(',')));
+      if (r && r.status === 200 && r.json) {
+        let container = null;
+        if (Array.isArray(r.json)) container = r.json;
+        else if (Array.isArray(r.json.views)) container = r.json.views;
+        else if (Array.isArray(r.json.profiles)) container = r.json.profiles;
+        else if (r.json.views && typeof r.json.views === 'object') container = r.json.views;
+        else if (r.json.profiles && typeof r.json.profiles === 'object') container = r.json.profiles;
+        else if (r.json.items && typeof r.json.items === 'object') container = r.json.items;
+        else container = r.json;
+        const byName = new Map();
+        if (Array.isArray(container)) { for (const raw of container) { const v = normalizeExtView(raw); if (v) byName.set(v.username, v); } }
+        else if (container && typeof container === 'object') { for (const [k, raw] of Object.entries(container)) { const v = normalizeExtView(raw, k); if (v) byName.set(v.username, v); } }
+        for (const name of chunk) settleExtRefresh(name, byName.get(name) || null, true);
+        continue;
+      }
+      // 本片批量接口不可用时回退逐人单查
+      await Promise.all(chunk.map(async (name) => {
+        const s1 = await extProfileGet('/internal/profile/' + encodeURIComponent(name));
+        if (!s1) return settleExtRefresh(name, null, false);
+        if (s1.status === 404) return settleExtRefresh(name, null, true);
+        if (s1.status !== 200) return settleExtRefresh(name, null, false);
+        return settleExtRefresh(name, normalizeExtView(s1.json, name), true);
+      }));
+    }
+  }
+  function scheduleExtRefresh(name) {
+    const entry = extProfileCache.get(name);
+    if (entry && entry.pending) return;
+    if (entry) entry.pending = true;
+    else extProfileCache.set(name, { view: null, fetchedAt: 0, pending: true });
+    extRefreshQueue.add(name);
+    if (extRefreshTimer) return;
+    extRefreshTimer = setTimeout(() => { extRefreshTimer = null; flushExtRefresh().catch(() => {}); }, 10);
+    if (extRefreshTimer.unref) extRefreshTimer.unref();
+  }
+  function extViewOf(name) {
+    const key = String(name || '').toLowerCase();
+    if (!key) return null;
+    const entry = extProfileCache.get(key);
+    if (!entry || Date.now() - entry.fetchedAt > EXT_PROFILE_TTL_MS) scheduleExtRefresh(key);
+    return entry ? entry.view : null;
+  }
+  const displayNameOf = (name) => {
+    const v = extViewOf(name);
+    if (v && v.effectiveNickname) return v.effectiveNickname;
+    const p = profiles[String(name || '').toLowerCase()] || profiles[name];
+    return (p && p.nickname) ? p.nickname : name;
+  };
+  // 头像出口一律改走论坛同源代理（/api/forum/avatar/:name）：ext 的 avatarUrl
+  // 是 ext 源相对路径，论坛页在论坛源下直引必 404；代理经内网字节端点回源，
+  // 缓存口径与正本一致（?v= 对上 immutable、对不上 no-store）。
+  const authorAvatarUrlOf = (name) => { const v = extViewOf(name); return v && v.hasAvatar && v.avatarUpdatedAt ? '/api/forum/avatar/' + encodeURIComponent(String(name).toLowerCase()) + '?v=' + v.avatarUpdatedAt : null; };
+  function extAvatarGet(name, version) {
+    return new Promise((resolve) => {
+      const secret = licInternalSecret();
+      if (!secret) return resolve(null);
+      let done = false;
+      const finish = (x) => { if (!done) { done = true; resolve(x); } };
+      let rq;
+      try {
+        const qs = version ? '?v=' + encodeURIComponent(version) : '';
+        rq = http.request({ hostname: '127.0.0.1', port: EXT_PROFILE_PORT, path: '/internal/profile/' + encodeURIComponent(name) + '/avatar' + qs, method: 'GET', timeout: 3000, headers: { 'x-qf-internal-secret': secret } }, (rs) => {
+          const chunks = []; let total = 0;
+          // 核对 #6：同 extProfileGet——超限立即 settle，error/close 兜底防永挂
+          rs.on('data', (c) => { total += c.length; if (total > 512 * 1024) { try { rq.destroy(); } catch (e) {} finish(null); return; } chunks.push(c); });
+          rs.on('end', () => finish({ status: rs.statusCode, contentType: rs.headers['content-type'] || '', cacheControl: rs.headers['cache-control'] || 'no-store', body: Buffer.concat(chunks) }));
+          rs.on('error', () => finish(null));
+          rs.on('close', () => finish(null));
+        });
+      } catch (e) { return finish(null); }
+      rq.on('timeout', () => { try { rq.destroy(); } catch (e) {} finish(null); });
+      rq.on('error', () => finish(null));
+      rq.end();
+    });
+  }
   // 「官方」徽标只认两个账号：站长本人与官方发布号 qf-official（站长 2026-10-25 15:25 令），其余任何账号不认。
   const isOfficialAuthor = (name) => { const n = String(name || '').toLowerCase(); return n === OWNER_ACCOUNT || n === OFFICIAL_ACCOUNT; };
   function applyRejection(name, now) {
@@ -598,7 +754,7 @@ function main() {
   function publicPost(it, sess) {
     const mine = !!(sess && sess.user === it.author);
     return {
-      id: it.id, board: it.board, author: it.author, authorName: displayNameOf(it.author), authorOfficial: isOfficialAuthor(it.author), title: it.title, body: it.body,
+      id: it.id, board: it.board, author: it.author, authorName: displayNameOf(it.author), authorAvatarUrl: authorAvatarUrlOf(it.author), authorOfficial: isOfficialAuthor(it.author), title: it.title, body: it.body,
       status: it.status, reviewCategory: it.status === 'published' ? null : it.reviewCategory,
       createdAt: it.createdAt, views: it.views, likes: it.likes.length, liked: !!(sess && it.likes.includes(sess.user)), shares: it.shares || 0,
       replyCount: Object.values(repliesDb.items).filter(r => r.postId === it.id && !r.deleted && (r.status === 'published' && !r.banHidden || (sess && (sess.isAdmin || sess.user === r.author)))).length,
@@ -607,7 +763,7 @@ function main() {
     };
   }
   function publicReply(it, sess) {
-    return { id: it.id, postId: it.postId, author: it.author, authorName: displayNameOf(it.author), authorOfficial: isOfficialAuthor(it.author), body: it.body, status: it.status, reviewCategory: it.status === 'published' ? null : it.reviewCategory, createdAt: it.createdAt, banHidden: it.banHidden || undefined, reports: sess && sess.isAdmin ? it.reports.length : undefined, mine: !!(sess && sess.user === it.author) };
+    return { id: it.id, postId: it.postId, author: it.author, authorName: displayNameOf(it.author), authorAvatarUrl: authorAvatarUrlOf(it.author), authorOfficial: isOfficialAuthor(it.author), body: it.body, status: it.status, reviewCategory: it.status === 'published' ? null : it.reviewCategory, createdAt: it.createdAt, banHidden: it.banHidden || undefined, reports: sess && sess.isAdmin ? it.reports.length : undefined, mine: !!(sess && sess.user === it.author) };
   }
 
   // ---- 登录限速（防经论坛口爆破，也护住 MeshCentral 的登录锁定桶） ----
@@ -863,22 +1019,19 @@ function main() {
     return sendJson(res, 200, { ok: true, shares: post.shares || 0, counted });
   }
 
-  // ---- 补齐：论坛昵称（过机审才生效；命中硬规则或轻度敏感一律请更换，不进人工队列） ----
+  // ---- 论坛昵称旧直写端点已关停（2.3.2 收编，BUILD: PROFILE_UNIFIED）----
+  // 全站只许一个昵称写入口＝ext 统一档案（我的账户 · 个人资料）。
+  // 本端点不再写 profiles.nickname、不再走论坛机审，任何提交一律回
+  // HTTP 200 + {ok:false, code:'PROFILE_UNIFIED', msg:'昵称已统一到「我的账户 · 个人资料」修改。'}
+  // （HTTP 200 与论坛既有业务错误口径一致：如发帖被驳回亦是 200+ok:false），
+  // 并在 modlog 留一条 nickname-legacy-closed 审计。profiles.nickname 自此
+  // 停写，仅作 displayNameOf 的影子回退（存量导入见 import-nicknames.js）。
+  // 注：当刻字节里本函数的三态封禁门（DEV-19/21/22）随端点关停一并退役——
+  // 关停后任何提交都不写入、统一回执，冻结/封禁判定改由 ext 提交面承担。
   async function handleSetNickname(req, res, sess) {
-    const data = await readBody(req);
-    const nick = String(data.nickname || '').trim();
-    const p = profileOf(sess.user);
-    if (p.accountStatus && p.accountStatus !== 'ok' && !(p.accountStatus === 'banned' && banLinkTriF(sess.user) === false)) return sendJson(res, 403, { ok: false, msg: '您的账号已被冻结或封禁，无法修改昵称。申诉请联系官方客服，或前往官网留言。' }); // DEV-19＋DEV-21 三态：'banned' 仅在镜像可读且明示未封禁时让位
-    if (banLinkTriF(sess.user) === true) return sendJson(res, 403, { ok: false, msg: '您的账号已被冻结或封禁，无法修改昵称。申诉请联系官方客服，或前往官网留言。' }); // DEV-22/F1：镜像即时封禁第二道门（与发帖门同序，补 DEV-18 遗漏）
-    if (!nick) { p.nickname = ''; saveProfiles(); modlog({ actor: 'user', action: 'nickname-clear', author: sess.user }); return sendJson(res, 200, { ok: true, nickname: '', msg: '已恢复为账号名显示。' }); }
-    if ([...nick].length > 20) return sendJson(res, 400, { ok: false, msg: '昵称长度不得超过 20 个字。' });
-    const review = R.reviewContent({ title: '', body: nick }, compiled, {});
-    if (review.tier === 'B') return sendJson(res, 400, { ok: false, msg: '该昵称未通过审核：内容涉及' + (R.CATEGORIES[review.category] || '违规内容') + '，请更换后重试。' });
-    if (review.tier === 'C') return sendJson(res, 400, { ok: false, msg: '该昵称含有敏感内容，请更换后重试。' });
-    p.nickname = nick;
-    saveProfiles();
-    modlog({ actor: 'user', action: 'nickname-set', author: sess.user, detail: esc(nick) });
-    return sendJson(res, 200, { ok: true, nickname: nick, msg: '昵称已更新。' });
+    await readBody(req); // 读尽请求体后统一回执，不据其内容做任何写入
+    modlog({ actor: 'user', action: 'nickname-legacy-closed', author: sess.user });
+    return sendJson(res, 200, { ok: false, code: 'PROFILE_UNIFIED', msg: '昵称已统一到「我的账户 · 个人资料」修改。' });
   }
 
   // ---- 补齐：公开作者页（只展示已发布内容与汇总统计） ----
@@ -898,7 +1051,7 @@ function main() {
     const p = profiles[name] || {};
     return sendJson(res, 200, {
       ok: true,
-      user: { account: name, name: displayNameOf(name), official: isOfficialAuthor(name), joinedAt: p.accountCreatedAt || null, stats },
+      user: { account: name, name: displayNameOf(name), avatarUrl: authorAvatarUrlOf(name), official: isOfficialAuthor(name), joinedAt: p.accountCreatedAt || null, stats },
       total: published.length, page,
       posts: published.slice((page - 1) * 20, page * 20).map(x => publicPost(x, sess))
     });
@@ -1076,10 +1229,21 @@ function main() {
         res.writeHead(302, { Location: next, 'Set-Cookie': sc, 'Cache-Control': 'no-store', 'Content-Security-Policy': 'frame-ancestors ' + frameAncestorsOf(req) });
         return res.end();
       }
+      if (req.method === 'GET' && sub.startsWith('/avatar/')) {
+        // 头像同源代理（公开，游客可见帖即应见头像）：字节只从 ext 内网端点回源
+        let an = '';
+        try { an = decodeURIComponent(sub.slice('/avatar/'.length)).toLowerCase(); } catch (e) { return sendJson(res, 400, { ok: false, code: 'VALIDATION' }); } // 核对 #8：畸形编码回 400 而非 500
+        if (!/^[a-z0-9@._+\-]{1,80}$/.test(an)) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        const got = await extAvatarGet(an, u.searchParams.get('v'));
+        if (!got || got.status !== 200) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        res.writeHead(200, { 'Content-Type': got.contentType || 'application/octet-stream', 'Content-Length': got.body.length, 'Cache-Control': got.cacheControl, 'X-Content-Type-Options': 'nosniff' });
+        return res.end(got.body);
+      }
       if (req.method === 'GET' && sub === '/me') {
         if (!sess) return sendJson(res, 200, { ok: true, user: null });
         const p = profileOf(sess.user);
-        return sendJson(res, 200, { ok: true, user: sess.user, isAdmin: sess.isAdmin, nickname: p.nickname || '', displayName: displayNameOf(sess.user), official: isOfficialAuthor(sess.user), muted: isMuted(p, Date.now()) ? { permanent: p.mute.permanent, until: p.mute.until } : null, accountStatus: p.accountStatus });
+        const myView = extViewOf(sess.user);
+        return sendJson(res, 200, { ok: true, user: sess.user, isAdmin: sess.isAdmin, nickname: (myView && myView.nickname) || p.nickname || '', avatarUrl: authorAvatarUrlOf(sess.user), displayName: displayNameOf(sess.user), official: isOfficialAuthor(sess.user), muted: isMuted(p, Date.now()) ? { permanent: p.mute.permanent, until: p.mute.until } : null, accountStatus: p.accountStatus });
       }
       if (req.method === 'GET' && sub === '/boards') {
         const counts = {};

@@ -214,3 +214,25 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 .chatlist .row{flex-wrap:wrap}
 .chatlist .row>span:nth-child(2){flex:1 1 88px;min-width:0}
 }
+/* ===== 个人资料（2.3.2：头像圆图＋品牌占位＋审核记录；令牌同首行：深蓝 #0B2B5B / 品牌蓝 #2470E0 / 橙 #FF8A1E / 圆角 14 / 无阴影无渐变） ===== */
+.qf-avatar{border-radius:50%;object-fit:cover;display:block;background:var(--navy)}
+.qf-avatar-ph{background:var(--navy)}
+[data-my-avatar]{display:inline-flex;flex:0 0 auto;align-items:center}
+.sideid{display:flex;align-items:center;gap:11px;width:100%;padding:10px 12px;border-radius:10px;background:none;border:0;color:#fff;text-align:left;font:inherit}
+.sideid:hover{background:#27497C}
+.sideidtx{display:flex;flex-direction:column;min-width:0}
+.sideidtx b{font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sideidtx small{color:#9FB6D8;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.profile-head{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+.profile-head .pf-names b{font-size:17px;color:var(--navy);display:block}
+.profile-head .pf-names small{display:block;color:var(--sub);font-size:12.5px;margin-top:2px}
+.profile-login{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:11px 2px;margin-bottom:16px;font-size:13.5px;color:var(--sub);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.profile-login b{color:var(--tx)}
+.pf-ops{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.pf-count{font-weight:400;color:var(--sub);font-size:12.5px}
+.pfrec{display:flex;align-items:center;gap:11px;padding:11px 4px;border-bottom:1px solid var(--line)}
+.pfrec:last-child{border-bottom:none}
+.pfrec-main{flex:1;min-width:0}
+.pfrec-main b{font-size:14px}
+.pfrec-main small{display:block;color:var(--sub);font-size:12.5px}
+.pfrec-time{color:var(--sub);font-size:12.5px;white-space:nowrap}

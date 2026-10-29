@@ -76,6 +76,8 @@
   .tag.pend { background:var(--warn-soft); color:var(--warn); }
   .tag.rej { background:var(--danger-soft); color:var(--danger); }
   .tag.hid { background:var(--brand-soft); color:var(--muted); }
+  .author-avatar { width:20px; height:20px; border-radius:50%; object-fit:cover; vertical-align:-5px; margin-right:5px; }
+  .author-avatar-ph { display:inline-block; width:20px; height:20px; border-radius:50%; background:var(--brand-soft); vertical-align:-5px; margin-right:5px; }
   label { display:block; font-size:13.5px; color:var(--muted); font-weight:500; margin:14px 2px 6px; }
   label:first-of-type { margin-top:0; }
   input, textarea, select { width:100%; padding:0 13px; height:48px; font-size:16px; font-family:inherit; color:var(--ink); border:1px solid var(--line); border-radius:10px; background:var(--field); outline:none; transition:border-color .15s, box-shadow .15s; }
@@ -186,12 +188,10 @@
   <div class="card hidden" id="myCard">
     <h3 class="sec">我的帖子与回复</h3>
     <div id="myStats" class="meta" style="margin-bottom:6px"></div>
-    <label for="nickInput">论坛昵称（可选，最多 20 个字，须通过内容审核；清空并保存即恢复账号名显示）</label>
+    <div class="meta" style="margin:10px 0 6px">昵称已统一管理：论坛不再单独设置昵称。如需修改昵称或头像，请前往控制台「我的账户 · 个人资料」修改，修改后全站（论坛、好友、聊天）统一生效。</div>
     <div class="row">
-      <input id="nickInput" maxlength="20" placeholder="设置后，论坛中将以昵称显示" style="flex:1;min-width:200px;width:auto">
-      <button class="btn small ghost" id="nickBtn">保存昵称</button>
+      <a class="btn small ghost" href="/#profile" style="display:inline-flex;align-items:center;text-decoration:none">前往「我的账户 · 个人资料」</a>
     </div>
-    <div class="res" id="nickRes"></div>
     <div id="myList"></div>
   </div>
 
@@ -224,7 +224,8 @@ var me = null, boards = [], curBoard = 'general', page = 1, curPost = null, sort
 
 // 作者展示：昵称（无昵称时为账号名）＋官方标记；点击进入作者主页
 function authorHtml(x) {
-  return '<span class="link" data-author="' + esc(x.author) + '">' + esc(x.authorName || x.author) + '</span>' + (x.authorOfficial ? '<span class="tag off">官方</span>' : '');
+  var av = x.authorAvatarUrl ? '<img class="author-avatar" src="' + esc(x.authorAvatarUrl) + '" alt="">' : '<span class="author-avatar-ph" aria-hidden="true"></span>';
+  return av + '<span class="link" data-author="' + esc(x.author) + '">' + esc(x.authorName || x.author) + '</span>' + (x.authorOfficial ? '<span class="tag off">官方</span>' : '');
 }
 function wireAuthors(root) {
   (root || document).querySelectorAll('[data-author]').forEach(function (n) {
@@ -264,7 +265,7 @@ async function loadMe() {
   me = d.user ? d : null;
   var box = document.getElementById('meBox');
   if (me) {
-    box.innerHTML = '<span>已登录：' + esc(me.displayName || me.user) + (me.official ? '<span class="tag off">官方</span>' : '') + (me.isAdmin ? '（站长）' : '') + '</span>' +
+    box.innerHTML = (me.avatarUrl ? '<img class="author-avatar" src="' + esc(me.avatarUrl) + '" alt="">' : '') + '<span>已登录：' + esc(me.displayName || me.user) + (me.official ? '<span class="tag off">官方</span>' : '') + (me.isAdmin ? '（站长）' : '') + '</span>' +
       (me.muted ? '<span class="tag rej">论坛禁言中</span>' : '') +
       '<button class="btn small ghost" id="myBtn">我的帖子</button>' +
       (me.isAdmin ? '<button class="btn small ghost" id="admBtn">复核队列</button>' : '') +
@@ -382,7 +383,7 @@ async function showAuthor(account) {
   if (!d.ok) { alert(d.msg || '作者主页打开失败，请重试。'); return; }
   var usr = d.user;
   document.getElementById('authorBody').innerHTML =
-    '<div class="t" style="font-size:18px;font-weight:700">' + esc(usr.name) + (usr.official ? '<span class="tag off">官方</span>' : '') + '</div>' +
+    '<div class="t" style="font-size:18px;font-weight:700">' + (usr.avatarUrl ? '<img class="author-avatar" style="width:28px;height:28px" src="' + esc(usr.avatarUrl) + '" alt="">' : '<span class="author-avatar-ph" style="width:28px;height:28px" aria-hidden="true"></span>') + esc(usr.name) + (usr.official ? '<span class="tag off">官方</span>' : '') + '</div>' +
     '<div class="meta">账号 ' + esc(usr.account) + (usr.joinedAt ? ' · 注册于 ' + fmt(usr.joinedAt) : '') + '</div>' +
     '<div class="meta">帖子 ' + usr.stats.posts + ' · 回复 ' + usr.stats.replies + ' · 获赞 ' + usr.stats.likesReceived + ' · 总浏览 ' + usr.stats.viewsReceived + '</div>';
   var el = document.getElementById('authorPosts');
@@ -402,8 +403,6 @@ async function showAuthor(account) {
 async function showMy() {
   var d = await api('/my');
   document.getElementById('myStats').textContent = d.stats ? ('帖子 ' + d.stats.posts + ' · 回复 ' + d.stats.replies + ' · 获赞 ' + d.stats.likesReceived + ' · 总浏览 ' + d.stats.viewsReceived) : '';
-  var ni = document.getElementById('nickInput');
-  if (ni && me) ni.value = me.nickname || '';
   var el = document.getElementById('myList');
   var html = (d.posts || []).map(function (p) {
     return '<div class="post" data-id="' + p.id + '"><div class="t">' + esc(p.title) + statusTag(p) + '</div><div class="meta">' + fmt(p.createdAt) + (p.status === 'pending' ? ' · 已提交，审核通过后显示' : '') + (p.status === 'rejected' ? ' · 未通过审核：内容涉及违规类别。如认为判定有误，可通过页脚所列渠道申诉' : '') + ' · <span class="mini" data-delpost="' + p.id + '">删除</span></div></div>';
@@ -469,12 +468,6 @@ document.querySelectorAll('#sortBar .board').forEach(function (b) {
     page = 1; loadPosts();
   };
 });
-document.getElementById('nickBtn').onclick = async function () {
-  var res = document.getElementById('nickRes');
-  var r = await api('/profile', { method: 'POST', body: JSON.stringify({ nickname: document.getElementById('nickInput').value }) });
-  if (r.ok) { res.innerHTML = '<span class="ok">' + esc(r.msg) + '</span>'; loadMe(); }
-  else res.innerHTML = '<span class="bad">' + esc(r.msg || '保存失败，请重试。') + '</span>';
-};
 document.getElementById('modlogBtn').onclick = async function () {
   var d = await api('/admin/modlog?page=1&pageSize=100');
   var el = document.getElementById('modlogBody');

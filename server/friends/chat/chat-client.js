@@ -436,12 +436,22 @@ async function loadSupportFaq() {
   // 聊天列表改放智能客服入口卡片（chat.html 的 supportEntryCard）。本函数保留
   // 仅为兼容既有调用点，不再请求、不再渲染任何静态问答。
 }
-// 样图口径的字母头像取色（纯呈现：颜色按账号名稳定取色，不参与逻辑）
-const AV_PALETTE = ['#3E6FB4', '#5B83B8', '#7A93B5', '#4E7396', '#6B8CAE'];
-function avatarColor(name) {
-  let h = 0; const s = String(name || '?');
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return AV_PALETTE[h % AV_PALETTE.length];
+// 品牌占位头像（2.3.2 统一档案，DESIGN §三 A9／§四 C3 定版）：深蓝圆盘
+// #0B2B5B＋白色断环＋橙点 #FF8A1E，几何照 assets/avatar-placeholder.svg
+//（与安卓 QfAvatarPlaceholder 同参）。无真头像、或真头像加载失败时一律
+// 用它，不再用哈希色＋账号名首字。身份键仍是账号名，displayName 只作显示。
+const AV_PLACEHOLDER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="#0B2B5B"/><path d="M 68.65 73.50 A 30 30 0 1 1 78.81 41.62" fill="none" stroke="#FFFFFF" stroke-width="7.5" stroke-linecap="round"/><circle cx="73.4" cy="26.6" r="8.5" fill="#FF8A1E"/></svg>';
+const AV_PLACEHOLDER_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(AV_PLACEHOLDER_SVG);
+function qfAvatarImgError(img) { img.onerror = null; img.src = AV_PLACEHOLDER_URI; }
+function peerViewOf(name) { return (state._peers || []).find(x => x.name === name) || null; }
+// 头像 <img>：有真头像走同源代理 /chat/api/avatar/<账号名>?v=<avatarUpdatedAt>
+//（同源、会话 cookie 可达，字节由服务端经 ext 内网端点回源）；无则品牌占位。
+function avatarImgHtml(name, view) {
+  const v = view || peerViewOf(name);
+  if (v && v.hasAvatar && v.avatarUpdatedAt) {
+    return '<img src="/chat/api/avatar/' + encodeURIComponent(name) + '?v=' + encodeURIComponent(v.avatarUpdatedAt) + '" alt="" onerror="qfAvatarImgError(this)">';
+  }
+  return '<img src="' + AV_PLACEHOLDER_URI + '" alt="">';
 }
 async function renderFriends() {
   const r = await api('GET', '/chat/api/friends');
@@ -454,7 +464,14 @@ async function renderFriends() {
     const c = await api('GET', '/chat/api/conversations');
     (c.conversations || []).forEach(conv => {
       convMeta[conv.with] = { lastAt: conv.lastAt || 0, lastSeq: conv.lastSeq || 0, myRead: conv.myRead || 0 };
-      if (!peers.some(p => p.name === conv.with)) peers.push({ name: conv.with, type: conv.type || 'user' });
+      const exPeer = peers.find(p => p.name === conv.with);
+      if (exPeer) { // 会话侧档案显示字段补缺（好友侧已有值时以好友侧为准）
+        if (exPeer.displayName === undefined && conv.displayName !== undefined) exPeer.displayName = conv.displayName;
+        if (exPeer.hasAvatar === undefined && conv.hasAvatar !== undefined) exPeer.hasAvatar = conv.hasAvatar;
+        if (exPeer.avatarUpdatedAt === undefined && conv.avatarUpdatedAt !== undefined) exPeer.avatarUpdatedAt = conv.avatarUpdatedAt;
+      } else {
+        peers.push({ name: conv.with, type: conv.type || 'user', displayName: conv.displayName, hasAvatar: conv.hasAvatar, avatarUpdatedAt: conv.avatarUpdatedAt });
+      }
     });
   } catch (e) { /* 会话补集失败不影响好友清单 */ }
   peers.sort((a, b) => ((a.type === 'system' ? 0 : 1) - (b.type === 'system' ? 0 : 1)) || a.name.localeCompare(b.name));
@@ -482,15 +499,15 @@ function renderFriendRows() {
   let shown = 0;
   peers.forEach(p => {
     const isSys = p.type === 'system';
-    const label = isSys ? '官方客服' : p.name;
-    if (q && !(p.name.toLowerCase().includes(q) || label.toLowerCase().includes(q))) return;
+    const label = isSys ? '官方客服' : (p.displayName || p.name);
+    if (q && !(p.name.toLowerCase().includes(q) || label.toLowerCase().includes(q) || String(p.displayName || '').toLowerCase().includes(q))) return;
     shown++;
     const m = meta[p.name] || {};
     const unread = !!(m.lastSeq && m.lastSeq > (m.myRead || 0) && state.currentWith !== p.name);
     const preview = lastPreview(p.name);
     const av = isSys
       ? '<div class="avatar sys">客</div>'
-      : '<div class="avatar" style="background:' + avatarColor(p.name) + '">' + esc(p.name.slice(0, 1)) + '</div>';
+      : '<div class="avatar">' + avatarImgHtml(p.name, p) + '</div>';
     const tag = isSys ? '<span class="tag org">官方</span>' : '';
     const ss = preview
       ? '<div class="ss">' + esc(preview) + '</div>'
@@ -550,12 +567,12 @@ function openConversation(withUser) {
     return;
   }
   state.currentWith = withUser;
-  $('chatWith').textContent = withUser === 'qf-support' ? '官方客服' : withUser;
+  $('chatWith').textContent = withUser === 'qf-support' ? '官方客服' : ((peerViewOf(withUser) || {}).displayName || withUser);
   // 会话头头像与副标题（d05 头部式样；窄宽下由 CSS 隐藏，不改 m05 口径）
   const cav = $('chatAvatar');
   if (cav) {
     if (withUser === 'qf-support') { cav.className = 'avatar sys chat-av'; cav.textContent = '客'; cav.style.background = ''; }
-    else { cav.className = 'avatar chat-av'; cav.textContent = withUser.slice(0, 1); cav.style.background = avatarColor(withUser); }
+    else { cav.className = 'avatar chat-av'; cav.textContent = ''; cav.style.background = ''; cav.innerHTML = avatarImgHtml(withUser); }
   }
   const csub = $('chatSub');
   if (csub) csub.textContent = withUser === 'qf-support' ? '已迁移至智能客服，本会话只读查看' : '';
