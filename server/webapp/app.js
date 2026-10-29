@@ -1490,9 +1490,10 @@ function openSession(kind, ctx) {
 }
 
 function sessionMarkup(name, kind) {
+  const capLive = capBridgeLive();
   const capRows = QF_CAP_DEFS.map(c => {
     const on = sessCapOn(c.key);
-    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${on ? ' sv-opt__s--ok' : ''}">${on ? '已开启' : '已关闭'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"></button></div></li>`;
+    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${capLive && on ? ' sv-opt__s--ok' : ''}">${capLive ? (on ? '已开启' : '已关闭') : '未接入'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"></button></div></li>`;
   }).join('');
   return `<div class="qf-session-layer"><div class="viewer" id="qfViewer" data-morph="${kind}" data-fs="false">
     <header class="sv-bar"><div class="sv-bar__inner">
@@ -1573,7 +1574,7 @@ function sessionMarkup(name, kind) {
           <li><button class="sv-opt" data-kbmode="auto" role="radio" aria-checked="${Sess.kbMode !== 'manual'}"><span class="sv-opt__ic">${ic('keyboard')}</span><span class="sv-opt__tx"><span class="sv-opt__n">自动弹出</span><span class="sv-opt__d">点输入行即唤起键盘</span></span><span class="sv-opt__r"></span></button></li>
           <li><button class="sv-opt" data-kbmode="manual" role="radio" aria-checked="${Sess.kbMode === 'manual'}"><span class="sv-opt__ic">${ic('keyboard')}</span><span class="sv-opt__tx"><span class="sv-opt__n">仅点按召唤</span><span class="sv-opt__d">点键盘按钮才唤起，输入行键盘钮实底常亮</span></span><span class="sv-opt__r"></span></button></li>
         </ul>
-        <p class="sv-sheet__lbl">会话能力（全部保留，按新样式重排）</p>
+        <p class="sv-sheet__lbl">${capLive ? '会话能力（全部保留，按新样式重排）' : '会话能力（未接入，仅记录偏好）'}</p>
         <ul class="sv-opts">${capRows}</ul>
       </div>
     </div></div>
@@ -1609,8 +1610,11 @@ function sessCapOn(key) {
 }
 /* 能力驱动桥：优先引擎未来钩子 QFCap(key,on)；其次原生设定对话框控件（选择器映射
    待翻牌日按 phase-0 SELECTORS 纪律实捕后填 QF_CAP_NATIVE_MAP）；都不可用时仅记录
-   本地状态（开关行与状态字照常工作），不假报已生效。 */
+   本地偏好，状态字示「未接入」，不假报已生效（DS P1-2）。 */
 const QF_CAP_NATIVE_MAP = {};
+/* 桥接实况（静态判定）：映射表为空期间，能力行一律按「未接入，仅记录偏好」
+   降级展示；开关点击时逐次以 sessApplyCap 的真实返回值决定状态字。 */
+function capBridgeLive() { return Object.keys(QF_CAP_NATIVE_MAP).length > 0; }
 function sessApplyCap(key, on) {
   try {
     const w = Sess.frame && Sess.frame.contentWindow;
@@ -1906,16 +1910,21 @@ function wireSession(view) {
     updateKbBtn(view);
   });
   updateKbBtn(view);
-  /* 设定：能力开关（状态字＋本地持久化＋驱动桥尝试） */
+  /* 设定：能力开关（偏好持久化＋驱动桥尝试）。DS P1-2：先问驱动桥，
+     sessApplyCap 返回 false（桥未接入）时状态字只示「未接入」——开关
+     只记偏好，绝不置「已开启/已关闭」生效态、不丢弃 false 返回。 */
   root.querySelectorAll('[data-cap]').forEach(o => o.onclick = () => {
     const key = o.getAttribute('data-cap');
     const on = o.getAttribute('aria-checked') !== 'true';
+    const applied = sessApplyCap(key, on);
     o.setAttribute('aria-checked', on ? 'true' : 'false');
-    const chip = o.parentElement.querySelector('.sv-opt__s');
-    if (chip) { chip.textContent = on ? '已开启' : '已关闭'; chip.classList.toggle('sv-opt__s--ok', on); }
     const c = sessCaps(); c[key] = on;
     try { localStorage.setItem('qfSessCaps', JSON.stringify(c)); } catch (e) {}
-    sessApplyCap(key, on);
+    const chip = o.parentElement.querySelector('.sv-opt__s');
+    if (chip) {
+      if (applied) { chip.textContent = on ? '已开启' : '已关闭'; chip.classList.toggle('sv-opt__s--ok', on); }
+      else { chip.textContent = '未接入'; chip.classList.remove('sv-opt__s--ok'); }
+    }
   });
   /* 终端输入行（bp-form 820 以下、终端形态显示；DS2 §4.3 软键盘 dvh 锁高在下方视口监听） */
   const form = $('#qfInput', view), field = $('#qfInputField', view);
