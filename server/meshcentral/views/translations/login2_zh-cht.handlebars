@@ -1173,14 +1173,14 @@
                 var c = qfCredApi();
                 if (c && pw) {
                     try { var r = c.store(new PasswordCredential({ id: u, password: pw, name: u })); if (r && r.catch) r.catch(function () {}); } catch (e) {}
-                    qfLs(QF_CRED_PASS, null); // 有密碼管理器時不留本地密碼副本
-                } else if (!c && pw) {
-                    // Safari 等不支持 PasswordCredential 的瀏覽器：與新控制檯（SPA）#39 同口徑，
-                    // 密碼只存本機瀏覽器 localStorage，下次回填並自動登錄。
-                    qfLs(QF_CRED_PASS, pw);
                 }
+                // 不支持密碼管理器接口時只記帳號、不另存密碼（見上方保存方式）；
+                // 舊版曾寫入的本地密碼副本一律清除、永不再用。
+                qfLs(QF_CRED_PASS, null);
             }
             function qfAutoRestore() {
+                // 舊版本地密碼副本見值即清、永不使用（2026-10-29 審計 J-4 定案）。
+                qfLs(QF_CRED_PASS, null);
                 if (qfSs('qfJustLoggedOut') === '1') {
                     qfSs('qfJustLoggedOut', null);
                     // 與新控制檯口徑對齊：手動退出只結束會話，不清已保存的賬密；
@@ -1189,8 +1189,6 @@
                         var b2 = document.getElementById('qfRememberCreds'); if (b2) b2.checked = true;
                         var u2 = document.getElementById('username'); var su = qfLs(QF_CRED_USER);
                         if (u2 && su && !u2.value) u2.value = su;
-                        var p2 = document.getElementById('password'); var sp0 = qfLs(QF_CRED_PASS);
-                        if (p2 && sp0 && !p2.value) { p2.value = sp0; if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} } }
                     }
                     return;
                 }
@@ -1200,7 +1198,8 @@
                 var uEl = document.getElementById('username');
                 var savedUser = qfLs(QF_CRED_USER);
                 if (uEl && savedUser && !uEl.value) uEl.value = savedUser;
-                // 上一輪自動登錄失敗會帶著錯誤提示回到本頁：給一句話說明，不再重試防死循環
+                // 上一輪自動登錄已嘗試過（QF_TRIED=1）：無論 #message1 是否有文字都停手；
+                // #message1 有文字只額外顯示提示行，絕不再重試，防死循環。
                 var msg = document.getElementById('message1');
                 if (qfSs(QF_TRIED) === '1') {
                     if (msg && msg.textContent) { var h = document.getElementById('qfAutoHint'); if (h) h.style.display = 'block'; }
@@ -1208,16 +1207,8 @@
                 }
                 var c = qfCredApi();
                 if (!c || !c.get) {
-                    // 無密碼管理器接口（Safari）：用本地保存的密碼回填並自動登錄
-                    var sp2 = qfLs(QF_CRED_PASS);
-                    var pEl2 = document.getElementById('password');
-                    var btn2 = document.getElementById('loginButton');
-                    if (sp2 && uEl && pEl2 && btn2 && uEl.value) {
-                        pEl2.value = sp2;
-                        if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} }
-                        qfSs(QF_TRIED, '1');
-                        btn2.click();
-                    }
+                    // 無密碼管理器接口（Safari 等）：不回填密碼、不自動登錄；
+                    // 恢復只靠「記住此設備」的 30 天會話，密碼由用戶手動輸入。
                     return;
                 }
                 try {

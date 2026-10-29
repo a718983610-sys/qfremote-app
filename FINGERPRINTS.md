@@ -81,9 +81,9 @@
 | server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3cad00a6ec3308d35643b70056783f10` |
 | server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `dd15b8a85cd685cf5fa8ab0631e6ad6a` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
-| server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
-| server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
-| server/meshcentral/views/translations/login2_zh-cht.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-cht.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
+| server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `2dc19f6fed541495ac29ac2a74a06378` |
+| server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `2dc19f6fed541495ac29ac2a74a06378` |
+| server/meshcentral/views/translations/login2_zh-cht.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-cht.handlebars | `bafa000727d9844b696de39405c33ce4` |
 | server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `9cb19dad137d44981b190734c48c82c6` |
 | server/register/README.md | /opt/qfremote-register/README.md | `527556ba06903beaeb3959cf728ef23f` |
 | server/register/register.html | /opt/qfremote-register/register.html | `4094a720db44d5172feda7cb02fa9f49` |
