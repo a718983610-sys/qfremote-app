@@ -651,8 +651,10 @@ async function checkSession(silent, opts) {
       return false;
     }
     const isNewAuth = S.auth !== 'in' || S.user !== me.json.username;
+    const userSwitched = isNewAuth && !!S.user && S.user !== me.json.username; // DS-R07/S3：检出换账号（他标签切号落到本页）
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
     if (isNewAuth) S.sessGen++; // DS-R49：仅新建登录身份时递增；同账号周期校验不递增，防误伤在飞心跳
+    if (userSwitched) { try { chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断会话检查 */ } } // DS-R07/S3：身份一变立即清本页聊天态与轮询，不等下一次 chatApi（此处 S.user 已是新身份，重签绑定正确）
     const curGen = S.sessGen;
     if (me.json.activeBan) {
       S.displayName = S.displayName || me.json.username;
@@ -1775,25 +1777,29 @@ Views.friends = async function (view) {
    示）。换票失败（手动退出聊天／账号不可用聊天／未登录控制台）把
    服务端原因原样交回调用方显示，不许用笼统文案掩盖。并发换票合并
    为一路；换票失败只清本路开始时那张旧票，不误清并发刚换好的新票。 */
-let chatTok = '', chatTokAt = 0, chatTokGen = 0, chatTokFlight = null;
+let chatTok = '', chatTokAt = 0, chatTokGen = 0, chatTokFlight = null, chatTokUser = ''; // DS-R07/S3 补修：chatTokUser＝当前聊天票的签发身份
 /* 登出 / 会话失效被踢时的聊天令牌复位：自增代号使任何在飞的换票请求作废，
    其迟到的成功响应绝不会再把上一个账号的令牌写回 chatTok（C-16）。 */
 function qfChatTokenReset() {
-  chatTok = ''; chatTokAt = 0; chatTokGen++; chatTokFlight = null;
+  chatTok = ''; chatTokAt = 0; chatTokGen++; chatTokFlight = null; chatTokUser = '';
 }
 function ensureChatToken(force) {
-  if (!force && chatTok && (Date.now() - chatTokAt) < 11 * 3600 * 1000) return Promise.resolve({ ok: true });
+  /* DS-R07/S3 补修：聊天票绑定签发身份——跨标签切号后本页 S.user 已是新账号而旧票未过期，
+     入口先复位，强制以当前控制台会话重新换票，绝不让旧账号的票在本页继续用。 */
+  if (chatTok && chatTokUser && S.user && chatTokUser !== S.user) qfChatTokenReset();
+  if (!force && chatTok && (Date.now() - chatTokAt) < 11 * 3600 * 1000 && (!chatTokUser || !S.user || chatTokUser === S.user)) return Promise.resolve({ ok: true });
   /* 在飞换票一律合并（含 force）：并发 401 只换一次票，避免多个强制换票
      共享同一 gen0 时，后完成者被 gen 校验误判为「登录状态已变更」（N-1）。
      登出复位由 qfChatTokenReset 置空 flight＋自增 gen，迟到成功仍被丢弃。 */
   if (chatTokFlight) return chatTokFlight;
   const gen0 = chatTokGen;
+  const mintUser = S.user || ''; // DS-R07/S3：签发目标身份——换票开始时捕获（sso 回执不含 user 字段，成功时以此记 chatTokUser）
   const flight = (async () => {
     const r = await api('/chat/api/sso', { method: 'POST', json: {} });
     if (r.status === 200 && r.json && r.json.ok && r.json.token) {
       /* 换票期间发生过登出/换账号：此票属于上一个账号，直接丢弃，绝不复活。 */
       if (chatTokGen !== gen0) return { ok: false, msg: '登录状态已变更，请重新打开聊天。' };
-      chatTok = r.json.token; chatTokAt = Date.now(); chatTokGen++;
+      chatTok = r.json.token; chatTokAt = Date.now(); chatTokGen++; chatTokUser = mintUser;
       return { ok: true };
     }
     if (chatTokGen === gen0) { chatTok = ''; chatTokAt = 0; }
@@ -2664,6 +2670,10 @@ window.qfShellUnlock = async function (password) {
 
 /* ================= 聊天（会话列表与对话区均为控制台原生组件） ================= */
 Views.chat = async function (view) {
+  /* DS-R07/S3 补修：挂载前先同步当前控制台身份（他标签切号时本页 S.user 可能尚未更新），
+     把「本页尚未检出切号」的旧票窗口压到近零；同步后若已被踢/锁定则不再挂载。 */
+  await checkSession(true).catch(() => {});
+  if (BanLock.active() || !S.auth) return;
   view.innerHTML = `<h1 class="pt">聊天</h1><p class="psub">好友聊天内容全程加密，钥匙由您的登录状态保管，登录了账号的设备可直接查看记录。左侧选联系人，右侧即对话，不再跳页。</p>
     <div class="grid2 chatwrap" style="grid-template-columns:1fr 1.6fr"><div class="card chatlist chatpane-list"><h3>会话</h3><div id="chList"><div class="skel" style="height:52px"></div></div></div>
     <div class="card chatpane-thread"><button class="btn sm grey chatback" id="ch-back" type="button">${ic('chevR')} 返回会话列表</button><h3>对话</h3>
