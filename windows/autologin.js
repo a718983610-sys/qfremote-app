@@ -201,51 +201,84 @@ async function clearConsoleSession(ses, originUrl) {
 }
 
 // ---------- 静默登录（主进程直提，与登录页原生提交同字段） ----------
-// baseUrl 为控制台根地址（如 https://主机:8443/）；成功判据：回程带回
-// xid 会话 cookie，或响应已不是登录页。失败/异常都回 {ok:false}，不抛。
+// baseUrl 为控制台根地址（如 https://主机:8443/）；初步成功判据只有一个：
+// 回程下发非空 xid 会话 cookie（响应形状不作数，最终由页面状态裁定）。
+// 失败/异常都回 {ok:false}，不抛。
 function httpSilentLogin(args) {
   const a = args || {};
   const timeoutMs = a.timeoutMs || 8000;
   return new Promise((resolve) => {
     let u;
     try { u = new URL(a.baseUrl); } catch (e) { resolve({ ok: false, status: 0, setCookies: [], error: '地址不对' }); return; }
+
     const body = new URLSearchParams({
       action: 'login',
       username: String(a.username || ''),
       password: String(a.password || ''),
       urlargs: ''
     }).toString();
+
     const lib = u.protocol === 'https:' ? https : http;
-    const opts = {
-      method: 'POST',
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: u.pathname || '/',
-      headers: clientVersion.withClientVersion({
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body)
-      }, a.clientVersion),
-      timeout: timeoutMs
-    };
+    let opts;
+    try {
+      opts = {
+        method: 'POST',
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        // 保留 query，避免 CONSOLE_URL 带路由参数时打错路径
+        path: (u.pathname || '/') + (u.search || ''),
+        headers: clientVersion.withClientVersion({
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body)
+        }, a.clientVersion),
+        timeout: timeoutMs
+      };
+    } catch (e) {
+      resolve({ ok: false, status: 0, setCookies: [], error: (e && e.message) || '请求构造失败' });
+      return;
+    }
     applyConsoleTls(opts, u, a);
+
     let done = false;
     const finish = (r) => { if (!done) { done = true; resolve(r); } };
+
     try {
       const req = lib.request(opts, (res) => {
-        const setCookies = res.headers['set-cookie'] || [];
+        const rawSetCookies = res.headers['set-cookie'];
+        const setCookies = Array.isArray(rawSetCookies)
+          ? rawSetCookies
+          : (rawSetCookies ? [rawSetCookies] : []);
+        const status = res.statusCode || 0;
+        const location = res.headers.location || null;
         const chunks = [];
         let size = 0;
-        res.on('data', (c) => { size += c.length; if (size < 2 * 1024 * 1024) chunks.push(c); });
+
+        res.on('data', (c) => {
+          size += c.length;
+          if (size < 2 * 1024 * 1024) chunks.push(c);
+        });
+
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
-          const hasXid = setCookies.some(sc => /^xid=/.test(sc));
-          const isLoginPage = text.includes('loginpanelform');
-          const redirected = res.statusCode >= 300 && res.statusCode < 400;
-          const ok = !isLoginPage && (hasXid || redirected || res.statusCode === 200);
-          finish({ ok, status: res.statusCode, setCookies, error: ok ? null : '登录未成功' });
+          // 只有下发非空 xid 才算“凭据被接受”。302/200 的页面形状不再作数。
+          const hasXid = setCookies.some((sc) => {
+            const m = /^\s*xid=([^;]*)/.exec(String(sc));
+            return !!(m && m[1]);
+          });
+          const ok = hasXid && status >= 200 && status < 400;
+          finish({
+            ok,
+            status,
+            setCookies,
+            location,
+            isLoginPage: text.includes('loginpanelform'),
+            error: ok ? null : (hasXid ? '登录响应异常' : '登录未成功')
+          });
         });
-        res.on('error', () => finish({ ok: false, status: res.statusCode || 0, setCookies, error: '无法连接服务器' }));
+
+        res.on('error', () => finish({ ok: false, status: status || 0, setCookies, error: '无法连接服务器' }));
       });
+
       req.on('timeout', () => req.destroy(new Error('连接超时')));
       req.on('error', (e) => finish({ ok: false, status: 0, setCookies: [], error: (e && e.message) || '无法连接服务器' }));
       req.write(body);
@@ -255,48 +288,81 @@ function httpSilentLogin(args) {
     }
   });
 }
-
-// 探活会话是否还成立：带分区 cookie 请求控制台根地址，回来的不是登录页就算成立。
-// cookieHeader 由调用方从持久分区拼好；本函数据实返回，不成立不报错。
 function httpProbeSession(args) {
   const a = args || {};
   const timeoutMs = a.timeoutMs || 6000;
+  const loginMarker = a.loginMarker || 'loginpanelform';
+  const consoleMarkers = Array.isArray(a.consoleMarkers) ? a.consoleMarkers.filter(Boolean) : [];
+  const minBodyBytes = typeof a.minBodyBytes === 'number' ? a.minBodyBytes : 256;
+
   return new Promise((resolve) => {
     let u;
-    try { u = new URL(a.baseUrl); } catch (e) { resolve({ alive: false, status: 0 }); return; }
+    try { u = new URL(a.baseUrl); } catch (e) { resolve({ alive: false, status: 0, error: '地址不对' }); return; }
+
     const lib = u.protocol === 'https:' ? https : http;
-    const opts = {
-      method: 'GET',
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: u.pathname || '/',
-      headers: clientVersion.clientVersionHeaders(a.clientVersion),
-      timeout: timeoutMs
-    };
-    if (a.cookieHeader) opts.headers.Cookie = a.cookieHeader;
+    let opts;
+    try {
+      opts = {
+        method: 'GET',
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: (u.pathname || '/') + (u.search || ''),
+        headers: clientVersion.clientVersionHeaders(a.clientVersion),
+        timeout: timeoutMs
+      };
+      if (a.cookieHeader) {
+        opts.headers = Object.assign({}, opts.headers, { Cookie: a.cookieHeader });
+      }
+    } catch (e) {
+      resolve({ alive: false, status: 0, error: (e && e.message) || '请求构造失败' });
+      return;
+    }
     applyConsoleTls(opts, u, a);
+
     let done = false;
     const finish = (r) => { if (!done) { done = true; resolve(r); } };
+
     try {
       const req = lib.request(opts, (res) => {
+        const status = res.statusCode || 0;
+        const location = res.headers.location || null;
         const chunks = [];
         let size = 0;
-        res.on('data', (c) => { size += c.length; if (size < 2 * 1024 * 1024) chunks.push(c); });
+
+        res.on('data', (c) => {
+          size += c.length;
+          if (size < 2 * 1024 * 1024) chunks.push(c);
+        });
+
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
-          finish({ alive: !text.includes('loginpanelform'), status: res.statusCode });
+          const bodyBytes = Buffer.byteLength(text, 'utf8');
+          const is2xx = status >= 200 && status < 300;
+          const isLoginPage = text.includes(loginMarker);
+
+          // 硬条件：2xx、无 Location、非登录页、响应体不是空壳。
+          let alive = is2xx && !location && !isLoginPage && bodyBytes >= minBodyBytes;
+
+          // 若调用方给了控制台正向标记，必须命中；没有正向标记时本探活只是弱信号，
+          // 绝不能作为最终成功裁定（最终由 processAuthPage 的 DETECT_JS 裁定）。
+          if (alive && consoleMarkers.length) {
+            alive = consoleMarkers.some((m) => text.includes(m));
+          }
+
+          finish({ alive, status, location, isLoginPage, bodyBytes });
         });
-        res.on('error', () => finish({ alive: false, status: res.statusCode || 0 }));
+
+        res.on('error', () => finish({ alive: false, status: status || 0, error: '读取响应失败' }));
       });
+
       req.on('timeout', () => req.destroy(new Error('连接超时')));
       req.on('error', () => finish({ alive: false, status: 0 }));
       req.end();
-    } catch (e) { finish({ alive: false, status: 0 }); }
+    } catch (e) {
+      finish({ alive: false, status: 0, error: e.message });
+    }
   });
 }
-
-// ---------- 页面脚本（函数字符串化后注入远程页面，必须自含） ----------
-
 // 登录页注入：补勾选、回填、暂存提交、清框与退出信号。opts={username,password,rememberPassword,rememberDevice}
 function pageInject(opts) {
   var PENDING = 'qfShellPendingLogin';
