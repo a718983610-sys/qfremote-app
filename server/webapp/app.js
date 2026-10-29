@@ -1667,7 +1667,7 @@ Views.session = async function (view, param) {
          直达（映射未预热时 byId 反查未命中走此路），不再假报未找到。 */
       nodeid = bareNodeId(param); Sess.nodeid = nodeid;
     }
-    else { showSessionMask(view, (r && r.code) || 'TIMEOUT', r); return; }
+    else { if (r && r.nodeid) Sess.nodeid = bareNodeId(r.nodeid); showSessionMask(view, (r && r.code) || 'TIMEOUT', r); return; }   // DS P2-2：OFFLINE 等失败响应带 nodeid 时先落 Sess.nodeid，邀请不再必空
   }
   if (!nodeid) { showSessionMask(view, 'NOT_FOUND', null); return; }
   buildSessionFrame(view);
@@ -2093,6 +2093,15 @@ function resetSendSheet(view) {
 function wireSendSheet(view) {
   const go = $('#qfSendGo', view); if (!go || go._qfWired) return; go._qfWired = true;
   go.onclick = async () => {
+    if (!Sess.nodeid) {
+      /* DS P2-2：nodeid 未解析（连接中/解析中/离线卡）时不发空邀请，
+         提交处直接失败提示，不生成 qf-invite-.json 空载荷。 */
+      const l = $('#qfSendList', view), f = $('#qfSendFail', view), ft = $('#qfSendFailTxt', view);
+      if (ft) ft.textContent = '设备连接尚未就绪，暂时无法发送邀请，请等会话连接建立后再试。';
+      if (l) l.hidden = true; if (f) f.hidden = false;
+      return;
+    }
+    const ft0 = $('#qfSendFailTxt', view); if (ft0) ft0.textContent = '指令未能送达手机，请稍后重试。';
     go.disabled = true; go.textContent = '发送中…';
     const payload = JSON.stringify({ v: 1, kind: 'session', nodeid: Sess.nodeid, vm: Sess.vm, from: ctrlInstanceId(), at: Date.now() });
     let okSend = false;
