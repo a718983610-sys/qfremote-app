@@ -111,7 +111,7 @@
 | windows/.gitignore | ~/workspace/qfremote/app-src/.gitignore | `4ebeaea4b6d938afe4ecf061b7c6cd94` |
 | windows/README.md | ~/workspace/qfremote/app-src/README.md | `d209fabbe74c74d8c777d6290479e196` |
 | windows/about-preload.js | ~/workspace/qfremote/app-src/about-preload.js | `4bc54efbadb87aa4035517b1f3795387` |
-| windows/about.html | ~/workspace/qfremote/app-src/about.html | `bd07415e1208bfb8a3be0b96f3824a51` |
+| windows/about.html | ~/workspace/qfremote/app-src/about.html | `899d2e76cd89b3564f920e54700e09e0` |
 | windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `8aa462a5cdd94d823220688b334be0a3` |
 | windows/build-info.json | ~/workspace/qfremote/app-src/build-info.json | `aeb6679d53e66faf56f147cd3086c09c` |
 | windows/build/icon-1024.png | ~/workspace/qfremote/app-src/build/icon-1024.png | `987af6e99ce6049324c9307d5f4e1d46` |
@@ -138,14 +138,14 @@
 | windows/lock-preload.js | ~/workspace/qfremote/app-src/lock-preload.js | `5456d32be105b2d326c8a448f099ed80` |
 | windows/lock.html | ~/workspace/qfremote/app-src/lock.html | `b3c644faa35f5d9668227054471d846d` |
 | windows/lock.js | ~/workspace/qfremote/app-src/lock.js | `b9a94176485698a9fce9378c69c0f474` |
-| windows/main.js | ~/workspace/qfremote/app-src/main.js | `b384cd8d7ed56f9cfafd8602deb8788e` |
+| windows/main.js | ~/workspace/qfremote/app-src/main.js | `70beadc17e6a0e95a32343da768436d8` |
 | windows/offline.html | ~/workspace/qfremote/app-src/offline.html | `37a5f6cb50b88546b666647b8d84d0a6` |
 | windows/package-lock.json | ~/workspace/qfremote/app-src/package-lock.json | `125095ca0d81179b6fe49dcbcfe3e044` |
 | windows/package.json | ~/workspace/qfremote/app-src/package.json | `6ca998fe1b440b5ad5b5ef2fc94fde1f` |
 | windows/session-bar-preload.js | ~/workspace/qfremote/app-src/session-bar-preload.js | `c5c03d4ea0b651c2f635797c5ee32196` |
 | windows/session-bar.html | ~/workspace/qfremote/app-src/session-bar.html | `84dc0cd4cf3e6907ba55149d7d2c3fb8` |
 | windows/splash.html | ~/workspace/qfremote/app-src/splash.html | `05a350561ced1370a657b9e36fa8c2bf` |
-| windows/svc-urls.js | ~/workspace/qfremote/app-src/svc-urls.js | `2927023519d612cf94c95d0b3d6c05a6` |
+| windows/svc-urls.js | ~/workspace/qfremote/app-src/svc-urls.js | `736a33dfd8b82daa49337e58fef85126` |
 | windows/test/autologin-page-test.js | ~/workspace/qfremote/app-src/test/autologin-page-test.js | `ff5cd7b0a082b4886e2e938663c83aaa` |
 | windows/test/autologin-test.js | ~/workspace/qfremote/app-src/test/autologin-test.js | `20ddbef5cdfa9be5ccaef4257611d097` |
 | windows/test/client-version-test.js | ~/workspace/qfremote/app-src/test/client-version-test.js | `b5e5aa8e1dc0a04548e036c2cb8a5a82` |
@@ -156,7 +156,7 @@
 | windows/test/fixture-mc-console.html | ~/workspace/qfremote/app-src/test/fixture-mc-console.html | `a26c3fd1ce9735d71c181bc668553c53` |
 | windows/test/fixture-mc-login.html | ~/workspace/qfremote/app-src/test/fixture-mc-login.html | `818ca65c2a619f8693c862cf3b45143a` |
 | windows/test/fixture-session.html | ~/workspace/qfremote/app-src/test/fixture-session.html | `f67ae5c16bf9ee7c4019b684cd858912` |
-| windows/test/h-sso-test.js | ~/workspace/qfremote/app-src/test/h-sso-test.js | `169d656740e6e78035b081c31db91dc0` |
+| windows/test/h-sso-test.js | ~/workspace/qfremote/app-src/test/h-sso-test.js | `9aeaee12e768c6eb515d790e95b3c032` |
 | windows/test/installer-launch-test.js | ~/workspace/qfremote/app-src/test/installer-launch-test.js | `cb7ff35e4a857868ff674a6f0894200b` |
 | windows/test/license-test.js | ~/workspace/qfremote/app-src/test/license-test.js | `a0c0ab85c938a17319f3d029637f5ffd` |
 | windows/test/lock-test.js | ~/workspace/qfremote/app-src/test/lock-test.js | `fcefc71ec49f379b80468bf696f98331` |
@@ -177,7 +177,7 @@
 | windows/tools/make_previews_v103.py | ~/workspace/qfremote/app-src/tools/make_previews_v103.py | `15617bf754d2846b27590a30d2926835` |
 | windows/tools/make_previews_v104.py | ~/workspace/qfremote/app-src/tools/make_previews_v104.py | `0f28a5e955f79996152784f6ffa4732d` |
 | windows/tools/make_previews_v200.py | ~/workspace/qfremote/app-src/tools/make_previews_v200.py | `8bcef823e9aaa1e29889992bad2c8879` |
-| windows/update.js | ~/workspace/qfremote/app-src/update.js | `888195eb7e400bcd9fce4bea47c0f906` |
+| windows/update.js | ~/workspace/qfremote/app-src/update.js | `ba1ba2ad8fc1bbe0e44c21a4bee96923` |
 | windows/views.js | ~/workspace/qfremote/app-src/views.js | `0aaa13822732feb068462719025282b4` |
 | windows/watchdog.js | ~/workspace/qfremote/app-src/watchdog.js | `f77b6c221308903908e4bbdad936e34a` |
 
