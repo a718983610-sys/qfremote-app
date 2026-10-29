@@ -339,7 +339,8 @@ function noteLedgerLock(username, locking, by) {
     fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
     fs.renameSync(tmp, LEDGER_FILE);
     try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
-  } catch (e) { log({ ev: 'ledger-lock-note-error', target: username, err: String(e && e.message) }); }
+    return { ok: true };
+  } catch (e) { log({ ev: 'ledger-lock-note-error', target: username, err: String(e && e.message) }); return { ok: false, error: (e && e.code) || 'UNKNOWN' }; }
 }
 // 解封/解冻收尾写回：许可侧封禁全清后，把 qf-account-ledger 的残留
 // 标记一并清掉——frozen 残留（全权账号在 licUnlockAccount 走
@@ -390,7 +391,8 @@ async function liveSetLockBit(username, locking, opts) {
       const led = loadLedger(); const e0 = led.accounts[username];
       const frozenNow = !!(e0 && e0.frozen === true);
       if (locking === frozenNow) return { ok: true, detail: 'already-in-state' };
-      noteLedgerLock(username, locking, by);
+      const note = noteLedgerLock(username, locking, by);
+      if (!note || !note.ok) return { ok: false, detail: 'ledger-write-failed' };
       return { ok: true, detail: 'ledger-only-fullrights' };
     }
     let svcCfg = {};
@@ -1059,6 +1061,27 @@ function postInternalJson(urlStr, obj, timeoutMs) {
 const FORUM_INTERNAL_BASE = process.env.QFEXT_FORUM_URL || 'http://127.0.0.1:8446';
 const SOCIAL_INTERNAL_BASE = process.env.QFEXT_SOCIAL_URL || 'https://127.0.0.1:8445'; // 好友服务为本机自签 HTTPS（与 nginx proxy_ssl_verify off 同口径）
 const REG_INTERNAL_BASE = process.env.QFEXT_REG_URL || 'https://127.0.0.1:8444'; // 注册服务为本机自签 HTTPS（站长创建账号内网口，同上口径）
+const SHIM_INTERNAL_BASE = process.env.QFEXT_SHIM_URL || 'http://127.0.0.1:8450'; // loginshim 内网口（DS-R28 解封联动清本地冻结）
+
+// DS-R28：通知 loginshim 清除本地登录页冻结。成功回
+// { ok:true, wasFrozen }；失败/超时回 null，调用方按失败文案追加回执。
+async function clearLoginFreeze(username) {
+  const target = String(username || '').trim().toLowerCase();
+  try {
+    const r = await postInternalJson(SHIM_INTERNAL_BASE + '/internal/clear-freeze', { username: target }, 3000);
+    if (r && r.ok === true) return { ok: true, wasFrozen: r.wasFrozen === true };
+    log({ ev: 'login-freeze-clear-failed', target, code: r && r.code });
+    return null;
+  } catch (e) {
+    log({ ev: 'login-freeze-clear-error', target, err: String(e && e.message) });
+    return null;
+  }
+}
+
+function loginFreezeReceiptNote(r) {
+  if (r && r.ok) return '登录页当日冻结已同步解除。';
+  return '登录页冻结仍需改密或次日重置。';
+}
 
 // ---- B 设计 4.2 探测引擎：refId 前缀强绑定（B1）、超时双保险（B2）、连续失败熔断（B2）----
 const PROBE_REF_RE = /^(post|reply):/;
@@ -2641,17 +2664,26 @@ const server = http.createServer(async (req, res) => {
         const ban = lic.getBan(String(body.banId || ''));
         if (!ban) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '封禁记录不存在。' });
         if (ban.status !== 'active') return sendJson(res, 409, { ok: false, code: 'BAD_STATE', msg: '该封禁当前不是生效状态，无需解封。' });
+        // DS-R28：lift 前快照（含本条）：同账号有 B1 生效时，解封后联动
+        // 清 loginshim 本地冻结；仅 B9 等其余封禁不触发（防误清）。
+        let hadLoginFreezeBan = false;
+        if (ban.targetType === 'account') {
+          hadLoginFreezeBan = lic.activeBansFor(ban.target, Date.now()).some((b) => String(b.code || '').toUpperCase() === 'B1');
+        }
         lic.liftBan(ban, Date.now(), { by: auth.user, restoreKeys: true });
         let extraLifted = [];
         let unlock = null;
+        let freezeClear = null;
         if (ban.targetType === 'account') {
           extraLifted = liftAllActiveBans(ban.target, auth.user);
+          if (hadLoginFreezeBan) freezeClear = await clearLoginFreeze(ban.target);
           unlock = await licUnlockAccount(ban.target);
         }
-        log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user, extraLifted, unlock: unlock && unlock.state });
+        log({ ev: 'admin-unban', banId: ban.id, target: ban.target, by: auth.user, extraLifted, unlock: unlock && unlock.state, loginFreezeCleared: !!(freezeClear && freezeClear.ok) });
         let msg = '已解封：' + ban.target + '，共解除 ' + (1 + extraLifted.length) + ' 条生效中的封禁（关联回收密钥已按规恢复）。';
         if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
         else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
+        if (hadLoginFreezeBan) msg += loginFreezeReceiptNote(freezeClear);
         return sendJson(res, 200, { ok: true, msg });
       }
       // 账号列表「解封账号」（与「封禁」同排）：按账号一次全清——解掉该
@@ -2664,17 +2696,23 @@ const server = http.createServer(async (req, res) => {
         if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '账号格式不正确，请检查后重试。' });
         const docs = loadDb();
         const user = findDbUser(docs, username);
-        const before = lic.activeBansFor(username, Date.now()).length;
+        const bansBefore = lic.activeBansFor(username, Date.now());
+        const before = bansBefore.length;
+        // DS-R28：解封前快照，只认 B1 为登录页冻结联动触发条件。
+        const hadLoginFreezeBan = bansBefore.some((b) => String(b.code || '').toUpperCase() === 'B1');
         if (!user) {
           // 台账独有行（账号库已无此人、许可/账号台账仍有记录）：许可层
           // 全清＋残留写回仍可办，不让列表行的解封钮点出 404 死钮。
           if (before > 0) {
             const liftedG = liftAllActiveBans(username, auth.user);
+            let freezeClearG = null;
+            if (hadLoginFreezeBan) freezeClearG = await clearLoginFreeze(username);
             const residueG = clearLedgerResidue(username, 'ext-lic-unlock');
             const remainingG = lic.activeBansFor(username, Date.now()).length;
-            log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted: liftedG, ghost: true, ledgerCleared: residueG });
+            log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted: liftedG, ghost: true, ledgerCleared: residueG, loginFreezeCleared: !!(freezeClearG && freezeClearG.ok) });
             let msgG = '已解封：' + username + '，共解除 ' + liftedG.length + ' 条生效中的封禁（关联回收密钥已按规恢复；该账号已不在账号库，仅清许可台账与残留标记）。';
             if (remainingG > 0) msgG += '注意：仍有 ' + remainingG + ' 条封禁未解除，请重试。';
+            if (hadLoginFreezeBan) msgG += loginFreezeReceiptNote(freezeClearG);
             return sendJson(res, 200, { ok: true, liftedCount: liftedG.length, msg: msgG });
           }
           const residueErr = {};
@@ -2689,9 +2727,11 @@ const server = http.createServer(async (req, res) => {
         const guard = adminGuardCheck(user, username);
         if (guard) return sendJson(res, 400, { ok: false, msg: guard });
         const lifted = liftAllActiveBans(username, auth.user);
+        let freezeClear = null;
+        if (hadLoginFreezeBan) freezeClear = await clearLoginFreeze(username);
         const unlock = await licUnlockAccount(username);
         const remaining = lic.activeBansFor(username, Date.now()).length;
-        log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted, unlock: unlock && unlock.state, ledgerCleared: !!(unlock && unlock.ledgerCleared) });
+        log({ ev: 'admin-unban-account', target: username, by: auth.user, lifted, unlock: unlock && unlock.state, ledgerCleared: !!(unlock && unlock.ledgerCleared), loginFreezeCleared: !!(freezeClear && freezeClear.ok) });
         if (!lifted.length && before === 0 && !(unlock && unlock.state === 'unlocked')) {
           // 解锁真失败（如账号仍被 bit 锁定且解锁通道失败）必须如实报
           // 失败，不许落进「没有封禁」的安慰回执把失败盖住。
@@ -2716,6 +2756,7 @@ const server = http.createServer(async (req, res) => {
         if (remaining > 0) msg += '注意：仍有 ' + remaining + ' 条封禁未解除，请重试。';
         if (unlock && unlock.state === 'failed') msg += '注意：账号解锁未成功（' + (unlock.detail || '原因未明') + '），请稍后重试解封。';
         else if (unlock && unlock.state === 'still-banned') msg += '注意：该账号仍有其他生效中的封禁，尚未完全解封。';
+        if (hadLoginFreezeBan) msg += loginFreezeReceiptNote(freezeClear);
         return sendJson(res, 200, { ok: true, liftedCount: lifted.length, msg });
       }
       if (req.method === 'GET' && p === '/admin/api/license/overview') {
@@ -2850,6 +2891,11 @@ const server = http.createServer(async (req, res) => {
           if (!mcConfirmed) sealMsg += '（注意：MeshCentral 会话关闭未确认，详见服务日志）';
           return sendJson(res, 200, { ok: true, msg: sealMsg, probeBefore: out2.probeBefore, probeAfter: out2.probeAfter, enforce: enf });
         }
+        // DS-R28：解冻前快照，仅在确有 B1 生效时于解冻成功后联动清冻结。
+        let unfreezeHadLoginFreezeBan = false;
+        if (action === 'unfreeze') {
+          unfreezeHadLoginFreezeBan = lic.activeBansFor(username.toLowerCase(), Date.now()).some((b) => String(b.code || '').toUpperCase() === 'B1');
+        }
         const out = action === 'resetpass'
           ? await enqueueOp(() => runMcdbOp('resetpass', username.toLowerCase(), { adminOverride: true }))
           : await setLockBit(username.toLowerCase(), action === 'freeze', { adminOverride: true });
@@ -2867,14 +2913,18 @@ const server = http.createServer(async (req, res) => {
         if (out.ok && action === 'unfreeze') {
           unfreezeLifted = liftAllActiveBans(username.toLowerCase(), auth.user);
         }
+        let unfreezeFreezeMsg = '';
+        if (out.ok && action === 'unfreeze' && unfreezeHadLoginFreezeBan) {
+          unfreezeFreezeMsg = loginFreezeReceiptNote(await clearLoginFreeze(username.toLowerCase()));
+        }
         if (out.ok && action === 'unfreeze' && unfreezeLifted.length) {
           const remainingU = lic.activeBansFor(username.toLowerCase(), Date.now()).length;
-          return sendJson(res, 200, Object.assign({}, out, { msg: remainingU > 0
+          return sendJson(res, 200, Object.assign({}, out, { msg: (remainingU > 0
             ? '已解冻：' + username + '，并解除 ' + unfreezeLifted.length + ' 条生效中的封禁；注意：仍有 ' + remainingU + ' 条封禁未解除，请重试。'
-            : '已解冻：' + username + '，并解除 ' + unfreezeLifted.length + ' 条生效中的封禁（含永久封禁），账号恢复正常。' }));
+            : '已解冻：' + username + '，并解除 ' + unfreezeLifted.length + ' 条生效中的封禁（含永久封禁），账号恢复正常。') + unfreezeFreezeMsg }));
         }
         if (out.ok && action === 'unfreeze') {
-          return sendJson(res, 200, Object.assign({}, out, { msg: '已解冻：' + username + '。' }));
+          return sendJson(res, 200, Object.assign({}, out, { msg: '已解冻：' + username + '。' + unfreezeFreezeMsg }));
         }
         return sendJson(res, out.ok ? 200 : 400, out);
       }

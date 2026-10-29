@@ -205,7 +205,55 @@ function accountState(key) {
   if (!st || st.day !== t) { st = { day: t, fails: 0, frozen: false }; freezeState.accounts[key] = st; }
   return st;
 }
-function saveFreeze() { try { atomicWriteJson(FREEZE_FILE, freezeState); } catch (e) { console.error('freeze 落盘失败：', e.message); } }
+// DS-R28：saveFreeze 返回是否落盘成功（原调用方不接返回值，行为不变）；
+// clear-freeze 端点据此如实回 500，不许内存已清、落盘失败却报成功。
+function saveFreeze() { try { atomicWriteJson(FREEZE_FILE, freezeState); return true; } catch (e) { console.error('freeze 落盘失败：', e.message); return false; } }
+
+// ===== 内网 clear-freeze 专用响应 =====
+function jsonReply(res, status, obj) {
+  const body = Buffer.from(JSON.stringify(obj));
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length });
+  res.end(body);
+}
+
+// DS-R28：管理端解封联动——清除本地登录页当日冻结（loginshim 为 freeze.json
+// 唯一写方）。仅回环监听内可达，并按 X-QF-Internal-Secret 同密钥文件校验；
+// 只清「当日存在且 frozen」的条目并连同 fails 清零（不清零则下一次错密立即
+// 再冻）；无条目/非当日/未冻结回 wasFrozen:false，不新建条目；落盘失败回滚
+// 内存态并回 500。
+async function handleClearFreeze(req, res) {
+  if (req.method !== 'POST') return jsonReply(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED' });
+  let secret = '';
+  try { secret = fs.readFileSync(LIC_SECRET_FILE, 'utf8').trim(); } catch (e) { secret = ''; }
+  const got = String(req.headers['x-qf-internal-secret'] || '');
+  if (!secret || got !== secret) return jsonReply(res, 403, { ok: false, code: 'FORBIDDEN' });
+  let body;
+  try {
+    body = await new Promise((resolve, reject) => {
+      let done = false; let size = 0; const chunks = [];
+      req.on('data', (c) => {
+        if (done) return;
+        size += c.length;
+        if (size > 10000) { done = true; reject(new Error('TOO_BIG')); try { req.destroy(); } catch (e) {} return; }
+        chunks.push(c);
+      });
+      req.on('end', () => { if (done) return; done = true; try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { reject(e); } });
+      req.on('error', (e) => { if (!done) { done = true; reject(e); } });
+    });
+  } catch (e) { return jsonReply(res, 400, { ok: false, code: 'BAD_JSON' }); }
+  const username = String(body.username || '').trim().toLowerCase();
+  if (!username) return jsonReply(res, 400, { ok: false, code: 'VALIDATION' });
+  const tk = todayKey();
+  const st = freezeState.accounts[username];
+  if (!st || st.day !== tk || !st.frozen) return jsonReply(res, 200, { ok: true, wasFrozen: false });
+  const oldFrozen = st.frozen; const oldFails = st.fails;
+  st.frozen = false; st.fails = 0;
+  if (!saveFreeze()) {
+    st.frozen = oldFrozen; st.fails = oldFails;
+    return jsonReply(res, 500, { ok: false, code: 'FREEZE_WRITE_FAILED' });
+  }
+  return jsonReply(res, 200, { ok: true, wasFrozen: true });
+}
 function clientIp(req) {
   const cf = req.headers['cf-connecting-ip'];
   if (cf) return String(cf);
@@ -239,6 +287,7 @@ function injectPopup(html, username) {
 const server = http.createServer((req, res) => {
   let pathname = req.url;
   try { pathname = new URL(req.url, 'http://localhost').pathname; } catch (e) {}
+  if (pathname === '/internal/clear-freeze') return handleClearFreeze(req, res);
   if (pathname === '/qf-login') return handleLogin(req, res);
   if (pathname === '/appeal' || pathname.startsWith('/appeal/')) return handleAppeal(req, res, pathname);
   const isLogout = pathname === '/logout' || pathname.startsWith('/logout/');

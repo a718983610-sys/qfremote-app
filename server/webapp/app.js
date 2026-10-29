@@ -413,6 +413,7 @@ const BanLock = {
     this.reason = '';
     this.data = null;
     this.flight = false;
+    this._lastPaintState = 'off';   // DS-R46：退出即作废上次绘制态，防旧表单节点被误保全
   },
 
   startTimer() {
@@ -446,8 +447,10 @@ const BanLock = {
         }
         // 解封：退出锁定，按 checkSession 既有口径回填后回主壳
         this.exit();
-        const ok = await checkSession(true, { noDied: true });
+        const probe = {};
+        const ok = await checkSession(true, { noDied: true, probe });
         if (this.active()) return;            // 复查期间又被判封禁，保持锁定
+        if (probe.gated) return;              // DS-R44：checkSession 已画设备门，禁止 showAuth 覆盖
         if (ok && S.auth === 'in') {
           location.hash = '#home';
           showShell();
@@ -541,10 +544,17 @@ const BanLock = {
       if (S.isAdmin) html += '<a class="txtlink" id="bn-admin" style="cursor:pointer">管理后台</a> ';
       html += '<a class="txtlink" id="bn-logout" style="cursor:pointer">退出登录</a>';
       html += '</div><div id="bn-tools" style="margin-top:16px"></div></div></div>';
+      // DS-R46：自动复检重绘（locked→locked）时保全旧 #bn-tools 节点，
+      // 正在填的申诉/客服/查钥表单与已绑定监听不丢；状态迁移（进入锁定/
+      // 转已结束/退出后重入）不保全，照旧重置。上次绘制态由 _lastPaintState
+      // 记录（paint 末尾回写、exit 清零），防退出后残留节点被误保全。
+      const prevTools = (this._lastPaintState === 'locked' && this.state === 'locked') ? $('#bn-tools', root) : null;
       root.innerHTML = html;
 
       const self = this;
-      const box = $('#bn-tools', root);
+      let box = $('#bn-tools', root);
+      if (prevTools && box && box.parentNode) { box.parentNode.replaceChild(prevTools, box); box = prevTools; }
+      this._lastPaintState = this.state;
       const bind = (id, fn) => {
         const el = $('#' + id, root);
         if (!el) return;
@@ -593,13 +603,15 @@ function noteBanSignal(res, path) {
   const j = res.json;
   if (!j || typeof j !== 'object') return;
   if (j.code !== 'ACCOUNT_BANNED') return;
+  // DS-R45：参数化账号查询路径排除上移至 200/403 分流前共用——403 形
+  // 同样是替别人查号被拒，不得误锁当前会话（原仅 200 分支有此排除）。
+  const p = String(path || '').split('?')[0];
+  if (BAN_SIGNAL_PARAM_ACCOUNT_PATHS.indexOf(p) >= 0) return;  // 参数化账号查询，防误踢
   if (res.status === 403) {                    // 信号①：ext 集中门 / denyIfBanned
     BanLock.enter(null);
     return;
   }
   if (res.status === 200 && j.ok === false) {  // 信号③：处理器自查发出的 200 形封禁拒绝
-    const p = String(path || '').split('?')[0];
-    if (BAN_SIGNAL_PARAM_ACCOUNT_PATHS.indexOf(p) >= 0) return;  // 参数化账号查询，防误踢
     BanLock.enter(null);
   }
 }
@@ -623,11 +635,14 @@ api = async function (path, opts) {
 
 async function checkSession(silent, opts) {
   const o = opts || {};
+  const probe = o.probe;
+  if (probe) { try { probe.gated = false; } catch (e) {} }
   const me = await api('/license/api/me');
   if (me.status === 200 && me.json && me.json.ok) {
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
     // 同一响应只走一条路：先 forceLogout（设备门），再 activeBan（封禁锁定）
     if (me.json.forceLogout) {
+      if (probe) { try { probe.gated = true; } catch (e) {} }
       forceGate(me.json.gateCode || 'G1');
       return false;
     }

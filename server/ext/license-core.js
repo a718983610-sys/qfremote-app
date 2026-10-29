@@ -155,7 +155,7 @@ function createLicenseCore(opts) {
       const out = Object.create(null); // DEV-27（七审 S-2）：镜像映射用无原型对象，'constructor'/'__proto__' 类键名不撞原型链
       for (const u of Object.keys(state.accounts)) {
         const v = buildStatusView(u, now);
-        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, everBanned: v.everBanned, activeBanCode: v.activeBan ? String(v.activeBan.code || '').toUpperCase() : null, banLink: banLinkOf(u, now) }; // DEV-22/F2：与 account-link 输出统一归一
+        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, webBy: v.webBy, everBanned: v.everBanned, activeBanCode: v.activeBan ? String(v.activeBan.code || '').toUpperCase() : null, banLink: banLinkOf(u, now) }; // DEV-22/F2：与 account-link 输出统一归一
       }
       // 补齐：只有封禁记录、没有许可账号的登录名（纯 MC 账号被封）——不补则
       // 下游读镜像取不到条目、封禁形同虚设（P5-010 采纳 DS 实现稿 O3）。
@@ -165,7 +165,7 @@ function createLicenseCore(opts) {
         const u = String(b.target); // DEV-26（六审 BUG-A）：键用 target 原样——全链精确匹配（activeBansFor 的 b.target === username），改写大小写会让 banLinkOf 永远查不到本条
         if (!u || out[u]) continue;
         if (!(b.permanent || ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase()))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
-        out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
+        out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, webBy: null, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
       }
       fs.mkdirSync(path.dirname(mirrorFile), { recursive: true });
       try { const dir = path.dirname(mirrorFile); const base = path.basename(mirrorFile) + '.tmp-'; const cutoff = Date.now() - 5 * 60 * 1000; for (const f of fs.readdirSync(dir)) { if (!f.startsWith(base)) continue; try { if (fs.statSync(path.join(dir, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, f)); } catch (e) {} } } catch (e) {} // DEV-23/#3＋DEV-24/DEV-25：只清 5 分钟前的残留（含自身 pid 旧残留——清扫在本轮写 tmp 之前，在场的必是旧账），活进程在写的 tmp 不碰
@@ -1710,7 +1710,7 @@ function createLicenseCore(opts) {
       webEnabled: validPaid || trialInPeriod,
       // 网页版开通依据：'paid' 已激活付费钥、'trial' 账号试用在期、null 未开通。
       // 供展示/客服文案区分「付费开通」与「试用期内开通」；旧消费端忽略即可。
-      // 注：许可镜像（writeMirror）本轮未纳入此字段，镜像消费端取不到时按未区分处理。
+      // 许可镜像（writeMirror）主循环与封禁补齐已同步纳入此字段，消费端可读取。
       webBy: validPaid ? 'paid' : (trialInPeriod ? 'trial' : null),
       trialExpiresMs: acct && acct.trial ? acct.trial.expiresMs : null,
       keyExpiresMs: primary && primary.expiresBaseMs ? effectiveExpiry(primary, now) : null,
