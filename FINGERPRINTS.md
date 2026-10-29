@@ -112,7 +112,7 @@
 | windows/README.md | ~/workspace/qfremote/app-src/README.md | `d209fabbe74c74d8c777d6290479e196` |
 | windows/about-preload.js | ~/workspace/qfremote/app-src/about-preload.js | `4bc54efbadb87aa4035517b1f3795387` |
 | windows/about.html | ~/workspace/qfremote/app-src/about.html | `899d2e76cd89b3564f920e54700e09e0` |
-| windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `8aa462a5cdd94d823220688b334be0a3` |
+| windows/autologin.js | ~/workspace/qfremote/app-src/autologin.js | `5776054d7a1216e0f5685a5a3981cc7c` |
 | windows/build-info.json | ~/workspace/qfremote/app-src/build-info.json | `aeb6679d53e66faf56f147cd3086c09c` |
 | windows/build/icon-1024.png | ~/workspace/qfremote/app-src/build/icon-1024.png | `987af6e99ce6049324c9307d5f4e1d46` |
 | windows/build/icon.ico | ~/workspace/qfremote/app-src/build/icon.ico | `b2b0772ea612319f45cce8f029d68889` |
