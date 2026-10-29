@@ -97,12 +97,15 @@ function createEventsCore(deps) {
   // ---------- 接口令牌（只存哈希；明文只落 600 文件） ----------
   // 双槽并存：顶层四字段＝助手槽（qfa_，行为不变）；owner 子对象＝站长
   // 全开槽（qfo_，decide 不受订单阶段限制），两槽独立生成/吊销。
+  // 单写者约束（DS-R26-③）：assistant-token.json 只许运行中的 ext 进程
+  // 经本模块读写，外部工具一律经管理端点生成/吊销，禁直改文件；meta 为
+  // 读-改-写整文件，writeTokenMeta 的 tmp 用 pid 后缀隔离多进程误并发写。
   function readTokenMeta() {
     try { const v = JSON.parse(fs.readFileSync(tokenMetaFile, 'utf8')); if (v && typeof v === 'object') return v; } catch (e) {}
     return { status: 'none', hash: null, createdAt: null, lastUsedAt: null };
   }
   function writeTokenMeta(m) {
-    const tmp = tokenMetaFile + '.tmp';
+    const tmp = tokenMetaFile + '.tmp-' + process.pid;
     fs.writeFileSync(tmp, JSON.stringify(m, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, tokenMetaFile);
   }

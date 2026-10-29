@@ -148,6 +148,7 @@ function createLicenseCore(opts) {
     if (!bans || !bans.length) return false;
     return bans.some((b) => b.permanent) || bans.some((b) => ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase())); // DEV-18/G-10：code 大小写归一
   }
+  const mirrorPublishStats = { publishFailures: 0, lastPublishError: null }; // DS-R22-2：镜像发布失败可见性（累计失败数＋最近失败），经 mirrorStats() 供 ext overview 带出
   function writeMirror() {
     try {
       const now = Date.now();
@@ -173,7 +174,7 @@ function createLicenseCore(opts) {
       // DEV-21：先对 tmp chown 再 rename（原子替换且落位即可读）；原「先 rename 后 chown」有不可读窗口、chown 失败即永久不可读
       let publishable = false; // DEV-25（五审 BUG-1/P1）：chown 未成绝不发布——宁可保留可读的旧镜像，也不用属主不可读的新镜像覆盖它
       try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('qffriends:')); if (pw) { const f = pw.split(':'); fs.chownSync(tmp, Number(f[2]), Number(f[3])); publishable = true; } else { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-skip', why: 'qffriends-not-in-passwd' })); } catch (e2) {} } } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-24/S3：无 qffriends 条目时跳过 chown 必须留痕
-      if (publishable) { fs.renameSync(tmp, mirrorFile); } else { try { fs.unlinkSync(tmp); } catch (e) {} try { console.error(JSON.stringify({ ev: 'ban-mirror-not-published', why: 'chown-unavailable-kept-old-mirror' })); } catch (e2) {} }
+      if (publishable) { fs.renameSync(tmp, mirrorFile); if (mirrorPublishStats.lastPublishError) { mirrorPublishStats.lastPublishError = null; try { console.error(JSON.stringify({ ev: 'ban-mirror-publish-recovered', publishFailures: mirrorPublishStats.publishFailures })); } catch (e2) {} } } else { try { fs.unlinkSync(tmp); } catch (e) {} mirrorPublishStats.publishFailures += 1; mirrorPublishStats.lastPublishError = { at: now, why: 'chown-unavailable-kept-old-mirror' }; try { console.error(JSON.stringify({ ev: 'ban-mirror-not-published', why: 'chown-unavailable-kept-old-mirror', publishFailures: mirrorPublishStats.publishFailures })); } catch (e2) {} }
     } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-write-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-18/G-05：镜像写失败必须可见（原空 catch 吞噬＝F-02 同类静默机制）
   }
   function queueOwnerMail(subject, bodyObj) {
@@ -315,9 +316,10 @@ function createLicenseCore(opts) {
     if (!input || typeof input !== 'object') throw new Error('applyBan: input must be an object'); // DEV-30（十审 S2）
     if (!Number.isFinite(now)) throw new Error('applyBan: now must be a finite ms number'); // DEV-29（九审存疑 1）
     if (input.permanent !== true && !(Number.isFinite(input.endsAt) || input.endsAt === null || (Number.isFinite(input.days) && input.days > 0 && Number.isFinite(now + input.days * 86400000) && (now + input.days * 86400000) <= 8640000000000000))) throw new Error('applyBan: non-permanent ban requires finite endsAt, explicit null endsAt, or positive days'); // DEV-29（九审 BUG-1）＋DEV-30（十审 P3-1：days 乘积须有限）：守卫与归一化同一合法口径，能落 null 的只剩显式 null（B8 手动解除型；显式 null 与 days 并传时 null 优先）
+    const target = input.targetType === 'account' ? String(input.target || '').trim().toLowerCase() : input.target; // DS-R22-4：账号型 target 单点归一（全链小写隐式契约显式化，存量零大写无迁移面）；device 型（哈希）不动
     const ban = {
       id: 'ban_' + crypto.randomBytes(6).toString('hex'),
-      targetType: input.targetType, target: input.target, code: input.code,
+      targetType: input.targetType, target: target, code: input.code,
       permanent: input.permanent === true, // DEV-27（七审 #1）：严格布尔——字符串 "false" 不得被 !! 折成永久封禁；现行调用方全传真布尔，语义不变
       startsAt: now, endsAt: input.permanent === true ? null : (Number.isFinite(input.endsAt) ? input.endsAt : (input.endsAt === null ? null : (Number.isFinite(input.days) && input.days > 0 ? now + input.days * 86400000 : null))), // DEV-27（七审 #2/#3）：endsAt 只认有限数（ISO 串等异型值回落 days 路径，不再透传成永不过期）；显式 null＝手动解除型（B8 站长冻结既定语义，调用点 server.js admin-freeze 在案）
       status: 'active', actor: input.actor || 'system', evidence: String(input.evidence || '').slice(0, 300),
@@ -1651,7 +1653,7 @@ function createLicenseCore(opts) {
     grantPurchase, initiateTransfer, confirmTransfer, rejectTransfer, cancelTransfer, listTransfers, expireTransfers, transferTtlMs, claimByKeyString, listClaimableTransfers, forceLogoutState, decideDeviceReview, overrideDeviceReview, sealedExpired, markPurged,
     activateKey, primaryKeyOf, expiredText, remainTextForKey,
     rebindEligibility, rebindEligibilityByHash, executeRebind, executeRebindByHash,
-    shadowLog,
+    shadowLog, mirrorStats: () => mirrorPublishStats,
     getBan: (id) => state.bans.find((b) => b.id === id) || null,
     adjustBanEnds: (id, endsAt, now) => { const b = state.bans.find((x) => x.id === id); if (b && b.status === 'active') { b.endsAt = endsAt; save(); } return b || null; },
     setContact: (username, email, now) => { ensureAccount(username, now, {}); state.accounts[username].contactEmail = email; save(); },

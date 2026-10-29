@@ -335,7 +335,7 @@ function noteLedgerLock(username, locking, by) {
     e.frozen = locking;
     e.history = e.history || [];
     e.history.push({ ev: locking ? 'freeze' : 'unfreeze', at: new Date().toISOString(), by });
-    const tmp = LEDGER_FILE + '.tmp-ext';
+    const tmp = LEDGER_FILE + '.tmp-ext-note';
     fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
     fs.renameSync(tmp, LEDGER_FILE);
     try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
@@ -349,7 +349,7 @@ function noteLedgerLock(username, locking, by) {
 // buildUsersList 读作显示与台账独有行门槛，许可台账无生效封禁时
 // 它就是过期残留，不清则「已封禁」标签永不消失且无钮可解）。
 // 仅当台账已有该账号条目且对应标记为 true 时才写，不新建条目、
-// 不动其他字段；写形与 noteLedgerLock 一致（同 tmp 名、同 chown）。
+// 不动其他字段；写形与 noteLedgerLock 一致（同 chown；tmp 后缀已按写方分离，D5-P3）。
 function clearLedgerResidue(username, by, errBox) {
   try {
     const ledger = loadLedger();
@@ -360,7 +360,7 @@ function clearLedgerResidue(username, by, errBox) {
     if (e.frozen === true) { e.frozen = false; e.history.push({ ev: 'unfreeze', at: new Date().toISOString(), by }); changed = true; }
     if (e.banned === true) { e.banned = false; e.history.push({ ev: 'unban', at: new Date().toISOString(), by }); changed = true; }
     if (!changed) return false;
-    const tmp = LEDGER_FILE + '.tmp-ext';
+    const tmp = LEDGER_FILE + '.tmp-ext-clear';
     fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
     fs.renameSync(tmp, LEDGER_FILE);
     try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('meshcentral:')); if (pw) { const f = pw.split(':'); fs.chownSync(LEDGER_FILE, Number(f[2]), Number(f[3])); } } catch (e) {}
@@ -370,8 +370,8 @@ function clearLedgerResidue(username, by, errBox) {
     // 如实上抛，调用方不得再把故障误回成 404「账号不存在」。旧调用
     // 方不传 errBox 时行为不变（仍回 false）。errBox 只带错误码不带
     // 异常原文（DS 差量审 P3：fs 异常原文含服务器绝对路径，不许透
-    // 传到前端回执，原文只进日志）。失败时不删 .tmp-ext：该 tmp 名
-    // 与 noteLedgerLock 共用固定后缀，无条件删可能误伤并发写盘；残
+    // 传到前端回执，原文只进日志）。失败时不删自家 .tmp-ext-clear：该 tmp 后缀已与 noteLedgerLock 分离（D5-P3）
+    // 分离后不存在误伤并发写盘之虞，保留便于诊断；残
     // 留 tmp 会被下一次写盘截断覆盖，无害（DS 差量审 D4）。
     log({ ev: 'ledger-residue-clear-error', target: username, err: String(e && e.message) });
     if (errBox) { errBox.failed = true; errBox.err = (e && e.code) || 'UNKNOWN'; }
@@ -1449,6 +1449,7 @@ const server = http.createServer(async (req, res) => {
     // 只读游标接口供助手侧秒级轮询：本服务无全局 IP 限流，nginx 亦不
     // 对 /assistant-api/ 挂 limit_req，不会被高频轮询误伤（定版口径）。
     if (p.startsWith('/assistant-api/')) {
+      // DS-R26-① 双头优先级（登记销项）：x-assistant-token 头优先，Bearer 仅在头缺失时参与；刻意 fail-closed——错头不穿透 Bearer，避免双凭据混叠。
       const tok = String(req.headers['x-assistant-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '');
       const tokenRole = reviewEvents.verifyTokenRole(tok);
       if (!tokenRole) return sendJson(res, 401, { ok: false, code: 'TOKEN_INVALID', msg: '助手令牌无效或已吊销。' });
@@ -1519,7 +1520,7 @@ const server = http.createServer(async (req, res) => {
               catch (e) { log({ ev: 'owner-stage2-fake-locklink-failed', refId, user: o.username, err: String(e && e.message || e) }); }
             }
           }
-          log({ ev: 'assistant-decide', type, refId, action, actor: ACTOR, ok: !!out.ok });
+          log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out);
         }
         if (type === 'appeal' || type === 'rebind') {
@@ -1540,11 +1541,11 @@ const server = http.createServer(async (req, res) => {
             const r = await runCmd('node', args, 30000);
             const okB1 = r.code === 0;
             if (okB1) reviewEvents.resolve('appeal', refId, ACTOR, 'b1-' + action);
-            log({ ev: 'assistant-decide', type, refId, action, ok: okB1, via: 'appeal-admin' });
+            log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: okB1, via: 'appeal-admin' });
             return sendJson(res, okB1 ? 200 : 409, { ok: okB1, msg: okB1 ? '申诉结论已生效（B1 改密闭环）。' : (lastLine(r.stderr) || '处理未成功。') });
           }
           const out = await decideAppeal(refId, action, String(body.reason || ''), ACTOR, body);
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out); // 事件销账在 decideAppeal 内完成
         }
         if (type === 'device_review') {
@@ -1553,7 +1554,7 @@ const server = http.createServer(async (req, res) => {
           const out = lic.decideDeviceReview(refId, dec, ACTOR, nowA);
           if (out.ok && out.violation) { for (const t of out.accounts || []) await licLockAccount(t); }
           if (out.ok && dec !== 'escalate') reviewEvents.resolve('device_review', refId, ACTOR, dec);
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!out.ok });
+          log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: !!out.ok });
           return sendJson(res, out.ok ? 200 : 409, out);
         }
         if (type === 'forum') {
@@ -1573,7 +1574,7 @@ const server = http.createServer(async (req, res) => {
               log({ ev: 'assistant-event-auto-closed', reason: 'content-gone', refId, eventId: rec.id });
             }
           }
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok), autoClosed });
+          log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: !!(out && out.ok), autoClosed });
           if (autoClosed) return sendJson(res, 200, { ok: true, autoClosed: true, code: 'CONTENT_GONE', msg: '内容已删除，事件已自动销账。' });
           return sendJson(res, out && out.ok ? 200 : 409, out || { ok: false });
         }
@@ -1581,7 +1582,7 @@ const server = http.createServer(async (req, res) => {
           const out = await postInternalJson(SOCIAL_INTERNAL_BASE + '/internal/support/decide', { ticketId: refId, action, text: String(body.text || ''), actor: ACTOR }, 8000);
           if (out && out.ok && action === 'close') reviewEvents.resolve('support', refId, ACTOR, 'closed');
           else if (out && out.ok) reviewEvents.resolve('support', refId, ACTOR, 'replied'); // 回复即视为已处理一轮；工单未关可由新消息再入队
-          log({ ev: 'assistant-decide', type, refId, action, ok: !!(out && out.ok) });
+          log({ ev: tokenRole === 'owner' ? 'owner-decide' : 'assistant-decide', type, refId, action, actor: ACTOR, role: tokenRole, ok: !!(out && out.ok) });
           return sendJson(res, out && out.ok ? 200 : 409, out || { ok: false });
         }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'type 不正确。' });
@@ -1754,7 +1755,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && p === '/internal/license/overview') {
         const st = lic.state();
         const masked = Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, plan: k.plan, source: k.source, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, createdAt: k.createdAt }));
-        return sendJson(res, 200, { ok: true, config: cfg, keys: masked, bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), shadowEvents: st.shadowEvents.slice(-30), accounts: st.accounts });
+        return sendJson(res, 200, { ok: true, mirrorPublish: lic.mirrorStats(), config: cfg, keys: masked, bans: st.bans.slice(-30), orders: Object.values(st.orders).slice(-30), shadowEvents: st.shadowEvents.slice(-30), accounts: st.accounts });
       }
       return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
     }
@@ -2767,8 +2768,8 @@ const server = http.createServer(async (req, res) => {
         const roleRaw = body.role == null ? 'assistant' : String(body.role).trim();
         if (roleRaw !== 'assistant' && roleRaw !== 'owner') return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'role 参数不合法。' });
         const tokRole = roleRaw; // DS-R26 P3-1：role 白名单化，非法值显式拒绝、不再静默落 assistant
-        if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
-        if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
+        if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-api-token', action, role: tokRole }); return sendJson(res, 200, out); }
+        if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-api-token', action, role: tokRole }); return sendJson(res, 200, out); }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });
       }
       if (req.method === 'POST' && (p === '/admin/api/appeals/approve' || p === '/admin/api/appeals/reject')) {

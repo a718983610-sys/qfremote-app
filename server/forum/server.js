@@ -93,6 +93,7 @@ function sweepBanLinkCacheF(now) { // G-09 同型
 // 按 pushReviewEvent 同式 raw http 新写 promise 版；失败回落缓存值）=====
 const banLinkCacheF = new Map();
 const BANLINK_TTL_F = 5000;
+let banLinkHttpDownUntil = 0; // DS-R22-5：回源已证失败后的跨名短路窗口（与缓存 TTL 同长），窗口内同类查询不再逐名发请求
 function fetchBanLink(username) {
   const u = String(username || '').trim().toLowerCase();
   if (!u) return Promise.resolve(false);
@@ -101,9 +102,13 @@ function fetchBanLink(username) {
   sweepBanLinkCacheF(now);
   if (hit && (now - hit.at) < BANLINK_TTL_F) return Promise.resolve(hit.val);
   const m = readMirrorF(); // DEV-18：镜像可读即以镜像为准（写盘同步于 applyBan/liftBan，无窗口）
-  if (m) { const rec = mirrorRecF(m, u); const val = !!(rec && rec.banLink === true); banLinkCacheF.set(u, { val, at: now }); return Promise.resolve(val); }
+  if (m) { const rec = mirrorRecF(m, u); if (rec) { const val = rec.banLink === true; banLinkCacheF.set(u, { val, at: now }); return Promise.resolve(val); } }
+  // DS-R22-3：镜像可读但缺条目不直接判未封禁——落入下方 HTTP 回源核对
+  // ext 进程内真值（与 banLinkTriF 的未知口径对齐）；回源失败仍按 fallback
+  // 回落缓存值或 false，与今日缺条目口径一致。
+  if (Date.now() < banLinkHttpDownUntil) { const v = hit ? hit.val : false; banLinkCacheF.set(u, { val: v, at: Date.now() }); return Promise.resolve(v); } // DS-R22-5 短路：回源已证失败窗口内不再发请求
   return new Promise((resolve) => {
-    const fallback = () => { const v = hit ? hit.val : false; banLinkCacheF.set(u, { val: v, at: Date.now() }); resolve(v); }; // DEV-18/G-03：失败结果也短缓存，防 ext 不可达时逐请求满超时
+    const fallback = () => { const v = hit ? hit.val : false; banLinkCacheF.set(u, { val: v, at: Date.now() }); if (Date.now() >= banLinkHttpDownUntil) { try { console.error(JSON.stringify({ ev: 'banlink-http-degraded', svc: 'forum', windowMs: BANLINK_TTL_F })); } catch (e2) {} } banLinkHttpDownUntil = Date.now() + BANLINK_TTL_F; resolve(v); }; // DEV-18/G-03：失败结果也短缓存，防 ext 不可达时逐请求满超时；DS-R22-5：失败即置跨名短路窗口（翻转时打一条退化日志），syncAccounts 逐名串行退化同治
     const secret = licInternalSecret();
     if (!secret) return fallback();
     const data = Buffer.from(JSON.stringify({ username: u }));
