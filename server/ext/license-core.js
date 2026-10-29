@@ -140,13 +140,14 @@ function createLicenseCore(opts) {
   }
   function appendLine(file, obj) { try { fs.appendFileSync(file, JSON.stringify(obj) + '\n', { mode: 0o600 }); } catch (e) {} }
   // 客服只读镜像：掩码级公开状态（无密钥原文、无判定细节）
+  const isB6B7B9 = (code) => ['B6', 'B7', 'B9'].includes(String(code || '').toUpperCase()); // F-4（发版前全量审 P3）：封禁 code 大小写归一的单一口径，banLinkOf/writeMirror/syncAccountLinkage 三处共用
   // 封禁链判定（P5-010）：与 syncAccountLinkage 的 link==='banned' 逐字同口径——
   // 生效封禁中存在「永久」或 code∈{B6,B7,B9} 即为封禁链。功能门只认此判定，
   // 冻结类（B1/B8 等）不扩大口径。
   function banLinkOf(username, now) {
     const bans = activeBansFor(username, now);
     if (!bans || !bans.length) return false;
-    return bans.some((b) => b.permanent) || bans.some((b) => ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase())); // DEV-18/G-10：code 大小写归一
+    return bans.some((b) => b.permanent) || bans.some((b) => isB6B7B9(b.code)); // DEV-18/G-10：code 大小写归一（F-4 后走 isB6B7B9 单一口径）
   }
   const mirrorPublishStats = { publishFailures: 0, lastPublishError: null }; // DS-R22-2：镜像发布失败可见性（累计失败数＋最近失败），经 mirrorStats() 供 ext overview 带出
   function writeMirror() {
@@ -164,7 +165,7 @@ function createLicenseCore(opts) {
         if (b.endsAt && b.endsAt <= now) continue;
         const u = String(b.target); // DEV-26（六审 BUG-A）：键用 target 原样——全链精确匹配（activeBansFor 的 b.target === username），改写大小写会让 banLinkOf 永远查不到本条
         if (!u || out[u]) continue;
-        if (!(b.permanent || ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase()))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
+        if (!(b.permanent || isB6B7B9(b.code))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
         out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, webBy: null, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
       }
       fs.mkdirSync(path.dirname(mirrorFile), { recursive: true });
@@ -304,7 +305,7 @@ function createLicenseCore(opts) {
     const bans = activeBansFor(username, now);
     const hasPerm = bans.some((b) => b.permanent);
     const hasTimed = bans.some((b) => !b.permanent);
-    const link = hasPerm || bans.some((b) => ['B6', 'B7', 'B9'].includes(b.code)) ? 'banned' : (bans.length ? 'frozen' : 'normal');
+    const link = hasPerm || bans.some((b) => isB6B7B9(b.code)) ? 'banned' : (bans.length ? 'frozen' : 'normal'); // F-4：原此处直比 b.code 未归一，与 banLinkOf 口径不一致（潜伏），现统一 isB6B7B9
     for (const k of accountKeys(username)) {
       if (k.lifecycle === 'expired' || k.lifecycle === 'revoked') continue;
       k.link = hasPerm ? 'banned' : link;

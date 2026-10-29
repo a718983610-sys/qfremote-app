@@ -188,7 +188,29 @@ const OFFICIAL_ACCOUNT = 'qf-official';
 const isFrozen = (siteadmin, username) => (((siteadmin || 0) & SITERIGHT_LOCKED) !== 0) && String(username || '').toLowerCase() !== OWNER_ACCOUNT;
 
 function loadJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return fallback; }
+  // F-2（发版前全量审 P3）：原实现解析失败静默回退 fallback，下一次 save 即
+  // 覆盖损坏原件。改与 events-core 隔离口径对齐并按 DS 门一收紧：ENOENT
+  // （首跑无文件）才静默回退；解析失败先改名隔离 .corrupt-* 留痕再回退
+  // （七库一律隔离，含可再生的 wordsDb，保留现场）；非 ENOENT 读错误与隔离
+  // 改名失败一律抛错硬停，禁止以空数据启动后写回覆盖唯一原件。
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (e) {
+    if (e && e.code === 'ENOENT') return fallback;
+    console.error(JSON.stringify({ ev: 'forum-store-load-error', file, err: String((e && e.message) || e) }));
+    throw e;
+  }
+  try { return JSON.parse(raw); }
+  catch (e) {
+    const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    try { fs.renameSync(file, corrupt); }
+    catch (renameErr) {
+      console.error(JSON.stringify({ ev: 'forum-store-isolate-failed', file, err: String((renameErr && renameErr.message) || renameErr) }));
+      throw renameErr;
+    }
+    console.error(JSON.stringify({ ev: 'forum-store-corrupt-isolated', file, corrupt }));
+    return fallback;
+  }
 }
 function saveJson(file, obj) {
   fs.writeFileSync(file + '.tmp', JSON.stringify(obj));

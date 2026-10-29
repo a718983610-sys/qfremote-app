@@ -73,8 +73,30 @@ function emptyData() {
 class Store {
   constructor(file) {
     this.file = file;
-    try { this.data = Object.assign(emptyData(), JSON.parse(fs.readFileSync(file, 'utf8'))); }
-    catch (e) { this.data = emptyData(); }
+    // F-2（发版前全量审 P3）：原构造解析失败静默回退空数据，任一后续 save 即
+    // 覆盖损坏原件。改与 events-core 隔离口径对齐并按 DS 门一收紧：ENOENT
+    // （首跑无文件）才以空数据起；解析失败先改名隔离 .corrupt-* 留痕再起空；
+    // 非 ENOENT 读错误与隔离改名失败一律抛错硬停，禁止写回覆盖唯一原件。
+    let raw = null;
+    try { raw = fs.readFileSync(file, 'utf8'); }
+    catch (e) {
+      if (!(e && e.code === 'ENOENT')) {
+        console.error(JSON.stringify({ ev: 'chat-store-load-error', file, err: String((e && e.message) || e) }));
+        throw e;
+      }
+    }
+    if (raw === null) { this.data = emptyData(); return; }
+    try { this.data = Object.assign(emptyData(), JSON.parse(raw)); }
+    catch (e) {
+      const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      try { fs.renameSync(file, corrupt); }
+      catch (renameErr) {
+        console.error(JSON.stringify({ ev: 'chat-store-isolate-failed', file, err: String((renameErr && renameErr.message) || renameErr) }));
+        throw renameErr;
+      }
+      console.error(JSON.stringify({ ev: 'chat-store-corrupt-isolated', file, corrupt }));
+      this.data = emptyData();
+    }
   }
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
