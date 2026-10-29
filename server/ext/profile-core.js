@@ -580,11 +580,16 @@ function createProfileCore(deps) {
       const key = String(rawName).toLowerCase();
       if (IMPORT_DENY_KEYS.has(key) || !IMPORT_KEY_RE.test(key)) { out.skippedInvalid.push(rawName); continue; }
       if (key !== rawName) out.normalized[rawName] = key;
-      const rec = Object.prototype.hasOwnProperty.call(profiles.users, key) ? profiles.users[key] : null;
+      // DS 复核必改（J-9c 补强）：存量档案可能已有同名不同大小写的键（历史
+      // 写入路径大小写保留时留下）——先做大小写不敏感匹配，命中已有记录就
+      // 并到原键上，禁止归一键与存量键劈叉成两条档案、查键方读不到导入值。
+      const existingKey = Object.keys(profiles.users).find((k) => k.toLowerCase() === key);
+      const effectiveKey = existingKey || key;
+      const rec = existingKey ? profiles.users[existingKey] : null;
       if (rec && rec.nickname) { out.skippedExisting.push(key); continue; }
-      ensureRec(key).nickname = nick;
-      profiles.users[key].updatedAt = Date.now();
-      out.imported.push(key);
+      ensureRec(effectiveKey).nickname = nick;
+      profiles.users[effectiveKey].updatedAt = Date.now();
+      out.imported.push(effectiveKey);
     }
     if (out.imported.length) saveProfiles();
     return out;
