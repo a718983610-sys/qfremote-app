@@ -2193,10 +2193,14 @@ const server = http.createServer(async (req, res) => {
       const fileDlM = p.match(/^\/license\/api\/files\/([^/]+)\/download$/);
       if (req.method === 'GET' && fileDlM) {
         const got = fileStage.blobPathFor(auth.user, decodeURIComponent(fileDlM[1]), now);
-        if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
-        const buf = fs.readFileSync(got.fp);
-        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
-        return res.end(buf);
+        try {
+          if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
+          const buf = fs.readFileSync(got.fp);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
+          return res.end(buf);
+        } finally {
+          if (got) got.release();
+        }
       }
       const fileAckM = p.match(/^\/license\/api\/files\/([^/]+)\/ack$/);
       if (req.method === 'POST' && fileAckM) {
