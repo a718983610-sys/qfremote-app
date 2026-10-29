@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { createSvcUrls } = require('../svc-urls');
+const { createSvcUrls, FALLBACKS } = require('../svc-urls');
 const autologin = require('../autologin');
 const { createLockBridge } = require('../lock');
 
@@ -25,8 +25,13 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   // A1 兜底值推导
   const svc = createSvcUrls({ fetchJson: async () => { throw new Error('offline'); }, loadCache: () => null, saveCache: () => {} });
   await svc.refresh();
-  ok('A1_forum_api_fallback', svc.forumApi('sso-token') === 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/api/forum/sso-token', { got: svc.forumApi('sso-token') });
-  ok('A2_forum_sso_login_url', svc.forumSsoLoginUrl('a b+c') === 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/api/forum/sso-login?token=a%20b%2Bc', { got: svc.forumSsoLoginUrl('a b+c') });
+  ok('A1_forum_api_fallback', svc.forumApi('sso-token') === 'https://app.qfremote.top/api/forum/sso-token', { got: svc.forumApi('sso-token') });
+  ok('A2_forum_sso_login_url', svc.forumSsoLoginUrl('a b+c') === 'https://app.qfremote.top/api/forum/sso-login?token=a%20b%2Bc', { got: svc.forumSsoLoginUrl('a b+c') });
+  // A4 写死兜底防回归（2026-10-29 审计 J-1）：兜底必须落在正式 Web 基座，
+  // 任何一键都不得再指向已拆除的临时隧道；friendsUrl 保持既定代际直连。
+  ok('A4_fallback_prod_base', FALLBACKS.forumUrl === 'https://app.qfremote.top/forum' && FALLBACKS.registerUrl === 'https://app.qfremote.top/register' && FALLBACKS.adminUrl === 'https://app.qfremote.top/admin' && FALLBACKS.pointsUrl === 'https://app.qfremote.top/points', FALLBACKS);
+  ok('A5_fallback_no_tunnel', !Object.values(FALLBACKS).some(u => String(u).includes('trycloudflare')), FALLBACKS);
+  ok('A6_fallback_friends_direct', FALLBACKS.friendsUrl === 'https://54.248.9.192:8445/friends');
   // A3 product.json 新鲜值推导
   const svc2 = createSvcUrls({
     fetchJson: async () => ({ web: { forumUrl: 'https://tun.example.com/forum' } }),

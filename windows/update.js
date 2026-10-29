@@ -9,13 +9,13 @@
  * 对不上立刻删文件。取不到清单一律安静失败，绝不弹错误框。
  *
  * 信任口径（不许放宽）：
- *   - 生产环境清单与安装包只认自家主机 54.248.9.192:8443 这一个 origin，
+ *   - 生产环境清单与安装包只认自家正式域名 app.qfremote.top 这一个 origin
+ *     （Let's Encrypt 正规证书，Node 默认证书校验，不再关闭校验），
  *     清单里的 url 若指向别的主机，直接拒绝；
- *   - 服务器是自签证书，Node 侧 https 用 rejectUnauthorized:false 仅对
- *     上述自家 origin 生效（与探活同一口径：不发送任何凭据），完整性
- *     的最终兜底是安装包 SHA256 必须与清单一致；
+ *   - 完整性的最终兜底是安装包 SHA256 必须与清单一致（并核对大小）；
  *   - 测试覆盖开关 QFREMOTE_RELEASE_URL 存在时改认那个 origin（仅测试用，
  *     生产环境不要设置这个环境变量），见 README。
+ *   （2026-10-29 发版前审计 J-2 定案：更新链自直连自签源收口至正式域名源。）
  */
 const http = require('http');
 const https = require('https');
@@ -24,7 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const clientVersion = require('./client-version');
 
-const PROD_ORIGIN = 'https://54.248.9.192:8443';
+const PROD_ORIGIN = 'https://app.qfremote.top';
 const PROD_RELEASE_URL = PROD_ORIGIN + '/release.json';
 // 仅测试用：覆盖清单地址（同时该地址的 origin 成为本次运行唯一可信 origin）
 const OVERRIDE_URL = process.env.QFREMOTE_RELEASE_URL || '';
@@ -45,7 +45,7 @@ function isTrustedUrl(raw) {
   try { return new URL(raw).origin === TRUSTED_ORIGIN; } catch (e) { return false; }
 }
 
-// 带超时的 GET；对可信 origin 的自签证书放行（仅自家/测试 origin，见文件头）
+// 带超时的 GET（证书走 Node 默认校验，见文件头信任口径）
 function getBuffer(rawUrl, timeoutMs) {
   return new Promise((resolve, reject) => {
     let u;
@@ -54,7 +54,6 @@ function getBuffer(rawUrl, timeoutMs) {
     const lib = u.protocol === 'https:' ? https : http;
     // 2.3.2：清单 GET 带统一版本头（互联窗观察，见 client-version.js）
     const opts = { timeout: timeoutMs || 8000, headers: clientVersion.clientVersionHeaders() };
-    if (u.protocol === 'https:') opts.rejectUnauthorized = false;
     const req = lib.get(u, opts, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
@@ -130,7 +129,6 @@ function downloadToFile(u, part, manifest, onProgress, opts2) {
     const fail = (e) => { try { if (out) out.destroy(); } catch (err) { /* ignore */ } done(reject, e instanceof Error ? e : new Error(String(e))); };
     const lib = u.protocol === 'https:' ? https : http;
     const opts = { timeout: 15000, headers: clientVersion.clientVersionHeaders() };
-    if (u.protocol === 'https:') opts.rejectUnauthorized = false;
     const req = lib.get(u, opts, (res) => {
       if (res.statusCode !== 200) { res.resume(); fail(new Error('下载失败：HTTP ' + res.statusCode)); return; }
       const total = manifest.size || parseInt(res.headers['content-length'] || '0', 10) || null;

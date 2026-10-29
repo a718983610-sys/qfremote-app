@@ -31,7 +31,7 @@ const CHAT_URL = 'https://54.248.9.192:8445/chat';
 let FRIENDS_FALLBACK_URL = '';
 // 论坛/注册/管理/积分服务地址（v2.2.0 改运行时解析，见 svc-urls.js）：
 // 启动时拉官网 product.json 的 web.* 更新下面这组变量，拉不到用上次缓存、
-// 再兜底 svc-urls.js 里的写死值（即原临时通道地址）。域名落地只改 product.json。
+// 再兜底 svc-urls.js 里的写死值（正式 Web 基座 app.qfremote.top；friendsUrl 为既定代际直连兜底）。
 let FORUM_URL = svcUrlsMod.FALLBACKS.forumUrl;
 let REGISTER_URL = svcUrlsMod.FALLBACKS.registerUrl;
 let ADMIN_URL = svcUrlsMod.FALLBACKS.adminUrl;
@@ -43,8 +43,9 @@ const TOOLBAR_HEIGHT = 48;
 const PREVIEW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
 const PREVIEW_DIR = process.env.QFREMOTE_PREVIEW_DIR || '';
 const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'blue' | 'dark'
-// 仅预览自检：探活可经隧道打到真服务器（与生产相同的探活代码、仅路由不同）；生产环境恒用 CONSOLE_URL
-const PROBE_URL = (PREVIEW && process.env.QFREMOTE_PROBE_URL) ? process.env.QFREMOTE_PROBE_URL : CONSOLE_URL;
+// 仅预览自检：探活目标可经环境变量改指（与生产相同的探活代码、仅路由不同）；
+// 生产环境恒用正式域名源（2026-10-29 审计 J-2 定案，见下方探活节口径）
+const PROBE_URL = (PREVIEW && process.env.QFREMOTE_PROBE_URL) ? process.env.QFREMOTE_PROBE_URL : 'https://app.qfremote.top/release.json';
 const BG_DEEP = '#f4f7fb'; // 窗口底色与新版令牌底色对齐（亮主题页面底 #F4F7FB；深色仍 #17181c）
 
 app.setName('QFRemote');
@@ -922,10 +923,12 @@ function startWatchdog() {
 }
 
 // ---------- 服务器探活（工具栏状态灯与关于面板的数据来源） ----------
-// 只做一件事：定时向自家服务器发一个不带任何凭据的 HTTPS GET，看它回不回、
-// 回什么状态码。这里 rejectUnauthorized:false 仅为让探活穿过自签证书拿到
-// 状态码——探活不发送数据、不参与任何信任决策；真正的控制台页面始终走
-// 外壳顶部的证书校验（只认 ALLOWED_HOST 的 ALLOWED_PORTS 两个自家地址）。
+// 只做一件事：定时向自家正式域名源发一个不带任何凭据的 HTTPS GET，看它
+// 回不回、回什么状态码。2026-10-29 发版前审计 J-2 定案：探活改走正式域名
+// 源（app.qfremote.top 的 release.json，Let's Encrypt 正规证书、Node 默认
+// 校验），不再对自签直连源关闭证书校验——探活不发送数据、不参与任何信任
+// 决策；真正的控制台页面始终走外壳顶部的证书校验（只认 ALLOWED_HOST 的
+// ALLOWED_PORTS 两个自家地址）。
 let lastProbe = { state: 'checking', ok: null, at: null, detail: '尚未检测', ms: null };
 let probeTimer = null;
 let probeInFlight = false;
@@ -952,7 +955,7 @@ function runProbe() {
       resolve(lastProbe);
     };
     try {
-      const req = https.get(PROBE_URL, { rejectUnauthorized: false, timeout: 6000, headers: clientVersion.clientVersionHeaders() }, (res) => {
+      const req = https.get(PROBE_URL, { timeout: 6000, headers: clientVersion.clientVersionHeaders() }, (res) => {
         res.resume();
         finish(res.statusCode < 500, '服务器响应正常（HTTP ' + res.statusCode + '）');
       });
@@ -984,13 +987,16 @@ async function extRequest(method, urlStr, bodyObj, opts) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(urlStr); } catch (e) { resolve({ status: 0, json: null, text: '' }); return; }
+    // 2026-10-29 审计 J-2 定案：本通道承载会话 Cookie 与密钥领取核验，只许
+    // https 且走 Node 默认证书校验，不再关闭校验、不接受 http 目标。
+    if (u.protocol !== 'https:') { resolve({ status: 0, json: null, text: '' }); return; }
     const lib = u.protocol === 'https:' ? https : http;
     const body = bodyObj ? JSON.stringify(bodyObj) : null;
     // 2.3.2：自家服务统一版本头（许可/积分/站长/论坛 SSO/子服务登出全走此出口）
     const headers = clientVersion.clientVersionHeaders();
     if (cookie) headers.Cookie = cookie;
     if (body) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
-    const req = lib.request(u, { method, headers, timeout: 8000, rejectUnauthorized: false }, (res) => {
+    const req = lib.request(u, { method, headers, timeout: 8000 }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {

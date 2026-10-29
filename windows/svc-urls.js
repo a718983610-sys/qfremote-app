@@ -16,14 +16,15 @@ const https = require('https');
 const clientVersion = require('./client-version');
 
 const PRODUCT_JSON_URL = 'https://a718983610-sys.github.io/qfremote-website/product.json';
-const TUNNEL_BASE = 'https://bookmarks-hunting-rendering-atlas.trycloudflare.com';
+// 正式 Web 基座。临时隧道地址不得作为生产兜底。
+const PROD_WEB_BASE = 'https://app.qfremote.top';
 
 const FALLBACKS = {
-  forumUrl: TUNNEL_BASE + '/forum',
-  registerUrl: TUNNEL_BASE + '/register',
-  friendsUrl: 'https://54.248.9.192:8445/friends',
-  adminUrl: TUNNEL_BASE + '/admin',
-  pointsUrl: TUNNEL_BASE + '/points'
+  forumUrl: PROD_WEB_BASE + '/forum',
+  registerUrl: PROD_WEB_BASE + '/register',
+  friendsUrl: 'https://54.248.9.192:8445/friends', // 既定代际兜底，保持直连
+  adminUrl: PROD_WEB_BASE + '/admin',
+  pointsUrl: PROD_WEB_BASE + '/points'
 };
 const KEYS = Object.keys(FALLBACKS);
 
