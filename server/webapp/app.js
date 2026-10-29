@@ -26,7 +26,18 @@ const ICONS = {
   refresh: '<path d="M21 12a9 9 0 1 1-2.9-6.6L21 8"/><path d="M21 3v5h-5"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/>'
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/>',
+  /* 会话融合视图补图（2.4.0，路径与冻结稿 preview 图标库同源同风格） */
+  back: '<path d="M15 5l-7 7 7 7"/>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/>',
+  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  power: '<path d="M12 3v8M6.3 6.5a8 8 0 1 0 11.4 0"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+  keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/>',
+  send: '<path d="M21 3L10 14M21 3l-7 18-4-7-7-4z"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  check: '<path d="M4 12.5l5 5L20 6.5"/>',
+  mute: '<path d="M4 10v4h3l5 4V6l-5 4H4z"/><path d="M16 9l5 6M21 9l-5 6"/>'
 };
 const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n] || ''}</svg>`;
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,7 +84,7 @@ function confirmModal(title, text, okLabel, onOk) {
    其余一概不自动重发——尤其 POST /appeal：服务端按提交次数计数（永久
    封禁 2 次/其他 3 次），「已落库但响应丢失」时重发会白白消耗一次额度；
    POST /chat/api/send 会重复投递消息，同样不在白名单内。 */
-const API_TIMEOUT_MS = 30000;   // 默认单项上限【施工偏差 D1：DS 稿 12000 → 30000；现行本无超时，截图上传等大 POST 弱网可合法超 12s，关键路径另有显式超时（lockApi 表/raceNodeId），抬高默认值只防回归】
+const API_TIMEOUT_MS = 30000;   // 默认单项上限【施工偏差 D1：DS 稿 12000 → 30000；现行本无超时，截图上传等大 POST 弱网可合法超 12s，关键路径另有显式超时（lockApi 表等），抬高默认值只防回归】
 const API_RETRY_DELAY_MS = 600; // 与原文案一致的退避间隔
 const API_RETRY_SAFE = [
   ['POST', '/appeal/status'],
@@ -194,7 +205,8 @@ let nodeMapInflight = null;
 let nodeMapSlowInflight = null;
 const NODE_MAP_TTL_MS = 60000;
 const CONTROL_PROBE_MS = 1500;      // 控制通道探测上限（原 6000，与慢源定位一致）
-const NAV_LOOKUP_BUDGET_MS = 900;   // 点按解析 name→id 的硬预算：超时直接回落 CANON 根，不等全量图
+/* NAV_LOOKUP_BUDGET_MS（900ms 点按竞态预算）已随 2.4.0 会话直达删除：解析改走
+   数据携带→缓存→服务端 resolve 端点的确定序，不再有超时回落老列表这条路。 */
 
 function ensureNodeMap() {
   if (!nodeMapCache) nodeMapCache = { at: 0, byName: new Map(), byId: new Map(), lockDevices: [], lockStatus: 'ok', lockError: '' };
@@ -209,6 +221,7 @@ function applyLockDevices(devices) {
     list.push(dev);
     if (dev.name) nm.byName.set(dev.name, dev.id);
     nm.byId.set(dev.id, dev.name);
+    nm.byId.set(bareNodeId(dev.id), dev.name);   /* 裸 id 键：邀请/深链等按裸 id 反查设备名 */
   });
   nm.lockDevices = list;
   nm.lockStatus = 'ok'; nm.lockError = '';
@@ -224,6 +237,7 @@ function applyControlNodes(grouped) {
       const nmName = String(n.name || n.rname || '');
       if (nmName && !nm.byName.has(nmName)) nm.byName.set(nmName, id);
       if (!nm.byId.has(id)) nm.byId.set(id, nmName);
+      if (!nm.byId.has(bareNodeId(id))) nm.byId.set(bareNodeId(id), nmName);
     });
   });
   // [gate2-delta N6] slow fill renews the TTL only when the lock leg is healthy; on failure backdate so retry happens in ~5s
@@ -269,7 +283,7 @@ async function fetchNodeMap(opts) {
     // 慢源不阻塞：后台拉控制通道全量 nodes，回来只回填缓存（供后续导航/共享设备用）
     if (!nodeMapSlowInflight) {
       nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)
-        .then((grouped) => { applyControlNodes(grouped); })
+        .then((grouped) => { applyControlNodes(grouped); refreshDevRowIds(document); })
         .catch(() => {})
         .then(() => { nodeMapSlowInflight = null; });
     }
@@ -278,19 +292,9 @@ async function fetchNodeMap(opts) {
             (e) => { nodeMapInflight = null; throw e; });
   return nodeMapInflight;
 }
-/* 点按解析：缓存命中同步返回；否则最多等 NAV_LOOKUP_BUDGET_MS 让快源落地，
-   超时按原口径回落 CANON 根（原实现等全量图 7s+，等待零收益）。 */
-function raceNodeId(name, budgetMs) {
-  const hitNow = () => (nodeMapCache && name && nodeMapCache.byName.has(name)) ? nodeMapCache.byName.get(name) : '';
-  const quick = hitNow();
-  if (quick) return Promise.resolve(quick);
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (id) => { if (done) return; done = true; clearTimeout(timer); resolve(String(id || '')); };
-    const timer = setTimeout(() => finish(hitNow() || ''), budgetMs || NAV_LOOKUP_BUDGET_MS);
-    fetchNodeMap().then(() => finish(hitNow() || ''), () => finish(hitNow() || ''));
-  });
-}
+/* raceNodeId（点按 900ms 竞态解析）已随 2.4.0 会话直达整体删除：openSession 的
+   解析序＝入口 data-nodeid 数据携带 → nodeIdFor 缓存 → ext /api/device/resolve
+   兜底（见会话融合视图段），超时回落原生设备列表的路径不复存在。 */
 function invalidateNodeMap() { nodeMapCache = null; }
 
 /* ---------------- 设备间文件发送（N-3 端点组，会话鉴权） ---------------- */
@@ -964,6 +968,8 @@ async function render() {
   if (BanLock.active()) return;   // 锁定 / 会话已结束呈现期间不得渲回主壳
   const seq = ++renderSeq;
   S.route = parseRoute();
+  if (S.route.name !== 'session') teardownSession();   // 离开会话路由即拆会话（定时器/监听/预热收编框归位）
+  else if (Sess.active && Sess.root && document.contains(Sess.root) && (S.route.param === Sess.name || S.route.param === Sess.nodeid)) return;   // 同会话重复渲染（返回链复位 URL 等）跳过，不重建
   if (S.route.name !== 'forum' && S.route.name !== 'post') { forumListMemo = null; forumMemoArmed = false; }
   if (S._chatStop) { try { S._chatStop(); } catch (e) {} S._chatStop = null; }
   renderNavs();
@@ -985,6 +991,7 @@ function showShell() {
   var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（内联脚本被拦截时的双保险）
   if (!location.hash) location.hash = '#home';
   render();
+  startSessionPreheat();   // 登录即预热引擎源（phase-0 E8 承重项，会话打开时收编加速）
 }
 function showAuth(kind, extra) {
   $('#shellRoot').hidden = true;
@@ -1295,7 +1302,11 @@ function rowInfoHtml(icon, t, s) {
   return `<div class="row"><span class="tile">${ic(icon)}</span><span><b>${esc(t)}</b><small>${esc(s)}</small></span></div>`;
 }
 function devRowHtml(d) {
-  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span><span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span><span class="ops">${d.online ? `<button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button>` : '<span class="pill off">设备离线时不可连接</span>'}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
+  /* 2.4.0 数据携带解析：渲染时能查到节点 id 就直接盖进按钮（data-nodeid），
+     点按零等待；查不到的由 refreshDevRowIds 在节点图落地后补盖，再兜底 resolve 端点。 */
+  const nid = d.nodeid ? bareNodeId(d.nodeid) : nodeIdFor(d.name);
+  const nidAttr = nid ? ` data-nodeid="${esc(nid)}"` : '';
+  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span><span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span><span class="ops">${d.online ? `<button class="btn sm" data-remote="${esc(d.name)}"${nidAttr}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${nidAttr}>文件管理</button>` : '<span class="pill off">设备离线时不可连接</span>'}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
 }
 /* 点按反馈：立即置忙＋一句可见文案（本稿唯一新增可见文案，7 字内）＋6s 兜底恢复。
    跳转类（远程桌面/终端）走 CANON 导航，页面会离开，无需回收；导航类（文件/详情）
@@ -1327,18 +1338,17 @@ function bindDevRows(view) {
       } catch (e) { release(); }
     };
   };
-  view.querySelectorAll('[data-remote]').forEach(el => tap(el, () => openNativeDesktop(el.getAttribute('data-remote')), true));
-  view.querySelectorAll('[data-terminal]').forEach(el => tap(el, () => openNativeTerminal(el.getAttribute('data-terminal')), true));
-  view.querySelectorAll('[data-files]').forEach(el => tap(el, () => navigate('files', el.getAttribute('data-files')), false));
+  view.querySelectorAll('[data-remote]').forEach(el => tap(el, () => openSession('desktop', { name: el.getAttribute('data-remote'), nodeid: el.getAttribute('data-nodeid') }), true));
+  view.querySelectorAll('[data-terminal]').forEach(el => tap(el, () => openSession('terminal', { name: el.getAttribute('data-terminal'), nodeid: el.getAttribute('data-nodeid') }), true));
+  view.querySelectorAll('[data-files]').forEach(el => tap(el, () => openSession('files', { name: el.getAttribute('data-files'), nodeid: el.getAttribute('data-nodeid') }), true));
   view.querySelectorAll('[data-detail]').forEach(el => tap(el, () => navigate('device', el.getAttribute('data-detail')), false));
 }
 
-/* 原生直达（丙案＋站长 2026-10-26 裁定）：点设备→顶层直达该设备的 MeshCentral
-   原生视图（CANON＝直连源），停用 iframe 挂载与自研远控页二次选设备。
-   深链格式经基线实测（2026-10-26，含应用源码互证）：主应用自带的新标签页链接
-   形态 /?node=<裸节点 id>&viewmode=<页签> 冷启 5 秒内即绑定设备数据；
-   viewmode 10=设备页 / 11=桌面页签 / 12=终端页签。gotonode 冷启在本构建不绑定
-   （gotoStartViewPage 守卫丢弃），不用。 */
+/* 引擎同源入口（CANON）：会话融合视图的 iframe 与预热框都挂在本站同源的
+   /console-engine 反代路径下（2026-10-28 域名修复口径）。旧「点设备顶层跳原生页」
+   动线已于 2.4.0 退役：深链只在框内使用（/?node=<裸 id>&viewmode=<11|12|13>
+   &qfm=frame&hide=31，见会话融合视图段）；顶层打开仅保留为哨兵错误卡里用户
+   主动触发的兼容模式。viewmode 10＝原生设备页，融合视图永不使用。 */
 const QF_CANON_ORIGIN = location.origin + '/console-engine'; // 2026-10-28 域名修复：原写死裸 IP 8443 废止，改同源 /console-engine（nginx 同源反代到原生页），桌面会话全程留在当前域名
 /* 官网入口（站长 2026-10-26 11:12 令补）：三容器登出上方独立行＋「我的」页独立行，
    不进 MENU34、不占 BTABS，#34 次序不动；新标签打开官网。 */
@@ -1350,24 +1360,728 @@ const websiteNavHtml = (cls) => `<a class="${cls || 'nav'}" href="${QF_WEBSITE_U
    账户菜单与「我的」页各补一行（导航容器互为同位呈现，不构成 #20 重复入口）；不进
    MENU34、不占 BTABS，#34 次序不动；目标为 SPA 内站长管理页（route=admin），服务端
    /home/api/stats 的 isAdmin 判定（账号===ADMIN_EMAIL 且 siteadmin 全权）未动。 */
-async function openNativeDevice(name, viewmode) {
-  let id = '';
+/* ================= 会话融合视图（2.4.0：会话直达＋旧页关闭＋会话 UI 大改版） =================
+   定稿依据：redesign-v2 FREEZE（站长 2026-10-26 点头冻结）＋ DS-DESIGN 适配 A1–A10
+   ＋ phase-0 更正证据（E6–E9）。形态：#/session 单 iframe 同源融合——八入口点设备
+   直达会话，MeshCentral 原生设备列表/详情退出用户路径（前置翻牌随 2.4.0 组装执行）。
+   深链（E7 实测）：引擎根 /?node=<裸 id>&viewmode=<11|12|13>&qfm=frame&hide=31，
+   hide=31 位掩码隐引擎外壳；形态切换走框内 go(vm)（463ms 实测），换 src 会断控制
+   通道、禁用作常态路径。父页双层守卫：框内注入 CSS 压制 go() 复现的子导航条，
+   URL 规范化守卫把框内逃逸拉回 hide 形态。
+   id 解析序（根除 900ms 竞态）：入口数据携带 data-nodeid → 页内节点缓存 →
+   ext 只读端点 GET /api/device/resolve 兜底；全程不回落老列表。
+   预热（E8 承重项）：登录后隐藏框预热引擎源，会话打开时同设备同形态直接收编。 */
+const QF_SESSION_VM = { desktop: 11, terminal: 12, files: 13 };
+const QF_SESSION_KIND = { 11: 'desktop', 12: 'terminal', 13: 'files' };
+/* 发送到手机的会话邀请走 #25 暂存通道（服务端零改动，toNode 为不透明字符串键）：
+   本版寻址＝账号级 ctrl 邮箱（ctrl:account），同账号任一实例在「我的文件·待接收」
+   可领取并打开会话；实例级 ctrl:<instanceId> 精确寻址待壳端实例注册表立项后深化。
+   本机实例 id 键名登记：localStorage.qfCtrlInstanceId（≥128bit 随机，防未来撞键）。 */
+const QF_CTRL_MAILBOX = 'ctrl:account';
+function ctrlInstanceId() {
   try {
-    const raw = await raceNodeId(name, NAV_LOOKUP_BUDGET_MS); // 只等 name→id 一条，不等全量节点图
-    id = String(raw || '').replace(/^node\/\//, ''); // [D5] restore live regex (strip node// fully)
-  } catch (e) { /* 取不到节点标识时退回原生设备列表，仍为原生流程 */ }
-  let vm = viewmode;
-  /* 手机形态（服务端按 UA 下发独立的手机版原生应用，543KB）：其实测冷启 vm11/vm12
-     渲染空白、vm10 设备页冷启正常绑定，故小屏落 vm10 设备页（原生页内含桌面/
-     终端/Web-VNC 入口）；桌面形态维持 vm11/vm12 一步直达。此为手机版应用自身
-     冷启缺陷的绕行，桌面口径不受影响（2026-10-26 抢修实测）。 */
-  if (window.matchMedia && window.matchMedia('(max-width: 820px)').matches) vm = 10;
-  const url = id ? (QF_CANON_ORIGIN + '?node=' + encodeURIComponent(id) + '&viewmode=' + vm) : QF_CANON_ORIGIN;
-  location.assign(url);
+    let v = localStorage.getItem('qfCtrlInstanceId');
+    if (!v) {
+      const a = new Uint8Array(16);
+      (window.crypto || {}).getRandomValues ? crypto.getRandomValues(a) : a.forEach((_, i) => a[i] = Math.floor(Math.random() * 256));
+      v = Array.from(a).map(x => x.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem('qfCtrlInstanceId', v);
+    }
+    return v;
+  } catch (e) { return ''; }
+}
+function bareNodeId(id) { return String(id || '').replace(/^node\/\//, '').replace(/^node\//, ''); }
+function nodeIdFor(name) {
+  if (!name || !nodeMapCache || !nodeMapCache.byName) return '';
+  return bareNodeId(nodeMapCache.byName.get(name) || '');
+}
+/* 节点图落地后把 id 盖进已渲染的设备行按钮（数据携带解析的第一级来源） */
+function refreshDevRowIds(root) {
+  if (!nodeMapCache) return;
+  (root || document).querySelectorAll('[data-remote],[data-terminal],[data-files]').forEach(el => {
+    const nm = el.getAttribute('data-remote') || el.getAttribute('data-terminal') || el.getAttribute('data-files');
+    const id = nodeIdFor(nm);
+    if (id) el.setAttribute('data-nodeid', id);
+  });
+}
+async function resolveDeviceId(name) {
+  const r = await api('/api/device/resolve?name=' + encodeURIComponent(name || ''));
+  if (r.json && typeof r.json === 'object') return r.json;
+  return { ok: false, code: 'TIMEOUT' };
+}
+function sessionDeepLink(nodeid, vm) {
+  return QF_CANON_ORIGIN + '/?node=' + encodeURIComponent(bareNodeId(nodeid)) + '&viewmode=' + vm + '&qfm=frame&hide=31';
 }
 
-function openNativeDesktop(name) { return openNativeDevice(name, 11); }
-function openNativeTerminal(name) { return openNativeDevice(name, 12); }
+/* ---------- 预热（phase-0 E8：Chromium 节流冷启 18–39s，预热是承重项） ---------- */
+const QF_PRE = { frame: null, nodeid: '', vm: 0, ready: false, t0: 0, warmMs: 0 };
+function startSessionPreheat() {
+  if (QF_PRE.frame) return;
+  const f = document.createElement('iframe');
+  f.className = 'qf-preheat'; f.id = 'qfPreheat'; f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+  QF_PRE.t0 = performance.now(); QF_PRE.ready = false;
+  f.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); };
+  f.src = QF_CANON_ORIGIN + '/?hide=31&qfm=warm';
+  document.body.appendChild(f);
+  QF_PRE.frame = f;
+}
+function upgradePreheat(nodeid, vm) {
+  const id = bareNodeId(nodeid);
+  if (!QF_PRE.frame || !id) return;
+  if (QF_PRE.nodeid === id && QF_PRE.vm === vm) return;
+  QF_PRE.nodeid = id; QF_PRE.vm = vm; QF_PRE.ready = false; QF_PRE.t0 = performance.now();
+  QF_PRE.frame.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); };
+  try { QF_PRE.frame.contentWindow.location.replace(sessionDeepLink(id, vm)); } catch (e) { QF_PRE.frame.src = sessionDeepLink(id, vm); }
+}
+
+/* ---------- 会话运行态 ---------- */
+const Sess = {
+  active: false, gen: 0, root: null, frame: null, adopted: false,
+  name: '', nodeid: '', kind: 'desktop', vm: 11, linkedVm: 0,
+  state: 'idle', t0: 0, connectMs: 0, reloaded: false, guardN: 0, guardToastShown: false,
+  discN: 0, blankSince: 0, timers: [], listeners: [], kbMode: 'auto', trapArmed: false,
+};
+let QF_SESS_CTX = null;
+function sessOn(target, type, fn, opts) { target.addEventListener(type, fn, opts); Sess.listeners.push([target, type, fn, opts]); }
+function teardownSession() {
+  Sess.gen++;
+  Sess.timers.forEach(t => { clearInterval(t); clearTimeout(t); });
+  Sess.timers = [];
+  Sess.listeners.forEach(([t, ty, fn, o]) => { try { t.removeEventListener(ty, fn, o); } catch (e) {} });
+  Sess.listeners = [];
+  if (Sess.frame && Sess.frame === QF_PRE.frame) {
+    /* 升格框降格回预热位：只改类名/样式/id（不移动节点、不换 src），文档与连接保持，
+       下次同设备打开即零加载收编；异设备由 buildSessionFrame 换 src 一次导航。 */
+    const f = Sess.frame;
+    f.classList.remove('qf-session-frame'); f.classList.add('qf-preheat');
+    f.removeAttribute('style'); f.id = 'qfPreheat'; f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+    const bd = document.getElementById('qfSessBackdrop'); if (bd) bd.remove();
+  }
+  Sess.active = false; Sess.trapArmed = false; Sess.root = null; Sess.frame = null; Sess.adopted = false; Sess.state = 'idle';
+}
+
+/* 八入口唯一收敛点：kind ∈ desktop/terminal/files；ctx.name 必备，ctx.nodeid 为数据携带 id（可缺） */
+function openSession(kind, ctx) {
+  ctx = ctx || {};
+  const name = ctx.name || '';
+  const nodeid = bareNodeId(ctx.nodeid || '') || nodeIdFor(name);
+  QF_SESS_CTX = { kind: QF_SESSION_VM[kind] ? kind : 'desktop', name, nodeid };
+  try { sessionStorage.removeItem('qfSessClosed'); } catch (e) {}
+  if (!name && !nodeid) { navigate('devices'); return; }
+  /* 已在会话中再开会话（换设备/邀请打开等）：原地切换，不走 hash 导航——引擎框是
+     联合历史的最新导航者时，顶层 hash 赋值会被浏览器回卷并派发 popstate，把导航
+     吞回旧会话（影子 rig 实证，联合历史污染即 phase-0 条 12 的本体）。 */
+  if (Sess.active && S.route && S.route.name === 'session') {
+    const view = $('#view');
+    try { history.replaceState(null, '', '#session/' + encodeURIComponent(name || nodeid)); } catch (e) {}
+    if (view) { Views.session(view, name || nodeid); return; }
+  }
+  navigate('session', name || nodeid);
+  /* 兜底：hash 导航若仍被联合历史吞掉（会话未在 350ms 内激活），replaceState 复位后直渲 */
+  setTimeout(() => {
+    if (!Sess.active && QF_SESS_CTX && QF_SESS_CTX.name === name && QF_SESS_CTX.nodeid === nodeid) {
+      try { history.replaceState(null, '', '#session/' + encodeURIComponent(name || nodeid)); } catch (e) {}
+      render();
+    }
+  }, 350);
+}
+
+function sessionMarkup(name, kind) {
+  const capRows = QF_CAP_DEFS.map(c => {
+    const on = sessCapOn(c.key);
+    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${on ? ' sv-opt__s--ok' : ''}">${on ? '已开启' : '已关闭'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"></button></div></li>`;
+  }).join('');
+  return `<div class="qf-session-layer"><div class="viewer" id="qfViewer" data-morph="${kind}" data-fs="false">
+    <header class="sv-bar"><div class="sv-bar__inner">
+      <button class="sv-iconbtn" data-act="back" aria-label="返回">${ic('back')}</button>
+      <div class="sv-bar__id">
+        <span class="sv-title" id="qfTitle">${esc(name || '设备')}</span>
+        <span class="sv-badge sv-badge--wait" id="qfBadge" role="status"><i class="sv-badge__dot"></i><span id="qfBadgeTxt">连接中</span></span>
+      </div>
+      <button class="sv-iconbtn" data-act="fullscreen" aria-label="全屏">${ic('expand')}</button>
+      <button class="sv-iconbtn sv-iconbtn--line" data-act="disconnect" aria-label="断开连接">${ic('power')}</button>
+    </div></header>
+    <main class="sv-stage" id="qfStage">
+      <div class="sv-wall" aria-hidden="true"><span class="sv-wall__tag">${ic('monitor')}远程画面</span></div>
+      <div class="sv-canvas qf-frame-slot" id="qfFrameSlot" aria-hidden="true"></div>
+      <div class="sv-connecting" id="qfConnecting">
+        <p class="sv-connecting__t">正在建立会话…</p>
+        <p class="sv-connecting__d" id="qfConnDev">目标设备：${esc(name || '')}</p>
+        <div class="sv-progress"><div class="sv-progress__bar"></div></div>
+      </div>
+      <div class="sv-strip" id="qfStrip" hidden><span class="sv-strip__spin"></span><span class="sv-strip__txt" id="qfStripTxt">连接中断，正在自动重连（第 1 次）</span></div>
+      <div class="sv-mask" id="qfMask" hidden><div class="sv-card">
+        <h2 class="sv-card__t" id="qfMaskT">无法建立会话</h2>
+        <p class="sv-card__d" id="qfMaskD"></p>
+        <div id="qfMaskCands"></div>
+        <div class="sv-card__acts">
+          <button class="sv-btn sv-btn--primary" data-act="retry">重试</button>
+          <button class="sv-btn" data-act="mask-back">返回设备详情</button>
+          <button class="sv-btn" data-act="compat" id="qfCompatBtn" hidden>兼容模式打开</button>
+        </div>
+      </div></div>
+    </main>
+    <form class="sv-input" id="qfInput" hidden>
+      <input class="sv-input__field" id="qfInputField" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" placeholder="输入命令，点发送或回车落到终端">
+      <button class="sv-iconbtn" type="button" data-act="keyboard" id="qfKbBtn" aria-label="召唤键盘">${ic('keyboard')}</button>
+      <button class="sv-iconbtn sv-iconbtn--brand" type="submit" aria-label="发送">${ic('send')}</button>
+    </form>
+    <footer class="sv-tools">
+      <div class="sv-seg" role="tablist" aria-label="会话形态">
+        <button class="sv-seg__btn" role="tab" aria-selected="${kind === 'desktop'}" data-morph="desktop">${ic('monitor')}<span>桌面</span></button>
+        <button class="sv-seg__btn" role="tab" aria-selected="${kind === 'terminal'}" data-morph="terminal">${ic('terminal')}<span>终端</span></button>
+        <button class="sv-seg__btn" role="tab" aria-selected="${kind === 'files'}" data-morph="files">${ic('folder')}<span>文件</span></button>
+      </div>
+      <div class="sv-acts">
+        <button class="sv-iconbtn sv-iconbtn--line sv-actbtn" data-act="settings" aria-label="设定">${ic('gear')}<span class="sv-actbtn__lbl">设定</span></button>
+        <button class="sv-iconbtn sv-iconbtn--line sv-actbtn" data-act="send-to-phone" aria-label="发送到手机">${ic('phone')}<span class="sv-actbtn__lbl">发送到手机</span></button>
+      </div>
+    </footer>
+    <button class="sv-fsx" data-act="exit-fullscreen" aria-label="退出全屏">${ic('expand')}<span class="sv-fsx__tx">退出全屏</span></button>
+    <div class="sv-scrim" id="qfScrimSend" data-open="false" hidden><div class="sv-sheet" role="dialog" aria-modal="true" aria-labelledby="qfSendTtl">
+      <div class="sv-sheet__grab"></div>
+      <div class="sv-sheet__h"><div class="sv-sheet__hd"><h3 class="sv-sheet__ttl" id="qfSendTtl">发送到手机</h3></div><button class="sv-sheet__x" data-close="qfScrimSend" aria-label="关闭">${ic('x')}</button></div>
+      <div class="sv-sheet__b">
+        <div id="qfSendList">
+          <ul class="sv-opts"><li><button class="sv-opt" role="radio" aria-checked="true"><span class="sv-opt__ic">${ic('phone')}</span><span class="sv-opt__tx"><span class="sv-opt__n">我的手机</span><span class="sv-opt__d">本账号手机控制器，在「我的文件 · 待接收」领取后打开会话</span></span><span class="sv-opt__r"></span></button></li></ul>
+          <div style="height:14px"></div>
+          <button class="sv-btn sv-btn--primary" id="qfSendGo">发送</button>
+        </div>
+        <div id="qfSendSent" hidden>
+          <div class="sv-sheet__ok"><span class="sv-sheet__ok-ic">${ic('check')}</span><p class="sv-sheet__ok-tx">已发送到你的手机，正在打开远程桌面</p></div>
+          <div style="height:14px"></div>
+          <button class="sv-btn sv-btn--primary" data-close="qfScrimSend">完成</button>
+        </div>
+        <div id="qfSendFail" hidden>
+          <div class="sv-sheet__fail"><span class="sv-sheet__fail-ic">${ic('x')}</span><p class="sv-sheet__fail-tx" id="qfSendFailTxt">指令未能送达手机，请稍后重试。</p></div>
+          <div class="sv-state-acts">
+            <button class="sv-btn sv-btn--primary" id="qfSendRetry">重试</button>
+            <button class="sv-btn" data-close="qfScrimSend">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <div class="sv-scrim" id="qfScrimSettings" data-open="false" hidden><div class="sv-sheet" role="dialog" aria-modal="true" aria-labelledby="qfSetTtl">
+      <div class="sv-sheet__grab"></div>
+      <div class="sv-sheet__h"><div class="sv-sheet__hd"><h3 class="sv-sheet__ttl" id="qfSetTtl">设定</h3></div><button class="sv-sheet__x" data-close="qfScrimSettings" aria-label="关闭">${ic('x')}</button></div>
+      <div class="sv-sheet__b">
+        <p class="sv-sheet__lbl">终端键盘</p>
+        <ul class="sv-opts">
+          <li><button class="sv-opt" data-kbmode="auto" role="radio" aria-checked="${Sess.kbMode !== 'manual'}"><span class="sv-opt__ic">${ic('keyboard')}</span><span class="sv-opt__tx"><span class="sv-opt__n">自动弹出</span><span class="sv-opt__d">点输入行即唤起键盘</span></span><span class="sv-opt__r"></span></button></li>
+          <li><button class="sv-opt" data-kbmode="manual" role="radio" aria-checked="${Sess.kbMode === 'manual'}"><span class="sv-opt__ic">${ic('keyboard')}</span><span class="sv-opt__tx"><span class="sv-opt__n">仅点按召唤</span><span class="sv-opt__d">点键盘按钮才唤起，输入行键盘钮实底常亮</span></span><span class="sv-opt__r"></span></button></li>
+        </ul>
+        <p class="sv-sheet__lbl">会话能力（全部保留，按新样式重排）</p>
+        <ul class="sv-opts">${capRows}</ul>
+      </div>
+    </div></div>
+    <div class="sv-scrim" id="qfScrimConfirm" data-open="false" hidden><div class="sv-sheet" role="dialog" aria-modal="true" aria-labelledby="qfCfTtl">
+      <div class="sv-sheet__grab"></div>
+      <div class="sv-sheet__h"><div class="sv-sheet__hd"><h3 class="sv-sheet__ttl" id="qfCfTtl">断开连接？</h3><p class="sv-sheet__sub">会话将被结束，你可以随时从设备详情重新连接。</p></div></div>
+      <div class="sv-sheet__f">
+        <button class="sv-btn sv-btn--danger" id="qfDiscGo">断开并返回</button>
+        <button class="sv-btn" data-close="qfScrimConfirm">继续会话</button>
+      </div>
+    </div></div>
+  </div></div>`;
+}
+
+/* 设定 sheet 能力项（G4：原生能力一项不丢；驱动桥见 sessApplyCap） */
+const QF_CAP_DEFS = [
+  { key: 'lock', name: '键鼠锁定', desc: '锁定被控端本地键鼠', icon: 'lock', def: true },
+  { key: 'mute', name: '静音', desc: '关闭会话声音', icon: 'mute', def: false },
+  { key: 'bell', name: '通知', desc: '被控端通知转发', icon: 'bell', def: true },
+  { key: 'lang', name: '语言（输入法）', desc: '远端输入法切换', icon: 'globe', def: true },
+  { key: 'reg', name: '注册表', desc: '远程注册表编辑', icon: 'file', def: false },
+  { key: 'apps', name: '软件管理', desc: '被控端软件列表与卸载', icon: 'folder', def: false },
+  { key: 'events', name: '事件日志', desc: '被控端系统事件查看', icon: 'file', def: false },
+];
+function sessCaps() {
+  try { return JSON.parse(localStorage.getItem('qfSessCaps') || '{}'); } catch (e) { return {}; }
+}
+function sessCapOn(key) {
+  const c = sessCaps();
+  if (typeof c[key] === 'boolean') return c[key];
+  const d = QF_CAP_DEFS.find(x => x.key === key);
+  return d ? d.def : false;
+}
+/* 能力驱动桥：优先引擎未来钩子 QFCap(key,on)；其次原生设定对话框控件（选择器映射
+   待翻牌日按 phase-0 SELECTORS 纪律实捕后填 QF_CAP_NATIVE_MAP）；都不可用时仅记录
+   本地状态（开关行与状态字照常工作），不假报已生效。 */
+const QF_CAP_NATIVE_MAP = {};
+function sessApplyCap(key, on) {
+  try {
+    const w = Sess.frame && Sess.frame.contentWindow;
+    if (w && typeof w.QFCap === 'function') { w.QFCap(key, on); return true; }
+    const doc = Sess.frame && Sess.frame.contentDocument;
+    const sel = QF_CAP_NATIVE_MAP[key];
+    if (doc && sel) { const el = doc.querySelector(sel); if (el) { el.click(); return true; } }
+  } catch (e) {}
+  return false;
+}
+
+/* ---------- 会话视图 ---------- */
+Views.session = async function (view, param) {
+  teardownSession();
+  const gen = Sess.gen;
+  const ctx = (QF_SESS_CTX && (QF_SESS_CTX.name === param || QF_SESS_CTX.nodeid === param)) ? QF_SESS_CTX : null;
+  if (!ctx && param) {
+    let closed = '';
+    try { closed = sessionStorage.getItem('qfSessClosed') || ''; } catch (e) {}
+    if (closed && closed === param) { try { sessionStorage.removeItem('qfSessClosed'); } catch (e) {} navigate('devices'); return; }
+  }
+  const kind = ctx ? ctx.kind : 'desktop';
+  let name = ctx ? (ctx.name || '') : '';
+  let nodeid = ctx ? bareNodeId(ctx.nodeid || '') : '';
+  if (!name && param && param !== nodeid) name = param;
+  if (!nodeid && name) nodeid = nodeIdFor(name);
+  Sess.active = true; Sess.name = name; Sess.nodeid = nodeid; Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind] || 11;
+  try { Sess.kbMode = localStorage.getItem('qfKbMode') || 'auto'; } catch (e) { Sess.kbMode = 'auto'; }
+  view.innerHTML = sessionMarkup(name, kind);
+  const layerEl = view.querySelector('.qf-session-layer');
+  if (layerEl) layerEl.classList.add('qf-ext');   // 会话框为 body 级升格框：层转透明让位（见 session.css 正式版补充 3）
+  Sess.root = $('#qfViewer', view);
+  wireSession(view);
+  history.pushState({ qfSessTrap: 1 }, '', location.href);
+  Sess.trapArmed = true;
+  if (!nodeid && name) {
+    const r = await resolveDeviceId(name).catch(() => ({ ok: false, code: 'TIMEOUT' }));
+    if (gen !== Sess.gen || !Sess.active) return;
+    if (r && r.ok && r.nodeid) { nodeid = bareNodeId(r.nodeid); Sess.nodeid = nodeid; if (r.name) { Sess.name = r.name; const t = $('#qfTitle', view); if (t) t.textContent = r.name; } }
+    else { showSessionMask(view, (r && r.code) || 'TIMEOUT', r); return; }
+  }
+  if (!nodeid) { showSessionMask(view, 'NOT_FOUND', null); return; }
+  buildSessionFrame(view);
+};
+
+function sessionDeepLinkCurrent() { return sessionDeepLink(Sess.nodeid, Sess.vm); }
+/* 框导航唯一通道：恒走框内 location.replace —— 框 src 赋值会在联合历史里新增条目，
+   且当框的当前条目落后于顶层条目时，提交瞬间把顶层 URL 回卷到框上次导航时的位置
+   （影子 rig 实证：会话中切换设备被打回旧会话），replace 只覆写框的当前条目、
+   不新增、不回卷（phase-0 条 12「SPA 接管返回语义」的落地式）。 */
+function frameNavigate(url) {
+  const f = Sess.frame || QF_PRE.frame;
+  if (!f) return;
+  try { f.contentWindow.location.replace(url); return; } catch (e) {}
+  try { f.src = url; } catch (e) {}
+}
+
+function buildSessionFrame(view) {
+  Sess.t0 = performance.now(); Sess.state = 'connecting'; Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0;
+  /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
+  const m0 = view.querySelector('#qfMask'); if (m0) m0.hidden = true; Sess.mask = null;
+  /* 会话框恒为 body 级永驻框（预热框原地升格）：iframe 换父节点必被浏览器重载
+     （影子 rig 微实测证实），故全程不移动节点——同设备同形态直接升格续用，
+     异设备只换 src（一次正当导航）。层内 #qfFrameSlot 只作几何标尺。 */
+  if (!QF_PRE.frame) startSessionPreheat();
+  const f = QF_PRE.frame;
+  Sess.linkedVm = Sess.vm;
+  if (QF_PRE.nodeid !== Sess.nodeid || QF_PRE.vm !== Sess.vm) {
+    QF_PRE.nodeid = Sess.nodeid; QF_PRE.vm = Sess.vm; QF_PRE.ready = false; QF_PRE.t0 = performance.now();
+    f.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); onFrameLoad(view); };
+    Sess.frame = f;
+    frameNavigate(sessionDeepLinkCurrent());
+  } else {
+    f.onload = () => onFrameLoad(view);
+    onFrameLoad(view);
+  }
+  let bd = document.getElementById('qfSessBackdrop');
+  if (!bd) { bd = document.createElement('div'); bd.id = 'qfSessBackdrop'; bd.className = 'qf-session-backdrop'; }
+  if (bd.nextSibling !== f) f.parentNode.insertBefore(bd, f);
+  f.classList.remove('qf-preheat'); f.classList.add('qf-session-frame');
+  f.id = 'qfFrame'; f.title = '远程画面'; f.setAttribute('aria-label', '远程画面');
+  f.removeAttribute('aria-hidden'); f.tabIndex = 0;
+  Sess.frame = f; Sess.adopted = true;
+  /* 顶层 URL 规范化：本会话路由应恒为当前会话（防引擎内部历史回卷，条 12） */
+  try { const want = '#session/' + encodeURIComponent(Sess.name || Sess.nodeid); if (location.hash !== want) history.replaceState(null, '', want); } catch (e) {}
+  syncSessionFrameGeometry();
+  setTimeout(() => syncSessionFrameGeometry(), 80);
+  startSentinel(view);
+}
+/* 会话框几何 = 层内标尺槽的视口矩形（槽带 .sv-canvas 类，几何与 DS 画布全等） */
+function syncSessionFrameGeometry() {
+  const f = Sess.frame, slot = document.getElementById('qfFrameSlot');
+  if (!f || !slot || !slot.isConnected) return;
+  const r = slot.getBoundingClientRect();
+  f.style.left = r.left + 'px'; f.style.top = r.top + 'px';
+  f.style.width = Math.max(0, Math.round(r.width)) + 'px'; f.style.height = Math.max(0, Math.round(r.height)) + 'px';
+  try { const br = getComputedStyle(slot).borderRadius; if (br) f.style.borderRadius = br; } catch (e) {}
+}
+
+function onFrameLoad(view) {
+  injectFrameGuard();
+  if (Sess.pendingVm && Sess.pendingVm !== Sess.linkedVm) {
+    Sess.linkedVm = Sess.pendingVm; Sess.pendingVm = 0;
+    tryGo(Sess.linkedVm);
+  }
+}
+function injectFrameGuard() {
+  try {
+    const doc = Sess.frame && Sess.frame.contentDocument;
+    if (!doc || !doc.head || doc.getElementById('qfGuardStyle')) return;
+    const st = doc.createElement('style');
+    st.id = 'qfGuardStyle';
+    st.textContent = '#masthead,#page_leftbar,#topbar,#footer{display:none!important}';
+    doc.head.appendChild(st);
+  } catch (e) {}
+}
+function tryGo(vm) {
+  try {
+    const w = Sess.frame && Sess.frame.contentWindow;
+    if (w && typeof w.go === 'function') { w.go(vm); return true; }
+  } catch (e) {}
+  return false;
+}
+
+/* 哨兵：onload＋8 秒同源尺寸/结构观察＋一次自动重载＋三级错误卡（空白/被拒/无 id），
+   兼容模式顶层打开为用户主动触发的第 3 级（DS-DESIGN 哨兵规格）。 */
+function startSentinel(view) {
+  let tickN = 0;
+  const tick = () => {
+    if (!Sess.active || !Sess.frame) return;
+    tickN++;
+    Sess.timers.push(setTimeout(tick, tickN < 12 ? 250 : 700));   // 前密后疏：连接建立期 250ms 密探（徽标时延），稳定后 700ms
+    /* 顶层 URL 规范化守卫（条 12）：引擎内部历史若把顶层 URL 回卷到别处，
+       以 replaceState 静默复位本会话路由（不触发渲染）；用户退出走 popstate
+       链与 exitSession（Sess.active 先置假），不被本守卫打架。 */
+    try { const want = '#session/' + encodeURIComponent(Sess.name || Sess.nodeid); if (location.hash !== want) history.replaceState(null, '', want); } catch (e) {}
+    injectFrameGuard();
+    /* URL 规范化守卫：框内逃逸（丢 qfm 标记）拉回 hide 形态，上限 3 次防循环 */
+    try {
+      const href = Sess.frame.contentWindow.location.href;
+      if (href && href.indexOf('about:blank') !== 0 && href.indexOf('qfm=') < 0 && Sess.state !== 'failed' && Sess.guardN < 3) {
+        Sess.guardN++;
+        frameNavigate(sessionDeepLinkCurrent());
+        if (!Sess.guardToastShown) { Sess.guardToastShown = true; toast('已回到会话界面。', 'info'); }
+        return;
+      }
+    } catch (e) {}
+    const p = probeFrame();
+    const now = performance.now();
+    if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
+    if (Sess.state === 'connecting') {
+      if (p === 'connected') { setConnected(view); return; }
+      if (now - Sess.t0 > 8000) {
+        if (!Sess.reloaded) {
+          Sess.reloaded = true; Sess.t0 = now;
+          try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
+        } else { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
+      }
+    } else if (Sess.state === 'connected') {
+      if (p === 'lost') { setLost(view); return; }
+      if (p === 'blank') {
+        if (!Sess.blankSince) Sess.blankSince = now;
+        else if (now - Sess.blankSince > 16000) { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
+      } else Sess.blankSince = 0;
+    } else if (Sess.state === 'lost') {
+      if (p === 'connected') { setConnected(view); return; }
+    }
+  };
+  Sess.timers.push(setTimeout(tick, 250));
+}
+function probeFrame() {
+  let doc = null, w = null;
+  try { w = Sess.frame.contentWindow; doc = Sess.frame.contentDocument; } catch (e) { return 'blank'; }
+  if (!doc || !doc.body) return 'blank';
+  /* 身份先行：框内当前文档必须是本会话目标设备的融合页——预热暖页（qfm=warm）
+     本身也带桌面画布与 Connected 字样，帧导航未提交时误判「已连接」即假绿
+     （影子 rig 重载荷实证）。非目标文档一律按绑定中处理。 */
+  try {
+    const href = String(w.location.href || '');
+    if (href.indexOf('node=' + Sess.nodeid) < 0 || href.indexOf('qfm=frame') < 0) return 'binding';
+  } catch (e) { return 'binding'; }
+  try {
+    if (/login/i.test(w.location.pathname || '') || doc.querySelector('#loginform, form[action*="login" i]')) return 'reject';
+  } catch (e) {}
+  const st = doc.querySelector('#deskstatus');
+  const stTxt = st ? String(st.textContent || '') : '';
+  if (/disconnect|not connected|断开|未连接/i.test(stTxt)) return 'lost';
+  const desk = doc.querySelector('#Desk');
+  /* 桌面形态的「已连接」须状态文本给出完整 Connected（Connecting 不算）且画布有尺寸：
+     画布元素在文档刚提交时即带属性尺寸，仅凭画布判连会在引擎尚在加载时假绿（rig 实证） */
+  if (Sess.vm === 11 && desk && desk.width > 10 && desk.height > 10 && (/^\s*connected\b/i.test(stTxt) || stTxt.indexOf('已连接') >= 0)) return 'connected';
+  if (Sess.vm === 12) { const p12 = doc.querySelector('#p12'); if (p12 && p12.offsetParent !== null) return 'connected'; }
+  if (Sess.vm === 13) { const p13 = doc.querySelector('#p13'); if (p13 && p13.offsetParent !== null) return 'connected'; }
+  if (desk || doc.querySelector('#p11')) return 'binding';
+  return 'blank';
+}
+function setBadge(view, kind, txt) {
+  const b = $('#qfBadge', view); if (!b) return;
+  b.className = 'sv-badge' + (kind ? ' sv-badge--' + kind : '');
+  const t = $('#qfBadgeTxt', view); if (t) t.textContent = txt;
+}
+function setConnected(view) {
+  Sess.state = 'connected';
+  Sess.connectMs = Math.round(performance.now() - Sess.t0);
+  const c = $('#qfConnecting', view); if (c) c.hidden = true;
+  const s = $('#qfStrip', view); if (s) s.hidden = true;
+  setBadge(view, '', '已连接');
+  if (Sess.name) { try { localStorage.setItem('qfLastSessionDevice', Sess.name); } catch (e) {} }
+}
+function setLost(view) {
+  Sess.state = 'lost';
+  Sess.discN++;
+  const s = $('#qfStrip', view); if (s) s.hidden = false;
+  const t = $('#qfStripTxt', view); if (t) t.textContent = '连接中断，正在自动重连（第 ' + Sess.discN + ' 次）';
+  setBadge(view, 'retry', '重连中');
+}
+function showSessionMask(view, code, r) {
+  const m = $('#qfMask', view); if (!m) return;
+  const T = $('#qfMaskT', view), D = $('#qfMaskD', view), cands = $('#qfMaskCands', view);
+  const retry = view.querySelector('[data-act="retry"]'), back = view.querySelector('[data-act="mask-back"]'), compat = $('#qfCompatBtn', view);
+  const cn = $('#qfConnecting', view); if (cn) cn.hidden = true;
+  if (cands) cands.innerHTML = '';
+  if (compat) compat.hidden = true;
+  if (retry) retry.className = 'sv-btn sv-btn--primary';
+  if (back) back.className = 'sv-btn';
+  Sess.maskCode = code;
+  if (code === 'REJECT') {
+    T.textContent = '无法建立会话';
+    D.textContent = '你没有这台设备的远程控制权限，请联系设备管理员为你开通。';
+    if (back) back.className = 'sv-btn sv-btn--primary';
+    if (retry) retry.className = 'sv-btn';
+  } else if (code === 'OFFLINE') {
+    T.textContent = '设备当前不在线';
+    D.textContent = '设备离线时无法建立会话，请确认设备已开机并联网后重试。';
+    if (back) back.className = 'sv-btn sv-btn--primary';
+    if (retry) retry.className = 'sv-btn';
+  } else if (code === 'AMBIGUOUS') {
+    T.textContent = '找到多台同名设备';
+    D.textContent = '请选择要连接的设备：';
+    if (cands && r && Array.isArray(r.candidates)) {
+      cands.innerHTML = r.candidates.map(c => `<button class="sv-btn" data-cand="${esc(c.nodeid)}" style="margin:4px 4px 0 0">${esc(c.name || c.nodeid)}${c.online ? '' : '（离线）'}</button>`).join('');
+      cands.querySelectorAll('[data-cand]').forEach(b => b.onclick = () => {
+        Sess.nodeid = bareNodeId(b.getAttribute('data-cand'));
+        m.hidden = true;
+        const cn2 = $('#qfConnecting', view); if (cn2) cn2.hidden = false;
+        buildSessionFrame(view);
+      });
+    }
+  } else if (code === 'NOT_FOUND') {
+    T.textContent = '无法定位这台设备';
+    D.textContent = '未能取得设备的连接标识，请稍后重试，或使用兼容模式打开。';
+    if (compat) compat.hidden = false;
+  } else { /* FAIL / TIMEOUT */
+    T.textContent = '会话组件加载失败';
+    D.textContent = '请检查网络后重试。';
+    if (compat) compat.hidden = false;
+  }
+  m.hidden = false;
+}
+
+/* ---------- 会话内交互 ---------- */
+function wireSession(view) {
+  const root = Sess.root;
+  const SCRIMS = ['qfScrimSend', 'qfScrimSettings', 'qfScrimConfirm'];
+  const openSheet = (id) => SCRIMS.forEach(s => { const el = document.getElementById(s); if (!el) return; if (s === id) { el.hidden = false; void el.offsetWidth; el.dataset.open = 'true'; } else { el.dataset.open = 'false'; el.hidden = true; } });
+  const closeSheet = (id) => { const el = document.getElementById(id); if (el) { el.dataset.open = 'false'; el.hidden = true; } };
+  const closeAllSheets = () => SCRIMS.forEach(s => closeSheet(s));
+  const anySheetOpen = () => SCRIMS.some(s => { const el = document.getElementById(s); return el && el.dataset.open === 'true'; });
+  Sess._closeAllSheets = closeAllSheets; Sess._anySheetOpen = anySheetOpen;
+  root.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeSheet(b.getAttribute('data-close')));
+  root.querySelectorAll('.sv-seg__btn').forEach(b => b.onclick = () => setMorph(view, b.getAttribute('data-morph')));
+  const act = (n) => root.querySelector('[data-act="' + n + '"]');
+  act('settings').onclick = () => openSheet('qfScrimSettings');
+  act('send-to-phone').onclick = () => { resetSendSheet(view); openSheet('qfScrimSend'); };
+  act('fullscreen').onclick = () => setFs(view, root.dataset.fs !== 'true');
+  act('exit-fullscreen').onclick = () => setFs(view, false);
+  act('disconnect').onclick = () => openSheet('qfScrimConfirm');
+  act('back').onclick = () => { if (!sessionBackChain(view)) exitSession(); };
+  act('retry').onclick = () => retryFromMask(view);
+  act('mask-back').onclick = () => exitSession();
+  act('compat').onclick = () => {
+    /* 兼容模式＝用户主动触发的顶层打开（哨兵第 3 级），离开融合视图、事后审计有记 */
+    const url = Sess.nodeid ? sessionDeepLink(Sess.nodeid, Sess.vm).replace('&qfm=frame&hide=31', '') : QF_CANON_ORIGIN;
+    location.assign(url);
+  };
+  $('#qfDiscGo', view).onclick = () => exitSession();
+  wireSendSheet(view);
+  /* 设定：终端键盘二选项（DS2 §1.3/§4.3；[data-kb="manual"] 机制，D-11） */
+  root.querySelectorAll('[data-kbmode]').forEach(o => o.onclick = () => {
+    Sess.kbMode = o.getAttribute('data-kbmode');
+    try { localStorage.setItem('qfKbMode', Sess.kbMode); } catch (e) {}
+    root.querySelectorAll('[data-kbmode]').forEach(x => x.setAttribute('aria-checked', x === o ? 'true' : 'false'));
+    updateKbBtn(view);
+  });
+  updateKbBtn(view);
+  /* 设定：能力开关（状态字＋本地持久化＋驱动桥尝试） */
+  root.querySelectorAll('[data-cap]').forEach(o => o.onclick = () => {
+    const key = o.getAttribute('data-cap');
+    const on = o.getAttribute('aria-checked') !== 'true';
+    o.setAttribute('aria-checked', on ? 'true' : 'false');
+    const chip = o.parentElement.querySelector('.sv-opt__s');
+    if (chip) { chip.textContent = on ? '已开启' : '已关闭'; chip.classList.toggle('sv-opt__s--ok', on); }
+    const c = sessCaps(); c[key] = on;
+    try { localStorage.setItem('qfSessCaps', JSON.stringify(c)); } catch (e) {}
+    sessApplyCap(key, on);
+  });
+  /* 终端输入行（bp-form 820 以下、终端形态显示；DS2 §4.3 软键盘 dvh 锁高在下方视口监听） */
+  const form = $('#qfInput', view), field = $('#qfInputField', view);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = field.value;
+    if (!v) return;
+    sendTermText(v + '\r');
+    field.value = '';
+  });
+  $('#qfKbBtn', view).onclick = () => { field.focus(); };
+  field.addEventListener('focus', () => { if (Sess.kbMode === 'auto') updateKbBtn(view); });
+  /* 返回链（A4 合并）：sheet → 全屏 → 断开确认 → 设备详情（确认已开时再退＝真退出）。
+     浏览器返回先于本处理把 URL 改到上一条，链内消化时以 pushState 复位会话 URL
+     （伴随的同会话渲染由 render 的活性守卫跳过）；链走完直接 exitSession 收尾。 */
+  sessOn(window, 'popstate', () => {
+    if (!Sess.active || !Sess.trapArmed) return;
+    if (sessionBackChain(view)) {
+      history.pushState({ qfSessTrap: 1 }, '', '#session/' + encodeURIComponent(Sess.name || Sess.nodeid));
+    } else { Sess.trapArmed = false; exitSession(); }
+  });
+  sessOn(document, 'fullscreenchange', () => {
+    if (!Sess.active) return;
+    root.dataset.fs = document.fullscreenElement ? 'true' : 'false';
+    setTimeout(() => syncSessionFrameGeometry(), 60);
+  });
+  sessOn(window, 'resize', () => syncSessionFrameGeometry());
+  sessOn(document, 'keydown', (e) => {
+    if (!Sess.active || e.key !== 'Escape') return;
+    if (anySheetOpen()) { closeAllSheets(); return; }
+    if (root.dataset.fs === 'true') setFs(view, false);
+  });
+  /* 软键盘弹出时以 visualViewport 高度锁定会话层（dvh 锁高，DS2 §4.3） */
+  if (window.visualViewport) {
+    const layer = view.querySelector('.qf-session-layer');
+    const onVv = () => {
+      if (!Sess.active || !layer) return;
+      const vv = window.visualViewport;
+      if (vv.height < window.innerHeight * 0.78) { layer.style.height = vv.height + 'px'; layer.style.top = vv.offsetTop + 'px'; }
+      else { layer.style.height = ''; layer.style.top = ''; }
+      syncSessionFrameGeometry();
+    };
+    sessOn(window.visualViewport, 'resize', onVv);
+  }
+  applyMorphChrome(view);
+}
+function sessionBackChain(view) {
+  /* 返回 true＝链内消化（留在会话）；false＝链已走完（应退出到设备详情） */
+  if (Sess._anySheetOpen && Sess._anySheetOpen()) {
+    const c = document.getElementById('qfScrimConfirm');
+    if (c && c.dataset.open === 'true') { Sess._closeAllSheets(); return false; }
+    Sess._closeAllSheets(); return true;
+  }
+  if (Sess.root && Sess.root.dataset.fs === 'true') { setFs(view, false); return true; }
+  const c = document.getElementById('qfScrimConfirm');
+  if (c) { c.hidden = false; void c.offsetWidth; c.dataset.open = 'true'; }
+  return true;
+}
+function retryFromMask(view) {
+  const m = $('#qfMask', view); if (m) m.hidden = true;
+  const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
+  setBadge(view, 'wait', '连接中');
+  if ((Sess.maskCode === 'NOT_FOUND' || Sess.maskCode === 'OFFLINE' || Sess.maskCode === 'TIMEOUT' || Sess.maskCode === 'AMBIGUOUS') && Sess.name && !Sess.nodeid) {
+    const gen = Sess.gen;
+    resolveDeviceId(Sess.name).then(r => {
+      if (gen !== Sess.gen || !Sess.active) return;
+      if (r && r.ok && r.nodeid) { Sess.nodeid = bareNodeId(r.nodeid); buildSessionFrame(view); }
+      else showSessionMask(view, (r && r.code) || 'TIMEOUT', r);
+    }).catch(() => { if (gen === Sess.gen) showSessionMask(view, 'TIMEOUT', null); });
+    return;
+  }
+  if (Sess.frame && Sess.nodeid) { Sess.state = 'connecting'; Sess.t0 = performance.now(); Sess.reloaded = true; try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {} }
+  else if (!Sess.frame && Sess.nodeid) buildSessionFrame(view);
+}
+function exitSession() {
+  const name = Sess.name;
+  teardownSession();
+  QF_SESS_CTX = null;
+  /* A4 收尾：当前条目 replaceState 为设备详情（不留会话条目）；历史里更深一层的
+     旧会话条目以 sessionStorage 关闭标记拦截重开（Views.session 入口校验）。 */
+  try { sessionStorage.setItem('qfSessClosed', name || ''); } catch (e) {}
+  try { history.replaceState(null, '', name ? ('#device/' + encodeURIComponent(name)) : '#devices'); } catch (e) {}
+  render();
+  startSessionPreheat();
+}
+function setFs(view, on) {
+  const root = Sess.root; if (!root) return;
+  root.dataset.fs = on ? 'true' : 'false';
+  setTimeout(() => syncSessionFrameGeometry(), 60);
+  try {
+    if (on) { const p = root.requestFullscreen && root.requestFullscreen(); if (p && p.catch) p.catch(() => {}); }
+    else if (document.fullscreenElement) { const p = document.exitFullscreen(); if (p && p.catch) p.catch(() => {}); }
+  } catch (e) {}
+}
+function applyMorphChrome(view) {
+  const form = $('#qfInput', view);
+  if (form) form.hidden = !(Sess.kind === 'terminal' && window.matchMedia && window.matchMedia('(max-width: 820px)').matches);
+  if (Sess.kind === 'terminal' && Sess.kbMode === 'auto' && window.matchMedia && window.matchMedia('(max-width: 820px)').matches) {
+    const f = $('#qfInputField', view); if (f) setTimeout(() => { try { f.focus({ preventScroll: true }); } catch (e) {} }, 350);
+  }
+}
+function setMorph(view, kind) {
+  if (!QF_SESSION_VM[kind] || kind === Sess.kind) return;
+  Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind];
+  Sess.root.dataset.morph = kind;
+  Sess.root.querySelectorAll('.sv-seg__btn').forEach(b => b.setAttribute('aria-selected', b.getAttribute('data-morph') === kind ? 'true' : 'false'));
+  applyMorphChrome(view);
+  syncSessionFrameGeometry();
+  if (Sess.frame && Sess.linkedVm !== Sess.vm) {
+    if (tryGo(Sess.vm)) { Sess.linkedVm = Sess.vm; }
+    else if (Sess.state === 'connected' || Sess.state === 'lost') {
+      /* go() 不可用（引擎未就绪/异版）：退化换链重建（会断连，非常态路径，仅兜底） */
+      Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
+      const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
+      setBadge(view, 'wait', '连接中');
+      frameNavigate(sessionDeepLinkCurrent());
+    } else Sess.pendingVm = Sess.vm;
+  }
+}
+function updateKbBtn(view) {
+  const b = $('#qfKbBtn', view);
+  if (b) b.classList.toggle('sv-iconbtn--brand', Sess.kbMode === 'manual');
+}
+/* 终端输入转发：优先框内终端真实输入元（insertText），其次向框内文档派发按键事件；
+   引擎终端输入元选择器以翻牌日实捕为准（phase-0 SELECTORS 纪律），此处为最佳努力实现。 */
+function sendTermText(text) {
+  let doc = null, w = null;
+  try { w = Sess.frame.contentWindow; doc = Sess.frame.contentDocument; } catch (e) { return false; }
+  if (!doc) return false;
+  try {
+    const ta = doc.querySelector('#p12 textarea, #p12 input[type="text"], textarea.xterm-helper-textarea, #termInput');
+    if (ta) { ta.focus(); doc.execCommand('insertText', false, text); return true; }
+    Sess.frame.focus();
+    for (const ch of text) {
+      const opts = { key: ch === '\r' ? 'Enter' : ch, bubbles: true, cancelable: true };
+      doc.dispatchEvent(new w.KeyboardEvent('keydown', opts));
+      doc.dispatchEvent(new w.KeyboardEvent('keypress', opts));
+      doc.dispatchEvent(new w.KeyboardEvent('keyup', opts));
+    }
+    return true;
+  } catch (e) { return false; }
+}
+/* 发送到手机（会话邀请）：四态 idle/picking/sending/sent/failed，失败文案照 DS2 §2.6 */
+function resetSendSheet(view) {
+  const l = $('#qfSendList', view), s = $('#qfSendSent', view), f = $('#qfSendFail', view);
+  if (l) l.hidden = false; if (s) s.hidden = true; if (f) f.hidden = true;
+  const go = $('#qfSendGo', view); if (go) { go.disabled = false; go.textContent = '发送'; }
+}
+function wireSendSheet(view) {
+  const go = $('#qfSendGo', view); if (!go || go._qfWired) return; go._qfWired = true;
+  go.onclick = async () => {
+    go.disabled = true; go.textContent = '发送中…';
+    const payload = JSON.stringify({ v: 1, kind: 'session', nodeid: Sess.nodeid, vm: Sess.vm, from: ctrlInstanceId(), at: Date.now() });
+    let okSend = false;
+    try {
+      const r = await api('/license/api/files/send', { method: 'POST', json: { filename: 'qf-invite-' + Sess.nodeid + '.json', toNode: QF_CTRL_MAILBOX, fromNode: Sess.nodeid, contentBase64: btoa(payload) } });
+      okSend = !!(r.json && r.json.ok);
+    } catch (e) { okSend = false; }
+    if (!Sess.active) return;
+    if (okSend) {
+      const l = $('#qfSendList', view), s = $('#qfSendSent', view);
+      if (l) l.hidden = true; if (s) s.hidden = false;
+    } else {
+      const l = $('#qfSendList', view), f = $('#qfSendFail', view);
+      if (l) l.hidden = true; if (f) f.hidden = false;
+    }
+  };
+  const rt = $('#qfSendRetry', view); if (rt) rt.onclick = () => resetSendSheet(view);
+}
 
 /* ================= 设备 ================= */
 Views.devices = async function (view) {
@@ -1375,8 +2089,12 @@ Views.devices = async function (view) {
     <div class="tabs"><button class="on" data-tab="all">全部设备</button><button data-tab="mine">我的设备</button><button data-tab="shared">好友共享</button></div>
     <div id="devList"><div class="card"><div class="skel" style="height:52px"></div></div></div>
     <div class="note blue">可把文件发送到同账号的另一台设备（单文件上限 200 MB，离线暂存 24 小时）：在「我的文件」页选择「发送文件到其他设备」即可。</div>`;
-  // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染
-  fetchNodeMap().catch(() => {});
+  // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染；
+  // 落地后把节点 id 盖进设备行（数据携带解析），并把上次会话设备升级为深链预热
+  fetchNodeMap().then(() => {
+    refreshDevRowIds(view);
+    try { const last = localStorage.getItem('qfLastSessionDevice'); const id = last && nodeIdFor(last); if (id) upgradePreheat(id, 11); } catch (e) {}
+  }).catch(() => {});
   const st = await api('/home/api/stats');
   if (st.status === 200 && st.json && st.json.ok) S.stats = st.json;
   const mine = (S.stats && S.stats.devices) || [];
@@ -1634,17 +2352,31 @@ async function loadInboxList(root) {
   const nm = await fetchNodeMap();
   const devs = (S.stats && S.stats.devices) || [];
   const targets = devs.filter(d => nm.byName.has(d.name));
-  if (!targets.length) { box.innerHTML = '<div class="statebox"><b>暂无可查询的设备</b><p>设备上线并取得节点标识后，待接收文件将显示在这里。</p></div>'; return; }
   let all = [];
   for (const d of targets) {
     const r = await api('/license/api/files/inbox?node=' + encodeURIComponent(nm.byName.get(d.name)));
     if (r.json && r.json.ok && Array.isArray(r.json.files)) all = all.concat(r.json.files.map(f => Object.assign({}, f, { _toName: d.name })));
   }
+  /* 2.4.0 发送到手机：ctrl 账号邮箱一并汇总（会话邀请＋发到本机的文件，#25 通道） */
+  const ctrlR = await api('/license/api/files/inbox?node=' + encodeURIComponent(QF_CTRL_MAILBOX));
+  if (ctrlR.json && ctrlR.json.ok && Array.isArray(ctrlR.json.files)) all = all.concat(ctrlR.json.files.map(f => Object.assign({}, f, { _toName: '这台手机', _ctrl: true })));
+  if (!targets.length && !all.length) { box.innerHTML = '<div class="statebox"><b>暂无可查询的设备</b><p>设备上线并取得节点标识后，待接收文件将显示在这里。</p></div>'; return; }
   if (!all.length) { box.innerHTML = '<div class="statebox"><b>暂无待接收文件</b><p>其他设备发送给您的文件将显示在这里（暂存 24 小时）。</p></div>'; return; }
   box.innerHTML = all.map(f => {
     const fromName = (f.fromNode && nm.byId.get(f.fromNode)) || (f.fromNode ? '其他设备' : '网页端');
+    const inv = f._ctrl && /^qf-invite-([A-Za-z0-9_-]+)\.json$/.exec(f.filename || '');
+    if (inv) {
+      const targetName = nm.byId.get(inv[1]) || '远程设备';
+      return `<div class="dev"><span class="devic">${ic('phone')}</span><span><b>会话邀请：${esc(targetName)}</b><small>来自 ${esc(fromName)} · 发送到这台手机 · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-open-invite="${esc(f.id)}" data-inv-node="${esc(inv[1])}">打开会话</button></span></div>`;
+    }
     return `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(f.filename)}</b><small>${esc(fmtSize(f.size))} · 来自 ${esc(fromName)} · 接收到 ${esc(f._toName)} · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-dl="${esc(f.id)}" data-fn="${esc(f.filename)}">下载</button></span><div class="bar" data-dlbar="${esc(f.id)}" hidden style="flex-basis:100%"><i style="width:0%"></i></div></div>`;
   }).join('');
+  box.querySelectorAll('[data-open-invite]').forEach(btn => btn.onclick = async () => {
+    const id = btn.getAttribute('data-open-invite'), nodeid = bareNodeId(btn.getAttribute('data-inv-node') || '');
+    btn.disabled = true; btn.textContent = '打开中…';
+    await api('/license/api/files/' + encodeURIComponent(id) + '/ack', { method: 'POST', json: {} }).catch(() => {});
+    openSession('desktop', { name: nm.byId.get(nodeid) || '', nodeid });
+  });
   box.querySelectorAll('[data-dl]').forEach(btn => btn.onclick = async () => {
     const id = btn.getAttribute('data-dl'), fn = btn.getAttribute('data-fn');
     const barEl = box.querySelector('[data-dlbar="' + CSS.escape(id) + '"]');
@@ -1673,7 +2405,7 @@ async function loadSentList(root) {
   if (!files.length) { box.innerHTML = '<div class="statebox"><b>暂无发出记录</b><p>您发送到其他设备的文件及送达状态将显示在这里。</p></div>'; return; }
   const stText = { staged: '待接收', delivered: '已送达', expired: '已过期' };
   box.innerHTML = files.map(f => {
-    const toName = (f.toNode && nm.byId.get(f.toNode)) || '其他设备';
+    const toName = (f.toNode && f.toNode.indexOf('ctrl:') === 0) ? '这台手机' : ((f.toNode && nm.byId.get(f.toNode)) || '其他设备');
     const st = stText[f.status] || f.status || '';
     return `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(f.filename)}</b><small>${esc(fmtSize(f.size))} · 发送到 ${esc(toName)} · ${esc(fmtDate(f.createdAt))}${f.status === 'delivered' && f.deliveredAt ? ' · 送达于 ' + esc(fmtDate(f.deliveredAt)) : ''}</small></span><span class="ops"><span class="pill ${f.status === 'delivered' ? 'ok' : (f.status === 'expired' ? 'err' : 'warn')}">${esc(st)}</span></span></div>`;
   }).join('');
@@ -1691,12 +2423,10 @@ Views.files = async function (view, name) {
   loadSentList(view);
   if (name) toast('已定位设备：' + name + '，点「文件管理」进入。', 'info');
 };
-/* ================= 远程桌面（原生直达跳板） =================
-   站长 2026-10-26 裁定＋丙案：回归 MeshCentral 原生概念——点设备直接进桌面。
-   本视图不再承载任何界面：进入即顶层跳转到该设备的原生桌面视图。 */
+/* ================= 远程桌面（旧跳板路由，2.4.0 起改道会话融合视图） =================
+   历史链接/菜单仍可落到 #/remote/<设备名>：不再顶层跳原生页，统一改道 openSession。 */
 Views.remote = async function (view, name) {
-  view.innerHTML = `<div class="statebox"><b>正在打开远程桌面</b><p>正在进入${name ? '「' + esc(name) + '」' : '设备'}的远程桌面…</p></div>`;
-  openNativeDesktop(name || '');
+  openSession('desktop', { name: name || '' });
 };
 
 /* ================= 好友 ================= */
