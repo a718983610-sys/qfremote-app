@@ -3,6 +3,7 @@
 - 快照时点：2026-10-26 13:31–13:34 CST，从东京服务器（tokyo-node-1）与本机 Windows 壳源码树实拉。
 - 入库原则：**以线上现行字节为初始提交**；下表每个文件的 MD5 与线上原件逐项比对一致（87/87，加 ai-config.json 与 dispatcher-pubkey.txt 两件清单外实拉件共 89 件服务端文件全对齐）。
 - 本表为初始对账存档；此后的现行指纹以 `ops/drift-check.sh` 的实时比对为准，本表不手工维护。
+- **2026-10-29 冻结前终轮刷新（freeze-paperwork-20261029）**：批 A／B／C 收口后以 live 字节全行复核 163 行，11 行更新为现行值（ext files-core／license-core／server.js、forum forum.html／server.js、friends chat-server.js／friends.html／lock-bridge.js／server.js、loginshim server.js、nginx qfremote-proxy），余 152 行与现行字节一致；明细见 patrol-20261026/work/freeze-paperwork-20261029/REPORT.md。
 - 注意：本快照含当日各补丁线的最新部署（如 webapp app.js 已含 13:22 的 adminqueue 补丁，md5 `c0c38b4f…`；ext server.js/license-core.js/page.js 的现行值与巡查台账 SUP 的旧登记不符，以本次实拉为准——这类不一致正是漂移巡查要日日盯住的东西）。
 
 ## 一、服务端与网页端（server/）
@@ -20,28 +21,28 @@
 | server/ext/assets/pay-cards/pay-wechat-9.9.png | /opt/qfremote-ext/assets/pay-cards/pay-wechat-9.9.png | `f41fa1a3de5b385dbe0575ea7d87ac14` |
 | server/ext/assets/pay-example.jpg | /opt/qfremote-ext/assets/pay-example.jpg | `838c2588ef99c3cb8d6a638f1a8d57d0` |
 | server/ext/events-core.js | /opt/qfremote-ext/events-core.js | `5fc3566cab3bd30e8895f30377e68c16` |
-| server/ext/files-core.js | /opt/qfremote-ext/files-core.js | `847d4c4ec0be3c42624812be2d3f8ccd` |
+| server/ext/files-core.js | /opt/qfremote-ext/files-core.js | `9f19b58189ded0da7e7bf4150a475bf3` |
 | server/ext/home-page.js | /opt/qfremote-ext/home-page.js | `fa0dc90eee857b6b4578f6d79fc6971e` |
-| server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `3220a07c333fba561c60c3c815534e4e` |
+| server/ext/license-core.js | /opt/qfremote-ext/license-core.js | `2984c2eaf7cb4d93dee61f8a6bc2c88c` |
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `e53f940113be465d7b27c746243ed2cf` |
 | server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
 | server/ext/page.js | /opt/qfremote-ext/page.js | `6218a7480ce378f5ffb66e937a6155d6` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `12e99c9d46b207850b3b7fbbd85b9a3c` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `5bc1e53d0d16acc1439127f9bc3b6603` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `1c65d6dada7a0ab765585929756c44ec` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
 | server/ext/test-points.js | /opt/qfremote-ext/test-points.js | `8863c2daff65b567cceea8100993e344` |
 | server/forum/feedback.js | /opt/qfremote-forum/feedback.js | `782c79a26b81925c66d0f6e202c0a673` |
-| server/forum/forum.html | /opt/qfremote-forum/forum.html | `ba8aeb4ed18a990deb7f56ae6fc643fd` |
+| server/forum/forum.html | /opt/qfremote-forum/forum.html | `1a7bc72cc55b62b904190257be455cc8` |
 | server/forum/review.js | /opt/qfremote-forum/review.js | `f89d5827d1a715ff5ede0bc4b03fe0b4` |
-| server/forum/server.js | /opt/qfremote-forum/server.js | `2d7208ee17eb4d88ddd59680859d46d1` |
+| server/forum/server.js | /opt/qfremote-forum/server.js | `987b606459f096e85b35eba385741ec6` |
 | server/forum/words-seed.js | /opt/qfremote-forum/words-seed.js | `90a0d9235addc857aa3788955795dfcc` |
 | server/friends/chat/DESIGN.md | /opt/qfremote-friends/chat/DESIGN.md | `beb5c7c870e019486360165b0595a920` |
 | server/friends/chat/chat-client.js | /opt/qfremote-friends/chat/chat-client.js | `29ea090152d52a66462b686737782ec3` |
-| server/friends/chat/chat-server.js | /opt/qfremote-friends/chat/chat-server.js | `715cd3217cc2d462ff05106b532dd31e` |
+| server/friends/chat/chat-server.js | /opt/qfremote-friends/chat/chat-server.js | `190c556025ffc0593e98edecfbd63280` |
 | server/friends/chat/chat.html | /opt/qfremote-friends/chat/chat.html | `3f7927b30e399d4a4239f99b3fd30b57` |
 | server/friends/chat/config.sample.json | /opt/qfremote-friends/chat/config.sample.json | `f65f35754ca2c30bb8df3832390fb881` |
 | server/friends/chat/crypto-core.js | /opt/qfremote-friends/chat/crypto-core.js | `d826dd146dae5832b5c4cbe18d7c6805` |
@@ -52,12 +53,12 @@
 | server/friends/chat/qfremote-chat.service.draft | /opt/qfremote-friends/chat/qfremote-chat.service.draft | `7b437bcf00e9c18fb2c8e9cd7d2e0a4d` |
 | server/friends/chat/support-faq.json | /opt/qfremote-friends/chat/support-faq.json | `ddedde1af0eec64fb0270df205fbda5b` |
 | server/friends/chat/test-e2e.js | /opt/qfremote-friends/chat/test-e2e.js | `f027a7650394e95ee855fdd71a5a5301` |
-| server/friends/friends.html | /opt/qfremote-friends/friends.html | `df1dae4d733bdea435e05eb045036038` |
-| server/friends/lock-bridge.js | /opt/qfremote-friends/lock-bridge.js | `01176b28792385183ad7a357bc3883e6` |
+| server/friends/friends.html | /opt/qfremote-friends/friends.html | `e028cca9e7df1186b21022e195326892` |
+| server/friends/lock-bridge.js | /opt/qfremote-friends/lock-bridge.js | `377dee4e0690fde79a8c39546934d560` |
 | server/friends/lock-envelope.js | /opt/qfremote-friends/lock-envelope.js | `533f8000a331c0b63dc260fb0970f860` |
 | server/friends/logout-bridge.html | /opt/qfremote-friends/logout-bridge.html | `806f944a31424d10439ee2cbe20f9d72` |
 | server/friends/qf-wrap.html | /opt/qfremote-friends/qf-wrap.html | `d23be0c21a506e71e02ff14f0b03553f` |
-| server/friends/server.js | /opt/qfremote-friends/server.js | `cb5d3240ac26a7ddcdbb0aaf51503381` |
+| server/friends/server.js | /opt/qfremote-friends/server.js | `40a76a63ba1112e5d770d56da8aed488` |
 | server/friends/support/INTEGRATION.md | /opt/qfremote-friends/support/INTEGRATION.md | `fa296bb20252a0748e1b4085c18be565` |
 | server/friends/support/ai-channel.js | /opt/qfremote-friends/support/ai-channel.js | `5a7a6c400dac441354a6c9b7d6e2e14b` |
 | server/friends/support/build-review.js | /opt/qfremote-friends/support/build-review.js | `f773ed1a5094f78f9de9482a3104e2c3` |
@@ -77,13 +78,13 @@
 | server/loginshim/appeal-admin.js | /opt/qfremote-loginshim/appeal-admin.js | `1fa8a05e0835f680b1916b886f90e85c` |
 | server/loginshim/appeal-review.js | /opt/qfremote-loginshim/appeal-review.js | `41b162da554825ec2a75768b15ea0166` |
 | server/loginshim/apply-pass.js | /opt/qfremote-loginshim/apply-pass.js | `07b4158257b9aa7a1ca01a537bd5be7c` |
-| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `345f40f348da5ea50ee16371f8ff853c` |
+| server/loginshim/server.js | /opt/qfremote-loginshim/server.js | `3cad00a6ec3308d35643b70056783f10` |
 | server/meshcentral/public/release.json | /opt/meshcentral/meshcentral-web/public/release.json | `dd15b8a85cd685cf5fa8ab0631e6ad6a` |
 | server/meshcentral/public/scripts/custom.js | /opt/meshcentral/meshcentral-web/public/scripts/custom.js | `9e83dfade11fdb8bae57b35df59ee614` |
 | server/meshcentral/views/login2.handlebars | /opt/meshcentral/meshcentral-web/views/login2.handlebars | `75cc985f294870e10ac39a6e9ea43a2d` |
 | server/meshcentral/views/translations/login2_zh-chs.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-chs.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
 | server/meshcentral/views/translations/login2_zh-cht.handlebars | /opt/meshcentral/meshcentral-web/views/translations/login2_zh-cht.handlebars | `1eb59fb5611be2bd8ae0e9f4d3d88f4e` |
-| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `e0dc99febb2b546b742088005f2ce6f7` |
+| server/nginx/qfremote-proxy | /etc/nginx/sites-enabled/qfremote-proxy | `9cb19dad137d44981b190734c48c82c6` |
 | server/register/README.md | /opt/qfremote-register/README.md | `527556ba06903beaeb3959cf728ef23f` |
 | server/register/register.html | /opt/qfremote-register/register.html | `4094a720db44d5172feda7cb02fa9f49` |
 | server/register/server.js | /opt/qfremote-register/server.js | `1446bfdba5b2344b4da0cbbfaf40101c` |
