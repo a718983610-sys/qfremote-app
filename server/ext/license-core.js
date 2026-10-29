@@ -267,10 +267,31 @@ function createLicenseCore(opts) {
   }
   function expireBans(now) {
     let changed = false;
+    const deviceHashesToRecheck = new Set();
     for (const b of state.bans) {
-      if (b.status === 'active' && b.endsAt && b.endsAt <= now) { b.status = 'expired'; b.liftedAt = now; b.liftedBy = 'auto-expire'; changed = true; }
+      if (b.status === 'active' && b.endsAt && b.endsAt <= now) {
+        b.status = 'expired'; b.liftedAt = now; b.liftedBy = 'auto-expire'; changed = true;
+        if (b.targetType === 'device') deviceHashesToRecheck.add(b.target);
+      }
     }
-    if (changed) for (const u of Object.keys(state.accounts)) syncAccountLinkage(u, now);
+    // DS-R01 B6 存量自愈（门二问题 1 随批补）：旧版本下封禁已自动过期、但
+    // banned 旗残留的设备不在本次翻转集合内——逐台以 activeDeviceBan 复核，
+    // 无生效设备封禁者清旗并计 changed（与下方本次到期清旗同口径）。
+    for (const dh of Object.keys(state.deviceAccounts)) {
+      const d = state.deviceAccounts[dh];
+      if (d && d.banned && !activeDeviceBan(dh, now)) { d.banned = false; changed = true; }
+    }
+    if (changed) {
+      for (const u of Object.keys(state.accounts)) syncAccountLinkage(u, now);
+      // DS-R01 B6（license-batch-20261029）：设备封禁自动到期与 liftBan 同口径
+      // 清 deviceAccounts.banned 旗——原实现只处理账号联动，设备旗残留 true
+      // 使 reportDevice 恒回 banned:true 且多账号异常建单被永久堵死。仅当该
+      // 设备已无其他生效设备封禁时才清。
+      for (const dh of deviceHashesToRecheck) {
+        const d = state.deviceAccounts[dh];
+        if (d && !activeDeviceBan(dh, now)) d.banned = false;
+      }
+    }
     return changed;
   }
   // 联动：link 维 + 暂停计时（纯事件/到期驱动，无人工入口）
@@ -306,15 +327,21 @@ function createLicenseCore(opts) {
     appendLine(bansLog, { ev: 'ban-applied', id: ban.id, targetType: ban.targetType, target: ban.targetType === 'device' ? ban.target.slice(0, 12) : ban.target, code: ban.code, permanent: ban.permanent, endsAt: ban.endsAt, actor: ban.actor, at: now });
     if (ban.targetType === 'account') {
       if (ban.permanent) {
-        // 永封即时回收按天密钥（存封禁前剩余秒数，申诉恢复用，R-02/R-05）。
+        // 永封即时回收全部套餐密钥（按天钥存封禁前剩余秒数，申诉恢复用，
+        // R-02/R-05；永久钥无到期点、快照记 null，恢复支按套餐分流）。
         // 裁决批⑥后未激活密钥无到期点（长期有效）同样须回收：剩余按全额
         // （套餐天数＋未起算叠加）计，并标记回收时未激活，恢复时还原为
         // 未激活未起算状态，不因恢复动作起算计时。
         for (const k of accountKeys(ban.target)) {
-          if (k.plan !== 'permanent' && (k.lifecycle === 'unactivated' || k.lifecycle === 'activated')) {
-            k.remainingSecAtRecycle = k.expiresBaseMs
-              ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
-              : unstartedRemainingSec(k);
+          if (k.lifecycle === 'unactivated' || k.lifecycle === 'activated') {
+            // DS-R01 B2（license-batch-20261029）：定版「永久封禁直接收回密钥」
+            // 无套餐豁免，永久套餐钥同在回收范围（原条件 plan!=='permanent'
+            // 使其永封后仍 activated、无回收落账）。
+            k.remainingSecAtRecycle = k.plan === 'permanent'
+              ? null
+              : (k.expiresBaseMs
+                ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
+                : unstartedRemainingSec(k));
             k.recycledWhileUnactivated = (k.activatedAt == null);
             k.lifecycle = 'revoked'; k.revokedReason = 'permaban'; k.revokedBanId = ban.id; k.timing = 'exhausted';
           }
@@ -350,7 +377,13 @@ function createLicenseCore(opts) {
               // 推断——#24 一键兑换激活的密钥可以已激活但尚未绑任何设备，
               // 按槽位推断会把它误降为未激活却带着在跑的到期点，状态自相矛盾。
               k.lifecycle = 'activated';
-              if (k.expiresBaseMs) { k.expiresBaseMs = now + (k.remainingSecAtRecycle || 0) * 1000; k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'active'; }
+              if (k.plan === 'permanent') {
+                // DS-R01 B2：永久钥无到期点，恢复只还原生命周期与计时态。
+                // 计时态回 'none'——activateKey 对永久钥从不起算（plan.days
+                // 为 null），封禁前其 timing 恒为 'none'，不得留 exhausted
+                // 或因恢复动作起算。
+                k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'none';
+              } else if (k.expiresBaseMs) { k.expiresBaseMs = now + (k.remainingSecAtRecycle || 0) * 1000; k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'active'; }
             }
             k.everBanned = true; k.revokedReason = null; k.revokedBanId = null; k.recycledWhileUnactivated = false;
           }
@@ -373,7 +406,10 @@ function createLicenseCore(opts) {
   }
   function issueKey(username, planId, source, now, meta) {
     const plan = PLANS[planId]; if (!plan) throw new Error('bad-plan');
-    if (source !== 'paid' && source !== 'free') throw new Error('source-required');
+    // DS-R01 B3（license-batch-20261029）：来源三分——paid 付费／free 免费发放／
+    // points 积分兑换（福利中心专用）。网页门只认 paid，points 与 free 同落
+    // 非付费侧、不开网页；generateUnboundKey 不放行 points（站长生成面无此档）。
+    if (source !== 'paid' && source !== 'free' && source !== 'points') throw new Error('source-required');
     ensureAccount(username, now, {});
     const str = genKeyString();
     const rec = {
@@ -894,12 +930,25 @@ function createLicenseCore(opts) {
       return { ok: false, code, msg, offense, offenseApplied };
     };
     if (!rec || rec.username !== username) return fail('KEY_INVALID', '密钥无效或不属于该账号，请核对后重试。');
+    // DS-R01 B5（license-batch-20261029）：绑定前先按全局口径懒过期翻转——
+    // 原实现只认 lifecycle 字面值，已到期未翻转的钥可绑定成功（占槽＋假成功）。
+    // lazyExpireKeys 跳过 timing==='paused' 的钥，封禁暂停中的钥不误判过期；
+    // rec 为台账对象引用，翻转后下方 expired 判定直接生效。
+    lazyExpireKeys(username, now);
     if (rec.lifecycle === 'expired') return { ok: false, code: 'G5', msg: expiredText(rec, now) + '请购买新密钥。', expiredAt: rec.expiresBaseMs ? effectiveExpiry(rec, now) : null };
     if (rec.lifecycle === 'revoked') return { ok: false, code: 'KEY_REVOKED', msg: '该密钥已作废，无法绑定。' };
     const slot = platform === 'mobile' ? 'mobile' : 'pc';
     migrateSlots(rec);
     if (slotHas(rec, slot, dh)) return { ok: true, already: true, slot }; // 本设备重复确认不算失败
-    if (slotCount(rec, slot) >= SLOT_CAPS[slot]) return fail('KEY_BOUND', '该密钥已被绑定，无法再次绑定。一枚密钥仅可绑定两台电脑与一部手机；如需在其他设备使用，请购买新密钥。异常绑定行为将按《用户协议》相关约定处理。');
+    if (slotCount(rec, slot) >= SLOT_CAPS[slot]) {
+      // DS-R01 B4（license-batch-20261029）：槽满提示不是违规——定版「该密钥
+      // 已被绑定」只提示、不计 B10 犯次。原实现走 fail() 无条件计 attempts，
+      // 正常用户 10 分钟内重试 3 次即被记犯冻号。此处不经 fail()、不动
+      // bindAbuse，回执形状与 fail() 一致；save() 保留上方 migrateSlots 与
+      // ensureAccount 的结构落盘。
+      save();
+      return { ok: false, code: 'KEY_BOUND', msg: '该密钥已被绑定，无法再次绑定。一枚密钥仅可绑定两台电脑与一部手机；如需在其他设备使用，请购买新密钥。异常绑定行为将按《用户协议》相关约定处理。', offense: null, offenseApplied: false };
+    }
     slotAdd(rec, slot, dh);
     activateKey(rec, now); // 首次绑定即激活：未起算密钥自此刻起算（裁决批⑥）
     save();

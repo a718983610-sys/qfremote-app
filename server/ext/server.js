@@ -2345,7 +2345,7 @@ const server = http.createServer(async (req, res) => {
       if (!rec) { rec = pointsCore.newRecord(now); pointsData.users[auth.user] = rec; }
       const spend = pointsCore.earnSpend(rec, cost, '福利兑换 ' + LIC_PLANS[plan].name, now);
       if (!spend.ok) return sendJson(res, 200, { ok: false, code: spend.code, msg: spend.msg || '兑换失败。', balance: spend.balance });
-      const key = lic.issueKey(auth.user, plan, 'free', now, { actor: 'points-welfare' });
+      const key = lic.issueKey(auth.user, plan, 'points', now, { actor: 'points-welfare' }); // DS-R01 B3：积分兑换独立来源，不再冒用 free（sourceNote 旁注保留与存量同字）
       const stK = lic.state(); if (stK.keys[key.id]) { stK.keys[key.id].sourceNote = '积分兑换（免费）'; lic.save(); }
       try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
       log({ ev: 'welfare-redeemed', target: auth.user, plan, keyId: key.id, cost });
@@ -2491,7 +2491,7 @@ const server = http.createServer(async (req, res) => {
         }
         const rec = lic.issueKey(username, plan, body.source, Date.now(), { actor: auth.user, orderId });
         log({ ev: 'license-issue', target: username, plan, source: body.source, keyId: rec.id });
-        return sendJson(res, 200, { ok: true, msg: '密钥已发放到 ' + username + '（' + rec.planName + '，来源：' + (body.source === 'paid' ? '付费购买入账' : '免费发放') + '）。', keyId: rec.id, maskedKey: licMaskKey(rec.str) });
+        return sendJson(res, 200, { ok: true, msg: '密钥已发放到 ' + username + '（' + rec.planName + '，来源：' + (body.source === 'paid' ? '付费购买入账' : (body.source === 'points' ? '积分兑换' : '免费发放')) + '）。', keyId: rec.id, maskedKey: licMaskKey(rec.str) });
       }
       // ===== 许可：站长生成不绑账号钥串（站长 2026-10-26 13:54 令）=====
       // 与「给账号发放」分开：生成钥不绑任何账号，入许可台账为未激活，
@@ -2544,7 +2544,7 @@ const server = http.createServer(async (req, res) => {
         });
         const keys = raw.map((k) => ({
           keyId: k.id, masked: licMaskKey(k.str), plan: k.plan, planName: k.planName,
-          source: k.source, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
+          source: k.source, sourceNote: k.sourceNote || null, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
           expiresMs: k.expiresBaseMs ? lic.effectiveExpiry(k, now) : null,
           remainText: lic.remainTextForKey(k, now),
           slots: { pc: slotPc(k), mobile: k.slots && k.slots.mobile ? 1 : 0 },
@@ -2595,7 +2595,7 @@ const server = http.createServer(async (req, res) => {
         });
         const keys = raw.map((k) => ({
           keyId: k.id, masked: licMaskKey(k.str), plan: k.plan, planName: k.planName,
-          source: k.source, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
+          source: k.source, sourceNote: k.sourceNote || null, lifecycle: k.lifecycle, statusText: statusText[k.lifecycle] || k.lifecycle,
           expiresMs: k.expiresBaseMs ? lic.effectiveExpiry(k, now) : null,
           remainText: lic.remainTextForKey(k, now),
           slots: { pc: slotPc(k), mobile: k.slots && k.slots.mobile ? 1 : 0 },
