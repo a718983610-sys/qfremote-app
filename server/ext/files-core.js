@@ -27,18 +27,54 @@ function createFilesCore(deps) {
   const blobDir = path.join(dir, 'file-stage-blobs');
   try { fs.mkdirSync(blobDir, { recursive: true, mode: 0o700 }); } catch (e) {}
 
+  function quarantineFileStage() {
+    const dest = file + '.corrupt-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+    try {
+      fs.renameSync(file, dest);
+      log({ ev: 'file-stage-quarantined', dest });
+    } catch (e) {
+      log({ ev: 'file-stage-quarantine-rename-error', err: String(e && e.stack || e) });
+    }
+  }
+
   let store = { items: {} };
-  try {
-    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (v && typeof v === 'object' && v.items && typeof v.items === 'object') {
-      store = v;
-      // 老记录兼容：缺失 downloadedAt 按未下载处理。
-      for (const it of Object.values(store.items)) {
-        if (!Object.prototype.hasOwnProperty.call(it, 'downloadedAt')) it.downloadedAt = null;
-        if (it.pendingDelete && !it.blob) delete it.pendingDelete;
+  (function loadFileStageIndex() {
+    let raw;
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return; // 首跑无文件：静默空 store
+      log({ ev: 'file-stage-load-error', err: String(e && e.stack || e), reason: 'read' });
+      quarantineFileStage();
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      log({ ev: 'file-stage-load-error', err: String(e && e.stack || e), reason: 'parse' });
+      quarantineFileStage();
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || !parsed.items || typeof parsed.items !== 'object' || Array.isArray(parsed.items)) {
+      log({ ev: 'file-stage-load-error', err: 'bad-shape', reason: 'shape' });
+      quarantineFileStage();
+      return;
+    }
+    for (const [id, it] of Object.entries(parsed.items)) {
+      if (!it || typeof it !== 'object' || Array.isArray(it)) {
+        log({ ev: 'file-stage-load-error', err: 'bad-shape-item', id, reason: 'shape' });
+        quarantineFileStage();
+        return;
       }
     }
-  } catch (e) {}
+    store = parsed;
+    // 老记录兼容：缺失 downloadedAt 按未下载处理。
+    for (const it of Object.values(store.items)) {
+      if (!Object.prototype.hasOwnProperty.call(it, 'downloadedAt')) it.downloadedAt = null;
+      if (it.pendingDelete && !it.blob) delete it.pendingDelete;
+    }
+  })();
 
   // 仅驻留内存：id -> { tokens: Set<{ timer }> }（门二 P2-02：每 pin 独立租约）
   // 服务重启后没有 in-flight 租约；pendingDelete 会由 sweep 自愈清理。
@@ -69,6 +105,16 @@ function createFilesCore(deps) {
     }
   }
 
+  function terminalRetentionMs() {
+    try {
+      const c = lic.readConfig() || {};
+      const n = Number(c.fileSendTerminalRetentionDays);
+      return (n > 0 ? n : 7) * 86400000;
+    } catch (e) {
+      return 7 * 86400000;
+    }
+  }
+
   function pinTimeoutMs() {
     try {
       const c = lic.readConfig() || {};
@@ -84,29 +130,49 @@ function createFilesCore(deps) {
     return !!(p && p.tokens.size > 0);
   }
 
+  // 删除统一口径：只有真删掉（deleted）或本就不存在（missing）才许清引用；
+  // 其他错误（EACCES/EBUSY 等）保留引用并标 pendingDelete，留待后续 sweep 重试。
+  function unlinkBlobResult(it) {
+    const fp = path.join(blobDir, it.blob);
+    try {
+      fs.unlinkSync(fp);
+      return 'deleted';
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return 'missing';
+      log({ ev: 'file-blob-unlink-error', id: it.id, target: it.username || '-', err: String(e && e.stack || e) });
+      return 'error';
+    }
+  }
+
   function tryDeleteBlob(it) {
     if (!it || !it.blob) {
       if (it) delete it.pendingDelete;
-      return;
+      return true;
     }
     if (isPinned(it.id)) {
       it.pendingDelete = true;
-      return;
+      return false;
     }
-    try { fs.unlinkSync(path.join(blobDir, it.blob)); } catch (e) {}
+    const res = unlinkBlobResult(it);
+    if (res === 'error') {
+      it.pendingDelete = true;
+      return false;
+    }
     it.blob = null;
     delete it.pendingDelete;
+    return true;
   }
 
   function cleanupPendingDelete(id) {
     const it = store.items[id];
     if (!it || !it.pendingDelete) return;
     if (isPinned(id)) return;
-    delete it.pendingDelete;
     if (it.blob) {
-      try { fs.unlinkSync(path.join(blobDir, it.blob)); } catch (e) {}
+      const res = unlinkBlobResult(it);
+      if (res === 'error') return; // 保留 pendingDelete，等 sweep 重试
       it.blob = null;
     }
+    delete it.pendingDelete;
     save();
     log({ ev: 'file-blob-unlink', id: it.id, target: it.username || '-', reason: 'pin-released' });
   }
@@ -150,10 +216,60 @@ function createFilesCore(deps) {
   }
 
 
+  function sweepOrphanBlobs(now, maxAgeMs) {
+    let referenced;
+    try {
+      referenced = new Set();
+      for (const it of Object.values(store.items)) {
+        if (it.blob) referenced.add(it.blob);
+      }
+    } catch (e) {
+      log({ ev: 'file-orphan-scan-error', err: String(e && e.stack || e) });
+      return false;
+    }
+    let names;
+    try {
+      names = fs.readdirSync(blobDir);
+    } catch (e) {
+      if (e && e.code !== 'ENOENT') log({ ev: 'file-orphan-scan-error', err: String(e && e.stack || e) });
+      return false;
+    }
+    let changed = false;
+    for (const name of names) {
+      if (referenced.has(name)) continue;
+      const fp = path.join(blobDir, name);
+      let st;
+      try {
+        st = fs.statSync(fp);
+      } catch (e) {
+        if (e && e.code !== 'ENOENT') log({ ev: 'file-orphan-stat-error', id: name, err: String(e && e.stack || e) });
+        continue;
+      }
+      if (!st.isFile()) continue;
+      if (now - st.mtimeMs < maxAgeMs) continue;
+      try {
+        fs.unlinkSync(fp);
+        changed = true;
+        log({ ev: 'file-orphan-blob-unlink', id: name, target: '-', reason: 'orphan-aged' });
+      } catch (e) {
+        log({ ev: 'file-orphan-blob-unlink-error', id: name, err: String(e && e.stack || e) });
+      }
+    }
+    return changed;
+  }
+
   function sweep(now) {
     let changed = false;
 
-    // 到期边界：now >= expiresAt，满 24h 即到期。
+    const terminalMs = terminalRetentionMs();
+    let orphanMaxAge = 0;
+    try {
+      orphanMaxAge = limits().stageMs;
+    } catch (e) {
+      log({ ev: 'file-sweep-error', err: String(e && e.stack || e) });
+    }
+
+    // 1) 到期段：now >= expiresAt，满 24h 即到期。
     for (const it of Object.values(store.items)) {
       if (it.status === 'staged' && now >= it.expiresAt) {
         const pinned = isPinned(it.id);
@@ -162,9 +278,13 @@ function createFilesCore(deps) {
           if (pinned) {
             it.pendingDelete = true;
           } else {
-            try { fs.unlinkSync(path.join(blobDir, it.blob)); } catch (e) {}
-            it.blob = null;
-            delete it.pendingDelete;
+            const res = unlinkBlobResult(it);
+            if (res === 'error') {
+              it.pendingDelete = true;
+            } else {
+              it.blob = null;
+              delete it.pendingDelete;
+            }
           }
         }
         changed = true;
@@ -172,18 +292,53 @@ function createFilesCore(deps) {
       }
     }
 
-    // 自愈：非 staged 的 blob 不应保留。
+    // 2) 自洽段：staged 但 blob 文件已缺失 -> expired（索引与磁盘对齐）。
+    for (const it of Object.values(store.items)) {
+      if (it.status === 'staged' && it.blob && !fs.existsSync(path.join(blobDir, it.blob))) {
+        it.status = 'expired';
+        it.blob = null;
+        delete it.pendingDelete;
+        changed = true;
+        log({ ev: 'file-blob-missing', id: it.id, target: it.username });
+      }
+    }
+
+    // 3) 自愈段：非 staged 的 blob 不应保留。
     // 典型场景：上一进程 pinned 记录落盘 pendingDelete 后重启，
     // 新进程 pin 表为空，应由 sweep 补删。
     for (const it of Object.values(store.items)) {
       if (it.status !== 'staged' && it.blob && !isPinned(it.id)) {
-        try { fs.unlinkSync(path.join(blobDir, it.blob)); } catch (e) {}
+        const res = unlinkBlobResult(it);
+        if (res === 'error') {
+          it.pendingDelete = true;
+          continue;
+        }
         const reason = it.pendingDelete ? 'pending-restart' : it.status;
         it.blob = null;
         delete it.pendingDelete;
         changed = true;
         log({ ev: 'file-blob-unlink', id: it.id, target: it.username || '-', reason });
       }
+    }
+
+    // 4) 终态回收：delivered/expired 超过保留期且 blob 已清空则删除索引记录，
+    // 防 file-stage.json 无限增长；blob 未清的记录必须保留，防产生孤儿。
+    for (const it of Object.values(store.items)) {
+      if (it.status !== 'delivered' && it.status !== 'expired') continue;
+      if (it.blob) continue;
+      const base = it.status === 'delivered'
+        ? (Number(it.deliveredAt) > 0 ? Number(it.deliveredAt) : (Number(it.expiresAt) > 0 ? Number(it.expiresAt) : Number(it.createdAt)))
+        : (Number(it.expiresAt) > 0 ? Number(it.expiresAt) : Number(it.createdAt));
+      if (!Number.isFinite(base) || now < base + terminalMs) continue;
+      const id = it.id;
+      delete store.items[id];
+      changed = true;
+      log({ ev: 'file-terminal-deleted', id, target: it.username, status: it.status });
+    }
+
+    // 5) 孤儿 blob 回收：无索引引用且 mtime 超过暂存期的普通文件。
+    if (orphanMaxAge > 0 && sweepOrphanBlobs(now, orphanMaxAge)) {
+      changed = true;
     }
 
     if (changed) save();
@@ -200,6 +355,10 @@ function createFilesCore(deps) {
     if (fromNode && toNode === fromNode) return { ok: false, code: 'VALIDATION', msg: '目标设备与来源设备相同，请选择另一台设备。' };
     const b64 = String((input && input.contentBase64) || '');
     if (!b64) return { ok: false, code: 'VALIDATION', msg: '文件内容为空。' };
+    // FC-F8：解码前廉价估算拒绝门，避免超大 base64 无谓解码占用内存。
+    // 标准 base64 len*3/4 为解码字节上界；留 +3 余量防填充误杀，临界件由解码后精确判复核。
+    const estimated = Math.floor(b64.length * 0.75);
+    if (estimated > lim.maxBytes + 3) return { ok: false, code: 'TOO_LARGE', msg: '文件超过单文件上限（' + Math.floor(lim.maxBytes / 1048576) + ' MB）。' };
     let buf;
     try { buf = Buffer.from(b64, 'base64'); } catch (e) { buf = null; }
     if (!buf || !buf.length) return { ok: false, code: 'VALIDATION', msg: '文件内容不正确。' };
@@ -222,7 +381,16 @@ function createFilesCore(deps) {
     it.blob = it.id + '.bin';
     try { fs.writeFileSync(path.join(blobDir, it.blob), buf, { mode: 0o600 }); } catch (e) { return { ok: false, code: 'IO', msg: '文件暂存失败，请稍后再试。' }; }
     store.items[it.id] = it;
-    save();
+    try {
+      save();
+    } catch (e) {
+      // FC-F5(b)：索引落盘失败必须回滚内存记录并清刚写的 blob，
+      // 不许异常穿透、不许留无索引记录；blob 删除失败由孤儿回收段兜底。
+      delete store.items[it.id];
+      unlinkBlobResult(it);
+      log({ ev: 'file-stage-save-error', id: it.id, target: username, err: String(e && e.stack || e) });
+      return { ok: false, code: 'IO', msg: '文件暂存失败，请稍后再试。' };
+    }
     log({ ev: 'file-staged', id: it.id, target: username, size: it.size });
     return { ok: true, id: it.id, size: it.size, expiresAt: it.expiresAt };
   }
