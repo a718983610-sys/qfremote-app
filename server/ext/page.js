@@ -240,6 +240,7 @@ function setPill(view, n){
 }
 
 var RESTART_NOTE = '操作时服务器将短暂重启数秒，期间所有人将断线并自动重连，请确认当前可以操作。';
+var RESTART_NOTE_MAY = '该操作通常即时生效；如遇在线通道不可用，服务器可能短暂重启数秒，期间所有人将断线并自动重连。';
 
 function userRow(u){
   var tags = '';
@@ -346,7 +347,7 @@ function onUserAction(){
     // 许可台账实时计算，随行数据 data-cnt 带入），回执由服务端明写
     // 实际解除条数。
     var cnt = parseInt(this.getAttribute('data-cnt') || '0', 10);
-    showModal('解封账号', '确定要解封「' + u + '」吗？' + (cnt > 0 ? '将一次解除该账号全部 ' + cnt + ' 条生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。' : '将一次解除该账号全部生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。'), {
+    showModal('解封账号', '确定要解封「' + u + '」吗？' + (cnt > 0 ? '将一次解除该账号全部 ' + cnt + ' 条生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。' : '将一次解除该账号全部生效中的封禁（含恢复被回收的密钥），解封后对方可立即正常登录。') + RESTART_NOTE_MAY, {
       okText: '确认解封',
       onOk: function(){ doOp('/admin/api/license/unban-account', { username: u }); }
     });
@@ -354,10 +355,10 @@ function onUserAction(){
   }
   var titles = { freeze: '冻结账号', unfreeze: '解冻账号', resetpass: '重置密码', ban: '封禁账号' };
   var texts = {
-    freeze: '确定要冻结「' + u + '」吗？冻结后对方立即无法登录，账号与数据保留。' + RESTART_NOTE,
-    unfreeze: '确定要解冻「' + u + '」吗？解冻后对方可正常登录；若该账号还有生效中的封禁，将一并解除。',
+    freeze: '确定要冻结「' + u + '」吗？冻结后对方立即无法登录，账号与数据保留。' + RESTART_NOTE_MAY,
+    unfreeze: '确定要解冻「' + u + '」吗？解冻后对方可正常登录；若该账号还有生效中的封禁，将一并解除。' + RESTART_NOTE_MAY,
     resetpass: '确定要给「' + u + '」重置密码吗？会生成一个新密码，只显示一次，请转发给对方。' + RESTART_NOTE,
-    ban: '封禁将禁用「' + u + '」的账号，数据保留，对方可以申诉；不再删除账号。确定要封禁吗？' + RESTART_NOTE
+    ban: '封禁将禁用「' + u + '」的账号，数据保留，对方可以申诉；不再删除账号。确定要封禁吗？' + RESTART_NOTE_MAY
   };
   showModal(titles[act], texts[act], { okText: '确定', onOk: function(){ doOp('/admin/api/' + act, { username: u }); } });
 }
@@ -440,7 +441,7 @@ function onAppealAction(){
   var unified = !!(aid && rc);
   var isRebind = rc === 'REBIND';
   if (act === 'approve') {
-    showModal('通过申诉', isRebind ? '确定通过「' + u + '」的换绑申诉吗？通过后将立即执行换绑：同类旧设备解绑、新设备绑入，绑定名额不变。' : (unified ? '确定通过「' + u + '」的申诉吗？通过后封禁立即解除；若是永久封禁，原密钥将恢复并留下「曾被封禁」记录。' : '确定通过「' + u + '」的申诉吗？通过后对方可以自己设置新密码。'), { okText: '确认通过', onOk: function(){
+    showModal('通过申诉', isRebind ? '确定通过「' + u + '」的换绑申诉吗？通过后将立即执行换绑：同类旧设备解绑、新设备绑入，绑定名额不变。' : (unified ? '确定通过「' + u + '」的申诉吗？通过后封禁立即解除；若是永久封禁，原密钥将恢复并留下「曾被封禁」记录。' + RESTART_NOTE_MAY : '确定通过「' + u + '」的申诉吗？通过后对方可以自己设置新密码。' + RESTART_NOTE_MAY), { okText: '确认通过', onOk: function(){
       api('/admin/api/appeals/approve', unified ? { username: u, appealId: aid } : { username: u }).then(function(r){ toast(r.msg || (r.ok ? '已通过。' : '操作未成功。')); loadAppeals(); loadLicense(); });
     }});
   } else {

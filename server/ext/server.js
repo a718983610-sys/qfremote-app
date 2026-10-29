@@ -95,7 +95,12 @@ const MCDB = process.env.QFEXT_MCDB || '/opt/meshcentral/account-kit/mcdb.js';
 const RENAME_SH = process.env.QFEXT_RENAME_SH || '/opt/meshcentral/account-kit/rename-account.sh';
 
 const payOrders = createOrdersCore({ dir: LIC_DIR, lic, log });
-const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt', ownerTokenPlainFile: process.env.QFEXT_OWNER_TOKEN_FILE || '/opt/qfremote-ext/owner-api-token.txt' });
+const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: process.env.QFEXT_ASSISTANT_TOKEN_FILE || '/opt/qfremote-ext/assistant-api-token.txt', ownerTokenPlainFile: process.env.QFEXT_OWNER_TOKEN_FILE || '/opt/qfremote-ext/owner-api-token.txt',
+  // EV-1 兜底（verify-ev1-20261026 备补丁，DS 门一 2026-10-29 裁定部署）：order
+  // 事件销账前置断言——订单须已带一审裁定标记 review1（与 instant-review
+  // reconcile 的「一审已落定」标记同源同口径）；非 order 类型恒放行。
+  // payOrders 已于上一行先行实例化，无时序问题。
+  resolveGuard: (type, refId) => { if (type !== 'order') return true; const o = payOrders.getRaw(refId); return !!(o && o.review1); } });
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
 try {
@@ -1462,6 +1467,9 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, eventId: ev.id });
       }
       if (req.method === 'POST' && p === '/internal/events/resolve') {
+        // EV-1 附带收口：内网销账通道合法用途仅 forum 自家裁定回写，非 forum
+        // 类型（含 body 非对象/缺 type）一律拒绝。
+        if (!body || typeof body !== 'object' || String(body.type || '') !== 'forum') return sendJson(res, 409, { ok: false, code: 'INTERNAL_RESOLVE_TYPE' });
         const ev = reviewEvents.resolve(String(body.type || ''), String(body.refId || ''), String(body.actor || ''), String(body.result || ''));
         return sendJson(res, 200, { ok: true, found: !!ev });
       }

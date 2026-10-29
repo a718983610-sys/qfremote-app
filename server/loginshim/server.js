@@ -333,13 +333,17 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
   // R7 中性判定（DS-R25 微修，DS 门一＋增量裁定）：密码已二次验过、MC 锁定位
   // 在身，但台账无活动封禁——evaluate() 有活动封禁时必先回 BAN_PERM/BAN_UNTIL，
   // 故生产可达的非封禁形状只有 allow:true→code 'OK' 与 allow:false→G1/G2/G4/G5，
-  // 落入此允许名单即属异常漂移态：只记日志、不计失败/不清零，调用方收到
-  // 'neutral' 后以 ok=null 记录并原样透传。其余形状（lc 为空、allow:true＋BAN_*
-  // 矛盾形状、未知 code）一律维持 fail-closed 照旧计数。
+  // 落入此允许名单即属异常漂移态：只记日志、不计失败/不清零，调用方以 ok=null
+  // 记录并原样透传。
+  // W1-3（ds-p1-rest-20261029，DS 门一）：返回值由 'neutral' 更名为 'locked'，
+  // 且其余漂移形状（lc 为空、allow:true＋BAN_* 矛盾形状、未知 code、未知
+  // banCode）同归 'locked'——调用方透传时补 X-QF-Login-Result: locked 头，
+  // SPA 据此呈现中性「暂时无法登录」，不再把漂移态误报成「账号或密码不正
+  // 确」；计数与日志语义与原 'neutral'/回 false 路径一致（不计失败、不清零）。
   if (lc && ((lc.allow === true && lc.code === 'OK') ||
       (lc.allow === false && ['G1', 'G2', 'G4', 'G5'].indexOf(lc.code) >= 0))) {
     console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
-    return 'neutral';
+    return 'locked';
   }
 
   if (!lc || lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL')) {
@@ -348,7 +352,7 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
     if (vp.ok === true && lc && (lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL'))) {
       console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
     }
-    return false;
+    return 'locked';
   }
 
   // 根据 BAN_* code 和 banCode 映射门型，不暴露原始 banCode
@@ -367,9 +371,10 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
     } else if (['B1', 'B8', 'B10'].indexOf(banCode) >= 0) {
       mode = 'frozen';
     } else {
-      // 未知冻结/封禁 code；不露状态（DS-R25 P3-1：补 inconsistent 日志，计数照旧）
+      // 未知冻结/封禁 code；不露状态（DS-R25 P3-1：补 inconsistent 日志；
+      // W1-3 起同归 'locked' 中性透传，不报密码错误）
       console.warn('bancheck inconsistent: password ok, MC locked, active BAN_UNTIL with unknown banCode ' + banCode + ' for', key);
-      return false;
+      return 'locked';
     }
   }
 
@@ -454,10 +459,12 @@ function handleLogin(req, res) {
             ur.statusCode, ur.headers, ubody
           );
           if (banHandled === true) return;
-          if (banHandled === 'neutral') {
-            // R7（DS-R25）：只记日志、不计失败/不清零、原样透传；
-            // 用已算好的 h，保留 remember cookie 处理口径
+          if (banHandled === 'locked') {
+            // R7（DS-R25）＋W1-3：只记日志、不计失败/不清零、原样透传；
+            // 用已算好的 h，保留 remember cookie 处理口径，并补 locked 头
+            // 供 SPA 呈现中性提示（不再误报密码错误）
             logAttempt(key, null, ip, false);
+            h['x-qf-login-result'] = 'locked';
             res.writeHead(ur.statusCode, h);
             res.end(ubody);
             return;
@@ -533,11 +540,14 @@ function serveFrozenVerify(req, res, body, usernameRaw, passwordRaw, key, ip) {
         ur.statusCode, ur.headers, ubody
       );
       if (banHandled === true) return;
-      if (banHandled === 'neutral') {
-        // R7（DS-R25）：冻结路径同样中性——只记日志（blocked 保持 true）、
-        // 原样透传，不进冻结页、不动冻结状态
+      if (banHandled === 'locked') {
+        // R7（DS-R25）＋W1-3：冻结路径同样中性——只记日志（blocked 保持
+        // true）、原样透传，不进冻结页、不动冻结状态；补 locked 头供 SPA
+        // 呈现中性提示
         logAttempt(key, null, ip, true);
-        res.writeHead(ur.statusCode, ur.headers);
+        const lh = Object.assign({}, ur.headers);
+        lh['x-qf-login-result'] = 'locked';
+        res.writeHead(ur.statusCode, lh);
         res.end(ubody);
         return;
       }

@@ -403,6 +403,7 @@ const BanLock = {
     this.reason = (reason === 'locked') ? 'locked' : 'died';
     S.auth = 'out'; S.license = null; S.points = null; S.isAdmin = false; // DS-R24 B3：已结束页不得残留管理后台入口
     try { Cache.clear(); } catch (e) {}
+    try { invalidateNodeMap(); } catch (e) {} // W1-2：会话结束即清设备映射缓存，防换账号残留上一账号设备清单
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
     this.paint();
   },
@@ -727,6 +728,10 @@ async function doLogin(username, password, remember) {
       const ban = parseBanView(resp.headers.get('x-qf-ban-view'));
       return { ok: false, banned: true, ban };
     }
+    // W1-3 残面（2026-10-29）：密码已验过但账号处于锁定漂移态（垫片三查无
+    // 活动封禁可确认）时，垫片回 X-QF-Login-Result: locked——呈现中性提示，
+    // 不再误报「账号或密码不正确」，也不冒充封禁/冻结。
+    if (loginResult === 'locked') return { ok: false, locked: true };
   } catch (e) { return { ok: false, msg: '网络暂时不可用，请检查网络后重试。' }; }
   // 会话校验偶发抖动时多等一轮再判，避免把非密码原因误报成密码错误
   // （2026-10-26 热修：垫片许可门吃会话曾让 /me 必 401 并被一律误报）。
@@ -761,6 +766,7 @@ setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true)
 function forceGate(code) {
   BanLock.exit();
   S.auth = 'out'; Cache.clear();
+  invalidateNodeMap(); // W1-2：强制下线即清设备映射缓存，防换账号残留
   try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
   showAuth('gate', { code: code || 'G1' });
   toast('本设备已被退出登录，请重新登录后在「我的 · 兑换 KEY」中处理激活。', 'warn');
@@ -775,6 +781,7 @@ async function doLogout() {
       BanLock.suppress = false;
     }
     Cache.clear();
+    invalidateNodeMap(); // W1-2：主动登出即清设备映射缓存，防换账号残留
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
     try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
     S.auth = 'out'; S.license = null; S.points = null;
@@ -1025,6 +1032,16 @@ Views.login = function (root, extra) {
       $('#li-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
       const sup = $('#li-fz-support', root);
       if (sup) sup.onclick = (ev) => { ev.preventDefault(); authTool(root, 'support'); };
+    } else if (r.locked && fz) {
+      // W1-3：锁定漂移态中性提示（不写封禁/冻结、不露内部原因），给申诉与客服入口。
+      fz.innerHTML = '<div class="note err">该账号当前暂时无法登录。</div>'
+        + '<div class="hint" style="margin-top:4px">可能是账号状态异常，请稍后再试。</div>'
+        + '<button class="btn block" id="li-lock-appeal" type="button" style="margin-top:10px">提交申诉</button>'
+        + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-lock-support">智能客服</a>，或在客服中申请转人工。</p>';
+      fz.hidden = false;
+      $('#li-lock-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
+      const lsup = $('#li-lock-support', root);
+      if (lsup) lsup.onclick = (ev) => { ev.preventDefault(); authTool(root, 'support'); };
     } else if (r.banned && fz) {
       // 2026-10-28 热修（封禁误报）：账号被封禁或非 B1 冻结且密码正确时，
       // 直接画门：标题/状态/期限/事由/申诉/客服/查询密钥入口，不露原始 code。

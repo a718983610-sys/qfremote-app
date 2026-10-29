@@ -36,11 +36,34 @@ function createEventsCore(deps) {
   const ownerTokenPlainFile = deps.ownerTokenPlainFile || '/opt/qfremote-ext/owner-api-token.txt';
   try { fs.mkdirSync(dataDir, { recursive: true }); } catch (e) {}
 
+  // EV-1 兜底：可选销账前置断言（deps.resolveGuard），返回 false 或抛错即拒绝
+  // 销账；未注入时行为与旧版逐字一致。guard 只决定「能不能标 done」，不参与
+  // 裁定本身（补丁源 verify-ev1-20261026，DS 门一 2026-10-29 裁定部署）。
+  const resolveGuard = typeof deps.resolveGuard === 'function' ? deps.resolveGuard : null;
+  // EV-2/EV-3（DS 门一成稿，ds-p1-rest-20261029）：三态加载——ENOENT 静默空启；
+  // 读/解析/形状异常一律告警＋原件改名隔离后空启，原件永不被后续 save() 覆盖；
+  // seq 高水位恢复为 max(seq, max(id))，防重号与游标回退；元素逐个验对象＋数值 id。
   let store = { seq: 0, items: [] };
   try {
     const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (v && Array.isArray(v.items)) store = v;
-  } catch (e) {}
+    if (!v || !Array.isArray(v.items) || !v.items.every((entry) => entry && typeof entry === 'object' && typeof entry.id === 'number' && !Number.isNaN(entry.id))) {
+      throw new Error('events store shape invalid');
+    }
+    store = v;
+    const maxId = v.items.reduce((acc, e) => Math.max(acc, e.id), 0);
+    const parsedSeq = (typeof v.seq === 'number' && !Number.isNaN(v.seq)) ? v.seq : 0;
+    const targetSeq = Math.max(parsedSeq, maxId);
+    if (targetSeq !== v.seq) {
+      log({ ev: 'review-events-seq-adjusted', oldSeq: (v.seq === undefined ? null : v.seq), newSeq: targetSeq });
+      store.seq = targetSeq;
+    }
+  } catch (e) {
+    if (!(e && e.code === 'ENOENT')) {
+      log({ ev: 'review-events-load-error', err: String((e && e.message) || e) });
+      const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      try { fs.renameSync(file, corrupt); } catch (renameErr) { log({ ev: 'review-events-load-isolate-failed', err: String((renameErr && renameErr.message) || renameErr) }); }
+    }
+  }
   function save() {
     if (store.items.length > MAX_EVENTS) {
       const done = store.items.filter((e) => e.status === 'done');
@@ -69,6 +92,11 @@ function createEventsCore(deps) {
   function resolve(type, refId, actor, result) {
     const ev = store.items.find((e) => e.type === type && e.refId === String(refId) && e.status === 'pending');
     if (!ev) return null;
+    if (resolveGuard) {
+      let ok = false;
+      try { ok = resolveGuard(type, ev.refId, actor, result) !== false; } catch (e) { ok = false; }
+      if (!ok) { log({ ev: 'review-event-resolve-blocked', type, refId: ev.refId, eventId: ev.id, actor: actor || null }); return null; }
+    }
     ev.status = 'done'; ev.handledBy = actor || null; ev.handledAt = Date.now(); ev.result = result || null;
     save();
     log({ ev: 'review-event-resolved', type, refId: ev.refId, eventId: ev.id, actor: ev.handledBy, result: ev.result });

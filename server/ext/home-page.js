@@ -369,9 +369,9 @@ function $(id){return document.getElementById(id);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function api(path, body){ var opt={method: body?'POST':'GET', headers:{'Content-Type':'application/json'}}; if(body) opt.body=JSON.stringify(body); return fetch(path,opt).then(function(r){return r.json().catch(function(){return {ok:false,msg:'服务器没有返回内容，请稍后再试。'};});}); }
 function toast(msg){ var t=$('qfToast'); t.textContent=msg; t.style.display='block'; setTimeout(function(){t.style.display='none';},4200); }
-function fmtTime(ms){ if(!ms) return '—'; try{ return new Date(ms).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}); }catch(e){ return '—'; } }
-function fmtRemain(ms){ if(ms==null) return '—'; if(ms<=0) return '已到期'; var d=Math.floor(ms/86400000), h=Math.floor((ms%86400000)/3600000), m=Math.floor((ms%3600000)/60000); if(d>0) return d+' 天 '+h+' 小时'; if(h>0) return h+' 小时 '+m+' 分钟'; return m+' 分钟'; }
-function fmtBytes(n){ if(n==null) return null; if(n<1024) return n+' B'; if(n<1048576) return (n/1024).toFixed(1)+' KB'; if(n<1073741824) return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function fmtTime(ms){ if(!ms || !Number.isFinite(ms) || ms<0) return '—'; try{ return new Date(ms).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}); }catch(e){ return '—'; } }
+function fmtRemain(ms){ if(ms==null || ms==='' || !Number.isFinite(ms)) return '—'; if(ms<=0) return '已到期'; var d=Math.floor(ms/86400000), h=Math.floor((ms%86400000)/3600000), m=Math.floor((ms%3600000)/60000); if(d>0) return d+' 天 '+h+' 小时'; if(h>0) return h+' 小时 '+m+' 分钟'; return m+' 分钟'; }
+function fmtBytes(n){ if(n==null || !Number.isFinite(n) || n<0) return null; if(n<1024) return n+' B'; if(n<1048576) return (n/1024).toFixed(1)+' KB'; if(n<1073741824) return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
 var CHEV='<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>';
 function icon(paths,color){ return '<svg viewBox="0 0 24 24" fill="none" stroke="'+(color||'currentColor')+'" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'+paths+'</svg>'; }
 var IC={

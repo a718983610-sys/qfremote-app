@@ -56,7 +56,9 @@ function purchasePageHtml(opts) {
     // 传区、提交后抽屉内显示待审核状态；「取消」只收回抽屉、不取消订
     // 单（订单保留待支付，15 分钟内可在「我的订单」继续支付）。同时只
     // 展开一个抽屉，再点已展开的套餐即收回。订单接口与状态机一律不变。
-    const inner = '<h1>购买密钥</h1>' + plansHead
+    const inner = '<h1>购买密钥</h1>'
+      + '<p id="stack-note" style="display:none;color:#d92d20;font-size:13.5px;margin:0 0 14px">购买叠加的用户，购买后请到我的账户中兑换叠加套餐</p>'
+      + plansHead
       + '<p class="note" style="margin-top:10px">点击套餐即可展开付款区。扫码付款后点「支付成功」并提交账单详情截图（须露出订单号）。审核通过后，订单会显示「审核通过」，请在「我的订单」查看并复制密钥，再到软件的「输入密钥激活」处粘贴激活；审核通过不会自动激活。订单进度可在「我的订单」查看。</p>'
       + '<div id="out"></div>'
       + '<script>'
@@ -67,11 +69,10 @@ function purchasePageHtml(opts) {
       + 'function collapseAll(){document.querySelectorAll(".drawer").forEach(function(d){d.style.display="none";});document.querySelectorAll(".plan[data-plan]").forEach(function(x){x.classList.remove("sel");});openPlan=null;}'
       + 'function renderSubmitted(plan){var d=drawerOf(plan);d.innerHTML="<div class=\\"ok\\">已提交，正在审核。审核通过后订单会显示「审核通过」，请在「我的订单」查看并复制密钥，再到软件的「输入密钥激活」处粘贴激活；审核通过不会自动激活。</div>";}'
       + 'function renderDrawer(plan){var st=orders[plan];if(!st||!st.pay)return;var pay=st.pay;st.deadlineAt=Date.now()+pay.remainingSec*1000;'
-      + 'var wUrl=pay.method==="wechat"?pay.cardUrl:pay.otherCardUrl;var aUrl=pay.method==="wechat"?pay.otherCardUrl:pay.cardUrl;'
       + 'var h="<p style=\\"margin-top:12px\\">应付金额 <b>"+pay.amount+" 元</b>（金额已锁定）。剩余支付时间：<b id=\\"cd-"+plan+"\\">"+fmtSec(pay.remainingSec)+"</b>。</p>"'
-      + '+"<p class=\\"note\\">请扫与您付款方式对应的收款码付款；如需切换订单登记的支付方式，点击对应的收款码即可。</p>"'
-      + '+"<div class=\\"cards\\"><div class=\\"paycard"+(pay.method==="wechat"?" sel":"")+"\\" data-card=\\"wechat\\"><span class=\\"pc-name\\">微信支付</span><img src=\\""+wUrl+"\\" alt=\\"微信收款码\\"><span class=\\"note\\">"+pay.amount+" 元</span></div>"'
-      + '+"<div class=\\"paycard"+(pay.method==="alipay"?" sel":"")+"\\" data-card=\\"alipay\\"><span class=\\"pc-name\\">支付宝</span><img src=\\""+aUrl+"\\" alt=\\"支付宝收款码\\"><span class=\\"note\\">"+pay.amount+" 元</span></div></div>"'
+      + '+"<div class=\\"payseg\\"><div class=\\"payopt"+(pay.method==="wechat"?" sel":"")+"\\" data-card=\\"wechat\\">微信</div><div class=\\"payopt"+(pay.method==="alipay"?" sel":"")+"\\" data-card=\\"alipay\\">支付宝</div></div>"'
+      + '+"<p class=\\"note\\">请选择支付方式，并扫描下方收款码付款；如需切换支付方式，点击上方页签即可。</p>"'
+      + '+"<div class=\\"cards\\"><div class=\\"paycard\\"><span class=\\"pc-name\\">"+(pay.method==="wechat"?"微信支付":"支付宝")+"</span><img src=\\""+pay.cardUrl+"\\" alt=\\"收款码\\" style=\\"max-width:220px\\"><span class=\\"note\\">"+pay.amount+" 元</span></div></div>"'
       + '+"<button class=\\"btn\\" data-act=\\"paid\\" type=\\"button\\">支付成功</button>"'
       + '+"<button class=\\"btn\\" data-act=\\"cancel\\" type=\\"button\\" style=\\"background:#fff;color:#43536a;border:1px solid #c9d6e8\\">取消</button>"'
       + '+"<p class=\\"note\\">点「取消」不会取消订单：订单将保留为待支付（15 分钟内有效），可在「我的订单」继续支付或手动取消。</p>"'
@@ -79,14 +80,14 @@ function purchasePageHtml(opts) {
       + '+"<p>请上传付款账单详情截图。<b style=\\"color:#a40000\\">截图必须露出完整订单号</b>，并填写订单号（在账单详情页中查看，如下图红框位置）。审核通过后密钥将自动发放到本账号。</p>"'
       + '+"<img src=\\"/license/assets/pay-example.jpg\\" alt=\\"账单详情截图示例\\" style=\\"display:block;width:250px;max-width:100%;margin:12px auto;border:1px solid #DFE7F2;border-radius:12px\\">"'
       + '+"<label>订单号</label><input data-ono=\\"1\\" type=\\"text\\" maxlength=\\"64\\" placeholder=\\"请填写截图中的完整订单号\\">"'
-      + '+"<label>账单详情截图（JPG / PNG）</label><input data-shot=\\"1\\" type=\\"file\\" accept=\\"image/jpeg,image/png\\">"'
+      + '+"<label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input data-shot=\\"1\\" type=\\"file\\" accept=\\"image/jpeg,image/png\\">"'
       + '+"<button class=\\"btn\\" data-act=\\"submit\\" type=\\"button\\">提交审核</button><div data-sout=\\"1\\"></div></div></div>";'
       + 'var d=drawerOf(plan);d.innerHTML=h;'
-      + 'd.querySelectorAll(".paycard").forEach(function(el){el.onclick=function(){var m=el.getAttribute("data-card");if(m===st.pay.method)return;fetch("/license/api/pay/orders/"+st.orderId+"/continue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method:m})}).then(function(r){return r.json()}).then(function(j){if(j.ok){st.pay=j.pay;renderDrawer(plan);}}).catch(function(){});};});'
+      + 'd.querySelectorAll(".payopt").forEach(function(el){el.onclick=function(){var m=el.getAttribute("data-card");if(m===st.pay.method)return;fetch("/license/api/pay/orders/"+st.orderId+"/continue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method:m})}).then(function(r){return r.json()}).then(function(j){if(j.ok){st.pay=j.pay;renderDrawer(plan);}}).catch(function(){});};});'
       + 'd.querySelector("[data-act=paid]").onclick=function(){st.paidClicked=true;var up=d.querySelector("[data-up]");if(up){up.style.display="block";up.scrollIntoView({block:"nearest"});}};'
       + 'd.querySelector("[data-act=cancel]").onclick=function(){collapseAll();document.getElementById("out").innerHTML="<div class=\\"ok\\">订单已保留为待支付，请在 15 分钟内于「我的订单」继续支付。</div>";};'
       + 'd.querySelector("[data-act=submit]").onclick=function(){var ono=d.querySelector("[data-ono]").value.trim();var f=d.querySelector("[data-shot]").files[0];var o=d.querySelector("[data-sout]");'
-      + 'if(!ono){o.innerHTML="<div class=\\"err\\">请填写订单号。</div>";return;}if(!f){o.innerHTML="<div class=\\"err\\">请选择账单详情截图。</div>";return;}'
+      + 'if(!ono){o.innerHTML="<div class=\\"err\\">请填写订单号。</div>";return;}if(!f){o.innerHTML="<div class=\\"err\\">请选择账单详情截图。</div>";return;}if(f.size>12*1024*1024){o.innerHTML="<div class=\\"err\\">截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。</div>";return;}'
       + 'var rd=new FileReader();rd.onload=function(){fetch("/license/api/pay/orders/"+st.orderId+"/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({orderNo:ono,imageBase64:String(rd.result||"")})}).then(function(r){return r.json()}).then(function(j){if(j.ok){st.submitted=true;renderSubmitted(plan);}else{o.innerHTML="<div class=\\"err\\">"+esc(j.msg||"提交失败，请稍后再试。")+"</div>";}}).catch(function(){o.innerHTML="<div class=\\"err\\">网络异常，请稍后再试。</div>";});};rd.readAsDataURL(f);};}'
       + 'function openDrawer(plan){collapseAll();openPlan=plan;var head=document.querySelector(".plan[data-plan=\\""+plan+"\\"]");if(head)head.classList.add("sel");var d=drawerOf(plan);d.style.display="block";'
       + 'var st=orders[plan];if(st&&st.submitted){renderSubmitted(plan);return;}'
@@ -98,6 +99,7 @@ function purchasePageHtml(opts) {
       + 'setInterval(function(){if(!openPlan)return;var st=orders[openPlan];if(!st||!st.deadlineAt||st.submitted)return;var el=document.getElementById("cd-"+openPlan);if(el)el.textContent=fmtSec((st.deadlineAt-Date.now())/1000);},1000);'
       + 'fetch("/license/api/me").then(function(r){return r.json()}).then(function(j){if(j.ok&&j.planName==="QFRemote 永久套餐"){var el=document.querySelector("[data-plan=permanent]");if(el){el.style.opacity="0.45";el.title="您已持有永久套餐，不可重复购买";var n=document.createElement("p");n.className="note";n.textContent="您已持有永久套餐，永久档不可重复购买。";document.getElementById("plans").appendChild(n);if(openPlan==="permanent")collapseAll();}}}).catch(function(){});'
       + 'collapseAll();'
+      + 'fetch("/license/api/me").then(function(r){return r.json()}).then(function(j){if(j.ok&&j.planName&&!/永久/.test(j.planName)&&j.keyPlan&&j.keyPlan!=="permanent"&&j.keyExpiresMs&&!/试用/.test(j.planName)){var sn=document.getElementById("stack-note");if(sn)sn.style.display="block";}}).catch(function(){});'
       + 'var qs=new URLSearchParams(location.search);var qo=qs.get("order");if(qo){fetch("/license/api/pay/orders/"+qo+"/continue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(j){if(j.ok&&j.pay&&j.pay.plan){orders[j.pay.plan]={orderId:qo,pay:j.pay,paidClicked:false,submitted:false};openDrawer(j.pay.plan);}}).catch(function(){});}'
       + '</' + 'script>';
     return shell('购买密钥', '购买密钥（须先登录，密钥发放到下单账号）', inner);
