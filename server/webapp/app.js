@@ -2383,6 +2383,9 @@ function mountFileSend(container, opts) {
     setTimeout(() => { barWrap.hidden = true; }, 600);
   };
 }
+/* DS P2-5：邀请载荷校验未通过的文件 id——本页生命周期内按普通文件
+   展示，不再凭文件名当邀请渲染。 */
+const QF_INVITE_REJECTED = new Set();
 async function loadInboxList(root) {
   const box = $('#inboxList', root); if (!box) return;
   const nm = await fetchNodeMap();
@@ -2400,7 +2403,7 @@ async function loadInboxList(root) {
   if (!all.length) { box.innerHTML = '<div class="statebox"><b>暂无待接收文件</b><p>其他设备发送给您的文件将显示在这里（暂存 24 小时）。</p></div>'; return; }
   box.innerHTML = all.map(f => {
     const fromName = (f.fromNode && nm.byId.get(f.fromNode)) || (f.fromNode ? '其他设备' : '网页端');
-    const inv = f._ctrl && /^qf-invite-([A-Za-z0-9_-]+)\.json$/.exec(f.filename || '');
+    const inv = f._ctrl && !QF_INVITE_REJECTED.has(f.id) && /^qf-invite-([A-Za-z0-9_-]+)\.json$/.exec(f.filename || '');
     if (inv) {
       const targetName = nm.byId.get(inv[1]) || '远程设备';
       return `<div class="dev"><span class="devic">${ic('phone')}</span><span><b>会话邀请：${esc(targetName)}</b><small>来自 ${esc(fromName)} · 发送到这台手机 · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-open-invite="${esc(f.id)}" data-inv-node="${esc(inv[1])}">打开会话</button></span></div>`;
@@ -2409,7 +2412,22 @@ async function loadInboxList(root) {
   }).join('');
   box.querySelectorAll('[data-open-invite]').forEach(btn => btn.onclick = async () => {
     const id = btn.getAttribute('data-open-invite'), nodeid = bareNodeId(btn.getAttribute('data-inv-node') || '');
-    btn.disabled = true; btn.textContent = '打开中…';
+    btn.disabled = true; btn.textContent = '校验中…';
+    /* DS P2-5：ack 前先取回载荷校验——kind/nodeid/from 须与文件名一致，
+       只凭文件名不认邀请；不合法按普通文件处理（登记后重渲为下载行）。 */
+    let payload = null;
+    try {
+      const resp = await fetch('/license/api/files/' + encodeURIComponent(id) + '/download', { credentials: 'include' });
+      if (resp.ok) payload = JSON.parse(await resp.text());
+    } catch (e) { payload = null; }
+    const valid = !!payload && payload.kind === 'session' && bareNodeId(payload.nodeid || '') === nodeid && typeof payload.from === 'string' && !!payload.from;
+    if (!valid) {
+      QF_INVITE_REJECTED.add(id);
+      toast('这条会话邀请的内容校验未通过，已按普通文件处理。', 'warn');
+      loadInboxList(root);
+      return;
+    }
+    btn.textContent = '打开中…';
     await api('/license/api/files/' + encodeURIComponent(id) + '/ack', { method: 'POST', json: {} }).catch(() => {});
     openSession('desktop', { name: nm.byId.get(nodeid) || '', nodeid });
   });
