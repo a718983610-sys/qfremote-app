@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../core/client_header.dart';
 import '../core/svc_urls.dart';
@@ -40,6 +41,48 @@ class PointsInfo {
       points: p is int ? p : (p is num ? p.toInt() : null),
       user: u is String && u.isNotEmpty ? u : null,
       daysUsed: d is int ? d : (d is num ? d.toInt() : null),
+    );
+  }
+}
+
+/// 统一档案（扩展服务 /profile 的 /api/me 返回，2.3.2 S4 接驳）。
+/// 字段口径见 profile-avatar-nickname/DESIGN.md §5.2：effectiveNickname 为
+/// 全站生效昵称（未设昵称时服务端回退为登录账号名）；hasAvatar 为 false
+/// 或头像取不到时，「我的」页一律显示品牌占位 QfAvatarPlaceholder。
+class ProfileInfo {
+  /// 登录账号名（不可自助修改，与昵称分开）。
+  final String? username;
+
+  /// 生效昵称（个人卡主行显示），缺失为 null。
+  final String? effectiveNickname;
+
+  /// 是否已设置真实头像。
+  final bool hasAvatar;
+
+  /// 头像版本戳（拼版本化 URL 防缓存），缺失为 null。
+  final int? avatarUpdatedAt;
+
+  const ProfileInfo({
+    this.username,
+    this.effectiveNickname,
+    this.hasAvatar = false,
+    this.avatarUpdatedAt,
+  });
+
+  /// 纯解析（供自测）：字段缺失/类型不对一律给缺省值，调用方回退旧显示。
+  static ProfileInfo parse(String body) {
+    final root = jsonDecode(body);
+    if (root is! Map<String, dynamic>) {
+      throw const FormatException('档案信息格式不正确');
+    }
+    final u = root['username'];
+    final n = root['effectiveNickname'];
+    final v = root['avatarUpdatedAt'];
+    return ProfileInfo(
+      username: u is String && u.isNotEmpty ? u : null,
+      effectiveNickname: n is String && n.isNotEmpty ? n : null,
+      hasAvatar: root['hasAvatar'] == true,
+      avatarUpdatedAt: v is int ? v : (v is num ? v.toInt() : null),
     );
   }
 }
@@ -130,6 +173,55 @@ class ExtService {
       return PointsInfo.parse(r.$2);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 我的统一档案：取不到返回 null（「我的」页回退积分 user/已存账号名显示，
+  /// 头像回退品牌占位，不挡页面，与 fetchMe 同口径）。
+  Future<ProfileInfo?> fetchProfile() async {
+    final r = await _send('GET', urls.profileMeUrl);
+    if (r == null || r.$1 != 200) return null;
+    try {
+      return ProfileInfo.parse(r.$2);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 我的头像字节：走同一 cookie 桥取二进制（_send 按 UTF-8 文本解码，
+  /// 会损坏图片字节，故单独一条字节通道）。无头像（404）/失败返回 null，
+  /// 调用方显示品牌占位。
+  Future<Uint8List?> fetchProfileAvatar(ProfileInfo info) async {
+    if (!info.hasAvatar) return null;
+    final cookie = await cookieProvider();
+    if (cookie == null || cookie.isEmpty) return null;
+    HttpClient? client;
+    try {
+      client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 8);
+      final req = await client
+          .getUrl(Uri.parse(urls.profileAvatarUrl(info.avatarUpdatedAt)))
+          .timeout(const Duration(seconds: 8));
+      applyClientVersionHeader(req);
+      req.headers.set(HttpHeaders.cookieHeader, cookie);
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return null;
+      // 核对 D6：头像字节累计上限 1MB（正本落盘上限 200KB，此为异常路径兜底），
+      // 超限即中止回 null 走品牌占位，不再无条件累加。
+      if (res.contentLength > 1048576) return null;
+      final builder = BytesBuilder(copy: false);
+      var totalBytes = 0;
+      await for (final chunk in res.timeout(const Duration(seconds: 8))) {
+        totalBytes += chunk.length;
+        if (totalBytes > 1048576) return null;
+        builder.add(chunk);
+      }
+      final bytes = builder.takeBytes();
+      return bytes.isEmpty ? null : bytes;
+    } catch (_) {
+      return null;
+    } finally {
+      client?.close(force: true);
     }
   }
 

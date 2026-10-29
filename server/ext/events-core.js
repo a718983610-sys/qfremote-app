@@ -18,10 +18,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const EVENT_TYPES = ['order', 'appeal', 'rebind', 'device_review', 'forum', 'support'];
+const EVENT_TYPES = ['order', 'appeal', 'rebind', 'device_review', 'forum', 'support', 'profile_mod'];
 const TYPE_NAMES = {
   order: '付款订单', appeal: '申诉', rebind: '换绑申请',
   device_review: '设备异常待复核', forum: '论坛待审', support: '客服工单',
+  profile_mod: '资料申诉',
 };
 const MAX_EVENTS = 3000;
 

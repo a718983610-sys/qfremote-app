@@ -2197,6 +2197,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               : '未记住此设备，下次打开需要重新登录',
                           fallbackUser: _savedCreds?.username,
                           fetchPoints: _fetchPointsWhenLoggedIn,
+                          fetchProfile: () => _extService.fetchProfile(),
+                          fetchProfileAvatar: (info) =>
+                              _extService.fetchProfileAvatar(info),
                           onOpenSettings: _openSettings,
                           onCheckUpdate: () => _sessionUpdateCheck(manual: true),
                           onAccountAction: () {

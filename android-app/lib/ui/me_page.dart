@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../services/points.dart';
@@ -16,6 +18,13 @@ class MePage extends StatefulWidget {
   final String rememberLine;
   final String? fallbackUser;
   final Future<PointsInfo?> Function() fetchPoints;
+
+  /// 统一档案取数（2.3.2 S4 接驳，可选注入）：为空或取不到时，个人卡
+  /// 回退现行显示（积分 user → 已存账号名 → 「已登录」＋品牌占位）。
+  final Future<ProfileInfo?> Function()? fetchProfile;
+
+  /// 本人头像字节取数（可选注入）：为空/无头像/取不到时显示品牌占位。
+  final Future<Uint8List?> Function(ProfileInfo info)? fetchProfileAvatar;
   final VoidCallback onOpenSettings;
   final VoidCallback onCheckUpdate;
   final VoidCallback onAccountAction;
@@ -36,6 +45,8 @@ class MePage extends StatefulWidget {
     required this.rememberLine,
     required this.fallbackUser,
     required this.fetchPoints,
+    this.fetchProfile,
+    this.fetchProfileAvatar,
     required this.onOpenSettings,
     required this.onCheckUpdate,
     required this.onAccountAction,
@@ -58,6 +69,8 @@ String formatUsedDays(int days) {
 
 class _MePageState extends State<MePage> {
   PointsInfo? _points;
+  ProfileInfo? _profile;
+  Uint8List? _avatarBytes;
 
   @override
   void initState() {
@@ -69,12 +82,30 @@ class _MePageState extends State<MePage> {
     final info = await widget.fetchPoints();
     if (!mounted) return;
     setState(() => _points = info);
+    final fetchProfile = widget.fetchProfile;
+    if (fetchProfile == null) return;
+    final profile = await fetchProfile();
+    if (!mounted || profile == null) return;
+    setState(() => _profile = profile);
+    final fetchAvatar = widget.fetchProfileAvatar;
+    if (fetchAvatar == null || !profile.hasAvatar) return;
+    final bytes = await fetchAvatar(profile);
+    if (!mounted || bytes == null) return;
+    setState(() => _avatarBytes = bytes);
   }
 
   @override
   Widget build(BuildContext context) {
     final p = widget.palette;
-    final user = _points?.user ?? widget.fallbackUser ?? '已登录';
+    // 个人卡身份（2.3.2 S4）：档案到手时主行显示生效昵称、副行补登录
+    // 账号名（两者不同才补，与 DESIGN §四 C1「分行分称」同口径）；档案
+    // 取不到时完全回退现行口径（积分 user → 已存账号名 → 「已登录」）。
+    final accountUser =
+        _profile?.username ?? _points?.user ?? widget.fallbackUser;
+    final user = _profile?.effectiveNickname ?? accountUser ?? '已登录';
+    final showAccountLine = _profile?.effectiveNickname != null &&
+        accountUser != null &&
+        accountUser != _profile!.effectiveNickname;
     final days = _points?.daysUsed;
     return Material(
       color: p.pageColor,
@@ -125,7 +156,16 @@ class _MePageState extends State<MePage> {
                 _card(
                   child: Row(
                     children: [
-                      const QfAvatarPlaceholder(size: 52),
+                      if (_avatarBytes != null)
+                        ClipOval(
+                          child: Image.memory(_avatarBytes!,
+                              width: 52, height: 52, fit: BoxFit.cover,
+                              // 核对 D7：解码失败回退品牌占位，不留空白
+                              errorBuilder: (_, __, ___) =>
+                                  const QfAvatarPlaceholder(size: 52)),
+                        )
+                      else
+                        const QfAvatarPlaceholder(size: 52),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
@@ -133,6 +173,11 @@ class _MePageState extends State<MePage> {
                           children: [
                             Text(user,
                                 style: TextStyle(color: p.onCard, fontSize: 17, fontWeight: FontWeight.w700)),
+                            if (showAccountLine) ...[
+                              const SizedBox(height: 2),
+                              Text('账号 $accountUser',
+                                  style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+                            ],
                             const SizedBox(height: 3),
                             Text(widget.rememberLine,
                                 style: TextStyle(color: p.onCardDim, fontSize: 12.5, height: 1.45)),
