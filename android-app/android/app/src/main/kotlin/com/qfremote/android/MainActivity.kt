@@ -6,9 +6,15 @@ import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.PlatformException
 import java.io.File
 import java.security.MessageDigest
+
+/// 验签检查失败（携带回给 Dart 侧的错误码）。本机 Flutter 嵌入层没有
+/// io.flutter.plugin.common.PlatformException 这个 Kotlin 类（DS 成稿
+/// 原写法在 CI 编译期 Unresolved reference，见本线 DEV-5 留证），故用
+/// 本地异常＋result.error 回传，错误码与文案与成稿一致。
+private class ApkInspectException(val code: String, message: String) :
+    Exception(message)
 
 class MainActivity : FlutterActivity() {
     private val channelName = "qfremote/apk_verify"
@@ -24,23 +30,22 @@ class MainActivity : FlutterActivity() {
                 }
                 try {
                     result.success(inspectApk(call.argument<String>("path")))
+                } catch (e: ApkInspectException) {
+                    result.error(e.code, e.message, null)
                 } catch (e: Exception) {
-                    when (e) {
-                        is PlatformException -> result.error(e.code, e.message, e.details)
-                        else -> result.error("INSPECT_FAILED", e.message ?: "APK 签名核验失败", null)
-                    }
+                    result.error("INSPECT_FAILED", e.message ?: "APK 签名核验失败", null)
                 }
             }
     }
 
     private fun inspectApk(path: String?): Map<String, Any> {
         if (path.isNullOrBlank()) {
-            throw PlatformException("INVALID_ARGUMENT", "APK 路径为空", null)
+            throw ApkInspectException("INVALID_ARGUMENT", "APK 路径为空")
         }
 
         val apk = File(path)
         if (!apk.isFile) {
-            throw PlatformException("FILE_NOT_FOUND", "APK 文件不存在", null)
+            throw ApkInspectException("FILE_NOT_FOUND", "APK 文件不存在")
         }
 
         val pm = applicationContext.packageManager
@@ -52,10 +57,10 @@ class MainActivity : FlutterActivity() {
         }
 
         val info = pm.getPackageArchiveInfo(path, flags)
-            ?: throw PlatformException("APK_PARSE_FAILED", "APK 解析失败，无法读取包信息", null)
+            ?: throw ApkInspectException("APK_PARSE_FAILED", "APK 解析失败，无法读取包信息")
 
         val packageName = info.packageName
-            ?: throw PlatformException("APK_PARSE_FAILED", "APK 缺少包名", null)
+            ?: throw ApkInspectException("APK_PARSE_FAILED", "APK 缺少包名")
 
         val signers: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val signingInfo = info.signingInfo
@@ -71,10 +76,10 @@ class MainActivity : FlutterActivity() {
         } else {
             @Suppress("DEPRECATION")
             info.signatures
-        } ?: throw PlatformException("NO_SIGNERS", "未读取到签名者", null)
+        } ?: throw ApkInspectException("NO_SIGNERS", "未读取到签名者")
 
         if (signers.isEmpty()) {
-            throw PlatformException("NO_SIGNERS", "未读取到签名者", null)
+            throw ApkInspectException("NO_SIGNERS", "未读取到签名者")
         }
 
         val signerCertSha256s = signers.map { sha256Hex(it.toByteArray()) }
