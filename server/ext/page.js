@@ -176,6 +176,12 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 
   <section class="view" data-view="orders">
   <div class="card">
+    <h2>资料申诉待审</h2>
+    <p class="hint">昵称或头像被自动审核驳回后，用户可申诉一次。通过后原内容立即生效；驳回须写明原因，用户可见。头像申诉可点「看原图」核验。</p>
+    <div id="profileAppeals"><p class="empty">正在加载…</p></div>
+  </div>
+
+  <div class="card">
     <h2>付款订单审核</h2>
     <p class="hint">截图审核付款：一审（助手或此处）核对收款人、金额与套餐、订单号齐全，通过即发钥；二审由站长核对实际到账，通过结案；确认假图点「判假封禁」将封禁该账号并回收密钥。订单号一号一钥，台账永久保留。</p>
     <div id="payOrders"><p class="empty">正在加载…</p></div>
@@ -253,6 +259,8 @@ function userRow(u){
   if (u.banned || u.licBanned) tags += '<span class="tag banned">已封禁</span>';
   if (!u.exists) tags += '<span class="tag">账号已删除</span>';
   var meta = [];
+  if (u.nickname) meta.push('昵称：' + esc(u.nickname));
+  var thumb = u.hasAvatar ? '<img alt=\"\" src=\"/profile/' + encodeURIComponent(u.login) + '/avatar?v=' + (u.avatarUpdatedAt || 0) + '\" style=\"width:30px;height:30px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:8px\" onerror=\"this.style.display=\'none\'\">' : '';
   if (u.displayName && u.displayName !== u.login) meta.push('显示名：' + esc(u.displayName));
   if (u.label) meta.push('称呼：' + esc(u.label));
   if (u.template) meta.push('模板：' + esc(u.template));
@@ -286,12 +294,14 @@ function userRow(u){
     }
     btns += '<button class="btn ghost" data-act="resetpass" data-u="' + esc(u.login) + '">重置密码</button>';
     btns += '<button class="btn ghost" data-act="rename" data-u="' + esc(u.login) + '">改名</button>';
+    btns += '<button class="btn ghost" data-act="reset-nickname" data-u="' + esc(u.login) + '">重置昵称</button>';
+    btns += '<button class="btn ghost" data-act="reset-avatar" data-u="' + esc(u.login) + '">删除头像</button>';
     // P6-GK3：收回密钥（不可恢复，危险钮）；名下无在效钥时置灰（服务端 liveKeyCount）
     if (u.liveKeyCount > 0) btns += '<button class="btn danger" data-act="reclaim" data-u="' + esc(u.login) + '">收回密钥</button>';
     else btns += '<button class="btn ghost" disabled>收回密钥</button>';
     if (!bannedAny) btns += '<button class="btn danger" data-act="ban" data-u="' + esc(u.login) + '">封禁</button>';
   }
-  return '<div class="row' + (u.isOwner ? ' owner-row' : '') + '"><div class="who"><div class="login">' + esc(u.login) + '</div>'
+  return '<div class="row' + (u.isOwner ? ' owner-row' : '') + '"><div class="who">' + thumb + '<div class="login">' + esc(u.login) + '</div>'
     + '<div class="meta">' + tags + (meta.length ? '<br>' + meta.join(' · ') : '') + '</div></div>' + btns + '</div>';
 }
 
@@ -357,6 +367,11 @@ function onUserAction(){
     });
     return;
   }
+  if (act === 'reset-nickname' || act === 'reset-avatar') {
+    var isNick = act === 'reset-nickname';
+    showModal(isNick ? '重置昵称' : '删除头像', '确定要把「' + u + '」的' + (isNick ? '昵称重置为默认（显示账号名）' : '头像删除（恢复默认占位）') + '吗？该操作立即生效。', { okText: '确定', onOk: function(){ doOp('/admin/api/profile-reset', isNick ? { username: u, resetNickname: true } : { username: u, resetAvatar: true }); } });
+    return;
+  }
   var titles = { freeze: '冻结账号', unfreeze: '解冻账号', resetpass: '重置密码', ban: '封禁账号' };
   var texts = {
     freeze: '确定要冻结「' + u + '」吗？冻结后对方立即无法登录，账号与数据保留。' + RESTART_NOTE_MAY,
@@ -420,6 +435,40 @@ function appealRow(a, pending){
   }
   return h + '</div>';
 }
+function profileAppealRow(a){
+  var kind = a.kind === 'avatar' ? '头像' : '昵称';
+  var content = a.kind === 'avatar'
+    ? '<a href="/admin/api/profile-mod/' + encodeURIComponent(a.id) + '/snapshot" target="_blank" rel="noopener">看原图</a>'
+    : '「' + esc(a.snapshotText || '') + '」';
+  var h = '<div class="row"><div class="who"><div class="login">' + esc(a.username) + ' · ' + kind + '申诉</div>'
+    + '<div class="meta">提交内容：' + content + '<br>驳回原因：' + esc(a.message || '') + (a.appealNote ? '<br>申诉说明：' + esc(a.appealNote) : '') + '</div></div>'
+    + '<button class="btn" data-pmappeal-act="approve" data-id="' + esc(a.id) + '">通过</button>'
+    + '<button class="btn danger" data-pmappeal-act="reject" data-id="' + esc(a.id) + '">驳回</button></div>';
+  return h;
+}
+function loadProfileAppeals(){
+  api('/admin/api/profile-appeals').then(function(r){
+    if (!r.ok) { $('profileAppeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; return; }
+    $('profileAppeals').innerHTML = r.appeals.length ? r.appeals.map(profileAppealRow).join('') : '<p class="empty">现在没有待审的资料申诉。</p>';
+    var btns = document.querySelectorAll('#profileAppeals button[data-pmappeal-act]');
+    for (var i = 0; i < btns.length; i++) btns[i].onclick = onProfileAppealDecide;
+  }).catch(function(){ $('profileAppeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
+}
+function onProfileAppealDecide(){
+  var act = this.getAttribute('data-pmappeal-act'), id = this.getAttribute('data-id');
+  if (act === 'approve') {
+    showModal('通过资料申诉', '通过后，用户提交的昵称或头像将立即生效。', { okText: '确认通过', onOk: function(){
+      api('/admin/api/profile-appeals/decide', { id: id, action: 'approve' }).then(function(r){ toast(r.msg || (r.ok ? '已通过。' : '操作未成功。')); loadProfileAppeals(); loadUsers(); });
+    } });
+    return;
+  }
+  showModal('驳回资料申诉', '驳回须写明原因，用户可见。', { input: true, inputPlaceholder: '驳回原因', okText: '确认驳回', onOk: function(v){
+    var reason = String(v || '').trim();
+    if (!reason) { toast('驳回申诉要写明理由。'); return; }
+    api('/admin/api/profile-appeals/decide', { id: id, action: 'reject', reason: reason }).then(function(r){ toast(r.msg || (r.ok ? '已驳回。' : '操作未成功。')); loadProfileAppeals(); });
+  } });
+}
+
 function loadAppeals(){
   api('/admin/api/appeals').then(function(r){
     if (!r.ok) { $('appeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; setPill('appeals', 0); setPill('rebind', 0); return; }
@@ -785,6 +834,7 @@ function loadAssistantApi(){
 
 loadUsers();
 loadAppeals();
+loadProfileAppeals();
 loadSupportInbox();
 loadLicense();
 loadGenerated();
