@@ -208,13 +208,15 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 <script>
 var $ = function(id){ return document.getElementById(id); };
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-function toast(msg){ var t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(function(){ t.style.display = 'none'; }, 4200); }
+var toastTimer = null;
+function toast(msg){ var t = $('toast'); t.textContent = msg; t.style.display = 'block'; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(function(){ t.style.display = 'none'; }, 4200); }
 function api(path, body){
   var opt = { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' } };
   if (body) opt.body = JSON.stringify(body);
   return fetch(path, opt).then(function(r){ return r.json().catch(function(){ return { ok:false, msg:'服务器没有返回内容，请稍后再试。' }; }); });
 }
 var modalCb = null;
+var modalValidate = null;
 function showModal(title, text, opt){
   opt = opt || {};
   $('m-title').textContent = title;
@@ -225,12 +227,13 @@ function showModal(title, text, opt){
   $('m-ok').textContent = opt.okText || '确定';
   $('m-ok').style.display = opt.hideOk ? 'none' : 'block';
   modalCb = opt.onOk || null;
+  modalValidate = (typeof opt.validate === 'function') ? opt.validate : null;
   $('mask').style.display = 'flex';
   if (opt.input) setTimeout(function(){ inp.focus(); }, 60);
 }
-function hideModal(){ $('mask').style.display = 'none'; modalCb = null; }
+function hideModal(){ $('mask').style.display = 'none'; modalCb = null; modalValidate = null; }
 $('m-cancel').onclick = hideModal;
-$('m-ok').onclick = function(){ var cb = modalCb; var v = $('m-input').value; hideModal(); if (cb) cb(v); };
+$('m-ok').onclick = function(){ var cb = modalCb; var v = $('m-input').value; if (modalValidate) { var err = modalValidate(v); if (err) { toast(err); return; } } hideModal(); if (cb) cb(v); };
 
 function setPill(view, n){
   var el = $('cnt-' + view);
@@ -307,6 +310,7 @@ function onUserAction(){
   if (act === 'rename') {
     showModal('给账号改名', '为「' + u + '」设置新的登录名。修改后对方须使用新名字登录，密码不变。' + RESTART_NOTE, {
       input: true, inputPlaceholder: '新登录名（小写字母、数字、点、横线、下划线，3 到 32 位）', okText: '确认改名',
+      validate: function(v){ if (!String(v || '').trim()) return '请先填写新登录名。'; },
       onOk: function(v){
         var nn = String(v || '').trim();
         if (!nn) { toast('请先填写新登录名。'); return; }
@@ -445,7 +449,7 @@ function onAppealAction(){
       api('/admin/api/appeals/approve', unified ? { username: u, appealId: aid } : { username: u }).then(function(r){ toast(r.msg || (r.ok ? '已通过。' : '操作未成功。')); loadAppeals(); loadLicense(); });
     }});
   } else {
-    showModal('驳回申诉', '请写清驳回原因，「' + u + '」能在申诉进度页看到。', { input: true, inputPlaceholder: '驳回原因', okText: '确认驳回', onOk: function(v){
+    showModal('驳回申诉', '请写清驳回原因，「' + u + '」能在申诉进度页看到。', { input: true, inputPlaceholder: '驳回原因', okText: '确认驳回', validate: function(v){ if (!String(v || '').trim()) return '驳回须填写原因。'; }, onOk: function(v){
       var reason = String(v || '').trim();
       if (!reason) { toast('驳回须填写原因。'); return; }
       api('/admin/api/appeals/reject', unified ? { username: u, appealId: aid, reason: reason } : { username: u, reason: reason }).then(function(r){ toast(r.msg || (r.ok ? '已驳回。' : '操作未成功。')); loadAppeals(); });
@@ -460,7 +464,7 @@ function onAppealOverride(){
       api('/admin/api/appeals/approve', { username: u, appealId: aid, decision: 'approve', override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); });
     }});
   } else {
-    showModal('改判驳回申诉', '请写清改判原因。改判后按驳回口径执行（恢复封禁或回滚换绑），全程留痕。', { input: true, inputPlaceholder: '改判原因（必填）', okText: '确认改判', onOk: function(v){
+    showModal('改判驳回申诉', '请写清改判原因。改判后按驳回口径执行（恢复封禁或回滚换绑），全程留痕。', { input: true, inputPlaceholder: '改判原因（必填）', okText: '确认改判', validate: function(v){ if (!String(v || '').trim()) return '改判驳回须填写原因。'; }, onOk: function(v){
       var reason = String(v || '').trim();
       if (!reason) { toast('改判驳回须填写原因。'); return; }
       api('/admin/api/appeals/reject', { username: u, appealId: aid, decision: 'reject', reason: reason, override: true }).then(function(r){ toast(r.msg || (r.ok ? '已改判。' : '改判未成功。')); loadAppeals(); loadLicense(); loadUsers(); });
@@ -709,7 +713,7 @@ function onSupportAction(){
     }});
     return;
   }
-  showModal('回复工单', '回复内容将以「人工客服」的名义显示在用户的客服会话中。', { input: true, inputPlaceholder: '请输入回复内容', okText: '发送回复', onOk: function(v){
+  showModal('回复工单', '回复内容将以「人工客服」的名义显示在用户的客服会话中。', { input: true, inputPlaceholder: '请输入回复内容', okText: '发送回复', validate: function(v){ if (!String(v || '').trim()) return '回复内容不能为空。'; }, onOk: function(v){
     var text = String(v || '').trim();
     if (!text) { toast('回复内容不能为空。'); return; }
     api('/support/api/admin/reply', { ticketId: tid, text: text }).then(function(r){ toast(r.msg || (r.ok ? '回复已发送。' : '回复没有成功。')); loadSupportInbox(); });

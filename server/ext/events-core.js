@@ -64,16 +64,28 @@ function createEventsCore(deps) {
       try { fs.renameSync(file, corrupt); } catch (renameErr) { log({ ev: 'review-events-load-isolate-failed', err: String((renameErr && renameErr.message) || renameErr) }); }
     }
   }
+  // EV-4/EV-5（DS 门一成稿，final-fix-batchC-20261029）：save() 失败不直穿
+  // 调用方——结构化告警＋storeDirty 标记，下一次 save 成功清标（整表重写
+  // 天然自愈）；修剪 allowance<=0 时 done 保留 0 条（旧写 slice(-0) 等于
+  // 全取，pending>=MAX 时总量可超上限）。
+  let storeDirty = false;
   function save() {
-    if (store.items.length > MAX_EVENTS) {
-      const done = store.items.filter((e) => e.status === 'done');
-      const keep = store.items.filter((e) => e.status !== 'done')
-        .concat(done.slice(-Math.max(0, MAX_EVENTS - store.items.filter((e) => e.status !== 'done').length)));
-      store.items = keep.sort((a, b) => a.id - b.id);
+    try {
+      if (store.items.length > MAX_EVENTS) {
+        const pend = store.items.filter((e) => e.status !== 'done');
+        const allowance = Math.max(0, MAX_EVENTS - pend.length);
+        const done = store.items.filter((e) => e.status === 'done');
+        const keep = pend.concat(allowance > 0 ? done.slice(-allowance) : []);
+        store.items = keep.sort((a, b) => a.id - b.id);
+      }
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 1), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+      storeDirty = false;
+    } catch (e) {
+      storeDirty = true;
+      log({ ev: 'review-events-save-failed', err: String((e && e.message) || e) });
     }
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(store, null, 1), { mode: 0o600 });
-    fs.renameSync(tmp, file);
   }
 
   function enqueue(type, refId, summary) {
@@ -148,14 +160,35 @@ function createEventsCore(deps) {
       owner: { status: owner.status, createdAt: owner.createdAt, lastUsedAt: owner.lastUsedAt, plainFile: ownerTokenPlainFile },
     };
   }
+  // EV-7（DS 门一成稿，final-fix-batchC-20261029）：先写明文（tmp＋rename，
+  // 0600）后写 meta；meta 写失败则告警＋尽力删除刚写明文并抛错——meta 是
+  // 校验权威，明文无 meta 对应即惰性文件，不会出现「meta 已生效而明文
+  // 缺失/仍是旧值」的不一致。DEV-E2：tmp 带 0600 模式＋rename 后再 chmod，
+  // 保住明文文件 600 口径（DS 稿未带模式，此处按现行口径补齐）。
+  function writePlainThenMeta(plainFile, content, writeMeta) {
+    const tmp = plainFile + '.tmp';
+    try {
+      fs.writeFileSync(tmp, content, { mode: 0o600 });
+      fs.renameSync(tmp, plainFile);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (ignored) {}
+      throw e;
+    }
+    try { fs.chmodSync(plainFile, 0o600); } catch (ignored) {}
+    try {
+      writeMeta();
+    } catch (e) {
+      log({ ev: 'review-token-meta-write-failed', plainFile, err: String((e && e.message) || e) });
+      try { fs.unlinkSync(plainFile); } catch (ignored) {}
+      throw e;
+    }
+  }
   function generateToken() {
     // 读-改-写单槽：顶层四字段＝助手槽，owner 子对象原样保留（旧版整对象覆写会抹掉 owner 槽）
     const m = readTokenMeta();
     const plain = 'qfa_' + crypto.randomBytes(32).toString('hex');
     m.status = 'active'; m.hash = sha256(plain); m.createdAt = Date.now(); m.lastUsedAt = null;
-    writeTokenMeta(m);
-    fs.writeFileSync(tokenPlainFile, plain + '\n', { mode: 0o600 });
-    try { fs.chmodSync(tokenPlainFile, 0o600); } catch (e) {}
+    writePlainThenMeta(tokenPlainFile, plain + '\n', () => writeTokenMeta(m));
     log({ ev: 'assistant-token-generated' });
     return { ok: true, status: 'active', plainFile: tokenPlainFile };
   }
@@ -163,7 +196,7 @@ function createEventsCore(deps) {
     const m = readTokenMeta();
     m.status = 'revoked'; m.hash = null; // createdAt/lastUsedAt 保留（与旧版语义一致）
     writeTokenMeta(m);
-    try { fs.unlinkSync(tokenPlainFile); } catch (e) {}
+    try { fs.unlinkSync(tokenPlainFile); } catch (e) { if (!e || e.code !== 'ENOENT') log({ ev: 'review-token-plain-unlink-failed', slot: 'assistant', err: String((e && e.message) || e) }); }
     log({ ev: 'assistant-token-revoked' });
     return { ok: true, status: 'revoked' };
   }
@@ -173,9 +206,7 @@ function createEventsCore(deps) {
     const owner = ownerSlot(m) || {};
     owner.status = 'active'; owner.hash = sha256(plain); owner.createdAt = Date.now(); owner.lastUsedAt = null;
     m.owner = owner;
-    writeTokenMeta(m);
-    fs.writeFileSync(ownerTokenPlainFile, plain + '\n', { mode: 0o600 });
-    try { fs.chmodSync(ownerTokenPlainFile, 0o600); } catch (e) {}
+    writePlainThenMeta(ownerTokenPlainFile, plain + '\n', () => writeTokenMeta(m));
     log({ ev: 'owner-token-generated' });
     return { ok: true, status: 'active', plainFile: ownerTokenPlainFile };
   }
@@ -185,7 +216,7 @@ function createEventsCore(deps) {
     owner.status = 'revoked'; owner.hash = null; // createdAt/lastUsedAt 保留
     m.owner = owner;
     writeTokenMeta(m);
-    try { fs.unlinkSync(ownerTokenPlainFile); } catch (e) {}
+    try { fs.unlinkSync(ownerTokenPlainFile); } catch (e) { if (!e || e.code !== 'ENOENT') log({ ev: 'review-token-plain-unlink-failed', slot: 'owner', err: String((e && e.message) || e) }); }
     log({ ev: 'owner-token-revoked' });
     return { ok: true, status: 'revoked' };
   }

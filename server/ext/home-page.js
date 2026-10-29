@@ -367,8 +367,9 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
 'use strict';
 function $(id){return document.getElementById(id);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
-function api(path, body){ var opt={method: body?'POST':'GET', headers:{'Content-Type':'application/json'}}; if(body) opt.body=JSON.stringify(body); return fetch(path,opt).then(function(r){return r.json().catch(function(){return {ok:false,msg:'服务器没有返回内容，请稍后再试。'};});}); }
-function toast(msg){ var t=$('qfToast'); t.textContent=msg; t.style.display='block'; setTimeout(function(){t.style.display='none';},4200); }
+function api(path, body){ var opt={method: body?'POST':'GET', headers:{'Content-Type':'application/json'}}; if(body) opt.body=JSON.stringify(body); var ctl=(typeof AbortController!=='undefined')?new AbortController():null; if(ctl) opt.signal=ctl.signal; var timer=ctl?setTimeout(function(){ try{ctl.abort();}catch(e){} },30000):null; function done(){ if(timer){ clearTimeout(timer); timer=null; } } return fetch(path,opt).then(function(r){return r.json().catch(function(){return {ok:false,msg:'服务器没有返回内容，请稍后再试。'};});}).then(function(j){ done(); return j; }).catch(function(){ done(); return {ok:false,networkError:true,msg:'网络连接失败，请检查网络后重试。'}; }); }
+var qfToastTimer=null;
+function toast(msg){ var t=$('qfToast'); t.textContent=msg; t.style.display='block'; if(qfToastTimer) clearTimeout(qfToastTimer); qfToastTimer=setTimeout(function(){t.style.display='none';},4200); }
 function fmtTime(ms){ if(!ms || !Number.isFinite(ms) || ms<0) return '—'; try{ return new Date(ms).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}); }catch(e){ return '—'; } }
 function fmtRemain(ms){ if(ms==null || ms==='' || !Number.isFinite(ms)) return '—'; if(ms<=0) return '已到期'; var d=Math.floor(ms/86400000), h=Math.floor((ms%86400000)/3600000), m=Math.floor((ms%3600000)/60000); if(d>0) return d+' 天 '+h+' 小时'; if(h>0) return h+' 小时 '+m+' 分钟'; return m+' 分钟'; }
 function fmtBytes(n){ if(n==null || !Number.isFinite(n) || n<0) return null; if(n<1024) return n+' B'; if(n<1048576) return (n/1024).toFixed(1)+' KB'; if(n<1073741824) return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
@@ -538,6 +539,7 @@ document.querySelectorAll('[data-lic]').forEach(function(el){ el.addEventListene
   if(k==='welfare'){ goto('/points/welfare'); return; }
   if(k==='redeem'){
     api('/license/api/mykeys').then(function(j){
+      if(!j.ok){ toast(j.msg||'兑换信息暂时无法读取。'); return; }
       var pend=(j.keys||[]).filter(function(x){return x.canRedeem;});
       var h='<p>把他人出售或转赠的密钥粘贴到下方，提交即完成兑换并激活（激活后起算）。</p><input id="dlgRedeemKey" type="text" placeholder="请输入 QFRemote 激活密钥" maxlength="40" autocomplete="off">';
       if(pend.length){ h+='<p style="margin-top:12px"><b>待兑换密钥</b></p>'+pend.map(function(x){ return '<p style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>'+esc(x.planName)+' · '+esc(x.masked)+'（'+esc(x.sourceLabel)+'）</span><button type="button" class="btn" style="width:auto;margin:0;padding:8px 14px" data-redeem-id="'+esc(x.keyId)+'">一键兑换</button></p>'; }).join(''); }
@@ -743,6 +745,7 @@ bindGoto(document);
 function loadLoginDevices(){
   api('/home/api/login-devices').then(function(j){
     var box=$('loginDevices'); if(!box) return;
+    if(j.networkError){ box.innerHTML='<p class="empty">登录设备读取失败，请稍后再试。</p>'; return; }
     if(!j.ok||!j.devices||!j.devices.length){ box.innerHTML='<p class="empty">暂无其他设备的登录记录。</p>'; return; }
     box.innerHTML=j.devices.map(function(d){
       var t=new Date(d.loginAt);
