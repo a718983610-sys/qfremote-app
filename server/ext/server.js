@@ -1449,6 +1449,44 @@ async function buildHomeStats(req, auth) {
   };
 }
 
+// ---------- 设备解析（网页 SPA 点设备进会话的服务端兜底，根除 name→nodeid 竞态） ----------
+// 只读解析：按设备名精确查 nodeid。nodeid 在 MeshCentral 里有 node//、node/
+// 两种带前缀写法与裸 id 写法，对外一律归一为裸 id，免得调用方再猜格式。
+function normalizeNodeId(raw) {
+  return String(raw || '').replace(/^node\/\//, '').replace(/^node\//, '');
+}
+// 分组 nodes（{ meshid: [node, ...] }）摊平成一维列表；同一 nodeid 只留一条，
+// 防同一设备在多分组重复出现时被误判成同名多台。
+function flattenMeshNodes(nodesByMesh) {
+  const out = [];
+  const seen = new Set();
+  if (!nodesByMesh || typeof nodesByMesh !== 'object') return out;
+  for (const meshid of Object.keys(nodesByMesh)) {
+    for (const n of (nodesByMesh[meshid] || [])) {
+      if (!n) continue;
+      const nodeid = normalizeNodeId(n._id);
+      if (!nodeid || seen.has(nodeid)) continue;
+      seen.add(nodeid);
+      out.push({ nodeid, name: n.name || n.rname || '', rname: n.rname || '', online: ((n.conn || 0) & 1) !== 0 });
+    }
+  }
+  return out;
+}
+// 纯判定（无 IO，供路由与本地自测共用）：nodesByMesh 为 null＝取数失败/超时。
+// 同名多台绝不默默选一个，一律回 AMBIGUOUS 带候选清单让调用方处理。
+function resolveDeviceByName(nodesByMesh, queryName) {
+  if (!nodesByMesh) return { ok: false, code: 'TIMEOUT', msg: '设备列表暂时取不到，请稍后再试。' };
+  const q = String(queryName || '');
+  const hits = flattenMeshNodes(nodesByMesh).filter((d) => d.name === q || (d.rname && d.rname === q));
+  if (!hits.length) return { ok: false, code: 'NOT_FOUND', msg: '没有找到这个名称的设备。' };
+  if (hits.length > 1) {
+    return { ok: false, code: 'AMBIGUOUS', msg: '找到多个同名设备，无法确定要连接哪一台。', candidates: hits.map((d) => ({ nodeid: d.nodeid, name: d.name, online: d.online })) };
+  }
+  const one = hits[0];
+  if (!one.online) return { ok: false, code: 'OFFLINE', nodeid: one.nodeid, name: one.name, msg: '这台设备当前不在线。' };
+  return { ok: true, nodeid: one.nodeid, name: one.name, online: true };
+}
+
 // ---------- 路由 ----------
 const server = http.createServer(async (req, res) => {
   try {
@@ -2257,6 +2295,20 @@ const server = http.createServer(async (req, res) => {
       const out = await buildHomeStats(req, auth);
       return sendJson(res, 200, out);
     }
+    // ===== 设备解析兜底：GET /api/device/resolve?name=<设备名> =====
+    // 网页 SPA 点设备进远程会话时，本地 name→nodeid 解析偶发竞态降级；
+    // 本端点在服务端用同一条真实取数路径（mcFetchNodes）复查一遍回裸
+    // nodeid。只读、无副作用、不写任何状态。业务结果一律 200 回包、
+    // 由 ok/code 表达（未登录 401、缺 name 400 除外），与 /home/api 同口径。
+    if (req.method === 'GET' && p === '/api/device/resolve') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (denyIfBanned(res, auth.user)) return;
+      const qname = u.searchParams.get('name');
+      if (!qname || !String(qname).trim()) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '请提供要查找的设备名称。' });
+      const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req));
+      return sendJson(res, 200, resolveDeviceByName(nodesByMesh, String(qname)));
+    }
     if (req.method === 'GET' && p === '/home/api/login-devices') {
       const auth = await resolveAuth(req);
       if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
@@ -2926,4 +2978,4 @@ if (!process.env.QFEXT_NO_LISTEN) {
 }
 
 // 供本地单测使用（生产路径不依赖）
-module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids };
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName };
