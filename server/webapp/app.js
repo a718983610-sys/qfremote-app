@@ -357,7 +357,8 @@ const S = {
   user: null, displayName: '', isAdmin: false,
   license: null, points: null, stats: null,
   route: { name: 'home', param: null },
-  forumReady: false
+  forumReady: false,
+  sessGen: 0                 // DS-R49：会话身份代数（新登录/登出/强制下线/会话结束递增，在飞请求据此丢弃迟到响应）
 };
 function cacheSave() {
   if (S.auth !== 'in') return;
@@ -619,6 +620,7 @@ function noteBanSignal(res, path) {
 
 /* 会话猝死统一落点（R5）：返回是否已接管呈现 */
 function sessionDied(source) {
+  S.sessGen++; // DS-R49：会话结束＝登出等价落点，递增代数使其余在飞旧响应作废
   if (BanLock.suppress) return false;
   if (BanLock.state === 'expired') return true;
   if (BanLock.state === 'locked') { BanLock.toExpired('locked'); return true; }
@@ -638,15 +640,20 @@ async function checkSession(silent, opts) {
   const o = opts || {};
   const probe = o.probe;
   if (probe) { try { probe.gated = false; } catch (e) {} }
+  const gen = S.sessGen; // DS-R49：发起时捕获身份代数，响应回来时代数已变则整单丢弃
   const me = await api('/license/api/me');
+  if (gen !== S.sessGen) return S.auth === 'in'; // DS-R49：旧代数迟到响应，不写状态、不作处置
   if (me.status === 200 && me.json && me.json.ok) {
-    S.auth = 'in'; S.user = me.json.username; S.license = me.json;
     // 同一响应只走一条路：先 forceLogout（设备门），再 activeBan（封禁锁定）
     if (me.json.forceLogout) {
       if (probe) { try { probe.gated = true; } catch (e) {} }
       forceGate(me.json.gateCode || 'G1');
       return false;
     }
+    const isNewAuth = S.auth !== 'in' || S.user !== me.json.username;
+    S.auth = 'in'; S.user = me.json.username; S.license = me.json;
+    if (isNewAuth) S.sessGen++; // DS-R49：仅新建登录身份时递增；同账号周期校验不递增，防误伤在飞心跳
+    const curGen = S.sessGen;
     if (me.json.activeBan) {
       S.displayName = S.displayName || me.json.username;
       BanLock.enter(me.json.activeBan);       // 信号②
@@ -654,6 +661,7 @@ async function checkSession(silent, opts) {
       return true;
     }
     const st = await api('/home/api/stats');
+    if (curGen !== S.sessGen) return S.auth === 'in'; // DS-R49：stats 在飞期间身份已变，旧回填不写入
     if (st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || me.json.username; S.isAdmin = !!st.json.isAdmin; }
     else { S.displayName = me.json.username; }
     cacheSave();
@@ -738,6 +746,7 @@ async function doLogin(username, password, remember) {
   let me = await api('/license/api/me');
   if (!(me.status === 200 && me.json && me.json.ok)) { await new Promise(r => setTimeout(r, 600)); me = await api('/license/api/me'); }
   if (me.status === 200 && me.json && me.json.ok) {
+    S.sessGen++; // DS-R49：主动登录成功即新身份代数，旧在飞响应作废
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
     const st = await api('/home/api/stats');
     if (st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || S.user; S.isAdmin = !!st.json.isAdmin; }
@@ -752,8 +761,9 @@ async function doLogin(username, password, remember) {
 async function heartbeat() {
   if (S.auth !== 'in') return;
   if (BanLock.active()) return;
+  const gen = S.sessGen; // DS-R49：发起时捕获身份代数
   const r = await api('/points/api/heartbeat', { method: 'POST', json: { client: 'web-console-shadow' } });
-  if (S.auth !== 'in') return; // DS-R24 B2：等待期间已主动退出登录，迟到响应不再接管呈现（防覆盖登录页）
+  if (gen !== S.sessGen || S.auth !== 'in') return; // DS-R49＋DS-R24 B2：等待期间身份代数变化（含登出后快速重登）或已主动退出登录，迟到响应不再接管呈现、不写积分、不落强制下线（防误踢新会话）
   if (r.status === 200 && r.json) {
     if (r.json.forceLogout) { forceGate('G1'); return; }
     S.points = r.json; cacheSave();
@@ -764,6 +774,7 @@ async function heartbeat() {
 setInterval(heartbeat, 60000);                    // 在线计时/强制下线通道
 setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true); }, 240000); // 凭证静默续期校验
 function forceGate(code) {
+  S.sessGen++; // DS-R49：强制下线＝登出等价落点，递增代数使其余在飞旧响应作废
   BanLock.exit();
   S.auth = 'out'; Cache.clear();
   invalidateNodeMap(); // W1-2：强制下线即清设备映射缓存，防换账号残留
@@ -774,6 +785,7 @@ function forceGate(code) {
 async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
     BanLock.suppress = true;
+    S.sessGen++; // DS-R49：登出即身份代数变化，旧在飞响应作废
     try {
       BanLock.exit();
       await api('/logout');
@@ -1867,6 +1879,7 @@ async function cq(method, path, body) {
   if (body !== undefined) opts.json = body;
   const r = await chatApi(path, opts);
   if (r.ssoError) throw new Error(r.ssoError);
+  if (r.networkError) throw new Error('网络连接失败，请检查网络后重试。'); // CS2-2：接口自身网络失败走网络文案
   if (!r.json) throw new Error('聊天服务暂时不可用，请稍后再试。');
   if (!r.ok || r.json.ok === false) throw new Error(r.json.msg || ('HTTP ' + r.status));
   return r.json;
@@ -2685,8 +2698,10 @@ Views.chat = async function (view) {
         chOpenConversation(peer);
       }));
     } else {
-      const why = r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。');
-      box.innerHTML = `<div class="statebox"><b>会话列表加载失败</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
+      const net = !!r.networkError; // CS2-2：接口自身网络失败走网络文案，不落兜底句（原兜底与标题重复）
+      const title = net ? '网络暂时不可用' : '会话列表加载失败';
+      const why = net ? '网络连接失败，请检查网络后重试。' : (r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。'));
+      box.innerHTML = `<div class="statebox"><b>${esc(title)}</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
       const rb = $('#ch-retry', view); if (rb) rb.onclick = () => paintList();
     }
   };
