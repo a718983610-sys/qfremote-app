@@ -48,6 +48,11 @@ const { createEventsCore } = _eventsMod;
 const { createFilesCore } = _filesMod;
 let _homePageMod = null;
 try { _homePageMod = require('./home-page'); } catch (e) { try { _homePageMod = require('../ext-svc/home-page'); } catch (e2) {} }
+// 全站统一档案（昵称＋头像，2.3.2）：正本模块＋图像审核供给＋与论坛同一判定源
+let _profileCoreMod = null, _profileImageMod = null, _profileReviewMod = null, _profileWordsFallback = null;
+try { _profileCoreMod = require('./profile-core'); _profileImageMod = require('./profile-imagemod'); _profileReviewMod = require('./profile-review'); }
+catch (e) { try { _profileCoreMod = require('../ext-svc/profile-core'); _profileImageMod = require('../ext-svc/profile-imagemod'); _profileReviewMod = require('../ext-svc/profile-review'); } catch (e2) {} }
+try { _profileWordsFallback = require('./words-data.json'); } catch (e) { try { _profileWordsFallback = require('../ext-svc/words-data.json'); } catch (e2) {} }
 const homePageHtml = _homePageMod ? _homePageMod.homePageHtml : null;
 const LIC_DIR = process.env.QFLIC_DIR || '/opt/qfremote-license';
 const lic = createLicenseCore({ dir: LIC_DIR });
@@ -114,6 +119,40 @@ try {
   const _ocrMod = require('./ocr-core');
   orderOcr = _ocrMod.createOrderOcr({ payOrders, log, extDir: process.env.QFEXT_DIR || '/opt/qfremote-ext' });
 } catch (e) { log({ ev: 'order-ocr-unavailable', err: String(e && e.message || e) }); }
+
+// ---------- 全站统一档案（昵称＋头像，2.3.2；设计 v232/profile-avatar-nickname/DESIGN.md） ----------
+// 冻结判定与论坛同口径（冻结位＋站长精确豁免；全权账号源码豁免锁定）；
+// 封禁判定读许可台账现行封禁。判定只在提交时用，展示面不拦。
+function profileAccountStatus(username) {
+  const login = String(username || '').toLowerCase();
+  let frozen = false;
+  try {
+    const u = findDbUser(loadDb(), login);
+    if (u) frozen = ((u.siteadmin || 0) !== SITEADMIN_FULL) && (((u.siteadmin || 0) & SITEADMIN_LOCKED_BIT) !== 0) && login !== ADMIN_EMAIL;
+  } catch (e) {}
+  let banned = false;
+  try { banned = (lic.activeBansFor(login, Date.now()) || []).length > 0; } catch (e) {}
+  return { frozen, banned };
+}
+// 图像审核供给：生产＝GLM 视觉（profile-imagemod）。试运行桩（stub-ok/
+// stub-violate）须同时显式设 QFPROFILE_ALLOW_STUB=1 才生效（核对 #2 硬闸门：
+// 单独残留 QFPROFILE_IMAGE_MOD 不再能打开免审通道）；桩生效时启动日志留痕。
+const _profileStubOn = process.env.QFPROFILE_ALLOW_STUB === '1' && (process.env.QFPROFILE_IMAGE_MOD === 'stub-ok' || process.env.QFPROFILE_IMAGE_MOD === 'stub-violate');
+if (process.env.QFPROFILE_IMAGE_MOD && !_profileStubOn) log({ ev: 'profile-image-mod-stub-ignored', value: String(process.env.QFPROFILE_IMAGE_MOD) });
+if (_profileStubOn) log({ ev: 'profile-image-mod-STUB-ACTIVE', value: String(process.env.QFPROFILE_IMAGE_MOD), warn: '试运行桩生效中，禁止用于生产' });
+const profileImageMod = (_profileStubOn && process.env.QFPROFILE_IMAGE_MOD === 'stub-ok') ? (async () => ({ usable: true }))
+  : (_profileStubOn && process.env.QFPROFILE_IMAGE_MOD === 'stub-violate') ? (async () => ({ usable: false, category: '色情内容', rules: ['stub'] }))
+  : (_profileImageMod ? _profileImageMod.createGlmImageModerator({}) : null);
+// 路径段解码（核对 #8）：畸形编码回 null，调用方按 400/404 结构化处理，不抛 URIError
+function decSeg(s) { try { return decodeURIComponent(s); } catch (e) { return null; } }
+const profileCore = (_profileCoreMod && _profileReviewMod) ? _profileCoreMod.createProfileCore({
+  dataDir: DATA_DIR, log, events: reviewEvents,
+  reviewModule: _profileReviewMod,
+  wordsFile: process.env.QFPROFILE_WORDS_FILE || '/opt/qfremote-forum/data/words.json',
+  wordsFallback: _profileWordsFallback,
+  accountStatus: profileAccountStatus,
+  imageMod: profileImageMod,
+}) : null;
 const fileStage = createFilesCore({ dir: LIC_DIR, lic, log });
 const EXT_ASSETS_DIR = process.env.QFEXT_ASSETS_DIR || '/opt/qfremote-ext/assets';
 
@@ -827,6 +866,7 @@ function buildUsersList() {
     seen.add(login);
     const e = ledger.accounts[login] || {};
     const licSt = licBanStateOf(login);
+    const pv = profileCore ? profileCore.viewOf(login) : { nickname: null, hasAvatar: false, avatarUpdatedAt: null };
     users.push({
       login,
       displayName: d.realname || d.name || '',
@@ -842,6 +882,10 @@ function buildUsersList() {
       licBanned: licSt.licBanned,
       licFrozen: licSt.licFrozen,
       exists: true,
+      // 统一档案（2.3.2）：生效昵称与头像版本，供站长页展示与处置
+      nickname: pv.nickname || '',
+      hasAvatar: !!pv.hasAvatar,
+      avatarUpdatedAt: pv.avatarUpdatedAt || 0,
       // P6-GK3：「收回密钥」行内钮的置灰判定（名下在效钥数，含未激活）
       liveKeyCount: lic.activeKeys(login, Date.now()).length,
     });
@@ -1000,7 +1044,16 @@ async function runRenameOp(oldName, newName) {
     return { ok: false, msg, probeBefore, probeAfter };
   }
   log({ ev: 'admin-op', action: 'rename', target: oldName, ok: true, probeBefore, probeAfter });
-  return { ok: true, msg: '改名完成：' + oldName + ' 已改为 ' + newName + '，对方用新名字和原密码登录。', probeBefore, probeAfter };
+  // 改名挂钩（2.3.2 §5.8 必做）：统一档案键＋头像文件＋审核行跟随迁移；
+  // 迁移失败不回滚改名（账号本体已改），记显著日志并在回执里明示待人工补迁（核对 #14）。
+  let profileMigNote = '';
+  if (profileCore) {
+    try {
+      const mig = profileCore.migrateProfile(oldName, newName);
+      log({ ev: 'profile-migrate-after-rename', oldName, newName, movedProfile: mig.movedProfile, movedAvatar: mig.movedAvatar, modRows: mig.modRows });
+    } catch (e) { profileMigNote = '（注意：统一档案迁移失败，已记日志，请人工补迁该账号的昵称/头像档案）'; log({ ev: 'profile-migrate-PENDING-manual-fix', oldName, newName, err: String(e && e.message) }); }
+  }
+  return { ok: true, msg: '改名完成：' + oldName + ' 已改为 ' + newName + '，对方用新名字和原密码登录。' + profileMigNote, probeBefore, probeAfter };
 }
 
 // ---------- HTTP 工具 ----------
@@ -1549,6 +1602,8 @@ const server = http.createServer(async (req, res) => {
         } else if (ev.type === 'device_review') {
           const r = (lic.state().deviceReviews || []).find((x) => x.id === ev.refId);
           if (r) detail.review = { id: r.id, accounts: r.accounts, platform: r.platform, status: r.status, createdAt: r.createdAt, evidence: r.evidence };
+        } else if (ev.type === 'profile_mod') {
+          if (profileCore) detail.profileMod = profileCore.getRecordView(ev.refId);
         }
         return sendJson(res, 200, detail);
       }
@@ -1566,12 +1621,30 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': o.shotType || 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
         return res.end(buf);
       }
+      // 资料申诉快照：助手核验被驳回的昵称/头像原文（头像按审核时快照 MIME 回）
+      const pmShotM = p.match(/^\/assistant-api\/profile-mod\/([^/]+)\/snapshot$/);
+      if (req.method === 'GET' && pmShotM) {
+        const snapId = decSeg(pmShotM[1]);
+        const snap = (profileCore && snapId !== null) ? profileCore.getSnapshot(snapId) : null;
+        if (!snap) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        res.writeHead(200, { 'Content-Type': snap.mime, 'Content-Length': snap.bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        return res.end(snap.bytes);
+      }
       if (req.method === 'POST' && p === '/assistant-api/decide') {
         // 裁定回写：全部复用既有双通道裁定入口，执行者按令牌角色留痕（助手接口／站长接口），不另起平行逻辑
         const body = await readJsonBody(req);
         const type = String(body.type || ''); const refId = String(body.refId || '');
         const action = String(body.action || '');
         const ACTOR = tokenRole === 'owner' ? '站长接口' : '助手接口';
+        if (type === 'profile_mod') {
+          // 资料申诉：裁定即补生效并销账（decideAppeal 内部完成），本层不重复 resolve；
+          // 执行者留痕沿当刻令牌角色口径（助手接口／站长接口）。
+          if (!profileCore) return sendJson(res, 500, { ok: false, msg: '个人资料功能模块未加载。' });
+          if (action !== 'approve' && action !== 'reject') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          const outPm = profileCore.decideAppeal(refId, action, String(body.reason || ''), ACTOR, nowA);
+          log({ ev: 'assistant-decide', type, refId, action, ok: outPm.status === 200 });
+          return sendJson(res, outPm.status, outPm.json);
+        }
         if (type === 'order') {
           const o = payOrders.getRaw(refId);
           if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
@@ -1830,6 +1903,73 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ===== 许可公开页 =====
+    // ===== 全站统一档案（昵称＋头像，2.3.2；正本在本服务，forum/social 只读消费） =====
+    if (p === '/profile' || p.startsWith('/profile/') || p.startsWith('/internal/profile/')) {
+      if (!profileCore) return sendJson(res, 500, { ok: false, msg: '个人资料功能模块未加载。' });
+      if (p.startsWith('/internal/profile/')) {
+        if (!isInternal(req)) return sendJson(res, 403, { ok: false, code: 'INTERNAL_AUTH' });
+        const oneM = p.match(/^\/internal\/profile\/([^/]+)$/);
+        if (req.method === 'GET' && oneM && oneM[1] !== 'view') {
+          const name = (decSeg(oneM[1]) || '').toLowerCase();
+          if (!ACCOUNT_RE.test(name)) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          return sendJson(res, 200, Object.assign({ ok: true }, profileCore.viewOf(name)));
+        }
+        if (req.method === 'GET' && p === '/internal/profile/view') {
+          const names = String(u.searchParams.get('usernames') || '').split(',').map((s) => s.trim().toLowerCase()).filter((s) => ACCOUNT_RE.test(s)).slice(0, 50);
+          const views = {}; for (const n of names) views[n] = profileCore.viewOf(n);
+          return sendJson(res, 200, { ok: true, views });
+        }
+        // 头像字节内网出口（§5.2 补项，S4 审计路线 C）：供 social 侧同源代理给聊天页
+        const avInM = p.match(/^\/internal\/profile\/([^/]+)\/avatar$/);
+        if (req.method === 'GET' && avInM) {
+          const name = (decSeg(avInM[1]) || '').toLowerCase();
+          if (!ACCOUNT_RE.test(name)) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+          const got = profileCore.readAvatar(name, u.searchParams.get('v'));
+          if (!got) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+          res.writeHead(200, { 'Content-Type': got.mime, 'Content-Length': got.bytes.length, 'Cache-Control': got.cacheControl, 'X-Content-Type-Options': 'nosniff' });
+          return res.end(got.bytes);
+        }
+        return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+      }
+      // 头像字节（登录态；本人与他人同口径，版本化缓存照 A8 定版）
+      const avM = p.match(/^\/profile\/([^/]+)\/avatar$/);
+      if (req.method === 'GET' && (p === '/profile/avatar' || avM)) {
+        const auth = await resolveAuth(req);
+        if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+        const name = p === '/profile/avatar' ? String(auth.user).toLowerCase() : (decSeg(avM[1]) || '').toLowerCase();
+        // 核对 #9：公开段与 internal/论坛代理同口径补 ACCOUNT_RE（纵深一致，readAvatar 本有台账双门）
+        if (avM && !ACCOUNT_RE.test(name)) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        const got = profileCore.readAvatar(name, u.searchParams.get('v'));
+        if (!got) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        res.writeHead(200, { 'Content-Type': got.mime, 'Content-Length': got.bytes.length, 'Cache-Control': got.cacheControl, 'X-Content-Type-Options': 'nosniff' });
+        return res.end(got.bytes);
+      }
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      const me = String(auth.user).toLowerCase();
+      if (req.method === 'GET' && p === '/profile/api/me') return sendJson(res, 200, Object.assign({ ok: true }, profileCore.viewOf(me)));
+      if (req.method === 'GET' && p === '/profile/api/view') {
+        const names = String(u.searchParams.get('usernames') || '').split(',').map((s) => s.trim().toLowerCase()).filter((s) => ACCOUNT_RE.test(s)).slice(0, 50);
+        const views = {}; for (const n of names) views[n] = profileCore.viewOf(n);
+        return sendJson(res, 200, { ok: true, views });
+      }
+      if (req.method === 'POST' && p === '/profile/mod/submit') {
+        const body = await readJsonBody(req, 512 * 1024); // 头像 200KB 的 base64 约 273KB＋JSON 包装
+        const out = await profileCore.submit(me, body, Date.now());
+        return sendJson(res, out.status, out.json);
+      }
+      if (req.method === 'GET' && p === '/profile/mod/records') return sendJson(res, 200, { ok: true, records: profileCore.listRecords(me, Number(u.searchParams.get('limit')) || 50) });
+      const apM = p.match(/^\/profile\/mod\/([^/]+)\/appeal$/);
+      if (req.method === 'POST' && apM) {
+        const body = await readJsonBody(req);
+        const apId = decSeg(apM[1]);
+        if (apId === null) return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
+        const out = profileCore.appeal(me, apId, body.note, Date.now());
+        return sendJson(res, out.status, out.json);
+      }
+      return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+    }
+
     if (req.method === 'GET' && p === '/purchase') {
       const auth = await resolveAuth(req);
       if (!auth) { res.writeHead(302, { Location: '/?return=/purchase', 'Cache-Control': 'no-store' }); return res.end(); }
@@ -2940,6 +3080,36 @@ const server = http.createServer(async (req, res) => {
         }
         return sendJson(res, out.ok ? 200 : 400, out);
       }
+      // ===== 统一档案站长面（2.3.2）：重置昵称/头像、资料申诉裁定、驳回快照 =====
+      if (req.method === 'POST' && p === '/admin/api/profile-reset') {
+        if (!profileCore) return sendJson(res, 500, { ok: false, msg: '个人资料功能模块未加载。' });
+        const body = await readJsonBody(req);
+        const username = String(body.username || '').trim().toLowerCase();
+        if (!ACCOUNT_RE.test(username)) return sendJson(res, 400, { ok: false, msg: '账号格式不正确，请检查后重试。' });
+        if (!body.resetNickname && !body.resetAvatar) return sendJson(res, 400, { ok: false, msg: '未选择要重置的内容。' });
+        profileCore.adminReset(username, { resetNickname: !!body.resetNickname, resetAvatar: !!body.resetAvatar }, Date.now());
+        log({ ev: 'admin-profile-reset', target: username, by: auth.user, resetNickname: !!body.resetNickname, resetAvatar: !!body.resetAvatar });
+        const parts = []; if (body.resetNickname) parts.push('昵称'); if (body.resetAvatar) parts.push('头像');
+        return sendJson(res, 200, { ok: true, msg: '已重置' + parts.join('与') + '：' + username });
+      }
+      if (req.method === 'GET' && p === '/admin/api/profile-appeals') {
+        if (!profileCore) return sendJson(res, 500, { ok: false, msg: '个人资料功能模块未加载。' });
+        return sendJson(res, 200, { ok: true, appeals: profileCore.pendingAppeals(50) });
+      }
+      if (req.method === 'POST' && p === '/admin/api/profile-appeals/decide') {
+        if (!profileCore) return sendJson(res, 500, { ok: false, msg: '个人资料功能模块未加载。' });
+        const body = await readJsonBody(req);
+        const out = profileCore.decideAppeal(String(body.id || ''), String(body.action || ''), String(body.reason || ''), 'owner', Date.now());
+        return sendJson(res, out.status, out.json);
+      }
+      const admSnapM = p.match(/^\/admin\/api\/profile-mod\/([^/]+)\/snapshot$/);
+      if (req.method === 'GET' && admSnapM) {
+        const admSnapId = decSeg(admSnapM[1]);
+        const snap = (profileCore && admSnapId !== null) ? profileCore.getSnapshot(admSnapId) : null;
+        if (!snap) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND' });
+        res.writeHead(200, { 'Content-Type': snap.mime, 'Content-Length': snap.bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        return res.end(snap.bytes);
+      }
       return sendJson(res, 404, { ok: false, msg: '该接口不存在。' });
     }
 
@@ -2968,6 +3138,9 @@ async function sealPurgeSweep() {
   } catch (e) { log({ ev: 'seal-purge-error', err: String(e && e.message) }); }
 }
 if (!process.env.QFEXT_NO_LISTEN) { setInterval(sealPurgeSweep, 6 * 3600000); setTimeout(sealPurgeSweep, 60000); }
+// 资料申诉快照字节到期清理（结案 30 天，行保留，2.3.2 §5.4）
+function profileSnapshotSweep() { try { if (profileCore) profileCore.cleanupSnapshots(Date.now()); } catch (e) { log({ ev: 'profile-snapshot-sweep-error', err: String(e && e.message) }); } }
+if (!process.env.QFEXT_NO_LISTEN) { const _profileSweepT = setInterval(profileSnapshotSweep, 24 * 3600000); if (_profileSweepT && _profileSweepT.unref) _profileSweepT.unref(); setTimeout(profileSnapshotSweep, 120000); }
 
 if (!process.env.QFEXT_NO_LISTEN) {
   server.listen(PORT, BIND, () => {
