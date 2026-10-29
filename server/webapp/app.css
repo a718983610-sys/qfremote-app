@@ -43,7 +43,7 @@ svg.ic{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;str
 .acctmenu a{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3);border-radius:var(--r);font-size:var(--fs-14);line-height:var(--lh-btn)}
 .acctmenu a:hover{background:var(--tint)}.acctmenu a.on{color:var(--brand);font-weight:700}.acctmenu a.red{color:var(--err)}
 /* ===== 抽屉 ===== */
-.drawer{position:fixed;left:0;top:0;bottom:0;width:min(300px,84vw);background:var(--navy);color:#fff;padding:var(--sp-5) var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-1);z-index:var(--z-drawer);transform:translateX(-106%);transition:transform .22s ease,visibility 0s linear .22s;box-shadow:24px 0 48px rgba(11,26,51,.25);visibility:hidden}
+.drawer{position:fixed;left:0;top:0;bottom:0;width:min(300px,84vw);background:var(--navy);color:#fff;padding:var(--sp-5) var(--sp-4);display:flex;flex-direction:column;overflow-y:auto;gap:var(--sp-1);z-index:var(--z-drawer);transform:translateX(-106%);transition:transform .22s ease,visibility 0s linear .22s;box-shadow:24px 0 48px rgba(11,26,51,.25);visibility:hidden}
 .drawer.open{transform:none;visibility:visible;transition:transform .22s ease}
 .dscrim{position:fixed;inset:0;background:rgba(11,26,51,.45);z-index:var(--z-scrim);opacity:0;visibility:hidden;transition:opacity .22s ease,visibility 0s linear .22s}
 .dscrim.on{opacity:1;visibility:visible;transition:opacity .22s ease}

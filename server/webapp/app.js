@@ -750,8 +750,9 @@ async function doLogin(username, password, remember) {
   if (me.status === 200 && me.json && me.json.ok) {
     S.sessGen++; // DS-R49：主动登录成功即新身份代数，旧在飞响应作废
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
+    const curGen = S.sessGen; // 批A-A1：捕获本次登录代数，stats 回填前比对（处方同 checkSession）
     const st = await api('/home/api/stats');
-    if (st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || S.user; S.isAdmin = !!st.json.isAdmin; }
+    if (curGen === S.sessGen && st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || S.user; S.isAdmin = !!st.json.isAdmin; }
     cacheSave();
     // 登录即上报一次积分心跳（与软件端口径一致；响应含强制下线信号时立即处理）
     heartbeat();
@@ -767,7 +768,7 @@ async function heartbeat() {
   const r = await api('/points/api/heartbeat', { method: 'POST', json: { client: 'web-console-shadow' } });
   if (gen !== S.sessGen || S.auth !== 'in') return; // DS-R49＋DS-R24 B2：等待期间身份代数变化（含登出后快速重登）或已主动退出登录，迟到响应不再接管呈现、不写积分、不落强制下线（防误踢新会话）
   if (r.status === 200 && r.json) {
-    if (r.json.forceLogout) { forceGate('G1'); return; }
+    if (r.json.forceLogout) { forceGate(r.json.gateCode || 'G1'); return; } // 批A-A5：按服务端下发 gateCode 落门，与 checkSession 同口径
     S.points = r.json; cacheSave();
     return;
   }
@@ -790,7 +791,10 @@ async function doLogout() {
     S.sessGen++; // DS-R49：登出即身份代数变化，旧在飞响应作废
     try {
       BanLock.exit();
-      await api('/logout');
+      const lo = await api('/logout');
+      // 批A-W1-6：结果要查——失败也照常本地登出（既定口径），仅 console.warn 留痕、用户无感（DS 门一裁定 (a)）。
+      // 判失败只认网络失败/HTTP 错误：/logout 成功回的是页面而非 JSON，不能以 json.ok 判成败（偏差 DEV-1，送门二验收）。
+      if (!lo || lo.networkError || lo.status === 0 || lo.status >= 400) console.warn('退出登录请求未成功，已按本地退出处理。', lo && lo.status);
     } finally {
       BanLock.suppress = false;
     }
@@ -798,7 +802,7 @@ async function doLogout() {
     invalidateNodeMap(); // W1-2：主动登出即清设备映射缓存，防换账号残留
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
     try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
-    S.auth = 'out'; S.license = null; S.points = null;
+    S.auth = 'out'; S.user = null; S.displayName = ''; S.isAdmin = false; S.license = null; S.points = null; S.stats = null; // 批A-W1-11：身份字段按 S 默认复位，防换账号残留
     showAuth('login', { notice: '您已退出登录。' });
   });
 }
@@ -948,7 +952,12 @@ function navigate(name, param) {
 function parseRoute() {
   const h = (location.hash || '#home').slice(1);
   const [name, param] = h.split('/');
-  return { name: name || 'home', param: param ? decodeURIComponent(param) : null };
+  let decodedParam = null;
+  if (param) {
+    try { decodedParam = decodeURIComponent(param); }
+    catch (e) { decodedParam = null; } // 批A-W1-9：畸形编码按无参处理，不抛 URIError 中断渲染（DS 门一裁定）
+  }
+  return { name: name || 'home', param: decodedParam };
 }
 async function render() {
   if (BanLock.active()) return;   // 锁定 / 会话已结束呈现期间不得渲回主壳
@@ -1370,14 +1379,24 @@ Views.devices = async function (view) {
   const mine = (S.stats && S.stats.devices) || [];
   let shared = [];
   const fm = await api('/api/friends/me');
-  if (fm.status === 200 && fm.json) shared = (fm.json.sharesIn || []).map(s => ({ name: s.meshName || '共享设备组', os: '好友共享 · ' + (s.tier === 'B2' ? '可操作' : '只看'), group: s.owner || '', online: false }));
+  if (fm.status === 200 && fm.json) shared = (fm.json.sharesIn || []).map(s => ({ name: s.meshName || '共享设备组', os: '好友共享 · ' + ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'), group: s.owner || '', online: false })); // 批A-A2：档位判法对齐好友页与服务端词表 operate/view
   const box = $('#devList', view);
   const paint = (tab) => {
+    // 批A-A4：三页签分开渲染——'all' 合并我的与共享；共享行归属读映射字段 group（原误读 d.from 永不显示）
+    const mineRows = mine.map(devRowHtml);
+    const sharedRows = shared.map(d => devRowHtml({ name: d.name || d.device || '', os: d.os || '好友共享', group: d.group || '', online: !!d.online }));
+    let rows, emptyHtml;
     if (tab === 'shared') {
-      box.innerHTML = `<div class="card">${shared.length ? shared.map(d => devRowHtml({ name: d.name || d.device || '', os: d.os || '好友共享', group: d.from || '', online: !!d.online })).join('') : '<div class="statebox"><b>暂无好友共享的设备</b><p>好友把设备共享给您后，将显示在这里。</p></div>'}</div>`;
+      rows = sharedRows;
+      emptyHtml = '<div class="statebox"><b>暂无好友共享的设备</b><p>好友把设备共享给您后，将显示在这里。</p></div>';
+    } else if (tab === 'mine') {
+      rows = mineRows;
+      emptyHtml = '<div class="statebox"><b>暂无设备</b><p>设备上线后将显示在这里。</p></div>';
     } else {
-      box.innerHTML = `<div class="card">${mine.length ? mine.map(devRowHtml).join('') : '<div class="statebox"><b>暂无设备</b><p>设备上线后将显示在这里。</p></div>'}</div>`;
+      rows = mineRows.concat(sharedRows);
+      emptyHtml = '<div class="statebox"><b>暂无设备</b><p>设备上线后，或好友将设备共享给您后，将显示在这里。</p></div>';
     }
+    box.innerHTML = `<div class="card">${rows.length ? rows.join('') : emptyHtml}</div>`;
     bindDevRows(box);
   };
   paint('all');
@@ -1729,7 +1748,7 @@ Views.friends = async function (view) {
       if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
       list.innerHTML = h;
       const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
-      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); toast('已删除好友。', 'ok'); paint(); }));
+      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { const r = await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); if (r.json && r.json.ok) { toast('已删除好友。', 'ok'); paint(); } else { toast((r.json && r.json.msg) || '删除好友未成功，请稍后再试。', 'err'); } })); // 批A-A3：查删除结果，失败如实提示且不刷新（DS 门一裁定）
       list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
       const groups = (j.myGroups || []);
       const opts = groups.length ? groups.map(g => `<option value="${esc(g.meshid || g.id || g)}">${esc(g.name || g.meshName || g.meshid || g)}</option>`).join('') : '<option value="">（暂无可共享分组）</option>';
@@ -3059,6 +3078,7 @@ Views.purchase = async function (view, param, _s, opts) {
     ? '<p style="color:var(--err);font-size:13.5px;margin:0 0 14px">购买叠加的用户，购买后请到我的账户中兑换叠加套餐</p>' : '';
   let expanded = null;                 // 当前展开的套餐 id（单开）
   const byPlan = {};                   // planId -> { order, pay }
+  const ensureOrderFlights = {};       // 批A-W3-F1：planId -> true（建单在飞守卫，防收起再展开重复建单）
   const guestMethod = {};              // 游客态各套餐选中的支付方式（页签切换仅换展示，无订单）
   let timer = null;
   const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
@@ -3289,14 +3309,19 @@ Views.purchase = async function (view, param, _s, opts) {
   async function ensureOrder(planId) {
     if (guest) { renderDrawer(planId); return; }
     if (byPlan[planId] && byPlan[planId].order) { renderDrawer(planId); return; }
+    if (ensureOrderFlights[planId]) { renderDrawer(planId); return; } // 批A-W3-F1：在飞期间重复进入只渲染加载态，不二次建单
     renderDrawer(planId); // 加载态
-    const plan = PLANS.find(x => x.id === planId);
-    const r = await api('/license/api/pay/orders', { method: 'POST', json: { plan: planId, method: 'wechat' } });
-    if (expanded !== planId) return; // 用户已切换/收起，订单已在服务端建好，可在我的订单继续
-    if (r.json && r.json.ok && r.json.order) byPlan[planId] = { order: r.json.order, pay: r.json.pay || null };
-    else if (r.status === 401 || r.status === 403) byPlan[planId] = { error: '登录状态已失效，请重新登录后再购买。' };
-    else byPlan[planId] = { error: apiErrText(r, '订单创建未成功，请稍后再试。') };
-    renderDrawer(planId);
+    ensureOrderFlights[planId] = true;
+    try {
+      const r = await api('/license/api/pay/orders', { method: 'POST', json: { plan: planId, method: 'wechat' } });
+      if (r.json && r.json.ok && r.json.order) byPlan[planId] = { order: r.json.order, pay: r.json.pay || null };
+      else if (r.status === 401 || r.status === 403) byPlan[planId] = { error: '登录状态已失效，请重新登录后再购买。' };
+      else byPlan[planId] = { error: apiErrText(r, '订单创建未成功，请稍后再试。') };
+      if (expanded !== planId) return; // 用户已切换/收起，结果已缓存于 byPlan，重新展开直接用，不再重复建单
+      renderDrawer(planId);
+    } finally {
+      delete ensureOrderFlights[planId];
+    }
   }
 
   view.querySelectorAll('[data-plan]').forEach(el => {
@@ -3319,6 +3344,7 @@ Views.purchase = async function (view, param, _s, opts) {
         expanded = planId; paintHeads(); renderDrawer(planId);
       }
     } else if (r.json) toast(apiErrText(r, '该订单当前不能继续支付。'), 'warn');
+    else toast('网络暂时不可用，请检查网络后重试。', 'err'); // 批A-W3-F3：网络失败（json 为空）不再静默
   }
 };
 
