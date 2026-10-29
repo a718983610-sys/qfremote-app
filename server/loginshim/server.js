@@ -350,7 +350,9 @@ function whoamiConnectOnce(cookieHeader, timeoutMs, fwdIp) {
     const timer = setTimeout(() => finish(new Error('mc-connect-timeout')), timeoutMs);
     function finish(err, userinfo) {
       if (done) return; done = true; clearTimeout(timer);
-      try { ws.close(); } catch (e) {}
+      // 超时路径用 terminate 立即断（DS flash 复核建议 1）：引擎假死时
+      // close() 的关闭握手会让半开连接滞留到 ws 内部关闭超时。
+      try { if (err && err.message === 'mc-connect-timeout' && ws.terminate) ws.terminate(); else ws.close(); } catch (e) {}
       if (err) reject(err); else resolve(userinfo);
     }
     ws.on('message', (data) => {
