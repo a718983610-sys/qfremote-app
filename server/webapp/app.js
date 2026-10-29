@@ -1640,6 +1640,13 @@ Views.session = async function (view, param) {
   const kind = ctx ? ctx.kind : 'desktop';
   let name = ctx ? (ctx.name || '') : '';
   let nodeid = ctx ? bareNodeId(ctx.nodeid || '') : '';
+  if (!ctx && param) {
+    /* DS P2-3：无 ctx 直达/刷新时 param 可能是裸 nodeid（邀请打开的会话
+       URL 规范化为 #session/<nodeid>）——先按 id 反查设备名（byId 映射，
+       邀请行同款口径），命中即按 id 定址，不再无条件当设备名解析。 */
+    const byIdName = (nodeMapCache && nodeMapCache.byId && nodeMapCache.byId.get(bareNodeId(param))) || '';
+    if (byIdName) { nodeid = bareNodeId(param); name = byIdName; }
+  }
   if (!name && param && param !== nodeid) name = param;
   if (!nodeid && name) nodeid = nodeIdFor(name);
   Sess.active = true; Sess.name = name; Sess.nodeid = nodeid; Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind] || 11;
@@ -1655,6 +1662,11 @@ Views.session = async function (view, param) {
     const r = await resolveDeviceId(name).catch(() => ({ ok: false, code: 'TIMEOUT' }));
     if (gen !== Sess.gen || !Sess.active) return;
     if (r && r.ok && r.nodeid) { nodeid = bareNodeId(r.nodeid); Sess.nodeid = nodeid; if (r.name) { Sess.name = r.name; const t = $('#qfTitle', view); if (t) t.textContent = r.name; } }
+    else if (r && r.code === 'NOT_FOUND' && !ctx && param && name === param) {
+      /* DS P2-3 兜底：名称解析已确证无此设备名的深链 param 按裸 nodeid
+         直达（映射未预热时 byId 反查未命中走此路），不再假报未找到。 */
+      nodeid = bareNodeId(param); Sess.nodeid = nodeid;
+    }
     else { showSessionMask(view, (r && r.code) || 'TIMEOUT', r); return; }
   }
   if (!nodeid) { showSessionMask(view, 'NOT_FOUND', null); return; }
