@@ -46,6 +46,9 @@ const SNAPSHOT_RETENTION_MS = 30 * 86400000;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 // 账号名文件名安全集（与 ext ACCOUNT_RE 对齐；服务账号带 '-' 亦在内）
 const NAME_RE = /^[A-Za-z0-9@._+\-]{1,80}$/;
+// 存量导入键口径（J-9c，与脚本版 import-nicknames.js 的 ACCOUNT_KEY_RE/DENY_KEYS 逐字一致）
+const IMPORT_KEY_RE = /^[a-z0-9@._+\-]{1,80}$/;
+const IMPORT_DENY_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 // ---------- 与 QFClash profile.js/util.js 同口径的小工具 ----------
 function decodeB64(s) {
@@ -97,8 +100,24 @@ function createProfileCore(deps) {
 
   // ---------- 台账读写（原子写，照 points.json 先例） ----------
   function loadJson(file, fallback) {
-    try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); if (v && typeof v === 'object') return v; } catch (e) {}
-    return fallback;
+    // J-9b（发版前全量审立项）：损坏台账不许静默回落空档——下一次 save 会把
+    // 损坏原件整文件覆盖、档案全丢。与 events-core/forum 隔离口径对齐：
+    // ENOENT（首启无文件）才静默回落；解析失败/非对象一律先改名隔离
+    // .corrupt-* 保全原字节并 log 留痕，再回落空档起步。
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); }
+    catch (e) {
+      if (e && e.code !== 'ENOENT') { try { log({ ev: 'profile-store-load-error', file, err: String(e && e.message || e) }); } catch (e2) {} }
+      return fallback;
+    }
+    try { const v = JSON.parse(raw); if (v && typeof v === 'object' && !Array.isArray(v)) return v; throw new Error('台账顶层不是对象'); } catch (e) {
+      const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      let isolated = true;
+      try { fs.renameSync(file, corrupt); } catch (e2) { isolated = false; try { log({ ev: 'profile-store-quarantine-failed', file, err: String(e2 && e2.message || e2) }); } catch (e3) {} }
+      try { log({ ev: 'profile-store-corrupt-isolated', file, corrupt: isolated ? corrupt : null, err: String(e && e.message || e) }); } catch (e2) {}
+      try { console.error(JSON.stringify({ ev: 'profile-store-corrupt-isolated', file, corrupt: isolated ? corrupt : null })); } catch (e2) {}
+      return fallback;
+    }
   }
   function saveJson(file, obj) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -446,6 +465,21 @@ function createProfileCore(deps) {
       if (row.kind === 'avatar' && row.baseAvatarUpdatedAt !== undefined && ((cur && cur.avatarUpdatedAt) || null) !== (row.baseAvatarUpdatedAt || null)) {
         return err(409, 'PROFILE_APPEAL_SUPERSEDED', '该账号的头像在申诉后已有新的变更，这条申诉不能再补生效，请驳回并说明原因');
       }
+      // J-9a（发版前全量审立项）：补生效先落档案、后落审核行——落行失败时
+      // 旧实现只退审核行、不退已生效档案，用户没申诉成功却先换了资料，
+      // 且行回到 pending 后再裁一次会二次生效。先把档案现状整份快照，
+      // saveModOrThrow 失败时连档案（含头像字节文件）一并回滚到裁定前。
+      const prevRec = recOf(row.username) ? JSON.parse(JSON.stringify(recOf(row.username))) : null;
+      let prevAvatarBytes = null;
+      if (prevRec && prevRec.avatarMime) { try { prevAvatarBytes = fs.readFileSync(avatarPathOf(row.username)); } catch (e) {} }
+      const rollbackProfile = () => {
+        if (prevRec) profiles.users[row.username] = prevRec; else delete profiles.users[row.username];
+        try {
+          if (prevAvatarBytes) { const tmp = avatarPathOf(row.username) + '.tmp'; fs.writeFileSync(tmp, prevAvatarBytes, { mode: 0o600 }); fs.renameSync(tmp, avatarPathOf(row.username)); }
+          else if (!prevRec || !prevRec.avatarMime) { try { fs.unlinkSync(avatarPathOf(row.username)); } catch (e) {} }
+        } catch (e) {}
+        try { saveProfiles(); } catch (e) {}
+      };
       if (row.kind === 'nickname') {
         setNicknameDirect(row.username, row.nicknameSnapshot, nowMs);
       } else {
@@ -457,6 +491,7 @@ function createProfileCore(deps) {
       row.decidedAt = nowMs; row.appliedAt = nowMs; row.updatedAt = nowMs;
       // F6：落盘失败（含重试）→ 回滚内存裁定态，行保持 pending 可再裁，不劈叉
       try { saveModOrThrow(); } catch (e) {
+        rollbackProfile(); // J-9a：已补生效的档案同步退回裁定前状态
         row.appealStatus = 'pending'; row.appealReviewer = null; row.decidedAt = null; row.appliedAt = null; row.updatedAt = nowMs;
         log({ ev: 'profile-mod-persist-failed', recordId: row.id, where: 'decideAppeal' });
         return err(500, 'PROFILE_PERSIST_FAILED', '系统繁忙，请稍后再试');
@@ -531,16 +566,25 @@ function createProfileCore(deps) {
 
   // ---------- 存量导入（论坛影子昵称一次性导入，S2 脚本共用同一逻辑） ----------
   function importNicknames(forumProfiles) {
-    const out = { imported: [], skippedExisting: [], total: 0 };
-    for (const name of Object.keys(forumProfiles || {})) {
-      const nick = String((forumProfiles[name] && forumProfiles[name].nickname) || '').trim();
+    // J-9c（发版前全量审立项）：与脚本版 import-nicknames.js 同口径，禁止漂移——
+    // 账号键先 toLowerCase 归一（ext 全部查键路径均小写）、键白名单
+    // （归一后小写集，与脚本 ACCOUNT_KEY_RE 一致）、__proto__/constructor/
+    // prototype 原型键显式拒绝、读写一律 hasOwnProperty 语义，杜绝原型污染
+    // 与记录静默丢失；被拒键进 skippedInvalid、归一映射进 normalized。
+    const out = { imported: [], skippedExisting: [], skippedInvalid: [], normalized: {}, total: 0 };
+    for (const rawName of Object.keys(forumProfiles || {})) {
+      const rawNick = forumProfiles[rawName] && forumProfiles[rawName].nickname;
+      const nick = typeof rawNick === 'string' ? rawNick.trim() : '';
       if (!nick) continue;
       out.total += 1;
-      const rec = recOf(name);
-      if (rec && rec.nickname) { out.skippedExisting.push(name); continue; }
-      ensureRec(name).nickname = nick;
-      profiles.users[name].updatedAt = Date.now();
-      out.imported.push(name);
+      const key = String(rawName).toLowerCase();
+      if (IMPORT_DENY_KEYS.has(key) || !IMPORT_KEY_RE.test(key)) { out.skippedInvalid.push(rawName); continue; }
+      if (key !== rawName) out.normalized[rawName] = key;
+      const rec = Object.prototype.hasOwnProperty.call(profiles.users, key) ? profiles.users[key] : null;
+      if (rec && rec.nickname) { out.skippedExisting.push(key); continue; }
+      ensureRec(key).nickname = nick;
+      profiles.users[key].updatedAt = Date.now();
+      out.imported.push(key);
     }
     if (out.imported.length) saveProfiles();
     return out;
