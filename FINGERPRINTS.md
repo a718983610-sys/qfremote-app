@@ -30,7 +30,7 @@
 | server/ext/page.js | /opt/qfremote-ext/page.js | `6218a7480ce378f5ffb66e937a6155d6` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `12e99c9d46b207850b3b7fbbd85b9a3c` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `37ca71db9e2288f07946e7619403c671` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `9d12b0f6a32d5ce8cc3fe55580de9c8f` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `7403528642a314f40c25bd6f64d2ef27` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |
@@ -90,7 +90,7 @@
 | server/register/server.js | /opt/qfremote-register/server.js | `1446bfdba5b2344b4da0cbbfaf40101c` |
 | server/register/test-logic.js | /opt/qfremote-register/test-logic.js | `84edd6bc4aade5f34f2d6a90be117322` |
 | server/webapp/app.css | /opt/qfremote-webapp/app.css | `4c5c772e35cbb9b55cc96e30ca3ad7a6` |
-| server/webapp/app.js | /opt/qfremote-webapp/app.js | `f075b356fe2ba8dbdff02cddca37dff5` |
+| server/webapp/app.js | /opt/qfremote-webapp/app.js | `56301317728ceb5b5d7116d4937e9b78` |
 | server/webapp/assets/pay-alipay-18.png | /opt/qfremote-webapp/assets/pay-alipay-18.png | `f09ee64e1c9b1f87d2ed44aefec1d78b` |
 | server/webapp/assets/pay-alipay-2.png | /opt/qfremote-webapp/assets/pay-alipay-2.png | `969be9794146019c9b8b6d986a5f474d` |
 | server/webapp/assets/pay-alipay-6.png | /opt/qfremote-webapp/assets/pay-alipay-6.png | `1a4dd9ed5a1513a8863d4942e68ee192` |
