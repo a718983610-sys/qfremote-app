@@ -1427,7 +1427,10 @@ function startSessionPreheat() {
 }
 function upgradePreheat(nodeid, vm) {
   const id = bareNodeId(nodeid);
-  if (!QF_PRE.frame || !id) return;
+  /* DS P1-1 硬门禁：会话已升格（Sess.active）或框已非预热态时，设备页的晚到
+     回调绝不对活动会话框执行 replace 导航（串设备/断连）。 */
+  if (Sess.active || !QF_PRE.frame || !QF_PRE.frame.classList.contains('qf-preheat')) return;
+  if (!id) return;
   if (QF_PRE.nodeid === id && QF_PRE.vm === vm) return;
   QF_PRE.nodeid = id; QF_PRE.vm = vm; QF_PRE.ready = false; QF_PRE.t0 = performance.now();
   QF_PRE.frame.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); };
@@ -2084,7 +2087,7 @@ function wireSendSheet(view) {
 }
 
 /* ================= 设备 ================= */
-Views.devices = async function (view) {
+Views.devices = async function (view, param, seq) {
   view.innerHTML = `<h1 class="pt">我的设备</h1><p class="psub">设备由站长分配或好友共享给您。在线设备可直接发起远程桌面、文件管理与远程终端。</p>
     <div class="tabs"><button class="on" data-tab="all">全部设备</button><button data-tab="mine">我的设备</button><button data-tab="shared">好友共享</button></div>
     <div id="devList"><div class="card"><div class="skel" style="height:52px"></div></div></div>
@@ -2092,6 +2095,7 @@ Views.devices = async function (view) {
   // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染；
   // 落地后把节点 id 盖进设备行（数据携带解析），并把上次会话设备升级为深链预热
   fetchNodeMap().then(() => {
+    if (seq !== renderSeq || S.route.name !== 'devices') return;   // DS P1-1：晚到回调世代校验——已离开设备页/已重渲即整段丢弃，不升级预热框
     refreshDevRowIds(view);
     try { const last = localStorage.getItem('qfLastSessionDevice'); const id = last && nodeIdFor(last); if (id) upgradePreheat(id, 11); } catch (e) {}
   }).catch(() => {});
