@@ -161,7 +161,7 @@ class _MePageState extends State<MePage> {
                           child: Image.memory(_avatarBytes!,
                               width: 52, height: 52, fit: BoxFit.cover,
                               // 核对 D7：解码失败回退品牌占位，不留空白
-                              errorBuilder: (_, __, ___) =>
+                              errorBuilder: (_, _, _) =>
                                   const QfAvatarPlaceholder(size: 52)),
                         )
                       else
