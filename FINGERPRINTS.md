@@ -26,10 +26,10 @@
 | server/ext/license-pages.js | /opt/qfremote-ext/license-pages.js | `789621923f1f7ce7309de38caa645d49` |
 | server/ext/orders-core.js | /opt/qfremote-ext/orders-core.js | `c9d2456620c87e14dcb5db5d28e0c9b0` |
 | server/ext/package.json | /opt/qfremote-ext/package.json | `76fefdd8e4c142362cd57c3191f22594` |
-| server/ext/page.js | /opt/qfremote-ext/page.js | `fddde75240faff6b26aff04b6346f431` |
+| server/ext/page.js | /opt/qfremote-ext/page.js | `c7487c59f67535be62db6dca84cb90f0` |
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `62d9c74ab5588d60c46821e43361debf` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
-| server/ext/server.js | /opt/qfremote-ext/server.js | `9b3f09a37763f3e1faa29ca9429449d3` |
+| server/ext/server.js | /opt/qfremote-ext/server.js | `eb3c2a4acd7957e5b467c4bdc0640334` |
 | server/ext/ocr-core.js | /opt/qfremote-ext/ocr-core.js | `206ea06e69bb24277a7c0057bf9cf851` |
 | server/ext/instant-review.js | /opt/qfremote-ext/instant-review.js | `fee88d27eecc5c8743211b54d4d75d2e` |
 | server/ext/test-client-version.js | /opt/qfremote-ext/test-client-version.js | `c845952bb8740f7d7ef29cb0e9318cf1` |

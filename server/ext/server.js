@@ -2717,7 +2717,7 @@ const server = http.createServer(async (req, res) => {
         const st = lic.state();
         const banActiveByTarget = {};
         for (const b of st.bans) { if (b.status === 'active') { const tk = b.targetType + '|' + b.target; banActiveByTarget[tk] = (banActiveByTarget[tk] || 0) + 1; } }
-        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans.slice(-30), banActiveByTarget, orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
+        return sendJson(res, 200, { ok: true, config: lic.readConfig(), keys: Object.values(st.keys).map((k) => ({ id: k.id, username: k.username, unbound: !!k.unbound, planName: k.planName, source: k.source, sourceNote: k.sourceNote || null, masked: licMaskKey(k.str), lifecycle: k.lifecycle, link: k.link, timing: k.timing, everBanned: !!k.everBanned, transferredOnce: !!k.transferredOnce })), bans: st.bans, banActiveByTarget, orders: Object.values(st.orders).slice(-30), deviceReviews: (st.deviceReviews || []).slice(-20) });
       }
       // ===== 截图付款订单审核（#21：站长侧含二审到账核对；一审亦可在此处理） =====
       if (req.method === 'GET' && p === '/admin/api/orders') {

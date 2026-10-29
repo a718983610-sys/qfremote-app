@@ -139,7 +139,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
 
   <section class="view" data-view="bans">
   <div class="card">
-    <h2>近期封禁台账</h2>
+    <h2>封禁台账</h2>
     <div id="lic-bans"></div>
     <h2 style="margin-top:18px" id="lic-devices-h">设备异常待审（B6 新规）</h2>
     <div id="lic-devices"></div>
@@ -479,8 +479,35 @@ function loadLicense(){
     $('lic-keys').innerHTML = '<h2 class="foldhead" id="keys-fold-head" style="margin-top:18px">已发放密钥（' + shownKeys.length + ' 条' + (r.keys.length > shownKeys.length ? '，共 ' + r.keys.length + ' 条' : '') + '）<span class="foldchev">展开 ▾</span></h2><div class="foldbody" id="keys-fold-body">' + kh + '</div>';
     bindFold('keys-fold-head', 'keys-fold-body');
     var hb = '';
-    if (r.bans && r.bans.length) { r.bans.slice(-10).reverse().forEach(function(b){ var cntT = (r.banActiveByTarget && typeof r.banActiveByTarget[b.targetType + '|' + b.target] === 'number') ? r.banActiveByTarget[b.targetType + '|' + b.target] : r.bans.filter(function(x){ return x.status === 'active' && x.targetType === b.targetType && x.target === b.target; }).length; hb += '<div class="row"><div class="who"><div class="login">' + esc(b.target || '') + '</div><div class="meta">' + esc(b.code) + ' · ' + esc(adminLabel(TXT_BAN_TARGET, b.targetType)) + ' · ' + (b.permanent ? '永久' : '限期') + ' · ' + esc(adminLabel(TXT_BAN_STATUS, b.status)) + '</div></div>'; if (b.status === 'active' && b.id) hb += '<button class="btn" data-ban-unban="' + esc(b.id) + '" data-t="' + esc(b.target || '') + '" data-tt="' + esc(b.targetType || '') + '" data-cnt="' + cntT + '">直接解封</button>'; hb += '</div>'; }); }
+    if (r.bans && r.bans.length) {
+      var bansActive = [], bansHistory = [];
+      for (var bansIdx = r.bans.length - 1; bansIdx >= 0; bansIdx--) {
+        var curBan = r.bans[bansIdx];
+        if (curBan.status === 'active') { bansActive.push(curBan); } else { bansHistory.push(curBan); }
+      }
+      var banRowHtml = function(curBan) {
+        var cntT = (r.banActiveByTarget && typeof r.banActiveByTarget[curBan.targetType + '|' + curBan.target] === 'number') ? r.banActiveByTarget[curBan.targetType + '|' + curBan.target] : r.bans.filter(function(x){ return x.status === 'active' && x.targetType === curBan.targetType && x.target === curBan.target; }).length;
+        var row = '<div class="row"><div class="who"><div class="login">' + esc(curBan.target || '') + '</div><div class="meta">' + esc(curBan.code) + ' · ' + esc(adminLabel(TXT_BAN_TARGET, curBan.targetType)) + ' · ' + (curBan.permanent ? '永久' : '限期') + ' · ' + esc(adminLabel(TXT_BAN_STATUS, curBan.status)) + '</div></div>';
+        if (curBan.status === 'active' && curBan.id) { row += '<button class="btn" data-ban-unban="' + esc(curBan.id) + '" data-t="' + esc(curBan.target || '') + '" data-tt="' + esc(curBan.targetType || '') + '" data-cnt="' + cntT + '">直接解封</button>'; }
+        row += '</div>';
+        return row;
+      };
+      if (bansActive.length) {
+        hb += '<h2 style="margin-top:18px">生效中的封禁（' + bansActive.length + ' 条）</h2>';
+        for (var activeIdx = 0; activeIdx < bansActive.length; activeIdx++) { hb += banRowHtml(bansActive[activeIdx]); }
+      } else {
+        hb += '<p class="empty">当前没有生效中的封禁。</p>';
+      }
+      if (bansHistory.length) {
+        var bansHistoryHtml = '';
+        for (var historyIdx = 0; historyIdx < bansHistory.length; historyIdx++) { bansHistoryHtml += banRowHtml(bansHistory[historyIdx]); }
+        hb += '<h2 class="foldhead" id="bans-fold-head" style="margin-top:18px">历史记录（' + bansHistory.length + ' 条）<span class="foldchev">展开 ▾</span></h2><div class="foldbody" id="bans-fold-body">' + bansHistoryHtml + '</div>';
+      }
+    } else {
+      hb += '<p class="empty">暂无封禁记录。</p>';
+    }
     $('lic-bans').innerHTML = hb;
+    bindFold('bans-fold-head', 'bans-fold-body');
     var hd = '';
     var pendDevices = 0;
     if (r.deviceReviews && r.deviceReviews.length) {
@@ -610,6 +637,7 @@ function bindFold(headId, bodyId){
 function resetFolds(){
   foldSet($('keys-fold-head'), $('keys-fold-body'), false);
   foldSet($('gen-fold-head'), $('gen-list'), false);
+  foldSet($('bans-fold-head'), $('bans-fold-body'), false);
 }
 bindFold('gen-fold-head', 'gen-list');
 function loadGenerated(){
@@ -772,7 +800,7 @@ function applyView(){
   for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === h) primary = links[k];
   if (!primary) for (k = 0; k < links.length; k++) if (links[k].getAttribute('data-nav') === v) primary = links[k];
   for (k = 0; k < links.length; k++) links[k].className = (links[k] === primary ? 'on' : '');
-  if (v === 'license') resetFolds();
+  if (v === 'license' || v === 'bans') resetFolds();
   setTimeout(function(){
     if (v === 'bans' && (h === 'devices' || h === 'lic-devices')) { var dh = $('lic-devices-h'); if (dh) dh.scrollIntoView({ block: 'start' }); }
     else if (v === 'license' && h === 'genkey') { var gh = $('genkey-card'); if (gh) gh.scrollIntoView({ block: 'start' }); else window.scrollTo(0, 0); }
