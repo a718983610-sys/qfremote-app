@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../build_info.dart';
 import '../core/constants.dart';
 import '../core/manifest.dart';
+import '../core/update_policy.dart';
 import '../services/points.dart';
 import '../services/probe.dart';
 import 'theme.dart';
@@ -16,6 +17,11 @@ class AboutDeps {
   final QfPalette palette;
   final Future<ProbeResult> Function() probeNow;
   final Future<ReleaseEntry?> Function() checkUpdate; // 有更高版本时返回条目（主页已同步徽标/待更新）
+
+  /// 四态检查（H-2）：区分失败/清单不完整/真最新/有新版，关于页据此
+  /// 如实显示，不再把失败渲染成「已经是最新版」。未注入时回落旧
+  /// checkUpdate 口径（仅未注入的测试替身场景）。
+  final Future<AboutUpdateResult> Function()? checkUpdateDetail;
   final Future<File> Function(ReleaseEntry entry, void Function(int, int?, int?) onProgress) download;
   final Future<void> Function(File file) openInstaller;
   final Future<String> Function() diagnosticsText;
@@ -28,6 +34,7 @@ class AboutDeps {
     required this.palette,
     required this.probeNow,
     required this.checkUpdate,
+    this.checkUpdateDetail,
     required this.download,
     required this.openInstaller,
     required this.diagnosticsText,
@@ -93,6 +100,18 @@ class _AboutDialogState extends State<_AboutDialog> {
       _checking = true;
       _updateText = null;
     });
+    final detail = widget.deps.checkUpdateDetail;
+    if (detail != null) {
+      // 四态口径（H-2）：失败/不完整如实显示，绝不冒充「已经是最新版」。
+      final r = await detail();
+      if (!mounted) return;
+      setState(() {
+        _checking = false;
+        _entry = r.entry;
+        _updateText = updateCheckText(r);
+      });
+      return;
+    }
     final entry = await widget.deps.checkUpdate();
     if (!mounted) return;
     setState(() {

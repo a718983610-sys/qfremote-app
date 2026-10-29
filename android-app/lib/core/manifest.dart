@@ -10,7 +10,7 @@ class ReleaseEntry {
   final String notes;
   final String url; // 已解析为绝对地址且已通过可信校验
   final String sha256;
-  final int? size;
+  final int size;
 
   const ReleaseEntry({
     required this.version,
@@ -73,13 +73,18 @@ class ReleaseManifest {
       if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(sha)) {
         throw const FormatException('更新清单缺少完整的 SHA256 校验码');
       }
+      // 大小必填（H-3）：发版口径 release.json 必带 size，缺失/非正整数
+      // 视为清单不完整、整单判失败，不留「给了才核」的纵深缺口。
       final sizeRaw = raw['size'];
+      if (sizeRaw is! int || sizeRaw <= 0) {
+        throw const FormatException('更新清单缺少有效的文件大小');
+      }
       return ReleaseEntry(
         version: version,
         notes: raw['notes'] is String ? raw['notes'] as String : '',
         url: abs,
         sha256: sha,
-        size: sizeRaw is int ? sizeRaw : null,
+        size: sizeRaw,
       );
     }
 

@@ -35,22 +35,14 @@ class _StubApkVerifier implements ApkIdentityVerifier {
 /// 取清单 → 解析 → 下载（进度单调至 100%）→ 核对 SHA256 → 落盘；
 /// 失败注入：中途断流、校验篡改、清单 500、服务器不回响应头、下载中途假死，
 /// 每种都必须明确报错且不留半截文件（＝有提示、不无声卡死、放行）。
-/// 运行方式（端口与 dart-define 对齐 constants 里的测试覆盖口径）：
-///   flutter test test/updater_chain_test.dart \
-///     --dart-define=QF_CHAIN_TEST=true \
-///     --dart-define=QF_RELEASE_URL=http://127.0.0.1:18791/release.json
-/// 没带 define 时自动跳过（默认清单地址是生产服务器，不能真打）。
+/// 运行方式：普通 `flutter test` 即跑（H-8 起默认开启）——清单地址与可信源
+/// 经 UpdateService 的测试注入参指向本机假服务器，不再依赖命令行 define，
+/// 更不会打到生产服务器。
 const int _port = 18791;
 const String _origin = 'http://127.0.0.1:$_port';
 
 void main() {
-  const testMode = bool.fromEnvironment('QF_CHAIN_TEST');
-
   test('更新全流程＋失败注入', () async {
-    if (!testMode) {
-      markTestSkipped('需要 --dart-define=QF_CHAIN_TEST=true 才跑（见文件头说明）');
-      return;
-    }
     final apkBytes = List<int>.generate(200000, (i) => (i * 7 + 13) % 251);
     final apkSha = sha256.convert(apkBytes).toString();
     var mode = 'normal'; // normal|tampered|truncated|hang|stall|manifest500
@@ -123,7 +115,11 @@ void main() {
       await req.response.close();
     });
 
-    final svc = UpdateService(apkIdentityVerifier: _StubApkVerifier());
+    final svc = UpdateService(
+      apkIdentityVerifier: _StubApkVerifier(),
+      releaseUrl: '$_origin/release.json',
+      trustedOrigin: _origin,
+    );
     final dir = await Directory.systemTemp.createTemp('qf_upd_test');
     addTearDown(() async {
       try {
@@ -205,6 +201,8 @@ void main() {
       responseTimeout: const Duration(milliseconds: 600),
       stallTimeout: const Duration(milliseconds: 600),
       apkIdentityVerifier: _StubApkVerifier(),
+      releaseUrl: '$_origin/release.json',
+      trustedOrigin: _origin,
     );
     final sw = Stopwatch()..start();
     // VM-03 起下载层异常统一映射为中文 FormatException 展示给用户，
@@ -231,6 +229,8 @@ void main() {
     mode = 'normal';
     final okManifest2 = await svc.fetchManifest();
     final wrongSigSvc = UpdateService(
+      releaseUrl: '$_origin/release.json',
+      trustedOrigin: _origin,
       apkIdentityVerifier: _StubApkVerifier(
         identity: const ApkIdentity(
           packageName: kExpectedApkPackageName,
@@ -249,6 +249,8 @@ void main() {
 
     // 8) 验签通道不可用（替身抛错）：fail-closed 拒装＋不留文件。
     final deadSvc = UpdateService(
+      releaseUrl: '$_origin/release.json',
+      trustedOrigin: _origin,
       apkIdentityVerifier: _StubApkVerifier(
         error: const ApkVerificationException('仿真验签通道失败'),
       ),

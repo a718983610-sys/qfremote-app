@@ -23,8 +23,23 @@ class DeviceCodeStore {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
-  /// 取本机设备码：没有就生成并落盘（并发调用以先落盘者为准，值恒定后不再变）。
-  Future<String> getOrCreate() async {
+  Future<String>? _pending;
+
+  /// 取本机设备码：没有就生成并落盘。并发调用共用同一在途操作（单飞），
+  /// 保证全机只产一码、返回值与落盘值一致（H-7：非原子读-判-写曾使并发
+  /// 首启产双码、先返回者上报未落盘的码）。操作失败清在途记录，下次可重试。
+  Future<String> getOrCreate() {
+    final p = _pending;
+    if (p != null) return p;
+    final f = _create();
+    _pending = f;
+    f.whenComplete(() {
+      if (identical(_pending, f)) _pending = null;
+    });
+    return f;
+  }
+
+  Future<String> _create() async {
     final existing = await _kv.read(_kDeviceCode);
     if (existing != null && existing.isNotEmpty) return existing;
     final code = _generate();

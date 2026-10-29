@@ -26,17 +26,27 @@ class UpdateService {
   /// 装前验签的注入点（测试替身用）；为空时用平台原生验签实现。
   final ApkIdentityVerifier? apkIdentityVerifier;
 
-  const UpdateService({
+  /// 清单地址与可信源：生产恒取全局常量（constants.dart 的信任口径，
+  ///含 QF_RELEASE_URL 测试覆盖口径）；仅单元测试可注入本地源，让更新
+  /// 全链测试不靠命令行 define 也能真跑（H-8）。生产构造点（main.dart）
+  /// 保持无参，不许注入。
+  final String releaseUrl;
+  final String trustedOrigin;
+
+  UpdateService({
     this.responseTimeout = const Duration(seconds: 30),
     this.stallTimeout = const Duration(seconds: 30),
     this.apkIdentityVerifier,
-  });
+    String? releaseUrl,
+    String? trustedOrigin,
+  })  : releaseUrl = releaseUrl ?? kReleaseUrl,
+        trustedOrigin = trustedOrigin ?? kTrustedOrigin;
 
   /// 取清单（8 秒超时）。失败抛异常，调用方安静处理。
   Future<ReleaseManifest> fetchManifest() async {
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 8));
     try {
-      final req = await client.getUrl(Uri.parse(kReleaseUrl));
+      final req = await client.getUrl(Uri.parse(releaseUrl));
       applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(const Duration(seconds: 8));
@@ -44,21 +54,21 @@ class UpdateService {
         throw HttpException('获取更新清单失败：HTTP ${res.statusCode}');
       }
       final body = await utf8.decodeStream(res).timeout(const Duration(seconds: 8));
-      return ReleaseManifest.parse(body);
+      return ReleaseManifest.parse(body, trustedOrigin: trustedOrigin);
     } finally {
       client.close(force: true);
     }
   }
 
-  /// 下载 APK 到 destDir：进度回调 onProgress(已收字节, 总字节或 null, 百分比或 null)；
-  /// 下完核对大小（清单给了才核）与 SHA256：对不上删文件并抛中文错误。
+  /// 下载 APK 到 destDir：进度回调 onProgress(已收字节, 总字节, 百分比)；
+  /// 下完核对大小与 SHA256：对不上删文件并抛中文错误。
   /// 返回校验通过的本地文件。
   Future<File> downloadApk(
     ReleaseEntry entry,
     Directory destDir,
     void Function(int received, int? total, int? percent) onProgress,
   ) async {
-    if (!isTrustedUrl(entry.url)) {
+    if (!isTrustedUrl(entry.url, trustedOrigin: trustedOrigin)) {
       throw const HttpException('下载地址不在信任范围内');
     }
     try {
@@ -78,7 +88,7 @@ class UpdateService {
       if (res.statusCode != 200) {
         throw HttpException('下载失败：HTTP ${res.statusCode}');
       }
-      final total = entry.size ?? (res.contentLength >= 0 ? res.contentLength : null);
+      final total = entry.size;
       var received = 0;
       final sink = part.openWrite();
       try {
@@ -90,7 +100,7 @@ class UpdateService {
           onProgress(
             received,
             total,
-            total != null && total > 0 ? (received * 100 ~/ total).clamp(0, 100) : null,
+            (received * 100 ~/ total).clamp(0, 100),
           );
         }
         await sink.flush();
@@ -117,10 +127,11 @@ class UpdateService {
       client.close(force: true);
     }
 
-    // 核对：大小（清单给了才核）＋ SHA256（必核）——与 Windows 版同一道关。
+    // 核对：大小（必核，清单 size 已在解析层强制必填）＋ SHA256（必核）
+    // ——与 Windows 版同一道关。
     try {
       final len = await part.length();
-      if (entry.size != null && len != entry.size) {
+      if (len != entry.size) {
         throw const FormatException('文件大小与清单不一致');
       }
       final digest = await sha256.bind(part.openRead()).first;

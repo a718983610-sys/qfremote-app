@@ -68,7 +68,7 @@ void main() {
   group('会话深链识别 isSessionDeepLink（收编 P1 地基）', () {
     const own = {
       'https://54.248.9.192:8443',
-      'https://bookmarks-hunting-rendering-atlas.trycloudflare.com',
+      'https://app.qfremote.top',
     };
     test('正例：桌面/终端/手机设备页三形态全命中', () {
       expect(
@@ -92,7 +92,7 @@ void main() {
           isTrue);
       expect(
           isSessionDeepLink(
-              'https://bookmarks-hunting-rendering-atlas.trycloudflare.com/?node=abc&viewmode=11',
+              'https://app.qfremote.top/?node=abc&viewmode=11',
               ownOrigins: own),
           isTrue);
     });

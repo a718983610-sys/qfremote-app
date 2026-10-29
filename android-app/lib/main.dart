@@ -108,6 +108,27 @@ class _WebViewEvaluator implements WatchdogEvaluator {
 
 /// 一次登录提交的回传（登录桥 JS 在点登录按钮时送回原生层）：
 /// 先挂起，等确认真进了控制台才落盘（密码错了不落，免得存下错密码）。
+/// 页面下载失败的用户面文案映射（H-5）：异常原文不上屏（VM-03 口径），
+/// 按异常类型归一到正式中文。自抛的中文 FormatException 原样透传。
+String pageDownloadFailureText(Object e) {
+  if (e is FormatException) {
+    return e.message.isNotEmpty ? e.message : '下载失败，请稍后重试。';
+  }
+  if (e is TimeoutException) {
+    return '下载中断，网络不稳定，请重新下载。';
+  }
+  if (e is SocketException ||
+      e is HttpException ||
+      e is HandshakeException ||
+      e is TlsException) {
+    return '下载失败：无法连接服务器，请检查网络后重试。';
+  }
+  if (e is FileSystemException) {
+    return '保存失败，请检查存储空间或权限后重试。';
+  }
+  return '下载失败，请稍后重试。';
+}
+
 class _PendingSubmit {
   final String username;
   final String password;
@@ -569,6 +590,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 在壳内打开自有网页（购买/查询/申诉/客服）：先移植会话，再推壳内页。
   Future<void> _openShellWeb(String title, String url) async {
+    // 打开前顺手刷新服务地址解析：此前解析失败过的，本次重试（H-6 的
+    // 失败不缓存与此配合）；当次 url 由调用方以 getter 取值，getter 的
+    // 退役源过滤＋正式兜底保证不落死链（H-1）。
+    await SvcUrls.instance.ensureResolved();
     await _transplantSessionToExt();
     if (!mounted) return;
     await Navigator.of(context).push(
@@ -1448,19 +1473,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // ---------------- 会话内更新检查（只提醒不强制） ----------------
 
-  Future<ReleaseEntry?> _sessionUpdateCheck({bool manual = false}) async {
-    ReleaseManifest? manifest;
+  /// 检查更新（四态版，H-2）：取清单失败 / 清单无安卓条目 / 真最新 /
+  /// 有新版严格分开。状态副作用（待更新标记、工具栏徽标）只在此一处；
+  /// 提示文案不在这里出，由调用方按 updateCheckText 统一映射。
+  Future<AboutUpdateResult> _sessionUpdateCheckDetail() async {
+    ReleaseManifest manifest;
     try {
       manifest = await _updateService.fetchManifest();
-    } catch (_) {
-      if (manual && mounted) _snack('检查更新失败：无法连接服务器，请检查网络后重试。');
-      return null;
+    } catch (e) {
+      // 异常原文只进日志，用户面走四态文案（VM-03 口径）。
+      debugPrint('QFUPDATE check failed: $e');
+      return AboutUpdateResult.failed();
     }
     final entry = manifest.android;
     final settings = _settings;
     if (entry == null || settings == null) {
-      if (manual && mounted) _snack('已经是最新版');
-      return null;
+      return AboutUpdateResult.manifestIncomplete();
     }
     final decision = decideUpdate(
       currentVersion: _currentVersion,
@@ -1471,13 +1499,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (decision == UpdateDecision.remind) {
       await settings.setPendingUpdateVersion(entry.version);
       if (mounted) setState(() => _updateEntry = entry);
-      if (!_remindedThisSession) {
-        _remindedThisSession = true;
-        if (mounted) _snack('发现新版 v${entry.version}，可在「关于」中下载更新');
-      } else if (manual && mounted) {
-        _snack('发现新版 v${entry.version}，可在「关于」中下载更新');
-      }
-      return entry;
+      return AboutUpdateResult.available(entry);
     }
     // 已是最新：顺手清掉过期的待更新标记
     final pending = settings.pendingUpdateVersion;
@@ -1485,7 +1507,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await settings.setPendingUpdateVersion(null);
     }
     if (mounted) setState(() => _updateEntry = null);
-    if (manual && mounted) _snack('已经是最新版');
+    return AboutUpdateResult.upToDate();
+  }
+
+  Future<ReleaseEntry?> _sessionUpdateCheck({bool manual = false}) async {
+    final result = await _sessionUpdateCheckDetail();
+    if (result.status == AboutUpdateStatus.available) {
+      if (manual) {
+        if (mounted) _snack(updateCheckText(result));
+      } else if (!_remindedThisSession) {
+        // 会话内首次发现新版：提醒一次（只提醒不强制，口径不变）。
+        _remindedThisSession = true;
+        if (mounted) {
+          _snack('发现新版 v${result.version}，可在「关于」中下载更新');
+        }
+      }
+      return result.entry;
+    }
+    // 失败/不完整/真最新：手动检查如实回文案，自动检查安静。
+    if (manual && mounted) _snack(updateCheckText(result));
     return null;
   }
 
@@ -1617,8 +1657,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           request.headers.set(HttpHeaders.cookieHeader,
               cookies.map((c) => '${c.name}=${c.value}').join('; '));
         }
-        final res = await request.close();
-        if (res.statusCode != 200) throw HttpException('HTTP ${res.statusCode}');
+        // 响应头超时 20 秒：服务器接受连接却不回话时不许无声挂死（H-5）。
+        final res = await request.close().timeout(const Duration(seconds: 20));
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          throw const FormatException('下载失败，服务器返回异常状态，请稍后重试。');
+        }
         final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
         final dir = Directory('${base.path}/downloads');
         await dir.create(recursive: true);
@@ -1631,7 +1674,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (name.isEmpty || name == '.' || name == '..') name = 'download.bin';
         final file = File('${dir.path}/$name');
         final sink = file.openWrite();
-        await res.pipe(sink);
+        // 正文无数据超时 30 秒（不设总时限，大文件慢速不断）：连续 30 秒
+        // 没有任何新数据才判卡死（H-5）。
+        await res.timeout(const Duration(seconds: 30)).pipe(sink);
         if (mounted) {
           _snack('已下载：$name', action: SnackBarAction(
             label: '打开',
@@ -1642,7 +1687,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         client.close(force: true);
       }
     } catch (e) {
-      if (mounted) _snack('下载失败：$e');
+      // 异常原文只进日志，用户面统一中文映射（H-5/VM-03 口径）。
+      debugPrint('QF page download failed: $e');
+      if (mounted) _snack(pageDownloadFailureText(e));
     }
   }
 
@@ -1816,7 +1863,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await file.writeAsBytes(bytes);
       if (mounted) _snack('截图已保存：$name');
     } catch (e) {
-      if (mounted) _snack('截图失败：$e');
+      // 异常原文只进日志，用户面统一文案（H-5/VM-03 口径）。
+      debugPrint('QF screenshot failed: $e');
+      if (mounted) _snack('截图失败，请稍后重试。');
     }
   }
 
@@ -1843,6 +1892,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         palette: _palette,
         probeNow: _runProbe,
         checkUpdate: () => _sessionUpdateCheck(),
+        checkUpdateDetail: _sessionUpdateCheckDetail,
         download: _downloadApk,
         openInstaller: _openInstaller,
         diagnosticsText: () async => _diagnosticsText(),

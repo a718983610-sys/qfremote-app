@@ -26,8 +26,23 @@ class DeviceKeyVault {
       : _store = store ?? FlutterSecureKvStore(),
         _random = random ?? Random.secure();
 
+  Future<String>? _pending;
+
   /// 取设备钥匙（base64，32 字节）；没有就生成并落盘（首次建钥匙时刻）。
-  Future<String> getOrCreate() async {
+  /// 并发调用共用同一在途操作（单飞），与 DeviceCodeStore 同口径（H-7）：
+  /// 防并发首启产双钥、返回值与落盘值不一致。失败清在途记录，下次可重试。
+  Future<String> getOrCreate() {
+    final p = _pending;
+    if (p != null) return p;
+    final f = _create();
+    _pending = f;
+    f.whenComplete(() {
+      if (identical(_pending, f)) _pending = null;
+    });
+    return f;
+  }
+
+  Future<String> _create() async {
     final existing = await _store.read(storageKey);
     if (existing != null && _isValidKey(existing)) return existing;
     final bytes = List<int>.generate(32, (_) => _random.nextInt(256));

@@ -29,9 +29,29 @@ void main() {
       expect(m.android?.fileName, 'QFRemote-v1.0.4.apk');
     });
 
+    test('H-3：size 缺失/非法 → 整单判失败', () {
+      const noSize =
+          '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha"}';
+      expect(() => ReleaseManifest.parse(noSize, trustedOrigin: _origin),
+          throwsFormatException);
+      const zeroSize =
+          '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha","size":0}';
+      expect(() => ReleaseManifest.parse(zeroSize, trustedOrigin: _origin),
+          throwsFormatException);
+      const strSize =
+          '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha","size":"123"}';
+      expect(() => ReleaseManifest.parse(strSize, trustedOrigin: _origin),
+          throwsFormatException);
+      const androidNoSize =
+          '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha","size":1,'
+          '"android":{"version":"1.0.4","notes":"","url":"$_origin/x.apk","sha256":"$_sha"}}';
+      expect(() => ReleaseManifest.parse(androidNoSize, trustedOrigin: _origin),
+          throwsFormatException);
+    });
+
     test('文件名加固：异常尾段回落默认名，正常名保留', () {
       ReleaseEntry entry(String url) => ReleaseEntry(
-          version: '1.0.0', notes: '', url: url, sha256: 'a' * 64, size: null);
+          version: '1.0.0', notes: '', url: url, sha256: 'a' * 64, size: 1);
       expect(entry('https://54.248.9.192:8443/QFRemote-v2.apk').fileName,
           'QFRemote-v2.apk');
       final dotdot = entry('https://54.248.9.192:8443/..').fileName;
@@ -63,7 +83,7 @@ void main() {
     });
 
     test('相对 url 按清单地址解析且仍受可信校验', () {
-      const body = '{"version":"1.0.3","notes":"","url":"/x.exe","sha256":"$_sha"}';
+      const body = '{"version":"1.0.3","notes":"","url":"/x.exe","sha256":"$_sha","size":1}';
       final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
       expect(m.windows?.url, '$_origin/x.exe');
     });

@@ -17,35 +17,36 @@ const String kConsoleUrl = '$kServerOrigin/';
 const int kFriendsPort = 8445;
 const String kFriendsUrl = 'https://$kServerHost:$kFriendsPort/friends';
 
-/// 临时通道源（兜底专用）：2.2.0 起论坛/注册/积分/管理地址一律运行时从官网
-/// product.json 的 web.* 解析（见 svc_urls.dart 的 SvcUrls），拉不到用本地缓存、
-/// 再拉不到才用这里的写死兜底。全仓临时通道域名只许出现在这一处。
-const String kFallbackTunnelOrigin =
-    'https://bookmarks-hunting-rendering-atlas.trycloudflare.com';
+/// 服务地址兜底基址（正式域名）：2.2.0 起论坛/注册/协议/积分/管理地址一律
+/// 运行时从官网 product.json 的 web.* 解析（见 svc_urls.dart 的 SvcUrls），
+/// 拉不到用本地缓存、再拉不到才用这里的写死兜底。兜底值与 product.json
+/// 现行 web.* 同源同值（均为 app.qfremote.top 下的同名路径），保证解析源
+/// 不可达且无缓存时五族入口仍落正式服务、不落死链。旧版用过的临时隧道
+/// 地址已于 2026-10-28 拆除，不得再作兜底（解析层另有过滤，见 svc_urls）。
+const String kSvcBaseOrigin = 'https://app.qfremote.top';
 
 /// 论坛入口兜底（运行时以 SvcUrls.forumUrl 为准）。
-const String kForumUrl = '$kFallbackTunnelOrigin/forum';
+const String kForumUrl = '$kSvcBaseOrigin/forum';
 
 /// 注册入口兜底（运行时以 SvcUrls.registerUrl 为准）。
-const String kRegisterUrl = '$kFallbackTunnelOrigin/register';
+const String kRegisterUrl = '$kSvcBaseOrigin/register';
 
 /// 协议页入口兜底（运行时以 SvcUrls.termsUrl 为准）。
-const String kTermsUrl = '$kFallbackTunnelOrigin/terms';
+const String kTermsUrl = '$kSvcBaseOrigin/terms';
 
 /// 积分服务兜底（运行时以 SvcUrls.pointsUrl 为准；product.json 的 web.pointsUrl）。
-const String kPointsUrlFallback = '$kFallbackTunnelOrigin/points';
+const String kPointsUrlFallback = '$kSvcBaseOrigin/points';
 
 /// 站长管理页兜底（运行时以 SvcUrls.adminUrl 为准；product.json 的 web.adminUrl）。
-const String kAdminUrlFallback = '$kFallbackTunnelOrigin/admin';
+const String kAdminUrlFallback = '$kSvcBaseOrigin/admin';
 
-/// 官网服务地址清单（运行时解析源）：官网 product.json 的 web.* 字段。
-const String kProductJsonUrl =
-    'https://a718983610-sys.github.io/qfremote-website/product.json';
+/// 官网服务地址清单（运行时解析源）：官网 product.json 的 web.* 字段；
+/// 文件由官网根域直发（与官网下载页同一份），不再经第三方托管页。
+const String kProductJsonUrl = 'https://qfremote.top/product.json';
 
-/// 官网根址（收编 P1 补「官网」带字入口 X-02）：与 kProductJsonUrl 同站，
-/// 与网页侧入口补丁的 QF_WEBSITE_URL 同值；全仓只许出现在这一处，
+/// 官网根址（收编 P1 补「官网」带字入口 X-02）：全仓只许出现在这一处，
 /// 取址走 SvcUrls.websiteUrl 单点。
-const String kWebsiteUrl = 'https://a718983610-sys.github.io/qfremote-website/';
+const String kWebsiteUrl = 'https://qfremote.top/';
 
 /// 隐私锁接口（与好友同服务族、同端口，路径 /lock；契约见线 B 接缝文件）。
 const int kLockPort = 8445;

@@ -34,11 +34,19 @@ class SvcUrls {
   /// 好友页：直连口径恒定（见类注释）。
   String get friendsUrl => kFriendsUrl;
 
-  String get forumUrl => _forum ?? kForumUrl;
-  String get registerUrl => _register ?? kRegisterUrl;
-  String get termsUrl => _terms ?? kTermsUrl;
-  String get pointsUrl => _points ?? kPointsUrlFallback;
-  String get adminUrl => _admin ?? kAdminUrlFallback;
+  /// 已退役源过滤：旧版本写入本地缓存（或旧清单下发）的临时隧道地址
+  /// 一律视为无效、回落正式兜底——该隧道已拆除，落上去就是死链（H-1）。
+  static String? _validSvcUrl(String? url) {
+    if (url == null) return null;
+    if (url.contains('trycloudflare.com')) return null;
+    return url;
+  }
+
+  String get forumUrl => _validSvcUrl(_forum) ?? kForumUrl;
+  String get registerUrl => _validSvcUrl(_register) ?? kRegisterUrl;
+  String get termsUrl => _validSvcUrl(_terms) ?? kTermsUrl;
+  String get pointsUrl => _validSvcUrl(_points) ?? kPointsUrlFallback;
+  String get adminUrl => _validSvcUrl(_admin) ?? kAdminUrlFallback;
 
   /// 官网根址（收编 P1，X-02）：固定公开站，不走 product.json 解析。
   String get websiteUrl => kWebsiteUrl;
@@ -129,30 +137,33 @@ class SvcUrls {
     return out;
   }
 
-  /// 启动时调用一次：先读本地缓存垫底，再异步拉官网清单刷新（失败安静保留旧值）。
+  /// 解析服务地址：先读本地缓存垫底，再拉官网清单刷新（失败安静保留旧值）。
+  /// 成功后本会话内复用结果；失败不缓存，下次调用自动重试（H-6）。
   Future<void> ensureResolved() {
     return _resolving ??= _resolve();
   }
 
   Future<void> _resolve() async {
+    var fetchedOk = false;
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!_loaded) {
         _loaded = true;
-        if (_usable(prefs.getString(_kForum))) _forum = prefs.getString(_kForum);
-        if (_usable(prefs.getString(_kRegister))) {
-          _register = prefs.getString(_kRegister);
-        }
-        if (_usable(prefs.getString(_kPoints))) _points = prefs.getString(_kPoints);
-        if (_usable(prefs.getString(_kAdmin))) _admin = prefs.getString(_kAdmin);
-        if (_usable(prefs.getString(_kTerms))) _terms = prefs.getString(_kTerms);
+        String? cached(String key) => _validSvcUrl(prefs.getString(key));
+        if (_usable(cached(_kForum))) _forum = cached(_kForum);
+        if (_usable(cached(_kRegister))) _register = cached(_kRegister);
+        if (_usable(cached(_kPoints))) _points = cached(_kPoints);
+        if (_usable(cached(_kAdmin))) _admin = cached(_kAdmin);
+        if (_usable(cached(_kTerms))) _terms = cached(_kTerms);
       }
       final fetched = await _fetchProductWeb();
       if (fetched == null) return;
+      fetchedOk = true;
       void apply(String key, String? v, void Function(String) set) {
-        if (v != null) {
-          set(v);
-          unawaited(prefs.setString(key, v));
+        final vv = _validSvcUrl(v);
+        if (vv != null) {
+          set(vv);
+          unawaited(prefs.setString(key, vv));
         }
       }
 
@@ -163,6 +174,11 @@ class SvcUrls {
       apply(_kTerms, fetched['termsUrl'], (v) => _terms = v);
     } catch (_) {
       // 拉不到/解析失败：一律安静走缓存与兜底，入口永不因此不可用。
+    } finally {
+      // 本轮没拉到新值（网络瞬时失败/清单异常）：清掉在途记录，下次调用
+      // 重新解析，不让一次失败把整会话钉死在兜底上（H-6）；拉到新值则
+      // 保留已完成记录，后续调用直接返回、不重复打网络。
+      if (!fetchedOk) _resolving = null;
     }
   }
 

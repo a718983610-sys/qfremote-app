@@ -58,3 +58,57 @@ UpdateDecision decideUpdate({
   // 清单版本低于待更新（例如待更新已被撤下）→ 不强制，按无新版处理。
   return UpdateDecision.none;
 }
+
+/// 检查更新的四态结果（H-2）：旧口径把「取清单失败 / 清单无安卓条目 /
+/// 真最新」全压成同一个 null 返回值，关于页据此把检查失败渲染成
+/// 「已经是最新版」（假报）。四态严格分开，文案全端共用同一组。
+enum AboutUpdateStatus {
+  /// 取清单失败（网络/服务器异常）。
+  failed,
+
+  /// 清单取到了但无安卓条目（或本地状态未就绪），无法下结论。
+  manifestIncomplete,
+
+  /// 确认已是最新版。
+  upToDate,
+
+  /// 有更高版本可更新。
+  available,
+}
+
+class AboutUpdateResult {
+  final AboutUpdateStatus status;
+
+  /// 仅 available 时非空（关于页据此走下载流）。
+  final ReleaseEntry? entry;
+
+  const AboutUpdateResult._(this.status, this.entry);
+
+  factory AboutUpdateResult.failed() =>
+      const AboutUpdateResult._(AboutUpdateStatus.failed, null);
+
+  factory AboutUpdateResult.manifestIncomplete() =>
+      const AboutUpdateResult._(AboutUpdateStatus.manifestIncomplete, null);
+
+  factory AboutUpdateResult.upToDate() =>
+      const AboutUpdateResult._(AboutUpdateStatus.upToDate, null);
+
+  factory AboutUpdateResult.available(ReleaseEntry entry) =>
+      AboutUpdateResult._(AboutUpdateStatus.available, entry);
+
+  String? get version => entry?.version;
+}
+
+/// 检查结果的用户面文案（关于页与手动检查提示共用同一组，不许各写一套）。
+String updateCheckText(AboutUpdateResult result) {
+  switch (result.status) {
+    case AboutUpdateStatus.failed:
+      return '检查更新失败：无法连接服务器，请检查网络后重试。';
+    case AboutUpdateStatus.manifestIncomplete:
+      return '检查更新失败：更新信息不完整，请稍后重试。';
+    case AboutUpdateStatus.upToDate:
+      return '已经是最新版';
+    case AboutUpdateStatus.available:
+      return '发现新版 v${result.version}';
+  }
+}

@@ -44,5 +44,25 @@ void main() {
       final k = await vault.getOrCreate();
       expect(base64Decode(k).length, 32);
     });
+
+    test('H-7：并发首启只产一钥、返回值与落盘一致', () async {
+      final kv = _SlowKv();
+      final vault = DeviceKeyVault(store: kv);
+      final results =
+          await Future.wait([vault.getOrCreate(), vault.getOrCreate()]);
+      expect(results[0], results[1], reason: '并发两路必须同钥');
+      expect(await kv.read(DeviceKeyVault.storageKey), results[0]);
+    });
   });
+}
+
+/// 读值在调用瞬间定格、延迟后才返回：模拟两路并发读都发生在
+/// 任何一路落盘之前（H-7 复现条件）。
+class _SlowKv extends MemorySecureKvStore {
+  @override
+  Future<String?> read(String key) async {
+    final v = await super.read(key);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    return v;
+  }
 }

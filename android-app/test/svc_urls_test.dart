@@ -27,6 +27,16 @@ void main() {
   });
 
   group('SvcUrls 兜底', () {
+    test('H-1：兜底与官网/解析源全部落正式域名、无旧隧道与旧托管页', () {
+      expect(kForumUrl, 'https://app.qfremote.top/forum');
+      expect(kRegisterUrl, 'https://app.qfremote.top/register');
+      expect(kTermsUrl, 'https://app.qfremote.top/terms');
+      expect(kPointsUrlFallback, 'https://app.qfremote.top/points');
+      expect(kAdminUrlFallback, 'https://app.qfremote.top/admin');
+      expect(kWebsiteUrl, 'https://qfremote.top/');
+      expect(kProductJsonUrl, 'https://qfremote.top/product.json');
+    });
+
     test('未解析时全部走兜底常量', () {
       final u = SvcUrls.instance;
       expect(u.friendsUrl, kFriendsUrl);
