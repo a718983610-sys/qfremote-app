@@ -770,6 +770,11 @@ void main() {
       expect(find.text('兑换'), findsOneWidget);
       expect(find.text('待兑换密钥'), findsOneWidget);
       expect(find.textContaining('8EGJB-'), findsOneWidget);
+      // 800×600 测试视口下按钮在滚动区下方：先滚到可见再点（产品侧该区
+      // 本就置于 SingleChildScrollView 内，真机可滚达；原测试未滚动
+      // 直接点，点位落在视口外、点击未命中——测试脚手架缺陷，A-003）。
+      await tester.ensureVisible(find.text('一键兑换'));
+      await tester.pump();
       await tester.tap(find.text('一键兑换'));
       await tester.pump();
       await tester.pump();
