@@ -31,7 +31,7 @@
 | server/ext/points-core.js | /opt/qfremote-ext/points-core.js | `12e99c9d46b207850b3b7fbbd85b9a3c` |
 | server/ext/qfremote-ext.service | /opt/qfremote-ext/qfremote-ext.service | `db1f4666656a36e0fa4236374d06125f` |
 | server/ext/server.js | /opt/qfremote-ext/server.js | `ac47631d602db4e19eb1d0359b20cd8f` |
-| server/ext/profile-core.js | /opt/qfremote-ext/profile-core.js | `aa8166eb70376b418c407622e2a4a8e2` |
+| server/ext/profile-core.js | /opt/qfremote-ext/profile-core.js | `5ddb92aaae85139ac7f8c53875a2fab2` |
 | server/ext/profile-imagemod.js | /opt/qfremote-ext/profile-imagemod.js | `20f6ed63b568b045ea754b9c590cdc2c` |
 | server/ext/profile-review.js | /opt/qfremote-ext/profile-review.js | `f89d5827d1a715ff5ede0bc4b03fe0b4` |
 | server/ext/profile-migrate.js | /opt/qfremote-ext/profile-migrate.js | `25cbcd8d2dfe53cd9e55350b40a888ca` |
