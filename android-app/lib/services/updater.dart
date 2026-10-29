@@ -61,7 +61,13 @@ class UpdateService {
     if (!isTrustedUrl(entry.url)) {
       throw const HttpException('下载地址不在信任范围内');
     }
-    await destDir.create(recursive: true);
+    try {
+      await destDir.create(recursive: true);
+    } on FileSystemException catch (e) {
+      // VM-03 补漏（DS 门二 P2-2）：目录创建失败的英文原文不上界面。
+      debugPrint('QFUPDATE create dir error: $e');
+      throw const FormatException('下载失败，请稍后重试。');
+    }
     final dest = File('${destDir.path}/${entry.fileName}');
     final part = File('${dest.path}.part');
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 15));
