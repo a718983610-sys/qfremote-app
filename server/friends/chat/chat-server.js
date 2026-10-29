@@ -597,7 +597,7 @@ function createChatHandler(configOverrides) {
     if (req.method === 'GET' && p === '/chat/api/poll') {
       const since = parseInt(u.searchParams.get('since') || '0', 10) || 0;
       const events = d.events.filter(e => e.seq > since && (
-        (e.type === 'msg' && (e.msg.from === me || e.msg.to === me)) ||
+        (e.type === 'msg' && !d.graveyard[e.msg.id] && (e.msg.from === me || e.msg.to === me)) ||
         (e.type === 'tomb' && e.parties.includes(me)) ||
         (e.type === 'recall' && e.parties.includes(me))));
       const read = {};
@@ -609,7 +609,8 @@ function createChatHandler(configOverrides) {
     if (req.method === 'POST' && p === '/chat/api/vault') {
       const body = await readBody(req);
       const msgId = String(body.msgId || '');
-      const origin = d.messages[msgId] || d.graveyard[msgId];
+      // CF-1：保险库写入只以仍存活的消息为正本；墓碑仅用于 tomb/recall 同步，不作为 vault 重建 origin。
+      const origin = d.messages[msgId];
       if (!origin || (origin.from !== me && origin.to !== me)) return sendJson(res, 400, { ok: false, msg: '记录校验未通过，请重试。' });
       if (!body.nonce || !body.cipher) return sendJson(res, 400, { ok: false, msg: '记录不完整，请重试。' });
       const mine = d.vault[me] = d.vault[me] || [];
