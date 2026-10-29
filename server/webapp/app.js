@@ -1776,7 +1776,11 @@ async function chatApi(path, opts) {
     t = await ensureChatToken(true);
     if (!t.ok) return { status: 0, ok: false, json: null, text: '', ssoError: t.msg, networkError: !!t.network };
     r = await call();
-    if (firstMsg && !(r.json && (r.json.msg || r.json.error))) r = Object.assign({}, r, { json: Object.assign({}, r.json || {}, { msg: firstMsg }) });
+    // CS2-1 修复（DS 门一成稿，候选丙）：首次 401/非 JSON 的原因只作为顶层诊断
+    // 字段 firstMsg 保留，绝不改写重试响应的 json——旧回填会把失败伪装成成功
+    // （200 非 JSON 被造出 {msg} 而走成功分支）、污染成功载荷、错置真因。
+    // 消费方 paintList/cq/apiErrText 只读 json，不读 firstMsg。
+    if (firstMsg) r = Object.assign({}, r, { firstMsg });
   }
   return r;
 }

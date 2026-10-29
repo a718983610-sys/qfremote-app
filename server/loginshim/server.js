@@ -281,6 +281,18 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
   } catch (e) {
     console.warn('bancheck login-check error', e);
   }
+  // R7 中性判定（DS-R25 微修，DS 门一＋增量裁定）：密码已二次验过、MC 锁定位
+  // 在身，但台账无活动封禁——evaluate() 有活动封禁时必先回 BAN_PERM/BAN_UNTIL，
+  // 故生产可达的非封禁形状只有 allow:true→code 'OK' 与 allow:false→G1/G2/G4/G5，
+  // 落入此允许名单即属异常漂移态：只记日志、不计失败/不清零，调用方收到
+  // 'neutral' 后以 ok=null 记录并原样透传。其余形状（lc 为空、allow:true＋BAN_*
+  // 矛盾形状、未知 code）一律维持 fail-closed 照旧计数。
+  if (lc && ((lc.allow === true && lc.code === 'OK') ||
+      (lc.allow === false && ['G1', 'G2', 'G4', 'G5'].indexOf(lc.code) >= 0))) {
+    console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
+    return 'neutral';
+  }
+
   if (!lc || lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL')) {
     // 无活动封禁或非预期 code；MC 锁定位可能由其他原因产生，不透传封禁
     // 值得记异常日志：密码验过、MC 称 locked、台账却无活动封禁
@@ -306,7 +318,8 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
     } else if (['B1', 'B8', 'B10'].indexOf(banCode) >= 0) {
       mode = 'frozen';
     } else {
-      // 未知冻结/封禁 code；不露状态
+      // 未知冻结/封禁 code；不露状态（DS-R25 P3-1：补 inconsistent 日志，计数照旧）
+      console.warn('bancheck inconsistent: password ok, MC locked, active BAN_UNTIL with unknown banCode ' + banCode + ' for', key);
       return false;
     }
   }
@@ -391,7 +404,15 @@ function handleLogin(req, res) {
             req, res, key, usernameRaw, passwordRaw, ip, text,
             ur.statusCode, ur.headers, ubody
           );
-          if (banHandled) return;
+          if (banHandled === true) return;
+          if (banHandled === 'neutral') {
+            // R7（DS-R25）：只记日志、不计失败/不清零、原样透传；
+            // 用已算好的 h，保留 remember cookie 处理口径
+            logAttempt(key, null, ip, false);
+            res.writeHead(ur.statusCode, h);
+            res.end(ubody);
+            return;
+          }
           const hasLoginForm = text.includes('loginpanelform');
           let verdict = 'neutral';
           if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
@@ -462,7 +483,15 @@ function serveFrozenVerify(req, res, body, usernameRaw, passwordRaw, key, ip) {
         req, res, key, usernameRaw, passwordRaw, ip, text,
         ur.statusCode, ur.headers, ubody
       );
-      if (banHandled) return;
+      if (banHandled === true) return;
+      if (banHandled === 'neutral') {
+        // R7（DS-R25）：冻结路径同样中性——只记日志（blocked 保持 true）、
+        // 原样透传，不进冻结页、不动冻结状态
+        logAttempt(key, null, ip, true);
+        res.writeHead(ur.statusCode, ur.headers);
+        res.end(ubody);
+        return;
+      }
       const hasLoginForm = text.includes('loginpanelform');
       let verdict = 'neutral';
       if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
