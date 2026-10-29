@@ -2193,10 +2193,14 @@ const server = http.createServer(async (req, res) => {
       const fileDlM = p.match(/^\/license\/api\/files\/([^/]+)\/download$/);
       if (req.method === 'GET' && fileDlM) {
         const got = fileStage.blobPathFor(auth.user, decodeURIComponent(fileDlM[1]), now);
-        if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
-        const buf = fs.readFileSync(got.fp);
-        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
-        return res.end(buf);
+        try {
+          if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
+          const buf = fs.readFileSync(got.fp);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
+          return res.end(buf);
+        } finally {
+          if (got) got.release();
+        }
       }
       const fileAckM = p.match(/^\/license\/api\/files\/([^/]+)\/ack$/);
       if (req.method === 'POST' && fileAckM) {
@@ -2760,7 +2764,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/admin/api/assistant/token') {
         const body = await readJsonBody(req);
         const action = String(body.action || '');
-        const tokRole = String(body.role || 'assistant') === 'owner' ? 'owner' : 'assistant';
+        const roleRaw = body.role == null ? 'assistant' : String(body.role).trim();
+        if (roleRaw !== 'assistant' && roleRaw !== 'owner') return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'role 参数不合法。' });
+        const tokRole = roleRaw; // DS-R26 P3-1：role 白名单化，非法值显式拒绝、不再静默落 assistant
         if (action === 'generate' || action === 'reset') { const out = tokRole === 'owner' ? reviewEvents.generateOwnerToken() : reviewEvents.generateToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         if (action === 'revoke') { const out = tokRole === 'owner' ? reviewEvents.revokeOwnerToken() : reviewEvents.revokeToken(); log({ ev: 'admin-assistant-token', action, role: tokRole }); return sendJson(res, 200, out); }
         return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: 'action 须为 generate / reset / revoke。' });
