@@ -1952,11 +1952,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ? _gateUsername
               : (_savedCreds?.username ?? '');
           final appealBase = SvcUrls.instance.appealUrl;
-          return _openShellWeb(
+          unawaited(_openShellWeb(
               '提交申诉',
               appealUser.trim().isEmpty
                   ? appealBase
-                  : '$appealBase?u=${Uri.encodeQueryComponent(appealUser)}');
+                  : '$appealBase?u=${Uri.encodeQueryComponent(appealUser)}'));
         },
         onRebind: () => unawaited(_openRebind()),
         onSupport: () =>

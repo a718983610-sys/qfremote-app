@@ -545,6 +545,26 @@ void main() {
       expect(claimed, 'QFR8K-M2X9P-7W4TD-H6N3C-V5YQZ');
       expect(find.text('领取成功。'), findsOneWidget);
       expect(rechecks, 1); // 领取成功后复查消解拦截
+      // C2-09 hunk A 专门断言：username 为空（及纯空格）时示占位说明、
+      // 不渲染空白账号；非空时占位不出现（上方 qflic2510a 已证正向）。
+      for (final emptyUser in ['', '   ']) {
+        await tester.pumpWidget(MaterialApp(
+          home: LicenseGatePage(
+            palette: const QfPalette(QfThemeMode.blue),
+            username: emptyUser,
+            copy: gateCopyFor(const LicenseDecision(
+                allow: false, code: 'G1', enforce: true))!,
+            onClaim: null,
+            onPurchase: () {},
+            onAppeal: () {},
+            onSupport: () {},
+            onLogout: () {},
+            onRecheck: () {},
+          ),
+        ));
+        expect(find.text('当前账号：暂未读取到（请以控制台登录账号为准）'),
+            findsOneWidget);
+      }
     });
 
     testWidgets('G3 态：换绑入口可见且可点（§11.9）', (tester) async {
