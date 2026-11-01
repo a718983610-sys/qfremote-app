@@ -23,6 +23,9 @@ MAP=$(mktemp)
 git ls-tree -r --name-only origin/main -- server windows ops | while IFS= read -r p; do
   case "$p" in
     server/ext/config-structure.md) continue ;;
+    # 退役豁免（2026-11-02 回收裁定）：ops/assistant-api/watcher.py 哨兵工具已按站长
+    # 2026-11-01 令全关退役，本地在役字节与仓库字节的差异为预期状态，不回收、不复活、不计漂移。
+    ops/assistant-api/watcher.py) continue ;;
     server/webapp/*)     live="/opt/qfremote-webapp/${p#server/webapp/}" ;;
     server/ext/*)        live="/opt/qfremote-ext/${p#server/ext/}" ;;
     server/loginshim/*)  live="/opt/qfremote-loginshim/${p#server/loginshim/}" ;;
