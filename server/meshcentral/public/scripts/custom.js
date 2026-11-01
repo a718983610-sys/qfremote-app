@@ -542,5 +542,31 @@
         mo.observe(document.documentElement, { childList: true, subtree: true });
         setTimeout(function () { mo.disconnect(); }, 120000);
     } catch (e) {}
+    /* 框内会话等比修复（2026-10-30 热修 DEV-ASPECT-01）：引擎 deskAspectRatio 存于
+       localStorage，=2 为拉伸模式（画布宽高双 100% 非等比填充）。站长旧版界面存下 2，
+       新版框内页沿用后横屏桌面在手机竖屏被拉扭曲。框内（qfm=frame）加载后若为 2，
+       只改本页内存值为 0（等比）并立即 deskAdjust()；不动 localStorage 存值，
+       全页界面仍随其本人偏好，框内手动切换仍可改本会话。
+       DS 轻审（flash）异议与裁定：①判等改宽松 ==（防字符串 "2"）——采纳；
+       ②「应覆盖取数/初始化而非改全局变量、轮询刷新仍复发」——驳回并记分歧：
+       custom.js 在页面主脚本之后加载，无法拦截其初始化取数；且本补丁每次框内
+       加载都会重跑，刷新后同样生效、框内不复发；存值不改是尊重站长全页偏好。
+       ③deskAdjust 存在性与 window 作用域调用——原稿已做。门二/门三补审挂 11-02 轮。 */
+    (function qfFrameAspectFix() {
+        if (!/[?&]qfm=frame(&|$)/.test(location.search)) return;
+        var n = 0;
+        var ivA = setInterval(function () {
+            n++;
+            try {
+                if (window.deskAspectRatio == 2) {
+                    window.deskAspectRatio = 0;
+                    var p = document.getElementById('DeskParent');
+                    if (p && p.clientWidth > 0 && typeof window.deskAdjust === 'function') window.deskAdjust();
+                }
+            } catch (e) {}
+            if (n > 40) clearInterval(ivA);
+        }, 500);
+    })();
+
     document.addEventListener('DOMContentLoaded', tick);
 })();
