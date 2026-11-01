@@ -198,6 +198,24 @@ server {
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
+    # 统一档案（2.4.0 组装补）：/profile/* -> 扩展服务(8448)档案面；proxy_pass 不带 URI 段保留全路径
+    location = /profile {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /profile/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 更新清单（2.4.0 组装补）：/release.json 现由兜底透传 8443，翻牌删兜底后须显式成路
+    location = /release.json {
+        proxy_pass https://127.0.0.1:8443;
+        proxy_ssl_verify off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
     # 隐私锁面板（2.3.2）：/lock/* -> 好友服务(8445)内的锁桥；proxy_pass 不带 URI 段以保留 /lock/ 前缀
     location /lock/ {
         proxy_pass https://127.0.0.1:8445;
@@ -205,18 +223,149 @@ server {
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
-    # #33 收口补漏·漏网乙（收编一期备补丁，待批）：隧道源 /login 不再直出 MeshCentral 原生登录页，
-    # 一律回新控制台 SPA 登录（根路径）。8443 直连源 /login 不在此列（正当登录面＋站长例外路径，不动）。
+    # 原生登录面分流（2.4.0 翻牌，X1，BUILD-20261029/fronting 定版 B 式）：站长→引擎登录面
+    # （B 式例外直达原生）；其余→丙段弹跳 302 回 SPA 登录。取代 #33 一律 302 口径的隧道源部分；
+    # 8443 直连源 /login 不在此列（正当登录面，不动）。
     location = /login {
-        return 302 /;
+        auth_request /_qf_whoami;
+        auth_request_set $qf_role_raw $upstream_http_x_qf_role;
+        proxy_pass $qf_login_upstream;
+        proxy_redirect off;
+        error_page 500 502 503 504 = @qf_spa_failsafe;
+        include qf-front-proxy-common.inc;
     }
 
-    # 新控制台（2.3.1 切换，#32/#33）：根路径只发新控制台壳；其静态资源同目录。
+    # 前置分流主入口（2.4.0 翻牌，BUILD-20261029/fronting 定版 B 式）：
+    # 角色子请求回填 $qf_role_raw，map 在内容阶段求值分流——站长例外整页直达引擎、
+    # 框内会话入场→引擎、非站长命中原生页→弹跳 302 回 SPA、其余→SPA 聚合（8082）。
+    # whoami 故障 fail-soft：变量为空→anon→落 SPA（条 17 定案）。
+    # 条 20：框内入场（含预热 qfm=warm）文档请求改写桌面 UA（E8 实证移动 UA 变体不可用）。
     location = / {
-        root /opt/qfremote-webapp;
-        try_files /index.html =404;
-        add_header Cache-Control "no-store";
+        auth_request /_qf_whoami;
+        auth_request_set $qf_role_raw $upstream_http_x_qf_role;
+        proxy_pass $qf_root_final;
+        proxy_redirect off;
+        error_page 500 502 503 504 = @qf_spa_failsafe;
+        proxy_set_header User-Agent $qf_frame_ua;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        include qf-front-proxy-common.inc;
     }
+
+    # 条 17 fail-soft 落点（组装故障注入实测后补）：whoami 子请求故障（上游断/超时）
+    # 时 auth_request 以 500 中止主请求，此处截获改落 SPA 聚合——故障期根路径与登录面
+    # 落 SPA 非 5xx（站长例外在故障期失效、可用性优先，与定案口径一致）。
+    location @qf_spa_failsafe {
+        proxy_pass http://qf_spa_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # ===== 引擎面（2.4.0 翻牌，片段乙段）：会话运行时资产与数据面 =====
+    # 角色子请求端点（内部，不对外；组装步 1 已在 loginshim 落地 whoami，契约恒 200+X-QF-Role）
+    location = /_qf_whoami {
+        internal;
+        proxy_pass http://127.0.0.1:8450;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout 1s;
+        proxy_send_timeout 1s;
+        proxy_read_timeout 1s;
+    }
+
+    # 引擎静态前缀集（条 2 实测全集；/translations/ 为组装保全项：原生登录页译文资产，非页面面）
+    location /scripts/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /styles/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /images/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /js/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /novnc/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /mstsc/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /samples/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /sounds/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /translations/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+
+    # 引擎根文件（实测集）
+    location = /favicon.ico { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location = /robots.txt { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location = /serviceworker.js { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location = /logo.png { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location ~* ^/commander[^/]*\.htm$ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+
+    # 引擎功能路径（/meshagents、/meshsettings 缺失会断新装 agent，E6 实测）
+    # 步3验收修复1（2026-10-30）：出厂 SPA 会话帧基址 QF_CANON_ORIGIN=/console-engine
+    # （app.js sessionDeepLink/preheat 均以 /console-engine/?... 入框），翻牌 X2 误删致帧 404；
+    # 按翻牌前原块恢复（上游改用合并图的 $qf_root_final：qfrem=1 走垫片、余直达引擎）。
+    location /console-engine/ {
+        rewrite ^/console-engine/(.*)$ /$1 break;
+        proxy_pass $qf_console_upstream;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+        proxy_set_header User-Agent $qf_ce_ua;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    location = /console-engine {
+        rewrite ^ / break;
+        proxy_pass $qf_console_upstream;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+        proxy_set_header User-Agent $qf_ce_ua;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    # 步3验收修复2：设备解析兜底 ext 路由（仓内 ext 有此端点、翻牌前亦未挂载，今补齐）
+    location = /api/device/resolve {
+        proxy_pass http://127.0.0.1:8448;
+        proxy_http_version 1.1;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    location /meshagents { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /meshsettings { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /downloads/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+
+    # 热修 2026-10-30（会话连不上定性）：框内引擎页按页目录相对路径拼出的 *.ashx
+    # （meshrelay/serverpic 等）带 /console-engine 前缀到达；通则 location 不剥前缀，
+    # 引擎按非规范路径路由——serverpic 404、meshrelay 升级后即断、桌面死在 Setup。
+    # 本 location 先剥前缀再交引擎，与引擎自带路径（control.ashx 根路径）行为对齐。
+    location ~* ^/console-engine/(.+\.ashx)$ {
+        rewrite ^/console-engine/(.+)$ /$1 break;
+        proxy_pass $qf_engine_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    # 会话数据面 *.ashx 通则（control/meshrelay/serverpic 等全集；条 16 长超时 86400s 不得压短）
+    location ~* \.ashx$ {
+        proxy_pass $qf_engine_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    # 登出面（引擎）
+    location = /logout { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
 
     location = /app.js {
         root /opt/qfremote-webapp;
@@ -228,27 +377,16 @@ server {
         add_header Cache-Control "no-store";
     }
 
+    location = /session.css {
+        root /opt/qfremote-webapp;
+        add_header Cache-Control "no-store";
+    }
+
     location /assets/ {
         root /opt/qfremote-webapp;
     }
 
-    # 远控入口（2026-10-28 域名修复，取代 2026-10-26 丙案 302）：原顶层 302 跳裸 IP
-    # 8443 废止——用户在 app.qfremote.top 点远程桌面被整页甩到裸 IP、撞自签证书。
-    # 改同源反代：路径改写为 / 后按既有 map 选上游（直达 8443 或记住设备垫片 8450），
-    # 深链 node/viewmode 查询原样透传，桌面会话全程留在当前域名。
-    # 回滚＝恢复 qfremote-proxy.bak-desktopfix-20261028 后 reload。
-    location = /console-engine {
-        rewrite ^ / break;
-        proxy_pass $qf_console_upstream;
-        proxy_ssl_verify off;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_buffering off;
-        include /etc/nginx/qfremote-proxy-headers.conf;
-    }
+    # X2（2.4.0 翻牌）：旧远控入口 location 已删除——框内会话改走根路径分流（见上）。回滚随主 conf 备份恢复。
 
 
     # ===== 404 普查修复（2026-10-28，DS 成稿，work/404-census-20261028）=====
@@ -282,15 +420,5 @@ server {
         add_header Cache-Control "public, max-age=86400";
     }
 
-    location / {
-        proxy_pass $qf_console_upstream;
-        proxy_ssl_verify off;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_buffering off;
-        include /etc/nginx/qfremote-proxy-headers.conf;
-    }
+    # 兜底透传 location / 已于 2.4.0 翻牌删除：未列明路径一律 404，不再直达引擎（G6 隔离面）。
 }
