@@ -3,7 +3,7 @@
  * QFRemote 服务地址运行时解析（v2.2.0 新增）
  * ================================================================
  * 背景：论坛/注册等入口地址原先写死在 main.js 里，临时通道一换就成死链。
- * 本模块在启动时拉官网 product.json（GitHub Pages，正经证书）：
+ * 本模块在启动时拉官网 product.json（正式域名，正经证书）：
  *   { web: { forumUrl, registerUrl, friendsUrl, adminUrl, pointsUrl } }
  * 解析优先级：product.json 最新值 > 上次成功缓存（qf-settings.svcUrls）> 写死兜底。
  * 拉不到一律安静退回缓存/兜底，绝不阻塞启动、绝不弹窗。
@@ -15,7 +15,7 @@
 const https = require('https');
 const clientVersion = require('./client-version');
 
-const PRODUCT_JSON_URL = 'https://a718983610-sys.github.io/qfremote-website/product.json';
+const PRODUCT_JSON_URL = 'https://qfremote.top/product.json';
 // 正式 Web 基座。临时隧道地址不得作为生产兜底。
 const PROD_WEB_BASE = 'https://app.qfremote.top';
 
