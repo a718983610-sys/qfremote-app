@@ -4497,7 +4497,7 @@ Views.profile = async function (view) {
       <div style="margin:-6px 0 4px 55px"><button class="btn sm ghost" id="pf-rebind">提交换绑申诉</button></div>
     </div></div>
     <div class="card"><h3>账号与安全</h3><div id="pfSec">
-      ${rowHtml('lock', '更改密码', '修改后其他设备需重新登录')}
+      ${rowHtml('lock', '更改密码', '修改密码不会使其他设备立即退出登录')}
       ${rowHtml('file', '查看以前的登录', '最近登录：' + (S.stats && S.stats.lastLoginMs ? fmtDate(S.stats.lastLoginMs) : '—'))}
       ${rowHtml('headset', '我的申诉与进度', '封禁申诉、换绑申诉都在这里查进度')}
       ${rowHtml('forum', '意见反馈', '提交后进入处理队列')}
