@@ -1820,7 +1820,7 @@ function frameNavigate(url) {
 
 function buildSessionFrame(view) {
   Sess.pendingVm = 0;   // DS P2-1：新一轮构建起算，旧待办形态清零
-  Sess.t0 = performance.now(); Sess.state = 'connecting'; Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0;
+  Sess.t0 = performance.now(); Sess.state = 'connecting'; Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
   /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
   const m0 = view.querySelector('#qfMask'); if (m0) m0.hidden = true; Sess.mask = null;
   /* 会话框恒为 body 级永驻框（预热框原地升格）：iframe 换父节点必被浏览器重载
@@ -1863,6 +1863,7 @@ function syncSessionFrameGeometry() {
 
 function onFrameLoad(view) {
   injectFrameGuard();
+  setTimeout(() => driveConnect(), 700);
   if (Sess.pendingVm) {
     const pv = Sess.pendingVm, pg = Sess.pendingGen;
     Sess.pendingVm = 0;
@@ -1887,6 +1888,34 @@ function tryGo(vm) {
     if (w && typeof w.go === 'function') { w.go(vm); return true; }
   } catch (e) {}
   return false;
+}
+
+/* 热修 2026-10-30（DS flash 轻审已过，必改项全采纳）：深链直达设备页时引擎不自连
+   （自连只在引擎设备列表点击流里），由 SPA 在绑定完成后代为触发引擎连接。
+   守卫：仅 connecting 态、帧已绑定目标设备（与探针同一身份口径）、引擎无对话框、
+   状态非建连中；节流 ≥4s、单轮 ≤6 次。contype 取 1（引擎直建分支，与引擎内部
+   调用及 rig 实证一致）：contype 3 对 agent.id<=4 的设备先走会话查询、框内等不到
+   回执会空转（笔记本实测），故不用；直建分支不经会话选择器，无误点面。 */
+function driveConnect() {
+  try {
+    if (!Sess.active || Sess.state !== 'connecting' || !Sess.frame) return;
+    const w = Sess.frame.contentWindow, doc = Sess.frame.contentDocument;
+    if (!w || !doc) return;
+    const href = String(w.location.href || '');
+    if (href.indexOf('node=' + Sess.nodeid) < 0 || href.indexOf('qfm=frame') < 0) return;
+    if (w.xxdialogMode) return;
+    const now = performance.now();
+    if (Sess.lastConnectTry && now - Sess.lastConnectTry < 4000) return;
+    if ((Sess.connectN || 0) >= 6) return;
+    const st = doc.querySelector('#deskstatus');
+    const stTxt = st ? String(st.textContent || '') : '';
+    if (/connecting|setup|连接中/i.test(stTxt)) return;
+    let acted = false;
+    if (Sess.vm === 11 && !w.desktop && w.currentNode && typeof w.connectDesktop === 'function') { w.connectDesktop(null, 1); acted = true; }
+    else if (Sess.vm === 12 && !w.terminal && w.currentNode && typeof w.connectTerminal === 'function') { w.connectTerminal(null, 1); acted = true; }
+    else if (Sess.vm === 13 && !w.files && w.currentNode && typeof w.connectFiles === 'function') { w.connectFiles(null); acted = true; }
+    if (acted) { Sess.lastConnectTry = now; Sess.connectN = (Sess.connectN || 0) + 1; }
+  } catch (e) {}
 }
 
 /* 哨兵：onload＋8 秒同源尺寸/结构观察＋一次自动重载＋三级错误卡（空白/被拒/无 id），
@@ -1917,9 +1946,10 @@ function startSentinel(view) {
     if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
     if (Sess.state === 'connecting') {
       if (p === 'connected') { setConnected(view); return; }
-      if (now - Sess.t0 > 8000) {
+      driveConnect();
+      if (now - Sess.t0 > 20000) {
         if (!Sess.reloaded) {
-          Sess.reloaded = true; Sess.t0 = now;
+          Sess.reloaded = true; Sess.t0 = now; Sess.connectN = 0; Sess.lastConnectTry = 0;
           try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
         } else { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
       }
@@ -2147,7 +2177,7 @@ function retryFromMask(view) {
     }).catch(() => { if (gen === Sess.gen) showSessionMask(view, 'TIMEOUT', null); });
     return;
   }
-  if (Sess.frame && Sess.nodeid) { Sess.state = 'connecting'; Sess.t0 = performance.now(); Sess.reloaded = true; try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {} }
+  if (Sess.frame && Sess.nodeid) { Sess.state = 'connecting'; Sess.t0 = performance.now(); Sess.reloaded = true; Sess.connectN = 0; Sess.lastConnectTry = 0; try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {} }
   else if (!Sess.frame && Sess.nodeid) buildSessionFrame(view);
 }
 function exitSession() {
