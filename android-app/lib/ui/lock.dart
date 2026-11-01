@@ -199,7 +199,7 @@ class _LockPageState extends State<LockPage> {
             child: SafeArea(
               top: false,
               child: ListView(
-          padding: const EdgeInsets.fromLTRB(18, 16, 18, 24),
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
           children: [
             _panelCard(
               child: Text(

@@ -63,7 +63,8 @@ class _SettingsPageState extends State<SettingsPage> {
         backgroundColor: p.cardColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('深色模式', style: TextStyle(color: p.onCard, fontSize: 16, fontWeight: FontWeight.w700)),
-        content: RadioGroup<ThemeChoice>(
+        content: SingleChildScrollView(
+          child: RadioGroup<ThemeChoice>(
           groupValue: _theme,
           onChanged: (v) {
             if (v != null) Navigator.of(ctx).pop(v);
@@ -84,6 +85,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
             ],
+          ),
           ),
         ),
       ),
@@ -107,7 +109,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+              padding: EdgeInsets.fromLTRB(16, 6, 16, 20 + MediaQuery.of(context).padding.bottom),
               children: [
                 _section('通用'),
                 _group([
@@ -160,7 +162,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         foregroundColor: QfPalette.brand,
                         side: BorderSide(color: p.cardBorder),
                         padding: const EdgeInsets.symmetric(horizontal: 13),
-                        minimumSize: const Size(0, 32),
+                        minimumSize: const Size(0, 48),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
                       child: const Text('检查更新', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),

@@ -58,7 +58,7 @@ class QfPalette {
       : const Color(0xFF0B2B5B).withValues(alpha: 0.08);
   Color get onCard => isDark ? const Color(0xFFECEFF3) : const Color(0xFF1F2D47);
   Color get onCardDim =>
-      isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90);
+      isDark ? const Color(0xFF9AA1AB) : const Color(0xFF5D6E84);
 
   /// 品牌标牌面：浅色底用深蓝牌 #0B2B5B 承载、深色底用白牌承载
   /// （三端口径：不许白字标直接上白底）
@@ -83,11 +83,25 @@ class QfPalette {
   static const Color navy = Color(0xFF0B2B5B);
   static const Color hairline = Color(0xFFDFE7F2);
   static const Color textMain = Color(0xFF1F2D47);
-  static const Color textDim = Color(0xFF6B7A90);
+  static const Color textDim = Color(0xFF5D6E84);
 
   /// 列表行浅蓝图标片底色（深色模式用卡片内浅一档）。
   Color get iconChipColor =>
       isDark ? const Color(0xFF2B3038) : const Color(0xFFEEF3FB);
+}
+
+/// 三端统一标度（排版批1 P30 地基，与网页 app.css :root 同一套数）：
+/// 字阶 11/12/13/14/15/16/20/24/29、间距 4/8/12/16/20/24/32/48/64、
+/// 圆角 8/14/999、内容封顶 1184（阅读类）/560（弹窗卡类）。
+/// 本批先落常量，新代码一律引用；存量硬编码逐页归一在大版本轮继续。
+class QfScale {
+  static const double fs11 = 11, fs12 = 12, fs13 = 13, fs14 = 14, fs15 = 15,
+      fs16 = 16, fs20 = 20, fs24 = 24, fs29 = 29;
+  static const double sp1 = 4, sp2 = 8, sp3 = 12, sp4 = 16, sp5 = 20,
+      sp6 = 24, sp7 = 32, sp9 = 48, sp10 = 64;
+  static const double rSmall = 8, rCard = 14, rPill = 999;
+  static const double maxReadWidth = 1184, maxCardWidth = 560;
+  static const double minTouch = 48;
 }
 
 /// 品牌默认头像占位（全产品统一）：深蓝圆盘＋白色断环＋橙点。

@@ -197,7 +197,7 @@ class _MePageState extends State<MePage> {
                         bigColor: QfPalette.navy,
                       ),
                     ),
-                    const SizedBox(width: 11),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: _statCard(
                         label: '我的积分',
@@ -211,7 +211,7 @@ class _MePageState extends State<MePage> {
                 Padding(
                   padding: const EdgeInsets.only(top: 10, left: 2),
                   child: Text('三端时间都算在一起。',
-                      style: TextStyle(color: p.onCardDim, fontSize: 11.5)),
+                      style: TextStyle(color: p.onCardDim, fontSize: 12)),
                 ),
                 if (widget.licenseSection != null) ...[
                   _section('付费与激活'),
@@ -223,13 +223,13 @@ class _MePageState extends State<MePage> {
                   onTap: widget.onAccountAction,
                   chevron: true,
                 ),
-                const SizedBox(height: 11),
+                const SizedBox(height: 12),
                 _rowCard(
                   title: '改名',
                   onTap: widget.onAccountAction,
                   chevron: true,
                 ),
-                const SizedBox(height: 11),
+                const SizedBox(height: 12),
                 _rowCard(
                   title: '软件版本 ${widget.currentVersion}',
                   sub: widget.hasUpdate ? '发现新版 v${widget.updateVersion}' : '已经是最新版',
@@ -237,7 +237,7 @@ class _MePageState extends State<MePage> {
                   onAction: widget.onCheckUpdate,
                 ),
                 if (widget.onOpenWebsite != null) ...[
-                  const SizedBox(height: 11),
+                  const SizedBox(height: 12),
                   _rowCard(
                     title: '官网',
                     sub: 'QFRemote 官方网站',
@@ -245,7 +245,7 @@ class _MePageState extends State<MePage> {
                     chevron: true,
                   ),
                 ],
-                const SizedBox(height: 11),
+                const SizedBox(height: 12),
                 _rowCard(
                   title: '退出账号',
                   titleColor: QfPalette.probeBad,
@@ -347,7 +347,7 @@ class _MePageState extends State<MePage> {
                   foregroundColor: QfPalette.brand,
                   side: BorderSide(color: p.cardBorder),
                   padding: const EdgeInsets.symmetric(horizontal: 13),
-                  minimumSize: const Size(0, 32),
+                  minimumSize: const Size(0, 48),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 ),
                 child: Text(actionLabel, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),

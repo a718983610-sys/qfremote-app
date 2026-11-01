@@ -206,7 +206,7 @@ class WatchdogStatusLine extends StatelessWidget {
           ? const Center(
               child: Text(
                 '连接断开，正在重连…',
-                style: TextStyle(color: Colors.white70, fontSize: 11.5),
+                style: TextStyle(color: Colors.white, fontSize: 12),
               ),
             )
           : null,

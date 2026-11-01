@@ -49,7 +49,7 @@ class SplashView extends StatelessWidget {
             Text(
               '远程控制',
               style: TextStyle(
-                color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90),
+                color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF5D6E84),
                 fontSize: 14,
                 letterSpacing: 5,
               ),
@@ -75,7 +75,7 @@ class SplashView extends StatelessWidget {
               Text(
                 note!,
                 style: TextStyle(
-                  color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF6B7A90),
+                  color: palette.isDark ? const Color(0xFF9AA1AB) : const Color(0xFF5D6E84),
                   fontSize: 13,
                 ),
               ),
@@ -83,7 +83,7 @@ class SplashView extends StatelessWidget {
             const SizedBox(height: 26),
             Text('v$version',
                 style: TextStyle(
-                  color: palette.isDark ? Colors.white38 : const Color(0xFF6B7A90),
+                  color: palette.isDark ? Colors.white38 : const Color(0xFF5D6E84),
                   fontSize: 12,
                 )),
           ],

@@ -5,11 +5,11 @@
 <style>
   html, body { margin:0; padding:0; }
   body {
-    --bg:#f4f7fb; --card:#ffffff; --line:#dfe7f2; --fg:#1f2d47; --sub:#6b7a90;
+    --bg:#f4f7fb; --card:#ffffff; --line:#dfe7f2; --fg:#1f2d47; --sub:#5d6e84;
     --brand:#2470e0; --brand-press:#1b5dc4; --sel-bg:#eaf2fd; --btn-line:#c9d6ea;
     background:var(--bg); color:var(--fg); box-sizing:border-box;
     font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
-    padding:20px 24px 28px;
+    padding:20px max(24px, calc((100vw - 1100px) / 2)) 28px;
     -webkit-user-select:none; user-select:none;
   }
   html[data-theme="dark"] body {
@@ -28,7 +28,7 @@
   button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
   button:disabled { opacity:.45; cursor:default; }
   .btn-refresh {
-    height:34px; padding:0 14px; font-size:13.5px;
+    height:34px; padding:0 14px; font-size:14px;
     background:var(--card); color:var(--brand); border:1px solid var(--btn-line);
   }
   .btn-refresh:hover { background:var(--sel-bg); }
@@ -44,8 +44,8 @@
   .dot { width:10px; height:10px; border-radius:50%; background:#b9c2cf; flex:none; }
   .dot.on { background:#1db954; }
   .card .nm { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .card .meta { font-size:12.5px; color:var(--sub); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .card .st { font-size:12.5px; color:var(--sub); margin-top:2px; }
+  .card .meta { font-size:13px; color:var(--sub); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .st { font-size:13px; color:var(--sub); margin-top:2px; }
   .detail {
     margin-top:18px; background:var(--card); border:1px solid var(--line);
     border-radius:14px; padding:16px 18px; display:none;
@@ -55,12 +55,12 @@
   .detail .dmeta { font-size:13px; color:var(--sub); margin-top:5px; }
   .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
   .btn-primary {
-    height:38px; padding:0 22px; font-size:14.5px; font-weight:600;
+    height:38px; padding:0 22px; font-size:15px; font-weight:600;
     background:var(--brand); color:#fff; border:1px solid var(--brand);
   }
   .btn-primary:hover { background:var(--brand-press); border-color:var(--brand-press); }
   .btn-secondary {
-    height:38px; padding:0 18px; font-size:14.5px;
+    height:38px; padding:0 18px; font-size:15px;
     background:var(--card); color:var(--fg); border:1px solid var(--btn-line);
   }
   .btn-secondary:hover { background:var(--sel-bg); }
@@ -72,7 +72,7 @@
   }
   .statebox.show { display:block; }
   .statebox .t { font-size:15px; font-weight:600; }
-  .statebox .d { font-size:13.5px; color:var(--sub); margin-top:8px; line-height:1.6; }
+  .statebox .d { font-size:14px; color:var(--sub); margin-top:8px; line-height:1.6; }
   .statebox button { margin-top:14px; }
 </style>
 </head>

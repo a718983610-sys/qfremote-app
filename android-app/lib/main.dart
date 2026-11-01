@@ -60,6 +60,12 @@ class QfRemoteApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2470E0)),
         useMaterial3: true,
+        // 排版批1（P30）：字阶地基与三端标度对齐（正文 14/次文案 12/标题 16）
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(fontSize: 14),
+          bodySmall: TextStyle(fontSize: 12),
+          titleMedium: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
       ),
       // 深色定义补齐（与品牌令牌同一种子色）：Material 层控件跟随系统深浅；
       // 壳内自绘面（工具栏/卡片等）走 QfPalette 双主题令牌，口径一致。
@@ -69,6 +75,11 @@ class QfRemoteApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
+        textTheme: const TextTheme(
+          bodyMedium: TextStyle(fontSize: 14),
+          bodySmall: TextStyle(fontSize: 12),
+          titleMedium: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
       ),
       themeMode: ThemeMode.system,
       home: const HomePage(),

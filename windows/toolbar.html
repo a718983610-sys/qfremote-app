@@ -45,33 +45,31 @@
   .brand { display:flex; align-items:center; gap:9px; margin-right:10px; }
   .brand .tile { width:29px; height:29px; border-radius:8px; background:#fff; padding:2.5px;
     box-sizing:border-box; }
-  .brand .tile img { width:100%; height:100%; border-radius:5.5px; display:block; }
+  .brand .tile img { width:100%; height:100%; border-radius:6px; display:block; }
   .brand .nm { font-size:15px; font-weight:600; letter-spacing:.5px; line-height:1; }
-  .brand .ver { font-size:10.5px; color:var(--fg-dim); margin-top:3px; line-height:1; letter-spacing:.4px; }
+  .brand .ver { font-size:11px; color:var(--fg-dim); margin-top:3px; line-height:1; letter-spacing:.4px; }
   .grp { display:flex; align-items:center; gap:3px; }
   .sep { width:1px; height:22px; background:var(--sep); margin:0 7px; flex:none; }
   button {
     -webkit-app-region: no-drag; appearance:none; border:1px solid transparent;
     background: transparent; color:var(--fg); border-radius:8px; cursor:pointer;
     font-family:inherit; display:flex; align-items:center; justify-content:center; gap:5px;
-    height:32px; min-width:32px; padding:0 6px; font-size:12.5px;
+    height:32px; min-width:32px; padding:0 6px; font-size:13px;
     transition: background .13s ease, border-color .13s ease;
   }
   button:hover { background: var(--hover); }
   button:active { background: var(--press); }
-  button:focus-visible { outline:2px solid rgba(255,255,255,.65); outline-offset:1px; }
+  button:focus-visible { outline:2px solid rgba(255,255,255,.85); outline-offset:1px; }
   button.on { background: rgba(255,159,46,.26); border-color: rgba(255,180,84,.6); color:#ffe1b0; }
   button svg { width:18px; height:18px; flex:none; }
   button:disabled { opacity:.4; cursor:default; }
-  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
-  body:not(.theme-dark) button:focus-visible { outline-color: rgba(255,255,255,.85); }
   .zlabel { -webkit-app-region: no-drag; min-width:42px; text-align:center;
     font-size:12px; color:var(--zlabel); font-variant-numeric: tabular-nums; }
   .spacer { flex:1; }
   .status {
     -webkit-app-region: no-drag; display:none; align-items:center; gap:7px;
     font-size:12px; color:var(--status-fg); background: var(--status-bg);
-    border:1px solid var(--status-border); border-radius:999px; padding:4.5px 12px; margin-right:6px;
+    border:1px solid var(--status-border); border-radius:999px; padding:4px 12px; margin-right:6px;
     white-space:nowrap;
   }
   .status.show { display:flex; }
@@ -91,7 +89,7 @@
   }
   .pdetail.show { display:block; }
   .al { -webkit-app-region: no-drag; display:flex; align-items:center; gap:7px; cursor:pointer;
-    font-size:12.5px; color:var(--fg); padding:5px 9px; border-radius:8px; border:1px solid transparent; }
+    font-size:13px; color:var(--fg); padding:5px 9px; border-radius:8px; border:1px solid transparent; }
   .al:hover { background: var(--hover); }
   .al input { accent-color:#ff9f2e; width:14px; height:14px; margin:0; cursor:pointer; }
   .winbtn { min-width:40px; }
@@ -100,7 +98,7 @@
   #toast {
     position:fixed; left:50%; top:7px; transform:translateX(-50%) translateY(-4px);
     z-index:50; pointer-events:none; opacity:0; transition: opacity .18s ease, transform .18s ease;
-    font-size:12.5px; color:#fff; border-radius:999px; padding:6px 16px; white-space:nowrap;
+    font-size:13px; color:#fff; border-radius:999px; padding:6px 16px; white-space:nowrap;
     background: var(--toast-ok-bg);
   }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
@@ -110,54 +108,37 @@
     display:none; align-items:center; gap:6px; height:30px; padding:0 12px; margin-right:6px;
     border-radius:999px; border:1px solid rgba(255,213,141,.55); cursor:pointer;
     background: #ff8a1e; color:#fff;
-    font-size:12.5px; font-weight:700; letter-spacing:.4px; white-space:nowrap;
+    font-size:13px; font-weight:700; letter-spacing:.4px; white-space:nowrap;
     transition: filter .13s ease;
   }
   .updbadge:hover { filter: brightness(1.07); }
   .updbadge.show { display:flex; }
   .updbadge .udot { width:8px; height:8px; border-radius:50%; background:#fff;
     animation: pulse 1.5s ease-in-out infinite; }
-  /* 窄窗适配（2.3.0）：工具栏固定项自然总宽约 1120px，主窗最小宽只有 900——
-     不收口时窗口三键（最小化/最大化/关闭）会被挤出屏幕、带文字的按钮被压成竖排。
-     按视图宽度分档收起次要文字与瞬时信息，只留图标/状态点，悬停说明（title）仍在；
-     保证最挤的状态（三键＋重连点＋新版点＋管理图标同时出现）在 900px 内放得下。 */
-  @media (max-width: 1460px) {
-    /* 服务器详情是一行瞬时文字（点状态灯看 6 秒），窄窗让位给窗口三键 */
+  /* 窄窗适配（排版批1 P22：原 8 档乱序逐个藏字重排为有序三档）：
+     >1240 全显——默认窗宽 1280 在此档，服务器详情、重连文字、新版徽标文字常态可见；
+     ≤1240 收瞬时/次要文字（服务器详情行、徽标字、管理字；悬停 title 与点击详情仍在）；
+     ≤1020 图标化（品牌名、首页/好友文字、缩放百分比、重连文字、自启文字收起，
+     只留图标/状态点/勾选框）；收起一律用 display:none，不再用 font-size:0 藏字；
+     窗口三键任何档都不收。 */
+  @media (max-width: 1240px) {
     .pdetail { display:none !important; }
-  }
-  @media (max-width: 1400px) {
-    /* 重连提示只留状态点，文字收起（点状脉冲本身即在重连的表达）；
-       阈值取到 1400 是因为默认窗宽 1280 下「重连＋新版＋管理」齐现时也要放得下 */
-    .status { font-size:0; gap:0; padding:4.5px 9px; }
-  }
-  @media (max-width: 1360px) {
-    /* 新版徽标只留圆点、管理只留图标（title 悬停仍有全名，点开关于页有全文） */
     #updBadgeTx { display:none; }
     .updbadge { padding:0 9px; }
     #adminBtn > span { display:none; }
   }
-  @media (max-width: 1180px) {
-    /* 品牌只留图标，名称文字收起 */
-    .brand > span:last-child { display:none; }
-    .brand { margin-right:2px; }
-  }
-  @media (max-width: 1120px) {
-    /* 好友只留图标（title 悬停仍有全名） */
-    button[onclick*="friends"] > span { display:none; }
-  }
-  @media (max-width: 1220px) {
-    /* 首页只留图标（title 悬停仍有全名） */
-    #navHomePage > span { display:none; }
-  }
-  @media (max-width: 1080px) {
+  @media (max-width: 1020px) {
     body { gap:2px; padding-left:8px; }
     .sep { margin:0 4px; }
-    /* 缩放百分比与「开机自启」文字收起：加减按钮、勾选框本身保留可用 */
+    .brand > span:last-child { display:none; }
+    .brand { margin-right:2px; }
+    #navHomePage > span { display:none; }
+    button[onclick*="friends"] > span { display:none; }
     .zlabel { display:none; }
-    .al { font-size:0; gap:0; padding:5px 6px; }
-  }
-  @media (max-width: 1020px) {
-    /* 「还原」按钮收起，Ctrl+0 仍可还原缩放 */
+    .status { gap:0; padding:4px 9px; }
+    .status .status-tx { display:none; }
+    .al { gap:0; padding:5px 6px; }
+    .al .al-tx { display:none; }
     button[onclick*="'reset'"] { display:none; }
   }
 </style>
@@ -191,7 +172,7 @@
 
   <span class="spacer"></span>
 
-  <span class="status" id="status"><span class="dot"></span>连接断开，正在重连…</span>
+  <span class="status" id="status"><span class="dot"></span><span class="status-tx">连接断开，正在重连…</span></span>
 
   <button id="navHomePage" onclick="qfNav.homePage()" title="首页：概览、付费与激活、快速入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg><span>首页</span></button>
   <button id="navFriends" onclick="qfNav.friends()" title="好友：添加好友与共享电脑，与控制台共用登录状态，无需再次登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="8" r="3.6"/><path d="M4.6 19.6c.8-3.3 3.4-5.1 6.4-5.1s5.6 1.8 6.4 5.1"/></svg><span>好友</span></button>
@@ -206,7 +187,7 @@
   <button id="adminBtn" onclick="qfNav.openAdmin()" title="站长管理（账号管理、积分与申诉处理）" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.2c0 4.6 3 7.7 7 9.3 4-1.6 7-4.7 7-9.3V6z"/><path d="M9.3 11.8l2 2 3.6-3.8"/></svg><span>管理</span></button>
   <button onclick="qfNav.openAbout()" title="关于 QFRemote（版本、服务器地址、检查服务器状态）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 11v5.2"/><path d="M12 7.6v.2"/></svg></button>
 
-  <label class="al" title="Windows 登录后自动启动 QFRemote"><input type="checkbox" id="al">开机自启</label>
+  <label class="al" title="Windows 登录后自动启动 QFRemote"><input type="checkbox" id="al"><span class="al-tx">开机自启</span></label>
   <button id="pin" onclick="qfNav.toggleTop()" title="窗口置顶（F10）：开启后 QFRemote 窗口始终位于最前"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 4h5l-.8 6.2 2.8 2.8H7.5l2.8-2.8z"/><path d="M12 13v7.2"/></svg></button>
   <button id="fs" onclick="qfNav.toggleFullscreen()" title="全屏（F11）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
 

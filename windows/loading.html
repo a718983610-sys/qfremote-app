@@ -18,17 +18,17 @@
   }
   @keyframes rise { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
   .tile {
-    width:88px; height:88px; border-radius:20px; padding:4px; box-sizing:border-box;
+    width:88px; height:88px; border-radius:14px; padding:4px; box-sizing:border-box;
     background: #0b2b5b;
   }
-  .tile img { width:100%; height:100%; border-radius:17px; display:block; }
+  .tile img { width:100%; height:100%; border-radius:10px; display:block; }
   .name { font-size:20px; font-weight:600; letter-spacing:1.2px; margin-top:17px; color:#1f2d47; }
-  .bar { width:196px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:25px; overflow:hidden; }
+  .bar { width:192px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:25px; overflow:hidden; }
   .bar i { display:block; height:100%; width:38%; border-radius:3px;
     background: #2470e0;
     animation: slide 1.15s ease-in-out infinite alternate; }
   @keyframes slide { from { transform: translateX(-55%);} to { transform: translateX(315%);} }
-  .hint { font-size:13.5px; color:#6b7a90; margin-top:12px; }
+  .hint { font-size:14px; color:#5d6e84; margin-top:12px; }
   /* 深灰深色主题（与工具栏联动，不用纯黑） */
   html[data-theme="dark"] body { background: #17181c; }
   html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
@@ -36,10 +36,13 @@
   html[data-theme="dark"] .name { color:#eceff3; }
   html[data-theme="dark"] .bar { background: rgba(255,255,255,.14); }
   html[data-theme="dark"] .hint { color:#9aa1ab; }
+
+  /* 排版批1（P19）：焦点环与减动效 */
+  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
-  <div class="orbit"></div>
   <div class="card">
     <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
     <div class="name">QFRemote</div>

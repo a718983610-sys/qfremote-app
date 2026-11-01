@@ -32,8 +32,8 @@
   --tools-px: 12px;
   --input-h: 56px;
   --strip-h: 40px;
-  --iconbtn: 40px;
-  --iconbtn-sm: 32px;
+  --iconbtn: 44px;
+  --iconbtn-sm: 36px;
   --row-h: 56px;
   --iconblk: 36px;
   --safe-t: env(safe-area-inset-top, 0px);
@@ -79,7 +79,7 @@
   --green: #12B76A;
   --red: rgb(217,45,32);
   --ink: #1F2D47;
-  --ink-2: #6B7A90;
+  --ink-2: #5D6E84;
   --hairline: rgba(11,43,91,.08);
   --hairline-dk: rgba(255,255,255,.12);
   --canvas-0: #0E141E;
@@ -750,7 +750,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--sp-3);
-  height: 38px;
+  height: 44px;
   padding: 0 var(--sp-6);
   border-radius: var(--r-10);
   font-size: var(--fs-4);
@@ -871,7 +871,7 @@
   outline: none;
   background: transparent;
   font-family: var(--font-mono);
-  font-size: var(--fs-3);
+  font-size: 16px; /* 批1：终端输入 ≥16px 防 iOS 聚焦放大（本文件字阶 --fs-3=15px 不动，避免牵连全站） */
   font-weight: var(--fw-3);
   line-height: var(--lh-3);
   letter-spacing: var(--ls-3);
@@ -1787,6 +1787,7 @@
   .viewer .sv-sheet .sv-btn{ width:auto; }
 }
 @media (max-width:600px){
+  .viewer{ --iconbtn-sm: 40px; }
   .viewer .sv-sheet__f{ flex-direction:column; }
   .viewer .sv-sheet .sv-btn{ width:100%; }
   .viewer .sv-opt{ gap:var(--sp-4); padding:var(--sp-4) var(--sp-5); }

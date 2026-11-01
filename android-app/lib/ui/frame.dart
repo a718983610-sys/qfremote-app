@@ -68,9 +68,9 @@ class QfAppHeader extends StatelessWidget {
           // 服务器状态点（点一下立即检测并提示结果）
           InkWell(
             onTap: onProbeTap,
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(22),
             child: Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(17),
               child: Container(
                 width: 11,
                 height: 11,
@@ -234,7 +234,7 @@ class QfPageHeader extends StatelessWidget {
                 GestureDetector(
                   onTap: onRightTap,
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
                     child: Text(
                       rightText!,
                       style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 12.5),

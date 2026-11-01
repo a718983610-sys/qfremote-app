@@ -354,7 +354,7 @@ class _LicenseSectionState extends State<LicenseSection> {
             onPressed: widget.onStatusQuery,
             style: TextButton.styleFrom(
               foregroundColor: QfPalette.brand,
-              minimumSize: const Size(0, 44),
+              minimumSize: const Size(0, 48),
             ),
             child: const Text('查询密钥', style: TextStyle(fontSize: 14.5)),
           ),
@@ -389,7 +389,7 @@ class _LicenseSectionState extends State<LicenseSection> {
                       _redeemingId == null ? () => _redeemById(k) : null,
                   style: FilledButton.styleFrom(
                     backgroundColor: QfPalette.brand,
-                    minimumSize: const Size(0, 38),
+                    minimumSize: const Size(0, 48),
                     padding: const EdgeInsets.symmetric(horizontal: 13),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(9)),
@@ -435,7 +435,7 @@ class _LicenseSectionState extends State<LicenseSection> {
           onPressed: busy ? null : onSubmit,
           style: FilledButton.styleFrom(
             backgroundColor: QfPalette.brand,
-            minimumSize: const Size(0, 46),
+            minimumSize: const Size(0, 48),
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           ),

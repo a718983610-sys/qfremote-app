@@ -23,18 +23,18 @@
   .tile img { width:100%; height:100%; border-radius:12px; display:block; }
   .tt { margin-left:14px; padding-top:5px; }
   .tt .nm { font-size:21px; font-weight:700; letter-spacing:.8px; line-height:1.1; }
-  .tt .ds { font-size:12px; color:#6b7a90; margin-top:5px; }
+  .tt .ds { font-size:12px; color:#5d6e84; margin-top:5px; }
   html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
   .x {
     -webkit-app-region: no-drag; margin-left:auto; appearance:none; border:none; cursor:pointer;
-    background:transparent; color:#6b7a90; width:30px; height:30px; border-radius:8px;
+    background:transparent; color:#5d6e84; width:30px; height:30px; border-radius:8px;
     display:flex; align-items:center; justify-content:center;
     transition: background .13s ease, color .13s ease;
   }
   .x:hover { background:#d3382c; color:#fff; }
   .x svg { width:14px; height:14px; }
   .intro {
-    margin:18px 22px 0; padding:13px 16px; border-radius:14px; font-size:12.5px; line-height:1.7;
+    margin:18px 22px 0; padding:13px 16px; border-radius:14px; font-size:13px; line-height:1.7;
     background: #ffffff; border:1px solid #dfe7f2; color:#1f2d47;
   }
   html[data-theme="dark"] .intro { background: #22262e; border-color: rgba(255,255,255,.08);
@@ -54,10 +54,10 @@
   html[data-theme="dark"] ::-webkit-scrollbar-thumb { background:#3a3f49; border-color:#17181c; }
   .dname { font-size:15px; font-weight:600; flex:1; word-break:break-all; color:#1f2d47; }
   html[data-theme="dark"] .dname { color:#eceff3; }
-  .dstat { font-size:12px; color:#6b7a90; white-space:nowrap; }
+  .dstat { font-size:12px; color:#5d6e84; white-space:nowrap; }
   html[data-theme="dark"] .dstat { color:#9aa1ab; }
-  .dstat.locked { color:#f58a0c; font-weight:600; }
-  .note { font-size:12px; color:#6b7a90; margin-top:8px; line-height:1.6; }
+  .dstat.locked { color:#b45309; font-weight:600; }
+  .note { font-size:12px; color:#5d6e84; margin-top:8px; line-height:1.6; }
   html[data-theme="dark"] .note { color:#9aa1ab; }
   /* 开关（手动，默认关） */
   .sw { -webkit-app-region: no-drag; flex:none; width:46px; height:26px; border-radius:99px; cursor:pointer;
@@ -73,7 +73,7 @@
   .form { display:none; margin-top:12px; border-top:1px solid #dfe7f2; padding-top:12px; }
   html[data-theme="dark"] .form { border-top-color: rgba(255,255,255,.08); }
   .form.show { display:block; }
-  .form label { display:block; font-size:12px; color:#6b7a90; margin:9px 0 5px; }
+  .form label { display:block; font-size:12px; color:#5d6e84; margin:9px 0 5px; }
   html[data-theme="dark"] .form label { color:#9aa1ab; }
   .form input {
     width:100%; box-sizing:border-box; padding:9px 11px; border-radius:10px; font-size:14px;
@@ -85,7 +85,7 @@
   .btn {
     width:100%; border:none; cursor:pointer; font-family:inherit; margin-top:13px;
     font-size:14px; font-weight:600; color:#fff; letter-spacing:1px;
-    padding:10.5px 0; border-radius:12px;
+    padding:12px 0; border-radius:12px;
     background: #2470e0;
     transition: filter .15s ease, opacity .15s;
   }
@@ -101,20 +101,24 @@
   html[data-theme="dark"] .btn.ghost:active { background:#3a3f49; }
   .btn.danger { background: #d3382c; }
   .linkbtn { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit;
-    color:#2470e0; font-size:12.5px; padding:0; margin-top:11px; text-decoration:underline; }
+    color:#2470e0; font-size:13px; padding:0; margin-top:11px; text-decoration:underline; }
   html[data-theme="dark"] .linkbtn { color:#8fb8f5; }
-  .msg { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center; color:#6b7a90; }
+  .msg { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center; color:#5d6e84; }
   html[data-theme="dark"] .msg { color:#a7adb8; }
   .msg .ok { color:#128a43; font-weight:600; }
   .msg .bad { color:#d3382c; font-weight:600; }
   html[data-theme="dark"] .msg .ok { color:#5eeaa0; }
   html[data-theme="dark"] .msg .bad { color:#ff9d8f; }
-  .statebox { margin:18px 22px 0; text-align:center; font-size:13.5px; line-height:1.8; color:#1f2d47; }
+  .statebox { margin:18px 22px 0; text-align:center; font-size:14px; line-height:1.8; color:#1f2d47; }
   html[data-theme="dark"] .statebox { color:#c9cdd4; }
   .statebox .btn { max-width:260px; margin-left:auto; margin-right:auto; }
   .foot { margin-top:auto; padding:16px 22px 15px; text-align:center;
-    font-size:11.5px; color:rgba(107,122,144,.75); }
-  html[data-theme="dark"] .foot { color:rgba(167,173,184,.55); }
+    font-size:12px; color:#5d6e84; }
+  html[data-theme="dark"] .foot { color:#9aa1ab; }
+
+  /* 排版批1（P19）：焦点环与减动效 */
+  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>

@@ -192,7 +192,7 @@ class _ForceUpdateViewState extends State<ForceUpdateView> {
                 const SizedBox(height: 6),
                 Center(
                   child: Text('更新完成后重新打开软件即可使用',
-                      style: TextStyle(color: p.onCardDim, fontSize: 11.5)),
+                      style: TextStyle(color: p.onCardDim, fontSize: 12)),
                 ),
               ],
               ),

@@ -8,6 +8,11 @@ import 'theme.dart';
 /// 壳内网页页（2.3.1）：购买页 /purchase、状态查询页 /license/status、
 /// 申诉页 /appeal、智能客服等自有页面一律在本页同框打开（顶部原生页栏＋
 /// 返回），不整页外跳、不跳系统浏览器（站长「下载与入口不许跳出」口径）。
+///
+/// 底部安全区口径（排版批1 P36 裁定，2026-10-31）：本页有意全幅不加原生
+/// 底部 inset——壳内网页（网页 SPA）自身已按 env(safe-area-inset-bottom)
+/// 给底导航/弹窗/贴底按钮留白，原生侧再叠一层会双计留白并压缩网页高度。
+/// 若将来装入不自带安全区的第三方页，先在网页侧补 env() 再评估本页。
 class ShellWebPage extends StatelessWidget {
   final QfPalette palette;
   final String title;

@@ -2332,9 +2332,9 @@ Views.device = async function (view, name) {
     <div class="grid2"><div class="card"><h3>连接</h3>
       <button class="row" data-remote="${esc(d.name)}"><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
       <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}">远程终端</button></p></div>
-    <div class="card"><h3>设备信息</h3><table>
+    <div class="card"><h3>设备信息</h3><div class="tblwrap"><table>
       <tr><th>系统</th><td>${esc(d.os || '—')}</td></tr><tr><th>分组</th><td>${esc(d.group || '默认分组')}</td></tr>
-      <tr><th>状态</th><td>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div>
+      <tr><th>状态</th><td>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div></div>
     <div class="card" id="lockCard"><h3>屏幕锁</h3><div id="lockBody"><div class="skel" style="height:52px"></div></div></div>
     <div class="card"><h3>共享与安全</h3>
       ${rowHtml('users', '共享给好友', '在好友页选择好友后共享此设备（只看 / 可操作两档）', 'friends')}
@@ -4104,7 +4104,7 @@ Views.purchase = async function (view, param, _s, opts) {
     const curUrl = curMethod === 'wechat' ? wxUrl : aliUrl;
     if (o.status === 'reviewing') {
       dr.innerHTML = `<div class="note ok" style="margin:0 0 10px">已提交，正在审核。审核通过后，可在「我的订单」查看并复制密钥，粘贴激活后即可使用。</div>
-        <table><tr><th>本站订单</th><td>${esc(o.id)}</td></tr><tr><th>套餐</th><td>${esc(o.planName || plan.name)} · ¥${esc(amt)}</td></tr><tr><th>状态</th><td>${orderPill(o)}</td></tr></table>
+        <div class="tblwrap"><table><tr><th>本站订单</th><td>${esc(o.id)}</td></tr><tr><th>套餐</th><td>${esc(o.planName || plan.name)} · ¥${esc(amt)}</td></tr><tr><th>状态</th><td>${orderPill(o)}</td></tr></table></div>
         <div class="drawerops"><button class="btn grey" data-act="leave">收起</button><button class="btn sm ghost" data-act="orders">查看我的订单</button></div>`;
       bindDrawerOps(planId);
       return;
@@ -4433,7 +4433,7 @@ Views.points = async function (view) {
       ${pendingKeys.length ? pendingKeys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.planName || '密钥')}</b><small>${esc(k.masked || '')} · 来源：${esc(k.sourceLabel || '')} · ${esc(k.expiresText || '未激活，激活后起算')}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm" data-keyredeem="${esc(k.keyId)}">兑换并激活</button></span></div>`).join('') : '<div class="statebox"><b>暂无待兑换密钥</b><p>用积分兑换的密钥将显示在这里，兑换并激活后开始计时。</p></div>'}
     </div></div>
     <div class="card"><h3>兑换记录</h3>
-      ${records.length ? '<table><tr><th>项目</th><th>积分变化</th><th>时间</th></tr>' + records.map(x => `<tr><td>${esc(x.note || '福利兑换')}</td><td>${esc(String(x.delta != null ? x.delta : ''))}</td><td>${x.at ? fmtDate(x.at) : ''}</td></tr>`).join('') + '</table>' : '<div class="statebox"><b>暂无兑换记录</b><p>在福利中心兑换密钥后，记录将显示在这里。</p></div>'}
+      ${records.length ? '<div class="tblwrap"><table><tr><th>项目</th><th>积分变化</th><th>时间</th></tr>' + records.map(x => `<tr><td>${esc(x.note || '福利兑换')}</td><td>${esc(String(x.delta != null ? x.delta : ''))}</td><td>${x.at ? fmtDate(x.at) : ''}</td></tr>`).join('') + '</table></div>' : '<div class="statebox"><b>暂无兑换记录</b><p>在福利中心兑换密钥后，记录将显示在这里。</p></div>'}
     </div>`;
   const ptOut = $('#pt-out', box);
   const signBtn = $('#pt-sign', box);
@@ -4483,14 +4483,14 @@ Views.profile = async function (view) {
       <div class="field"><label>输入密钥</label><input id="pf-key" placeholder="粘贴完整密钥串"><p class="hint">他人出售的一手未激活密钥、转赠密钥、积分兑换密钥都在这里兑换；兑换即完成归属转移并激活。</p></div>
       <button class="btn block" id="pf-claim">兑换并激活</button><div id="pf-claim-out" style="margin-top:10px"></div>
       <h3 style="margin-top:20px">待领取的转赠</h3><div id="pf-transfers"><div class="skel" style="height:40px"></div></div></div>
-    <div class="card"><h3>我的密钥（查询密钥）</h3><table>
+    <div class="card"><h3>我的密钥（查询密钥）</h3><div class="tblwrap"><table>
       <tr><th>套餐</th><td>${esc(lic.planName || '尚未激活')}</td></tr>
       <tr><th>密钥</th><td><span id="pf-masked">${esc(lic.maskedKey || '—')}</span> <a id="pf-reveal" style="color:var(--brand);font-weight:600;cursor:pointer">查看完整密钥（输密码核验）</a></td></tr>
       <tr><th>状态</th><td>${esc(lic.displayStatus || '—')}${lic.remainText ? ' · ' + esc(lic.remainText) : (lic.keyExpiresMs ? ' · 到期：' + fmtDate(lic.keyExpiresMs) : '')}</td></tr>
       <tr><th>设备名额</th><td>电脑 ${lic.slots ? lic.slots.pc : 0} / ${lic.slots && lic.slots.pcMax ? lic.slots.pcMax : 2} · 手机 ${lic.slots ? lic.slots.mobile : 0} / ${lic.slots && lic.slots.mobileMax ? lic.slots.mobileMax : 1}</td></tr>
       <tr><th>网页版</th><td>${lic.webEnabled ? '已开通' : '购买付费密钥后开通'}</td></tr>
       ${lic.everBanned ? '<tr><th>标记</th><td>该密钥曾被封禁（申诉恢复后保留此标记，不影响使用）</td></tr>' : ''}
-      </table>
+      </table></div>
       ${rowInfoHtml('key', '转赠密钥', '付费密钥可转赠一次；对方在查询密钥处复制密钥串后，登录时粘贴领取')}
       <div style="margin:-6px 0 10px 55px"><button class="btn sm ghost" id="pf-gift">发起转赠</button> <button class="btn sm grey" id="pf-gift-cancel">撤销待领取转赠</button></div>
       ${rowInfoHtml('refresh', '申诉换绑设备', '在新设备上提交，审核通过后替换同类旧设备')}
@@ -4855,7 +4855,7 @@ Views.admin = async function (view) {
       <div class="card"><h3>今日概览</h3><div class="stat"><div><b>${esc(String(userCount))}</b><span>注册账号</span></div><div><b>${esc(String(todayOrders))}</b><span>今日订单</span></div><div><b>${esc(String(pendAnomaly))}</b><span>异常登录待复核</span></div></div></div>
       <div class="card"><h3>站长 API</h3><p style="color:var(--sub);font-size:13.5px">助手事件接口：新订单、新申诉、异常登录、客服求助、换绑与论坛待审统一入队，助手经接口先审，疑难上交站长。</p><div style="margin-top:10px;font-size:13.5px">令牌状态：<b>${esc(tokText)}</b>${tok.createdAt ? ' · 生成于 ' + fmtDate(tok.createdAt) : ''}${tok.lastUsedAt ? ' · 最近调用 ' + fmtDate(tok.lastUsedAt) : ' · 尚无调用'}</div><div style="font-size:13.5px;margin-top:6px">待处理：${esc(cntLine)}</div>${doneHtml}</div>
     </div>
-    <div class="card"><h3>待办队列（申诉）</h3>${appeals.length ? '<table><tr><th>类型</th><th>账号</th><th>内容</th><th>时间</th></tr>' + appeals.slice(0, 10).map(a => `<tr data-go="__admin" data-anchor="appeals" style="cursor:pointer"><td><span class="tag">${esc(a.type === 'rebind' ? '换绑设备' : (a.type || '申诉'))}</span></td><td>${esc(a.username || a.user || '')}</td><td>${esc(a.desc || a.reason || '')}</td><td>${a.createdAt ? fmtDate(a.createdAt) : ''}</td></tr>`).join('') + '</table>' : '<div class="statebox"><b>暂无待办申诉</b><p>新的申诉、换绑与异常登录复核将汇总到这里，并同步进入站长 API 事件队列。</p></div>'}</div>
+    <div class="card"><h3>待办队列（申诉）</h3>${appeals.length ? '<div class="tblwrap"><table><tr><th>类型</th><th>账号</th><th>内容</th><th>时间</th></tr>' + appeals.slice(0, 10).map(a => `<tr data-go="__admin" data-anchor="appeals" style="cursor:pointer"><td><span class="tag">${esc(a.type === 'rebind' ? '换绑设备' : (a.type || '申诉'))}</span></td><td>${esc(a.username || a.user || '')}</td><td>${esc(a.desc || a.reason || '')}</td><td>${a.createdAt ? fmtDate(a.createdAt) : ''}</td></tr>`).join('') + '</table></div>' : '<div class="statebox"><b>暂无待办申诉</b><p>新的申诉、换绑与异常登录复核将汇总到这里，并同步进入站长 API 事件队列。</p></div>'}</div>
     <div class="grid2"><div class="card"><h3>账号管理</h3>
       ${rowHtml('users', '用户列表与搜索', '改名、改密、冻结、封禁（危险操作均需二次确认并留痕）', '__admin', 'users')}
       ${rowHtml('users', '创建账号', '站长手动开户：填账号与初始密码，创建即发 3 天试用', '__admin', 'create')}
