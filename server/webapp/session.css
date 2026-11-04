@@ -1867,3 +1867,16 @@
 .qf-session-layer.qf-ext .sv-stage{ background:transparent; }
 .qf-session-layer.qf-ext .sv-wall{ visibility:hidden; }
 .qf-frame-slot{ visibility:hidden; }
+
+/* 输入穿透修复（2026-10-30 热修 DEV-INPUT-01）：升格后的会话框永驻 body 层，
+   而舞台 #qfStage 与 #qfViewer 的盒子盖在框上、pointer-events 默认 auto，
+   把点击/触摸全部吞掉——画面看得见、点不动（站长真机实报，rig 真实点击实测
+   落点为舞台、框内零事件）。舞台与查看器只作布局背景，放行穿透；需交互的
+   子件逐个恢复 auto：顶栏/工具栏/终端输入条（全屏隐没规则特异性更高、
+   全屏下仍压过本条保持不可点）、舞台内失败卡（保住重试等按钮）。
+   弹层 .sv-scrim 与退出全屏钮 .sv-fsx 自有开关规则，不在此列。 */
+#qfViewer{ pointer-events:none; }
+#qfStage{ pointer-events:none; }
+.qf-session-layer{ pointer-events:none; }
+.viewer .sv-bar, .viewer .sv-tools, .viewer .sv-input, .viewer .sv-mask{ pointer-events:auto; }
+.qf-session-frame{ pointer-events:auto; }
