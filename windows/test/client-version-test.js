@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 2.4.0 客户端版本头（x-qf-client-version）专项自检：
+ * 2.4.1 客户端版本头（x-qf-client-version）专项自检：
  *  A. client-version.js 纯逻辑：头名常量、回落版本＝package.json 版本、
  *     setClientVersion 合法/非法、headers 生成、withClientVersion 不覆盖
  *     已有同名头、函数形态来源解析；
@@ -15,7 +15,7 @@
  *     client-version.js 一处定义（其余文件只引用、不自拼）；
  *  D. 待更标记新版首启自动清除的代码证据：dropStalePending 的版本比较
  *     与 startupUpdateGate 首行调用、clearPendingUpdate 落点；
- *  E. 安装器静态证据：.onInstSuccess＋IfSilent＋Exec 拉起、版本串 2.4.0、
+ *  E. 安装器静态证据：.onInstSuccess＋IfSilent＋Exec 拉起、版本串 2.4.1、
  *     交互完成页 MUI_FINISHPAGE_RUN 原样保留；
  *  F. 强更墙形态守卫（#40/#40-补/#42）：force-update.html 的 releaseBtn
  *     放行口、main.js 的 qf-force-release 处理、强更窗无关闭跳过路径的
@@ -43,7 +43,7 @@ const pkg = require('../package.json');
     // ---------- A 纯逻辑 ----------
     ok('A1_header_name', cv.HEADER_NAME === 'x-qf-client-version');
     ok('A2_fallback_is_package_version', cv.getClientVersion() === pkg.version, { got: cv.getClientVersion(), pkg: pkg.version });
-    ok('A3_package_version_240', pkg.version === '2.4.0', { pkg: pkg.version });
+    ok('A3_package_version_240', pkg.version === '2.4.1', { pkg: pkg.version });
     cv.setClientVersion('9.8.7');
     ok('A4_set_valid', cv.getClientVersion() === '9.8.7' && cv.clientVersionHeaders()['x-qf-client-version'] === '9.8.7');
     cv.setClientVersion('not-a-version');
@@ -152,8 +152,8 @@ const pkg = require('../package.json');
     // ---------- E 安装器 ----------
     const nsi = src('installer.nsi');
     ok('E1_oninstsuccess_silent_exec', nsi.includes('Function .onInstSuccess') && nsi.includes('IfSilent') && nsi.includes('Exec "$INSTDIR\\QFRemote.exe"'));
-    ok('E2_version_strings_232', nsi.includes('QFRemote-Setup-v2.4.0.exe') && nsi.includes('VIProductVersion "2.4.0.0"') &&
-      nsi.includes('"DisplayName" "QFRemote 2.4.0"') && nsi.includes('"DisplayVersion" "2.4.0"') && !nsi.includes('2.3.1'));
+    ok('E2_version_strings_232', nsi.includes('QFRemote-Setup-v2.4.1.exe') && nsi.includes('VIProductVersion "2.4.1.0"') &&
+      nsi.includes('"DisplayName" "QFRemote 2.4.1"') && nsi.includes('"DisplayVersion" "2.4.1"') && !nsi.includes('2.3.1'));
     ok('E3_finishpage_run_kept', nsi.includes('MUI_FINISHPAGE_RUN "$INSTDIR\\QFRemote.exe"') && nsi.includes('MUI_PAGE_DIRECTORY'));
 
     // ---------- F 强更墙守卫 ----------
