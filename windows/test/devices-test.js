@@ -23,13 +23,13 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
 const SRC = path.join(__dirname, '..');
 
 // ---------- A 深链 ----------
-ok('A1_desktop', D.sessionUrl('https://54.248.9.192:8443/', 'node//abc$DEF', 'desktop') === 'https://54.248.9.192:8443/?node=abc%24DEF&viewmode=11');
-ok('A2_terminal', D.sessionUrl('https://54.248.9.192:8443', 'abc', 'terminal') === 'https://54.248.9.192:8443/?node=abc&viewmode=12');
-ok('A3_files', D.sessionUrl('https://54.248.9.192:8443/', 'node//abc', 'files') === 'https://54.248.9.192:8443/?node=abc&viewmode=13');
-ok('A4_device', D.sessionUrl('https://54.248.9.192:8443/', 'abc', 'device').endsWith('viewmode=10'));
-ok('A5_bad_mode_null', D.sessionUrl('https://54.248.9.192:8443/', 'abc', 'nope') === null);
-ok('A6_empty_id_null', D.sessionUrl('https://54.248.9.192:8443/', '', 'desktop') === null);
-ok('A7_no_gotonode', !/gotonode/.test(D.sessionUrl('https://54.248.9.192:8443/', 'node//x', 'desktop') || ''));
+ok('A1_desktop', D.sessionUrl('https://app.qfremote.top/console-engine/', 'node//abc$DEF', 'desktop') === 'https://app.qfremote.top/console-engine/?node=abc%24DEF&viewmode=11');
+ok('A2_terminal', D.sessionUrl('https://app.qfremote.top/console-engine', 'abc', 'terminal') === 'https://app.qfremote.top/console-engine/?node=abc&viewmode=12');
+ok('A3_files', D.sessionUrl('https://app.qfremote.top/console-engine/', 'node//abc', 'files') === 'https://app.qfremote.top/console-engine/?node=abc&viewmode=13');
+ok('A4_device', D.sessionUrl('https://app.qfremote.top/console-engine/', 'abc', 'device').endsWith('viewmode=10'));
+ok('A5_bad_mode_null', D.sessionUrl('https://app.qfremote.top/console-engine/', 'abc', 'nope') === null);
+ok('A6_empty_id_null', D.sessionUrl('https://app.qfremote.top/console-engine/', '', 'desktop') === null);
+ok('A7_no_gotonode', !/gotonode/.test(D.sessionUrl('https://app.qfremote.top/console-engine/', 'node//x', 'desktop') || ''));
 ok('A8_bare', D.bareNodeId('node//a//b') === 'a//b' && D.bareNodeId('plain') === 'plain' && D.bareNodeId(null) === '');
 
 // ---------- B 归一 ----------
@@ -108,8 +108,8 @@ function contractCase() {
   ok('E7_preload_bridge', /qf-devices-list/.test(preload) && /qf-devices-open/.test(preload) && !/qf-devices-lib|qf-devices-wsurl/.test(preload));
   const main = fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
   ok('E8_main_wiring', /qf-devices-list/.test(main) && /fetchDevicesModel/.test(main) && /buildProbeCall/.test(main) && /qf-devices-open/.test(main) && /qf-sessionbar-back/.test(main) && /showView\('devices'\)/.test(main) && /require\('\.\/devices'\)/.test(main));
-  const call = D.buildProbeCall('wss://54.248.9.192:8443/control.ashx', 6000);
-  ok('E11_probe_call', /^\(function probeNodes/.test(call) && /qf-nodes-probe/.test(call) && /wss:\\\/\\\/54\.248\.9\.192:8443\\\/control\.ashx/.test(call.replace(/\\\//g, '/')) || (/^\(function/.test(call) && call.includes('wss://54.248.9.192:8443/control.ashx')), { call: call.slice(0, 60) });
+  const call = D.buildProbeCall('wss://app.qfremote.top/control.ashx', 6000);
+  ok('E11_probe_call', /^\(function/.test(call) && call.includes('wss://app.qfremote.top/control.ashx'), { call: call.slice(0, 60) });
   const bar = fs.readFileSync(path.join(SRC, 'session-bar.html'), 'utf8');
   ok('E9_sessionbar', /断开并返回/.test(bar));
   const pkg = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));

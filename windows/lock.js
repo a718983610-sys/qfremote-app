@@ -7,9 +7,9 @@
  * 锁面板 UI（lock.html）与状态机不动。
  *
  * 桥接口 v1：
- *   基址 https://54.248.9.192:8445/lock（与好友/聊天同服务族，8445 已在
- *   本壳证书白名单内）；鉴权用好友服务的会话 Cookie（壳内同一会话分区，
- *   登录一次通用），服务端按账号判设备归属。
+ *   基址 https://app.qfremote.top/lock（2.4.2 起，与好友/聊天同经正式
+ *   域名聚合路径到达好友服务内的锁桥）；鉴权用好友服务的会话 Cookie
+ *   （壳内同一会话分区，登录一次通用），服务端按账号判设备归属。
  *   GET  /devices -> { devices: [{ id, name, owner, locked, component }] }
  *   POST /enable  { id, password }          打开开关并当场设本次密码
  *   POST /disable { id }                    关锁，本次密码立即作废
@@ -23,8 +23,8 @@
  *   - 壳不存任何密码：锁密码/登录密码只在提交瞬间过桥，用完即弃，
  *     不落盘、不进日志、不进诊断信息；
  *   - 非机主设备不显示开关——owner 判定以服务端返回为准，壳侧只呈现；
- *   - 网络请求只发往自家主机 8445 这一个 origin（自签证书放行口径与
- *     update.js 同：仅自家 origin、且不带任何账号密码凭据，只带会话 Cookie）。
+ *   - 网络请求只发往自家域名这一个 origin（证书走系统默认校验，与
+ *     update.js 同口径：仅自家 origin、且不带任何账号密码凭据，只带会话 Cookie）。
  *
  * Mock 适配器：QFREMOTE_LOCK_MOCK=1（或主进程 PREVIEW=lock 时）走内存假
  * 数据，语义与真桥一致（enable 置 locked、disable 清、reset 保持 locked），
@@ -34,9 +34,9 @@
 const https = require('https');
 const clientVersion = require('./client-version');
 
-const LOCK_API_BASE = 'https://54.248.9.192:8445/lock';
-const LOCK_HOST = '54.248.9.192';
-const LOCK_PORT = 8445;
+const LOCK_API_BASE = 'https://app.qfremote.top/lock';
+const LOCK_HOST = 'app.qfremote.top';
+const LOCK_PORT = 443;
 
 // 密码预检（壳侧，最终以 A 线契约为准）：4–64 位。
 function validateLockPassword(pw) {
@@ -110,9 +110,9 @@ function createLockBridge(getSession, opts) {
     try {
       const ses = getSession && getSession();
       if (!ses || !ses.cookies) return '';
-      // 取整个分区罐（与主进程 extRequest 同一已实证路径）：控制台会话
-      // cookie（xid）在 8443 源下种、隐私锁在 8445 源，按 URL 过滤取罐有
-      // 跨端口漏取的风险；整罐取出后由服务端按名认人（只要 xid/qfr_frd）。
+      // 取整个分区罐（与主进程 extRequest 同一已实证路径）：各服务面
+      // 的会话 cookie 按 URL 过滤取罐有漏取的风险；整罐取出后由服务端
+      // 按名认人（只要 xid/qfr_frd）。
       const cookies = await ses.cookies.get({});
       return cookies.map(c => c.name + '=' + c.value).join('; ');
     } catch (e) { return ''; }
@@ -122,9 +122,11 @@ function createLockBridge(getSession, opts) {
     return new Promise(async (resolve, reject) => {
       let u;
       try { u = new URL(base + route); } catch (e) { reject(lockError('隐私锁服务地址不正确。')); return; }
-      // 只许自家 origin（测试覆盖 base 时放行本地回环）
+      // 只许自家 origin（测试覆盖 base 时放行本地回环）；端口按有效端口
+      // 比对：URL 未显式写端口时 u.port 为空串，https 记 443、http 记 80
       const isLocalTest = u.hostname === '127.0.0.1' || u.hostname === 'localhost';
-      if (!isLocalTest && (u.hostname !== LOCK_HOST || Number(u.port) !== LOCK_PORT)) {
+      const effPort = u.port === '' ? (u.protocol === 'https:' ? 443 : 80) : Number(u.port);
+      if (!isLocalTest && (u.hostname !== LOCK_HOST || effPort !== LOCK_PORT)) {
         reject(lockError('隐私锁服务地址不在信任范围内。'));
         return;
       }
@@ -144,7 +146,9 @@ function createLockBridge(getSession, opts) {
         method,
         headers,
         timeout: 10000,
-        rejectUnauthorized: false // 自签证书：仅自家 origin（上方已逐个核对主机+端口）
+        // 证书走 Node 默认校验（正式域名公共 CA）；仅本地测试假服务
+        // （opts.base 指向回环、自签证书）放行校验，生产基址恒为正式域名
+        rejectUnauthorized: !isLocalTest
       }, (res) => {
         const chunks = [];
         res.on('data', c => chunks.push(c));

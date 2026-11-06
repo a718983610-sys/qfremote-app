@@ -159,11 +159,11 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   const js = autologin.buildInjectScript({ username: null, password: null, rememberPassword: false, rememberDevice: false });
   ok('H1_inject_rows', js.includes('qfLicenseRows') && js.includes('购买密钥') && js.includes('查询密钥') &&
     js.includes('#111') && js.includes('#2470E0') && js.includes('qfBuyKeyRow'));
-  ok('H2_nav_target', lic.licenseNavTarget('https://54.248.9.192:8443/purchase', '54.248.9.192') === 'purchase' &&
-    lic.licenseNavTarget('https://54.248.9.192:8443/license/status', '54.248.9.192') === 'status' &&
-    lic.licenseNavTarget('https://54.248.9.192:8443/license/rebind', '54.248.9.192') === 'rebind' &&
-    lic.licenseNavTarget('https://tun.example.com/purchase', '54.248.9.192') === null &&
-    lic.licenseNavTarget('https://54.248.9.192:8443/', '54.248.9.192') === null);
+  ok('H2_nav_target', lic.licenseNavTarget('https://app.qfremote.top/purchase', 'app.qfremote.top') === 'purchase' &&
+    lic.licenseNavTarget('https://app.qfremote.top/license/status', 'app.qfremote.top') === 'status' &&
+    lic.licenseNavTarget('https://app.qfremote.top/license/rebind', 'app.qfremote.top') === 'rebind' &&
+    lic.licenseNavTarget('https://tun.example.com/purchase', 'app.qfremote.top') === null &&
+    lic.licenseNavTarget('https://app.qfremote.top/', 'app.qfremote.top') === null);
 }
 
 // ---------- I. parseMe 新字段与缺省（2.3.2 热修：slots 上限 / lifecycle / plan / remainText） ----------

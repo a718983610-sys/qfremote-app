@@ -40,46 +40,17 @@ const clientVersion = require('./client-version');
 const PENDING_KEY = 'qfShellPendingLogin';
 const LOGOUT_KEY = 'qfShellManualLogout';
 const CLEARED_KEY = 'qfShellFieldsCleared';
-// ---------- 控制台固定源的证书校验（C1-14 收口，随 J-2 同口径） ----------
-// 静默登录与探活的目标恒为控制台固定源（自签体系）：叶子证书由服务器自有
-// 根证书（MeshCentralRoot）签发、SAN 含该 IP。随壳内置这张根证书作信任锚：
-// 命中控制台主机时以它为 ca 并保持默认证书校验（含 IP SAN 核对），顶包源
-// 握手即失败；其余主机走系统默认校验。args.caCert 仅供测试注入：须显式
-// 环境开关 QFREMOTE_TEST_CA=1 才生效，生产进程从不开此开关、从不传参。
-// 根证书为公开证书（非秘密），SHA256 指纹 AB:B2:44:1B:41:0D:70:DD:50:1A:
-// EC:29:86:4E:8D:3F:DF:AE:54:1F:ED:4B:5C:59:47:00:C9:3C:7B:8C:FA:5B
-// （2026-10-29 服务器只读实取，有效期至 2049 年）。
-const CONSOLE_HOST = '54.248.9.192';
-const CONSOLE_CA_PEM = [
-  '-----BEGIN CERTIFICATE-----',
-  'MIIERTCCAq2gAwIBAgIFExF1aAYwDQYJKoZIhvcNAQEMBQAwRTEfMB0GA1UEAxMW',
-  'TWVzaENlbnRyYWxSb290LTY3YWVkMzEQMA4GA1UEChMHdW5rbm93bjEQMA4GA1UE',
-  'BhMHdW5rbm93bjAeFw0xODAxMDEwMDAwMDBaFw00OTEyMzEwMDAwMDBaMEUxHzAd',
-  'BgNVBAMTFk1lc2hDZW50cmFsUm9vdC02N2FlZDMxEDAOBgNVBAoTB3Vua25vd24x',
-  'EDAOBgNVBAYTB3Vua25vd24wggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIB',
-  'gQC5UTe3UMaXPbhVY9dteq/EEy9ohDWZDPqeOjuvRoBjs3LpvJbjSDM5dVqi2u0R',
-  'hS7Zl9AB2JdkHKI8aQFa3rkDP6UPKvThk53H1ukra9a7ml9apQYU0flQ94+NHcEc',
-  'RAwH18ID8HnNrwgFhhXOVWnPcj9II2FODvMpBREdQvsHy1gB2uM602wFADThd40b',
-  'W/gPKnO/z4YjdqMclTSe3IgMBzDYKa8KfIgoAYcxWoJwjthuudCLiypBMbFUlECY',
-  'cF25ESkb0UKEI7fJZaS9NaS6lY3xo7CKKtb6KoZnp9K4tre0y9l2fqFP5L0zeyTg',
-  'MBAk6UNfFFL4an1XdbszmAX/WsRRtpeE2h29bm9EN3Mzl09nIzbjxVZUAj6Pm/mq',
-  '9CsbHtHh3CRUGp8qb77HRm0UtZ7ohNtlAtmIiQo2tmCHrEy9tEu2TmO76hBkJd7h',
-  'LScFtzkK6MP6avD6ahU5rAnhzxVDMcpXcNJMX9GJN7Oa40HYBc7KJUZL38upUq5+',
-  'RZMCAwEAAaM8MDowDAYDVR0TBAUwAwEB/zAdBgNVHQ4EFgQUZ67TL9keCnrzgiwV',
-  '+9DtrtpnmCwwCwYDVR0PBAQDAgIEMA0GCSqGSIb3DQEBDAUAA4IBgQAosIYaPMiz',
-  'M2VV7f/V20L/vU0GFuWzdXWkc3o/rGGPoO/XY7cLuPQkdFYFOZhc9VIF8tuzzxvh',
-  'gGOqn1zDrsv44g6rlOBhTpbBXZ5I9UNb/Q4OabjnySyn7DM0kSs3Yo/3hb+z4leK',
-  'PvLuKLfrgnoNE/y0OJ8G2OKHubTMZmE5moXaxL1Nl3ngsbcQ9A2isVteXjUp2ftZ',
-  'tt8DXe3kOVRLQTcs6H4HqXfjy1TKbNruS8dO7gkwXjUFAGNeWiXVKUpnGfEoayKB',
-  'jXCM1gSKkFiQku7WcbTujtcl5SEXShydKC6BjezBn1PHr9LTKpLT4MRYads8Ncm6',
-  'nyzsy7UD3HXKgq+/XQ6j6v/Bobp1PIlTQyEzOneB0Qtbli/lJ0sWaQ8lJvOVuqjz',
-  'Mpmr26brlleUZ7jIOQjD0KdD2SH3wVb/N/xyUakcp4JW/kXAyp7nwTdiVXj3DhVk',
-  'OQJZ1ulMfELADfYXJJ8MijlwRYOTzuueQjFz9duZAoxNyETbi1V5l14=',
-  '-----END CERTIFICATE-----'
-].join('\n');
+// ---------- 控制台固定源的证书校验 ----------
+// 2.4.2 起控制台固定源迁至正式域名 app.qfremote.top（公共 CA 签发）：
+// 静默登录与探活一律走系统默认证书校验，不再内置任何信任锚。历史上为
+// 直连自签源（旧 IP:8443）内置的 MeshCentral 根证书信任锚已随该源退役
+// 删除——继续保留会把域名请求误钉到错误 CA 上、握手必失败。
+// args.caCert 仅供测试注入：须显式环境开关 QFREMOTE_TEST_CA=1 才生效，
+// 生产进程从不开此开关、从不传参。
+const CONSOLE_HOST = 'app.qfremote.top';
 function applyConsoleTls(opts, u, a) {
   if (u.protocol !== 'https:') return;
-  const ca = (a && a.caCert && process.env.QFREMOTE_TEST_CA === '1') ? a.caCert : (u.hostname === CONSOLE_HOST ? CONSOLE_CA_PEM : null);
+  const ca = (a && a.caCert && process.env.QFREMOTE_TEST_CA === '1') ? a.caCert : null;
   if (ca) opts.ca = ca;
 }
 
@@ -201,7 +172,7 @@ async function clearConsoleSession(ses, originUrl) {
 }
 
 // ---------- 静默登录（主进程直提，与登录页原生提交同字段） ----------
-// baseUrl 为控制台根地址（如 https://主机:8443/）；初步成功判据只有一个：
+// baseUrl 为控制台根地址（https://app.qfremote.top/）；初步成功判据只有一个：
 // 回程下发非空 xid 会话 cookie（响应形状不作数，最终由页面状态裁定）。
 // 失败/异常都回 {ok:false}，不抛。
 function httpSilentLogin(args) {
@@ -658,7 +629,7 @@ function buildChatDeviceEnrollScript(keyB64) {
 
 module.exports = {
   PENDING_KEY, LOGOUT_KEY, CLEARED_KEY,
-  CONSOLE_HOST, CONSOLE_CA_PEM,
+  CONSOLE_HOST,
   isLogoutUrl, isLoginFailureText, FAILURE_PATTERNS,
   createAutoLoginPolicy, planHarvest, planChatUnlock,
   parseSetCookie, applySetCookies, clearConsoleSession,

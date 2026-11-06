@@ -8,9 +8,10 @@
  * 解析优先级：product.json 最新值 > 上次成功缓存（qf-settings.svcUrls）> 写死兜底。
  * 拉不到一律安静退回缓存/兜底，绝不阻塞启动、绝不弹窗。
  * 只接受 https 地址；不合规的值直接丢弃走下一档。
- * 好友页口径：FRIENDS_URL 恒走直连 8445 优先，product.json 的 friendsUrl
- * 只作直连不可达时的备选地址。免密直达已于 2.3.0 在服务端修通（会话绑
- * IP 的转发修复，见服务端好友 server.js 注释），壳侧凭控制台会话直达。
+ * 好友页口径：2.4.2 起 FRIENDS_URL 与本模块兜底同为正式域名聚合路径
+ * /friends（旧 IP 直连源已随服务器换 IP 退役）；product.json 的 friendsUrl
+ * 仍作运行时备选地址。免密直达已于 2.3.0 在服务端修通（会话绑 IP 的转发
+ * 修复，见服务端好友 server.js 注释），壳侧凭控制台会话直达。
  */
 const https = require('https');
 const clientVersion = require('./client-version');
@@ -22,7 +23,7 @@ const PROD_WEB_BASE = 'https://app.qfremote.top';
 const FALLBACKS = {
   forumUrl: PROD_WEB_BASE + '/forum',
   registerUrl: PROD_WEB_BASE + '/register',
-  friendsUrl: 'https://54.248.9.192:8445/friends', // 既定代际兜底，保持直连
+  friendsUrl: PROD_WEB_BASE + '/friends', // 2.4.2：域名聚合路径（旧 IP 直连兜底退役）
   adminUrl: PROD_WEB_BASE + '/admin',
   pointsUrl: PROD_WEB_BASE + '/points'
 };

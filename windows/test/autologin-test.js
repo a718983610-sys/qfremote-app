@@ -29,9 +29,9 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
 (async () => {
   try {
     // A
-    ok('A1_logout', isLogoutUrl('https://54.248.9.192:8443/logout') === true);
-    ok('A2_logout_slash_query', isLogoutUrl('https://54.248.9.192:8443/logout/?a=1') === true);
-    ok('A3_not_logout', isLogoutUrl('https://54.248.9.192:8443/') === false && isLogoutUrl('https://54.248.9.192:8443/logoutx') === false && isLogoutUrl('not a url') === false);
+    ok('A1_logout', isLogoutUrl('https://app.qfremote.top/logout') === true);
+    ok('A2_logout_slash_query', isLogoutUrl('https://app.qfremote.top/logout/?a=1') === true);
+    ok('A3_not_logout', isLogoutUrl('https://app.qfremote.top/') === false && isLogoutUrl('https://app.qfremote.top/logoutx') === false && isLogoutUrl('not a url') === false);
     ok('A4_failure_text', isLoginFailureText('登录失败，请检查账号和密码后重试。') === true && isLoginFailureText('欢迎回来') === false);
 
     // B
@@ -65,21 +65,21 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
     ok('C4_no_pending_noop', h4.save === null && h4.clearVault === false && h5.save === null && h5.clearVault === false);
 
     // D
-    const c1 = parseSetCookie('xid=abc123; Path=/; Max-Age=2592000; Secure; HttpOnly', 'https://54.248.9.192:8443/');
+    const c1 = parseSetCookie('xid=abc123; Path=/; Max-Age=2592000; Secure; HttpOnly', 'https://app.qfremote.top/');
     ok('D1_maxage', !!c1 && c1.name === 'xid' && c1.value === 'abc123' && c1.path === '/' && c1.secure === true && c1.httpOnly === true && !('domain' in c1) && Math.abs(c1.expirationDate - (Math.floor(Date.now() / 1000) + 2592000)) <= 2, c1);
     const c2 = parseSetCookie('qfrem=1; Domain=.example.com; Expires=Wed, 01 Jan 2031 00:00:00 GMT', 'https://example.com/');
     ok('D2_domain_expires', !!c2 && c2.domain === 'example.com' && c2.expirationDate === Math.floor(Date.parse('2031-01-01T00:00:00Z') / 1000), c2);
     ok('D3_bad', parseSetCookie('', 'https://x/') === null && parseSetCookie('noequals', 'https://x/') === null);
     const setCalls = [];
     const fakeSes = { cookies: { set: async (d) => { setCalls.push(d); }, get: async () => [], remove: async () => {} } };
-    const applied = await applySetCookies(fakeSes, ['xid=v1; Path=/; Max-Age=100', 'xid.sig=v2; Path=/'], 'https://54.248.9.192:8443/');
+    const applied = await applySetCookies(fakeSes, ['xid=v1; Path=/; Max-Age=100', 'xid.sig=v2; Path=/'], 'https://app.qfremote.top/');
     ok('D4_apply', applied === 2 && setCalls.length === 2 && setCalls[0].name === 'xid');
 
     // E
     const jar = [
-      { name: 'xid', value: 'a', domain: '54.248.9.192', path: '/' },
-      { name: 'xid.sig', value: 'b', domain: '.54.248.9.192', path: '/' },
-      { name: 'qfrem', value: '1', domain: '54.248.9.192', path: '/' },
+      { name: 'xid', value: 'a', domain: 'app.qfremote.top', path: '/' },
+      { name: 'xid.sig', value: 'b', domain: '.app.qfremote.top', path: '/' },
+      { name: 'qfrem', value: '1', domain: 'app.qfremote.top', path: '/' },
       { name: 'other', value: 'z', domain: 'example.com', path: '/' }
     ];
     const removedNames = [];
@@ -90,7 +90,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
         set: async () => {}
       }
     };
-    const removed = await clearConsoleSession(fakeSes2, 'https://54.248.9.192:8443/');
+    const removed = await clearConsoleSession(fakeSes2, 'https://app.qfremote.top/');
     ok('E_clear_host_only', removed === 3 && removedNames.includes('xid') && removedNames.includes('xid.sig') && removedNames.includes('qfrem') && !removedNames.includes('other'), { removed, removedNames });
 
     // F: 本地假控制台

@@ -31,7 +31,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   // 任何一键都不得再指向已拆除的临时隧道；friendsUrl 保持既定代际直连。
   ok('A4_fallback_prod_base', FALLBACKS.forumUrl === 'https://app.qfremote.top/forum' && FALLBACKS.registerUrl === 'https://app.qfremote.top/register' && FALLBACKS.adminUrl === 'https://app.qfremote.top/admin' && FALLBACKS.pointsUrl === 'https://app.qfremote.top/points', FALLBACKS);
   ok('A5_fallback_no_tunnel', !Object.values(FALLBACKS).some(u => String(u).includes('trycloudflare')), FALLBACKS);
-  ok('A6_fallback_friends_direct', FALLBACKS.friendsUrl === 'https://54.248.9.192:8445/friends');
+  ok('A6_fallback_friends_domain', FALLBACKS.friendsUrl === 'https://app.qfremote.top/friends');
   // A3 product.json 新鲜值推导
   const svc2 = createSvcUrls({
     fetchJson: async () => ({ web: { forumUrl: 'https://tun.example.com/forum' } }),

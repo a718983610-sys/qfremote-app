@@ -18,11 +18,12 @@ const OUT = process.env.QFTEST_OUT || '/tmp/qfr230/views-result.json';
 const result = { cases: {}, pass: false };
 const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !!cond }, extra || {}); };
 
+// 2.4.2 生产拓扑：五面同在正式域名单源，归类按路径分
 const CTX = {
-  consoleUrl: 'https://54.248.9.192:8443/',
-  friendsUrl: 'https://54.248.9.192:8445/friends',
-  chatUrl: 'https://54.248.9.192:8445/chat',
-  forumUrl: 'https://tun.example.com/forum'
+  consoleUrl: 'https://app.qfremote.top/',
+  friendsUrl: 'https://app.qfremote.top/friends',
+  chatUrl: 'https://app.qfremote.top/chat',
+  forumUrl: 'https://app.qfremote.top/forum'
 };
 const URLS = { friends: CTX.friendsUrl, chat: CTX.chatUrl, forum: CTX.forumUrl };
 
@@ -30,16 +31,16 @@ let t = 1000;
 const vm = createViewManager({ now: () => t });
 
 // A 地址归类
-ok('A1_console', classifyUrl('https://54.248.9.192:8443/', CTX) === 'console');
-ok('A2_friends', classifyUrl('https://54.248.9.192:8445/friends', CTX) === 'friends');
-ok('A3_chat', classifyUrl('https://54.248.9.192:8445/chat', CTX) === 'chat');
-ok('A4_chat_sub', classifyUrl('https://54.248.9.192:8445/chat/room', CTX) === 'chat');
-ok('A5_forum', classifyUrl('https://tun.example.com/forum', CTX) === 'forum');
-ok('A6_forum_api', classifyUrl('https://tun.example.com/api/forum/posts', CTX) === 'forum');
+ok('A1_console', classifyUrl('https://app.qfremote.top/', CTX) === 'console');
+ok('A2_friends', classifyUrl('https://app.qfremote.top/friends', CTX) === 'friends');
+ok('A3_chat', classifyUrl('https://app.qfremote.top/chat', CTX) === 'chat');
+ok('A4_chat_sub', classifyUrl('https://app.qfremote.top/chat/room', CTX) === 'chat');
+ok('A5_forum', classifyUrl('https://app.qfremote.top/forum', CTX) === 'forum');
+ok('A6_forum_api', classifyUrl('https://app.qfremote.top/api/forum/posts', CTX) === 'forum');
 ok('A7_external_null', classifyUrl('https://example.com/forum', CTX) === null);
 ok('A8_file_null', classifyUrl('file:///tmp/x.html', CTX) === null);
-ok('A9_sso_transit', isForumSsoTransit('https://tun.example.com/api/forum/sso-login?token=x', CTX) === true);
-ok('A10_8445_root_is_friends', classifyUrl('https://54.248.9.192:8445/', CTX) === 'friends');
+ok('A9_sso_transit', isForumSsoTransit('https://app.qfremote.top/api/forum/sso-login?token=x', CTX) === true);
+ok('A10_api_friends', classifyUrl('https://app.qfremote.top/api/friends/logout', CTX) === 'friends');
 
 // C 预加载：未登录不调度
 ok('C1_no_preload_before_login', vm.nextPreload() === null);
@@ -83,10 +84,10 @@ vm2.noteLogin();
 ok('E3_relogin_resumes_preload', vm2.nextPreload() === 'chat'); // 已建的好友不重建，从未建处续上
 
 // W 包装页归类（壳内拦截用）
-ok('W1_wrap_friends', wrapperTarget('https://54.248.9.192:8443/qf-wrap.html?t=friends') === 'friends');
-ok('W2_wrap_forum', wrapperTarget('https://tun.example.com/qf-wrap.html?t=forum') === 'forum');
-ok('W3_wrap_bad_null', wrapperTarget('https://54.248.9.192:8443/qf-wrap.html?t=admin') === null);
-ok('W4_non_wrap_null', wrapperTarget('https://54.248.9.192:8443/', CTX) === null);
+ok('W1_wrap_friends', wrapperTarget('https://app.qfremote.top/qf-wrap.html?t=friends') === 'friends');
+ok('W2_wrap_forum', wrapperTarget('https://app.qfremote.top/qf-wrap.html?t=forum') === 'forum');
+ok('W3_wrap_bad_null', wrapperTarget('https://app.qfremote.top/qf-wrap.html?t=admin') === null);
+ok('W4_non_wrap_null', wrapperTarget('https://app.qfremote.top/', CTX) === null);
 
 result.pass = Object.values(result.cases).every(c => c.pass);
 fs.mkdirSync(path.dirname(OUT), { recursive: true });

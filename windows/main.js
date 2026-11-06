@@ -20,25 +20,35 @@ const clientVersion = require('./client-version');
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
 
-const CONSOLE_URL = 'https://54.248.9.192:8443/';
-// 好友页（独立小服务 qfremote-friends）：恒走直连 8445。
-// 免登口径（2.3.0 H 线纠正）：此前「免密直达不成立」的真因不是链接，而是
-// 控制台会话绑了登录 IP、服务端校验时没把会话自带 IP 带上（详见服务端
-// 好友 server.js 的 sessionIpFromCookie 注释）；服务端已修复，好友/聊天
-// 在壳内凭控制台会话直达成立。product.json 的 friendsUrl 只作备选地址。
-const FRIENDS_URL = 'https://54.248.9.192:8445/friends';
-const CHAT_URL = 'https://54.248.9.192:8445/chat';
+// 2.4.2 紧急修复：服务器换 IP 后，写死旧 IP 的直连源全灭（旧 IP 已被
+// 云厂商收回）。控制台与好友/聊天一律改走正式域名 app.qfremote.top 的
+// 同名聚合路径（nginx 按路径反代引擎/好友服务），不再写死任何 IP。
+const CONSOLE_URL = 'https://app.qfremote.top/';
+// 好友页/聊天页（独立小服务 qfremote-friends）：经域名聚合路径 /friends、
+// /chat 到达（与网页版同一入口）。免登口径（2.3.0 H 线纠正）：此前「免密
+// 直达不成立」的真因是控制台会话绑了登录 IP、服务端校验时没把会话自带
+// IP 带上（详见服务端好友 server.js 的 sessionIpFromCookie 注释）；服务
+// 端已修复，壳内凭控制台会话直达成立。product.json 的 friendsUrl 只作备选。
+const FRIENDS_URL = 'https://app.qfremote.top/friends';
+const CHAT_URL = 'https://app.qfremote.top/chat';
+// 壳内会话深链基址：与网页版同一规范源（SPA 的 QF_CANON_ORIGIN 同值）——
+// 域名根路径是网页控制台，会话深链（?node=&viewmode=）只在引擎规范源
+// /console-engine/ 下成立，故会话视图单独用这一基址拼深链（devices.js）。
+const SESSION_BASE_URL = 'https://app.qfremote.top/console-engine/';
 let FRIENDS_FALLBACK_URL = '';
 // 论坛/注册/管理/积分服务地址（v2.2.0 改运行时解析，见 svc-urls.js）：
 // 启动时拉官网 product.json 的 web.* 更新下面这组变量，拉不到用上次缓存、
-// 再兜底 svc-urls.js 里的写死值（正式 Web 基座 app.qfremote.top；friendsUrl 为既定代际直连兜底）。
+// 再兜底 svc-urls.js 里的写死值（正式 Web 基座 app.qfremote.top，friendsUrl 同为域名聚合路径）。
 let FORUM_URL = svcUrlsMod.FALLBACKS.forumUrl;
 let REGISTER_URL = svcUrlsMod.FALLBACKS.registerUrl;
 let ADMIN_URL = svcUrlsMod.FALLBACKS.adminUrl;
 let POINTS_URL = svcUrlsMod.FALLBACKS.pointsUrl;
-const ALLOWED_HOST = '54.248.9.192';
-// 证书/导航白名单只认自家主机的两个端口：8443 控制台、8445 好友页（同一台机、同一张自签证书，SAN 含该 IP）
-const ALLOWED_PORTS = ['8443', '8445'];
+const ALLOWED_HOST = 'app.qfremote.top';
+// 自家源识别（导航归类/版本头/退出拦截共用）：只认正式域名。端口口径：
+// https 默认端口——URL.port 在默认端口时为空串，显式写出时为 '443'，两者都认。
+// 注：这组常量只作「是不是自家页面」的识别，不再作证书放行依据（见下方
+// certificate-error 处理：正式域名是公共 CA 证书，不放行任何证书错误）。
+const ALLOWED_PORTS = ['443', ''];
 const TOOLBAR_HEIGHT = 48;
 const PREVIEW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
 const PREVIEW_DIR = process.env.QFREMOTE_PREVIEW_DIR || '';
@@ -61,20 +71,10 @@ if (PREVIEW && process.env.QFREMOTE_PREVIEW_USERDATA) {
   try { app.setPath('userData', process.env.QFREMOTE_PREVIEW_USERDATA); } catch (e) { /* ignore */ }
 }
 
-// 证书处理：只信任自家 QFRemote 服务器的自签证书（主机＋端口精确匹配），
-// 其他任何站点的证书错误一律拒绝，不放行。
+// 证书处理：2.4.2 起全部自家页面走正式域名（公共 CA 签发，证书链正常），
+// 旧自签直连源已退役——任何证书错误一律拒绝，不放行（与浏览器同口径）。
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-  let ok = false;
-  try {
-    const u = new URL(url);
-    ok = (u.hostname === ALLOWED_HOST && ALLOWED_PORTS.includes(u.port));
-  } catch (e) { ok = false; }
-  if (ok) {
-    event.preventDefault();
-    callback(true);
-  } else {
-    callback(false);
-  }
+  callback(false);
 });
 
 // ---------- 单开：重复双击只唤起已有窗口 ----------
@@ -831,7 +831,7 @@ function attachViewEvents() {
   wc.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) return;
     if (!isTargetUrl(validatedURL)) return;
-    // 好友直连打不开且有备选地址时试一次备选（地址备选，不是免密承诺）
+    // 好友页打不开且有备选地址时试一次备选（地址备选，不是免密承诺）
     if (validatedURL.startsWith(FRIENDS_URL) && FRIENDS_FALLBACK_URL && !friendsFallbackTried) {
       friendsFallbackTried = true;
       wc.loadURL(FRIENDS_FALLBACK_URL);
@@ -998,7 +998,7 @@ function createWindow() {
   // 手动退出检测（第一路：会话请求拦截，/logout 请求一出就记下）
   if (PREVIEW !== 'offline') {
     try {
-      ses.webRequest.onBeforeRequest({ urls: ['*://' + ALLOWED_HOST + ':8443/logout*'] }, (details, cb) => {
+      ses.webRequest.onBeforeRequest({ urls: ['*://' + ALLOWED_HOST + '/logout*'] }, (details, cb) => {
         handleManualLogout();
         cb({});
       });
@@ -1609,7 +1609,7 @@ function createSocialView(key) {
   wc.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) return;
     viewMgr.markUnloaded(key);
-    // 好友直连打不开且有备选地址时试一次备选（与原单视图口径一致）
+    // 好友页打不开且有备选地址时试一次备选（与原单视图口径一致）
     if (key === 'friends' && validatedURL.startsWith(FRIENDS_URL) && FRIENDS_FALLBACK_URL && !friendsFallbackTried) {
       friendsFallbackTried = true;
       wc.loadURL(FRIENDS_FALLBACK_URL);
@@ -1896,7 +1896,7 @@ function ensureSessionBarView(title, modeLabel) {
 // 打开，不整页跳、不新开窗口。
 function openSession(nodeId, name, mode) {
   if (!win || win.isDestroyed()) return;
-  const url = devicesMod.sessionUrl(CONSOLE_URL, nodeId, mode);
+  const url = devicesMod.sessionUrl(SESSION_BASE_URL, nodeId, mode);
   if (!url) return;
   if (browsingExt) { browsingExt = false; extReturnGate = false; extReturnRecheck = false; }
   sessionCtx = { nodeId: devicesMod.bareNodeId(nodeId), name: String(name || ''), mode };
@@ -1989,7 +1989,7 @@ function schedulePreload() {
 async function openForum() { showView('forum'); }
 
 // ---------- 聊天静默解锁（2.3.0 H 线） ----------
-// 聊天页（与好友同源 8445）加载完后轮询页面状态：单点登录已落定且钥匙
+// 聊天页（与好友同在域名聚合源）加载完后轮询页面状态：单点登录已落定且钥匙
 // 还锁着、保险箱里有记住的登录密码、非手动退出 → 把密码递进页面调
 // qfShellUnlock 静默解开。页面已无解锁框：没记住密码或解不开即停手，
 // 页面显示不可用提示。只试一轮，不重试。

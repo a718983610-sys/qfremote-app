@@ -71,7 +71,7 @@
 <script>
   var q = new URLSearchParams(location.search);
   if (q.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
-  var target = q.get('u') || 'https://54.248.9.192:8443/';
+  var target = q.get('u') || 'https://app.qfremote.top/';
   var delay = parseInt(q.get('d') || '6', 10);
   if (isNaN(delay) || delay < 1) delay = 6;
   var el = document.getElementById('count');

@@ -14,8 +14,8 @@
  *     切换 = 显示目标视图、隐藏其余视图，不产生任何导航。已创建的
  *     视图再次切入时 loadPlan 恒为 'none'（零导航、零重载），这是
  *     「无跳转感」在代码层的硬保证，可单测。
- *  2) 地址归类：任意 URL 归到所属视图（控制台 8443 / 好友与聊天
- *     8445 / 论坛隧道源），供主进程拦截视图内跨页链接——点好友页
+ *  2) 地址归类：任意 URL 归到所属视图（2.4.2 起同在正式域名单源，
+ *     按路径分），供主进程拦截视图内跨页链接——点好友页
  *     顶栏的「聊天」「论坛」是切视图，不是把当前视图导航走。
  *  3) 预加载调度：登录成功后空闲分批创建（好友 → 聊天 → 论坛），
  *     论坛在创建时就在后台完成令牌交接（SSO），用户点击时页面已
@@ -32,9 +32,10 @@
 // 不进社交预加载序列，loadPlan 不对它们出 create-and-load。
 const VIEW_KEYS = ['console', 'friends', 'chat', 'forum', 'home', 'devices', 'session'];
 
-// 地址归类：raw 是任意 URL 字符串；ctx = { consoleUrl, friendsUrl, chatUrl, forumUrl }
-// 论坛在隧道源（跨源），按 forumUrl 的主机名＋/forum 路径前缀认；
-// 其余按主机＋端口＋路径认。认不出返回 null（外站/本地页，主进程按既有口径处理）。
+// 地址归类：raw 是任意 URL 字符串；ctx = { consoleUrl, friendsUrl, chatUrl, forumUrl, extUrl }
+// 2.4.2 起五面同在正式域名一个源下（旧版 8443/8445 双源靠端口分已退役）：
+// 先判是否自家源（与任一登记地址同源），再按路径分视图。认不出返回 null
+// （外站/本地页，主进程按既有口径处理）。
 function classifyUrl(raw, ctx) {
   if (!raw || typeof raw !== 'string') return null;
   let u;
@@ -45,33 +46,32 @@ function classifyUrl(raw, ctx) {
     if (!base) return false;
     try { const b = new URL(base); return u.hostname === b.hostname && u.port === b.port; } catch (e) { return false; }
   };
-  // 聊天与好友同源（8445），靠路径分：/chat* 归聊天，其余 8445 归好友
-  if (sameOrigin(c.friendsUrl) || sameOrigin(c.chatUrl)) {
-    if (u.pathname === '/chat' || u.pathname.startsWith('/chat/')) return 'chat';
-    return 'friends';
-  }
+  // 单源口径：先认自家源，再按路径分（聊天/好友靠路径分，与旧版同规矩，
+  // 只是不再靠端口区分来源）
+  const own = sameOrigin(c.consoleUrl) || sameOrigin(c.friendsUrl) || sameOrigin(c.chatUrl) ||
+    sameOrigin(c.forumUrl) || sameOrigin(c.extUrl);
+  if (!own) return null;
+  const p = u.pathname;
+  if (p === '/chat' || p.startsWith('/chat/')) return 'chat';
+  if (p === '/friends' || p.startsWith('/friends/') ||
+      p === '/api/friends' || p.startsWith('/api/friends/')) return 'friends';
   if (c.forumUrl) {
     try {
       const f = new URL(c.forumUrl);
-      if (u.hostname === f.hostname && u.port === f.port &&
-          (u.pathname === f.pathname || u.pathname.startsWith(f.pathname + '/') || u.pathname.startsWith('/api/forum'))) {
+      if (p === f.pathname || p.startsWith(f.pathname + '/') || p.startsWith('/api/forum')) {
         return 'forum';
       }
     } catch (e) { /* ignore */ }
   }
-  // 首页视图（2.3.1 阶段 E）：扩展服务同源页面——/home 正本及购买/状态
-  // 查询/申诉/客服（壳内打开的自有网页同一落点）。ctx.extUrl 为 /home
-  // 地址，只认其源＋白名单路径；同源的 /points、/admin 等不归首页视图
-  // （沿用既有打开方式），论坛路径已在上面先行归类。
-  if (c.extUrl && sameOrigin(c.extUrl)) {
-    const p = u.pathname;
-    if (p === '/home' || p === '/purchase' || p === '/license/status' ||
-        p === '/appeal' || p === '/support' || p.startsWith('/license/')) {
-      return 'home';
-    }
+  // 首页视图（2.3.1 阶段 E）：扩展服务页面——/home 正本及购买/状态
+  // 查询/申诉/客服（壳内打开的自有网页同一落点）。只认白名单路径；
+  // 同源的 /points、/admin 等不归首页视图（沿用既有打开方式），论坛
+  // 路径已在上面先行归类。自家源判定已在函数前段完成，此处只看路径。
+  if (p === '/home' || p === '/purchase' || p === '/license/status' ||
+      p === '/appeal' || p === '/support' || p.startsWith('/license/')) {
+    return 'home';
   }
-  if (sameOrigin(c.consoleUrl)) return 'console';
-  return null;
+  return 'console';
 }
 
 // 论坛令牌交接的回跳地址（sso-login）也归论坛视图，但它是一次性
