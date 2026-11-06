@@ -15,7 +15,7 @@ import 'package:qfremote/ui/theme.dart';
 ReleaseEntry _entry() => ReleaseEntry(
       version: '9.9.9',
       notes: '',
-      url: 'https://54.248.9.192:8443/QFRemote-v9.9.9.apk',
+      url: 'https://app.qfremote.top/dl/QFRemote-v9.9.9.apk',
       sha256: 'a' * 64,
       size: 1000,
     );

@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qfremote/core/manifest.dart';
 
 const _sha = 'ffce5da483d2bd7ab99f32f7d69903c16e5d899275eed07e845a7833a5fbf351';
-const _origin = 'https://54.248.9.192:8443';
+const _origin = 'https://app.qfremote.top';
 
 void main() {
   group('ReleaseManifest.parse', () {
@@ -52,9 +52,9 @@ void main() {
     test('文件名加固：异常尾段回落默认名，正常名保留', () {
       ReleaseEntry entry(String url) => ReleaseEntry(
           version: '1.0.0', notes: '', url: url, sha256: 'a' * 64, size: 1);
-      expect(entry('https://54.248.9.192:8443/QFRemote-v2.apk').fileName,
+      expect(entry('https://app.qfremote.top/dl/QFRemote-v2.apk').fileName,
           'QFRemote-v2.apk');
-      final dotdot = entry('https://54.248.9.192:8443/..').fileName;
+      final dotdot = entry('https://app.qfremote.top/..').fileName;
       expect(dotdot, isNot('..'));
       expect(dotdot, isNot('.'));
       expect(dotdot, isNotEmpty);
@@ -92,8 +92,8 @@ void main() {
   group('isTrustedUrl', () {
     test('只认可信 origin', () {
       expect(isTrustedUrl('$_origin/release.json', trustedOrigin: _origin), isTrue);
-      expect(isTrustedUrl('https://54.248.9.192:9999/x', trustedOrigin: _origin), isFalse);
-      expect(isTrustedUrl('http://54.248.9.192:8443/x', trustedOrigin: _origin), isFalse);
+      expect(isTrustedUrl('https://app.qfremote.top:9999/x', trustedOrigin: _origin), isFalse);
+      expect(isTrustedUrl('http://app.qfremote.top/x', trustedOrigin: _origin), isFalse);
       expect(isTrustedUrl('not a url', trustedOrigin: _origin), isFalse);
     });
   });

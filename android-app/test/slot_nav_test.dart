@@ -67,27 +67,26 @@ void main() {
 
   group('会话深链识别 isSessionDeepLink（收编 P1 地基）', () {
     const own = {
-      'https://54.248.9.192:8443',
       'https://app.qfremote.top',
     };
     test('正例：桌面/终端/手机设备页三形态全命中', () {
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=11',
+          isSessionDeepLink('https://app.qfremote.top/?node=abc&viewmode=11',
               ownOrigins: own),
           isTrue);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=12',
+          isSessionDeepLink('https://app.qfremote.top/?node=abc&viewmode=12',
               ownOrigins: own),
           isTrue);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=10',
+          isSessionDeepLink('https://app.qfremote.top/?node=abc&viewmode=10',
               ownOrigins: own),
           isTrue);
     });
-    test('正例：带额外参数、node 含转义字符、自有源集合内另一源', () {
+    test('正例：带额外参数、node 含转义字符', () {
       expect(
           isSessionDeepLink(
-              'https://54.248.9.192:8443/?node=t3Eza%40Zz%24x&viewmode=11&title=a',
+              'https://app.qfremote.top/?node=t3Eza%40Zz%24x&viewmode=11&title=a',
               ownOrigins: own),
           isTrue);
       expect(
@@ -97,26 +96,26 @@ void main() {
           isTrue);
     });
     test('反例：SPA 常规导航不误伤（根路径无参/仅 node/模式外 viewmode）', () {
-      expect(isSessionDeepLink('https://54.248.9.192:8443/', ownOrigins: own),
+      expect(isSessionDeepLink('https://app.qfremote.top/', ownOrigins: own),
           isFalse);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/home',
+          isSessionDeepLink('https://app.qfremote.top/home',
               ownOrigins: own),
           isFalse);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=abc',
+          isSessionDeepLink('https://app.qfremote.top/?node=abc',
               ownOrigins: own),
           isFalse);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?viewmode=11',
+          isSessionDeepLink('https://app.qfremote.top/?viewmode=11',
               ownOrigins: own),
           isFalse);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=&viewmode=11',
+          isSessionDeepLink('https://app.qfremote.top/?node=&viewmode=11',
               ownOrigins: own),
           isFalse);
       expect(
-          isSessionDeepLink('https://54.248.9.192:8443/?node=abc&viewmode=13',
+          isSessionDeepLink('https://app.qfremote.top/?node=abc&viewmode=13',
               ownOrigins: own),
           isFalse);
     });
@@ -127,12 +126,12 @@ void main() {
           isFalse);
       expect(
           isSessionDeepLink(
-              'https://54.248.9.192:8443/logout?node=abc&viewmode=11',
+              'https://app.qfremote.top/logout?node=abc&viewmode=11',
               ownOrigins: own),
           isFalse);
       expect(
           isSessionDeepLink(
-              'https://54.248.9.192:8443/dl/app.apk?node=abc&viewmode=11',
+              'https://app.qfremote.top/dl/app.apk?node=abc&viewmode=11',
               ownOrigins: own),
           isFalse);
       expect(isSessionDeepLink(null, ownOrigins: own), isFalse);

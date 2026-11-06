@@ -53,11 +53,11 @@ void main() {
 
     test('isOwnOrigin：自有源认、外站拒（/logout 误触发防线）', () {
       final urls = SvcUrls.instance;
-      expect(urls.isOwnOrigin('https://54.248.9.192:8443/logout'), isTrue);
-      expect(urls.isOwnOrigin('https://54.248.9.192:8445/friends'), isTrue);
+      expect(urls.isOwnOrigin('https://app.qfremote.top/logout'), isTrue);
+      expect(urls.isOwnOrigin('https://app.qfremote.top/friends'), isTrue);
       expect(urls.isOwnOrigin(kForumUrl), isTrue);
       expect(urls.isOwnOrigin('https://evil.example.com/logout'), isFalse);
-      expect(urls.isOwnOrigin('https://54.248.9.192:9999/logout'), isFalse);
+      expect(urls.isOwnOrigin('https://app.qfremote.top:8443/logout'), isFalse);
       expect(urls.isOwnOrigin(null), isFalse);
       expect(urls.isOwnOrigin(':::bad'), isFalse);
     });

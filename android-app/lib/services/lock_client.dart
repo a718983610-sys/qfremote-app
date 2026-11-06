@@ -9,7 +9,7 @@ import 'probe.dart' show trustedHttpClient;
 
 /// 隐私锁桥（线 B 接缝：只此一处耦合服务端契约，UI 与状态机不碰路径/字段）。
 ///
-/// 基址 https://$kServerHost:8445/lock（与好友同服务族）；鉴权用好友服务
+/// 基址 $kLockApiBase（与好友同服务族、同源）；鉴权用好友服务
 /// 会话 Cookie（壳内同一 WebView Cookie 罐，登录一次通用）。
 /// 壳不存任何密码：锁密码与登录密码只在提交瞬间过桥，用完即弃。
 /// A 线契约若有出入，只改本文件。

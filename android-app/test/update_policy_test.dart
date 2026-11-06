@@ -5,7 +5,7 @@ import 'package:qfremote/core/update_policy.dart';
 ReleaseEntry entry(String v) => ReleaseEntry(
       version: v,
       notes: '',
-      url: 'https://54.248.9.192:8443/QFRemote-v$v.apk',
+      url: 'https://app.qfremote.top/dl/QFRemote-v$v.apk',
       sha256: 'a' * 64,
       size: 100,
     );

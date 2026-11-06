@@ -1,21 +1,23 @@
 /// QFRemote 安卓控制端常量。
 ///
 /// 信任口径（与 Windows 版同一条，不许放宽）：
-/// - 控制台与更新清单、安装包，只认 54.248.9.192:8443 这一个主机；
-/// - 服务器是自签证书，放行只发生在逐个校验主机+端口之后；
-/// - 好友页在同主机的 8445（v1.0.5 新增），与控制台同一张自签证书，
-///   仅 WebView 证书校验多放行这一个端口；更新信任口径不变，仍只认 8443。
+/// - 控制台与更新清单、安装包，只认 app.qfremote.top 这一个正式域名；
+/// - 2.4.2 起全量迁正式域名（服务器换 IP 后旧 IP 直连源已退役）：域名是
+///   公共 CA 证书，WebView/探活的证书错误放行只发生在逐个校验主机+端口
+///   之后、且只对自家域名这一个源；
+/// - 好友页/聊天/隐私锁与控制台同源（域名聚合路径 /friends、/chat、
+///   /lock），好友服务认控制台会话 cookie——同一 WebView 打开即 SSO
+///   直达，不再二次登录。
 library;
 
-const String kServerHost = '54.248.9.192';
-const int kServerPort = 8443;
-const String kServerOrigin = 'https://$kServerHost:$kServerPort';
+const String kServerHost = 'app.qfremote.top';
+const int kServerPort = 443;
+const String kServerOrigin = 'https://$kServerHost';
 const String kConsoleUrl = '$kServerOrigin/';
 
-/// 好友页（独立服务 qfremote-friends；与控制台同账号体系，好友服务认
-/// 控制台会话 cookie——同一 WebView 打开即 SSO 直达，不再二次登录）。
-const int kFriendsPort = 8445;
-const String kFriendsUrl = 'https://$kServerHost:$kFriendsPort/friends';
+/// 好友页（独立服务 qfremote-friends，经域名聚合路径到达）。
+const int kFriendsPort = 443;
+const String kFriendsUrl = '$kServerOrigin/friends';
 
 /// 服务地址兜底基址（正式域名）：2.2.0 起论坛/注册/协议/积分/管理地址一律
 /// 运行时从官网 product.json 的 web.* 解析（见 svc_urls.dart 的 SvcUrls），
@@ -48,11 +50,11 @@ const String kProductJsonUrl = 'https://qfremote.top/product.json';
 /// 取址走 SvcUrls.websiteUrl 单点。
 const String kWebsiteUrl = 'https://qfremote.top/';
 
-/// 隐私锁接口（与好友同服务族、同端口，路径 /lock；契约见线 B 接缝文件）。
-const int kLockPort = 8445;
-const String kLockApiBase = 'https://$kServerHost:$kLockPort/lock';
+/// 隐私锁接口（与好友同服务族、同源，路径 /lock；契约见线 B 接缝文件）。
+const int kLockPort = 443;
+const String kLockApiBase = '$kServerOrigin/lock';
 
-/// WebView 证书校验：只认自家主机的控制台与好友页两个端口。
+/// WebView 证书校验：只认自家域名源（控制台与好友页同源同端口）。
 bool isTrustedWebViewHostPort(String host, int port) =>
     host == kServerHost && (port == kServerPort || port == kFriendsPort);
 

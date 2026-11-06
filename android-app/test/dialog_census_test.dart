@@ -24,7 +24,7 @@ void main() {
   ReleaseEntry fakeEntry() => ReleaseEntry(
         version: '9.9.9',
         notes: longNotes,
-        url: 'https://54.248.9.192:8443/QFRemote-v9.9.9.apk',
+        url: 'https://app.qfremote.top/dl/QFRemote-v9.9.9.apk',
         sha256: 'a' * 64,
         size: 1000,
       );

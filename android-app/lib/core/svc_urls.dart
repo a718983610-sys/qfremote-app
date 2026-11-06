@@ -60,13 +60,13 @@ class SvcUrls {
   /// 令牌换发地址：拿控制台会话换一次性登录令牌，再打开管理页。
   String get ssoTokenUrl => '$adminUrl/api/sso-token';
 
-  /// 自有服务源集合：控制台直连、好友直连、当前解析到的通道源。
-  /// 导航策略据此识别「自家页面的 /logout」——外站同名路径不许触发
-  /// 本机手动退出（深查修复：防外链 /logout 误清凭据）。
+  /// 自有服务源集合：自家域名源（控制台/好友/聊天/锁同源）与当前解析
+  /// 到的各服务源。导航策略据此识别「自家页面的 /logout」——外站同名
+  /// 路径不许触发本机手动退出（深查修复：防外链 /logout 误清凭据）。
   Set<String> ownOrigins() {
     final out = <String>{
       kServerOrigin,
-      'https://$kServerHost:$kFriendsPort',
+      Uri.parse(kFriendsUrl).origin,
     };
     for (final u in [forumUrl, registerUrl, pointsUrl, adminUrl, termsUrl]) {
       try {
