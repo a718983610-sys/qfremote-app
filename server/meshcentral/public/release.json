@@ -1,18 +1,20 @@
 {
-  "version": "2.4.1",
-  "notes": "2.4.1 正式版：更新解析源切换至正式域名，改密提示文案优化，界面排版与体验优化。本版本为小幅更新，运行中将收到更新提醒，退出软件后重新打开将自动完成更新。",
-  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.1.exe",
-  "sha256": "ba911f6a29adf81e46e2388314de053bf235bb455cd65356d1803b93c3d413e9",
-  "size": 122100326,
+  "version": "2.4.2",
+  "notes": "2.4.2 正式版：服务线路优化，连接更稳定可靠。本版本为重要更新，退出软件后重新打开将自动完成更新。",
+  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.2.exe",
+  "sha256": "c7a33b82d785ab6cda2fa6f264c64ca2d059eb08cae581bac0cfaa9b63289c19",
+  "size": 122099479,
+  "minUsable": "2.4.2",
   "android": {
-    "version": "2.4.1",
-    "notes": "2.4.1 正式版：更新解析源切换至正式域名，改密提示文案优化，界面排版与体验优化。本版本为小幅更新，退出应用后重新打开将自动完成更新。",
-    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.1.apk",
-    "sha256": "273acc2e5b7a6bd4fbf221360d63a421d613b27bff71f4ae7868b5dee929944a",
-    "size": 54260943
+    "version": "2.4.2",
+    "notes": "2.4.2 正式版：服务线路优化，连接更稳定可靠。本版本为重要更新，退出应用后重新打开将自动完成更新。",
+    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.2.apk",
+    "sha256": "6818e7c2e107243056e4e0730afab0692653365a11b24c5a9a65aee9346312d4",
+    "size": 54260947,
+    "minUsable": "2.4.2"
   },
   "interop": {
     "window": 2,
-    "minVersion": ""
+    "minVersion": "2.4.2"
   }
 }
