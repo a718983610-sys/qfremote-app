@@ -59,7 +59,7 @@
 (function () {
   'use strict';
   var PRODUCT_JSON = 'https://a718983610-sys.github.io/qfremote-website/product.json';
-  var DIRECT_SOCIAL = 'https://54.248.9.192:8445';
+  var DIRECT_SOCIAL = 'https://' + location.hostname + ':8445'; // 直连源控制台（IP 字面量主机）时取同主机 8445，不写死任何 IP
   var frames = {};   // t -> iframe（建一次保活）
   var targets = {};  // t -> url（解析完成后填充）
   var current = null;

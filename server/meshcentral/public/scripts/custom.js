@@ -8,7 +8,7 @@
 (function () {
     'use strict';
     var FRIENDS_KEY = 'qfFriendsUrl';
-    var FRIENDS_DIRECT = 'https://54.248.9.192:8445/friends'; // 好友服务直连（8445 独立服务，与控制台 8443 同 IP）
+    var FRIENDS_DIRECT = 'https://' + location.hostname + ':8445/friends'; // 好友服务直连（8445 独立服务，与控制台同主机；2.4.2 起按当前主机名拼，不写死 IP）
     var PEOPLE_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232470E0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='3.6'/%3E%3Cpath d='M3.2 19.4c.7-3 2.9-4.6 5.8-4.6s5.1 1.6 5.8 4.6'/%3E%3Ccircle cx='17' cy='9' r='2.7'/%3E%3Cpath d='M16.4 14.9c2.3.2 3.9 1.6 4.4 4'/%3E%3C/svg%3E";
 
     /* 同框包装（2.3.0 M 线）：控制台内入口一律进同源包装页 /qf-wrap.html，
@@ -18,7 +18,7 @@
        源受上游 CSP 限制（frame-src/connect-src 只许同源），包装页长在
        控制台源时跨源 iframe 与取令牌请求都会被浏览器拦下；8445 与控制
        台同主机（会话 cookie 按主机携带）、无此限制（2.3.0 M2 线）。 */
-    var WRAP_BASE = (/^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname)) ? 'https://54.248.9.192:8445/qf-wrap.html' : '/qf-wrap.html';
+    var WRAP_BASE = (/^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname)) ? 'https://' + location.hostname + ':8445/qf-wrap.html' : '/qf-wrap.html';
     var WRAP_FRIENDS = WRAP_BASE + '?t=friends';
     var WRAP_FORUM = WRAP_BASE + '?t=forum';
     function isIpHost() { return /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname); }
@@ -47,7 +47,7 @@
        整个控制台被替换——手机 Safari 与桌面浏览器同此病。现改为：在控制台页面内挂
        一层固定面板，顶栏保留、地址不变、面板内 iframe 载好友/聊天/论坛，关面板即回
        原界面且登录态、页内状态原样。隧道源三页同源走相对路径；直连 IP 源
-       （54.248.9.192:8443）三页跨源：好友/聊天走好友服务 8445（会话 cookie 按主机
+       （IP 直连 :8443）三页跨源：好友/聊天走好友服务 8445（会话 cookie 按主机
        携带、单点登录照常），论坛走 8445 的令牌重定向端点换论坛会话。控制台页面
        CSP 的 frame-src 已由服务端配置 settings.extraFrameSrc 放行这两个自家来源
        （webserver.js 按上游既有 extrascriptsrc 同款式读取该配置，上游升级后需复核
@@ -103,8 +103,8 @@
     }
     function qfPanelSrc(t) {
         if (isIpHost()) {
-            if (t === 'friends') return 'https://54.248.9.192:8445/friends';
-            if (t === 'chat') return 'https://54.248.9.192:8445/chat';
+            if (t === 'friends') return 'https://' + location.hostname + ':8445/friends';
+            if (t === 'chat') return 'https://' + location.hostname + ':8445/chat';
             if (t === 'home') {
                 // 新版首页只在隧道源（nginx→ext）上：用缓存的隧道基址拼，
                 // 无缓存时先开论坛重定向同款的占位，解析完成后由
@@ -113,7 +113,7 @@
                 try { b = (localStorage.getItem('qfWrapForumUrl') || '').replace(/\/forum\/?$/, ''); } catch (e) {}
                 return b ? (b + '/home') : 'about:blank';
             }
-            return 'https://54.248.9.192:8445/api/friends/forum-sso-redirect';
+            return 'https://' + location.hostname + ':8445/api/friends/forum-sso-redirect';
         }
         return t === 'friends' ? '/friends' : (t === 'chat' ? '/chat' : (t === 'home' ? '/home' : '/forum'));
     }

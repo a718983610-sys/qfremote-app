@@ -167,7 +167,8 @@ const SITEADMIN_FULL = 4294967295;
 // （iframe 子框，受约束）。页面响应统一带 frame-ancestors 白名单：仅
 // 自家来源——'self'（论坛自身源，含隧道源同源控制台）、控制台直连源，
 // 以及请求实际到达时的转发源（隧道轮换时自动跟随，不写死隧道域名）。
-const FRAME_EXTRA_ORIGINS = ['https://54.248.9.192:8443', 'https://54.248.9.192:8445'];
+// 2.4.2：控制台已统一到正式域名单源，旧 IP 双源（8443/8445）退役。
+const FRAME_EXTRA_ORIGINS = ['https://app.qfremote.top'];
 function frameAncestorsOf(req) {
   const set = ["'self'"].concat(FRAME_EXTRA_ORIGINS);
   try {
