@@ -1657,8 +1657,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _handlePageDownload(DownloadStartRequest req) async {
     try {
       final cookies = await CookieManager.instance().getCookies(url: req.url);
-      // 证书校验端口跟随下载地址本身（好友源 8445 与控制台 8443 都是自家
-      // 自签证书；此前写死 8443，从好友/聊天页发起的下载会被证书校验拒掉）
+      // 证书校验端口跟随下载地址本身（各服务面同为自家域名源；此前写死
+      // 控制台端口，从好友/聊天页发起的下载会被证书校验拒掉）
       final client = trustedHttpClient(
           connectionTimeout: const Duration(seconds: 20), port: req.url.port);
       try {
@@ -2124,7 +2124,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             }
                           },
                           onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                            // 证书只认自家主机：逐个核对主机+端口（控制台 8443、好友页 8445），其余一律拒绝
+                            // 证书只认自家主机：逐个核对主机+端口（自家域名源），其余一律拒绝
                             final host = challenge.protectionSpace.host;
                             final port = challenge.protectionSpace.port;
                             final ok = port != null && isTrustedWebViewHostPort(host, port);

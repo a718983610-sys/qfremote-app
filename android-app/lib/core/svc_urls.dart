@@ -10,8 +10,9 @@ import 'constants.dart';
 ///
 /// 解析顺序：内存（本次运行从官网 product.json 拉到的 web.*）→ 本地缓存
 /// （上次成功拉到的值）→ constants.dart 的写死兜底。
-/// 好友入口例外：保持直连 8445 的 SSO 口径不动（与控制台同 WebView、同会话
-/// cookie、同自签证书校验），不走 product.json 的通道地址。
+/// 好友入口例外：地址恒用 constants 的写死值（2.4.2 起为域名同源
+/// /friends），不走 product.json 的通道地址；SSO 口径不动（与控制台同
+/// WebView、同会话 cookie）。
 class SvcUrls {
   SvcUrls._();
 
@@ -31,7 +32,7 @@ class SvcUrls {
   bool _loaded = false;
   Future<void>? _resolving;
 
-  /// 好友页：直连口径恒定（见类注释）。
+  /// 好友页：地址恒定口径（见类注释）。
   String get friendsUrl => kFriendsUrl;
 
   /// 已退役源过滤：旧版本写入本地缓存（或旧清单下发）的临时隧道地址
