@@ -12,12 +12,17 @@ class ReleaseEntry {
   final String sha256;
   final int size;
 
+  /// 强更线（2026-11-07 站长令）：清单可选字段，本机版本低于它即启动强制
+  /// 更新（见 update_policy.dart 的 decideUpdate）；缺失/不合规为 null。
+  final String? minUsable;
+
   const ReleaseEntry({
     required this.version,
     required this.notes,
     required this.url,
     required this.sha256,
     required this.size,
+    this.minUsable,
   });
 
   String get fileName {
@@ -79,12 +84,17 @@ class ReleaseManifest {
       if (sizeRaw is! int || sizeRaw <= 0) {
         throw const FormatException('更新清单缺少有效的文件大小');
       }
+      final minUsableRaw = raw['minUsable'];
       return ReleaseEntry(
         version: version,
         notes: raw['notes'] is String ? raw['notes'] as String : '',
         url: abs,
         sha256: sha,
         size: sizeRaw,
+        minUsable: (minUsableRaw is String &&
+                RegExp(r'^\d+\.\d+\.\d+$').hasMatch(minUsableRaw))
+            ? minUsableRaw
+            : null,
       );
     }
 

@@ -42,18 +42,21 @@ class UpdateService {
   })  : releaseUrl = releaseUrl ?? kReleaseUrl,
         trustedOrigin = trustedOrigin ?? kTrustedOrigin;
 
-  /// 取清单（8 秒超时）。失败抛异常，调用方安静处理。
-  Future<ReleaseManifest> fetchManifest() async {
-    final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 8));
+  /// 取清单（默认 8 秒超时）。失败抛异常，调用方安静处理。
+  /// [timeout] 可缩短：启动门无落盘待更时只为核强更线短探，不拖住离线启动。
+  Future<ReleaseManifest> fetchManifest({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final client = trustedHttpClient(connectionTimeout: timeout);
     try {
       final req = await client.getUrl(Uri.parse(releaseUrl));
       applyClientVersionHeader(req);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      final res = await req.close().timeout(const Duration(seconds: 8));
+      final res = await req.close().timeout(timeout);
       if (res.statusCode != 200) {
         throw HttpException('获取更新清单失败：HTTP ${res.statusCode}');
       }
-      final body = await utf8.decodeStream(res).timeout(const Duration(seconds: 8));
+      final body = await utf8.decodeStream(res).timeout(timeout);
       return ReleaseManifest.parse(body, trustedOrigin: trustedOrigin);
     } finally {
       client.close(force: true);

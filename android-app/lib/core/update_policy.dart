@@ -40,6 +40,14 @@ UpdateDecision decideUpdate({
   }
 
   // 启动时：
+  // 强更线（2026-11-07 站长令）：清单 minUsable 比本机新、且清单版本比本机新 →
+  // 即使没有落盘待更，本次启动也强制（与 Windows startupUpdateGate 同口径）。
+  if (manifestEntry != null &&
+      manifestEntry.minUsable != null &&
+      isNewerVersion(manifestEntry.minUsable!, currentVersion) &&
+      isNewerVersion(manifestEntry.version, currentVersion)) {
+    return UpdateDecision.forceAtLaunch;
+  }
   if (pendingVersion == null || !isNewerVersion(pendingVersion, currentVersion)) {
     return UpdateDecision.none; // 没有待更新（或早已更完）
   }

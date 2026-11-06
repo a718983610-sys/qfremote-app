@@ -73,8 +73,8 @@ function getBuffer(rawUrl, timeoutMs) {
 }
 
 // 取清单并校验。返回 {version, notes, url(绝对地址), sha256, size} 或抛错（调用方安静处理）。
-async function fetchManifest() {
-  const buf = await getBuffer(RELEASE_URL, 8000);
+async function fetchManifest(timeoutMs) {
+  const buf = await getBuffer(RELEASE_URL, timeoutMs || 8000);
   let m;
   try { m = JSON.parse(buf.toString('utf8')); } catch (e) { throw new Error('更新清单格式不正确'); }
   if (!m || typeof m.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(m.version)) throw new Error('更新清单缺少版本号');
@@ -83,12 +83,16 @@ async function fetchManifest() {
   if (!isTrustedUrl(absUrl)) throw new Error('清单里的下载地址不在信任范围内');
   const sha = typeof m.sha256 === 'string' ? m.sha256.toLowerCase() : '';
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error('更新清单缺少完整的 SHA256 校验码');
+  // 强更线 minUsable（2026-11-07 站长令）：清单可选字段，本机版本低于它即触发
+  // 启动强制更新（见 main.js startupUpdateGate）；缺失/格式不合规按无强更线处理。
+  const minUsable = (typeof m.minUsable === 'string' && /^\d+\.\d+\.\d+$/.test(m.minUsable)) ? m.minUsable : null;
   return {
     version: m.version,
     notes: typeof m.notes === 'string' ? m.notes : '',
     url: absUrl,
     sha256: sha,
-    size: typeof m.size === 'number' ? m.size : null
+    size: typeof m.size === 'number' ? m.size : null,
+    minUsable
   };
 }
 

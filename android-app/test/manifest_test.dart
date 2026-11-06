@@ -29,6 +29,29 @@ void main() {
       expect(m.android?.fileName, 'QFRemote-v1.0.4.apk');
     });
 
+    test('强更线 minUsable：双端解析、非法值归 null（2026-11-07）', () {
+      const body = '''
+{
+  "version": "2.4.2",
+  "notes": "",
+  "url": "$_origin/QFRemote-Setup-v2.4.2.exe",
+  "sha256": "$_sha",
+  "size": 85471395,
+  "minUsable": "2.4.2",
+  "android": {
+    "version": "2.4.2",
+    "notes": "",
+    "url": "$_origin/QFRemote-v2.4.2.apk",
+    "sha256": "$_sha",
+    "size": 12345678,
+    "minUsable": "bogus"
+  }
+}''';
+      final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
+      expect(m.windows?.minUsable, '2.4.2');
+      expect(m.android?.minUsable, isNull);
+    });
+
     test('H-3：size 缺失/非法 → 整单判失败', () {
       const noSize =
           '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha"}';

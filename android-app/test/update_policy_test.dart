@@ -10,6 +10,15 @@ ReleaseEntry entry(String v) => ReleaseEntry(
       size: 100,
     );
 
+ReleaseEntry entryMin(String v, String min) => ReleaseEntry(
+      version: v,
+      notes: '',
+      url: 'https://app.qfremote.top/dl/QFRemote-v$v.apk',
+      sha256: 'a' * 64,
+      size: 100,
+      minUsable: min,
+    );
+
 void main() {
   group('decideUpdate（全家统一更新政策）', () {
     test('会话中：有新版 → 只提醒', () {
@@ -56,6 +65,24 @@ void main() {
       expect(
         decideUpdate(currentVersion: '1.0.4', manifestEntry: entry('1.0.4'), pendingVersion: '1.0.5', isLaunchCheck: true),
         UpdateDecision.none,
+      );
+    });
+    test('启动：无待更新但低于强更线 → 强制（2026-11-07 站长令）', () {
+      expect(
+        decideUpdate(currentVersion: '2.4.1', manifestEntry: entryMin('2.4.2', '2.4.2'), pendingVersion: null, isLaunchCheck: true),
+        UpdateDecision.forceAtLaunch,
+      );
+    });
+    test('启动：无待更新且不低于强更线 → 无动作', () {
+      expect(
+        decideUpdate(currentVersion: '2.4.2', manifestEntry: entryMin('2.4.3', '2.4.2'), pendingVersion: null, isLaunchCheck: true),
+        UpdateDecision.none,
+      );
+    });
+    test('会话中：低于强更线也只提醒（强更只在启动那一下）', () {
+      expect(
+        decideUpdate(currentVersion: '2.4.1', manifestEntry: entryMin('2.4.2', '2.4.2'), pendingVersion: null, isLaunchCheck: false),
+        UpdateDecision.remind,
       );
     });
     test('启动：待更新其实已装好（不比本机新）→ 无动作', () {

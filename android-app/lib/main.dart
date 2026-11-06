@@ -860,32 +860,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 命中待更新且服务器可达 → 强制更新页；连不上 → 先放行进控制台。
   Future<void> _launchGate(QfSettings settings) async {
     final pending = settings.pendingUpdateVersion;
-    if (pending != null && isNewerVersion(pending, _currentVersion)) {
-      ReleaseManifest? manifest;
-      try {
-        manifest = await _updateService.fetchManifest();
-      } catch (_) {
-        manifest = null; // 取不到清单 = 服务器连不上 → 放行
-      }
-      final decision = decideUpdate(
-        currentVersion: _currentVersion,
-        manifestEntry: manifest?.android,
-        pendingVersion: pending,
-        isLaunchCheck: true,
+    final pendingValid =
+        pending != null && isNewerVersion(pending, _currentVersion);
+    ReleaseManifest? manifest;
+    try {
+      // 有落盘待更按原口径 8 秒取清单裁决；无待更只为核强更线短探 3 秒，
+      // 断网启动不被长等拖住（取不到照样放行）。
+      manifest = await _updateService.fetchManifest(
+        timeout: Duration(seconds: pendingValid ? 8 : 3),
       );
-      if (decision == UpdateDecision.forceAtLaunch && manifest?.android != null) {
-        if (!mounted) return;
-        setState(() {
-          _forceEntry = manifest!.android;
-          _gateDone = true;
-        });
-        return;
-      }
-      if (decision == UpdateDecision.none && manifest != null) {
-        // 待更新已被撤下或已不比本机新 → 清掉标记
-        await settings.setPendingUpdateVersion(null);
-      }
-    } else if (pending != null) {
+    } catch (_) {
+      manifest = null; // 取不到清单 = 服务器连不上 → 放行
+    }
+    final decision = decideUpdate(
+      currentVersion: _currentVersion,
+      manifestEntry: manifest?.android,
+      pendingVersion: pendingValid ? pending : null,
+      isLaunchCheck: true,
+    );
+    if (decision == UpdateDecision.forceAtLaunch && manifest?.android != null) {
+      if (!mounted) return;
+      setState(() {
+        _forceEntry = manifest!.android;
+        _gateDone = true;
+      });
+      return;
+    }
+    if (pending != null &&
+        (decision == UpdateDecision.none && manifest != null || !pendingValid)) {
+      // 待更新已被撤下/已不比本机新，或落盘值本身已过期 → 清掉标记
       await settings.setPendingUpdateVersion(null);
     }
     if (!mounted) return;

@@ -111,6 +111,16 @@ const server = http.createServer((req, res) => {
     const gMs = Date.now() - gT0;
     result.cases.G_stallTimeout = { error: gErr, ms: gMs, pass: !!gErr && gErr.includes('下载超时') && gMs >= 12000 && gMs < 30000 };
 
+    // H：强更线 minUsable 解析（2026-11-07 站长令）：合规值透传、非法/缺失为 null
+    manifest = Object.assign({}, manifest, { version: '9.9.9', url: ORIGIN + '/QFRemote-Setup-v9.9.9.exe', sha256: payloadSha, minUsable: '2.4.2' });
+    const h1 = await updater.fetchManifest();
+    manifest = Object.assign({}, manifest, { minUsable: 'bogus' });
+    const h2 = await updater.fetchManifest();
+    const h3base = Object.assign({}, manifest); delete h3base.minUsable;
+    manifest = h3base;
+    const h3 = await updater.fetchManifest();
+    result.cases.H_minUsable = { withLine: h1.minUsable, bogus: h2.minUsable, absent: h3.minUsable, pass: h1.minUsable === '2.4.2' && h2.minUsable === null && h3.minUsable === null };
+
     result.pass = Object.values(result.cases).every(c => c.pass);
   } catch (e) {
     result.fatal = e.message;

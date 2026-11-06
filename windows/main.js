@@ -2459,13 +2459,21 @@ ipcMain.on('qf-force-release', () => {
 // 启动门：返回 true 表示强更页已接管（不要再建主窗口）
 async function startupUpdateGate() {
   dropStalePending(); // 新版装好后首启：待更版本已 <= 本机版本，自动清除
-  if (!settings.pendingUpdate) return false;
   let manifest = null;
-  try { manifest = await updater.fetchManifest(); } catch (e) { return false; } // 连不上：放行
+  try {
+    // 有落盘待更：按原口径给足 8 秒取清单裁决；无待更时只为核强更线短探 2.5 秒，
+    // 断网启动不被长等拖住（取不到照样放行，符合「启动离线先放行」）。
+    manifest = await updater.fetchManifest(settings.pendingUpdate ? 8000 : 2500);
+  } catch (e) { return false; } // 连不上：放行
   if (updater.compareVersions(manifest.version, app.getVersion()) <= 0) {
     clearPendingUpdate();
     return false;
   }
+  // 强更线（2026-11-07 站长令）：清单 minUsable 高于本机版本时，即使没有落盘
+  // 待更，本次启动也强制更新——旧版自愈不再依赖「先开一次落盘、再开一次强更」。
+  const belowMinUsable = !!(manifest.minUsable &&
+    updater.compareVersions(app.getVersion(), manifest.minUsable) < 0);
+  if (!settings.pendingUpdate && !belowMinUsable) return false;
   persistPendingUpdate(manifest); // 以服务器最新清单刷新待更（说明/地址/校验以清单为准）
   openForceWindow(manifest);
   return true;
