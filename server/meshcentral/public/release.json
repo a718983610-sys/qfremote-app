@@ -1,16 +1,16 @@
 {
-  "version": "2.4.2",
-  "notes": "2.4.2 正式版：服务线路优化，连接更稳定可靠。本版本为重要更新，退出软件后重新打开将自动完成更新。",
-  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.2.exe",
-  "sha256": "c7a33b82d785ab6cda2fa6f264c64ca2d059eb08cae581bac0cfaa9b63289c19",
-  "size": 122099479,
+  "version": "2.4.3",
+  "notes": "2.4.3 正式版：电脑端更新时自动修复本机连接配置，连接更稳定可靠。退出软件后重新打开将自动完成更新。",
+  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.3.exe",
+  "sha256": "1767c8d06acb1ea032869a6c837f051b020794c259cb974224e531cbeb7c9bd0",
+  "size": 122104321,
   "minUsable": "2.4.2",
   "android": {
-    "version": "2.4.2",
-    "notes": "2.4.2 正式版：服务线路优化，连接更稳定可靠。本版本为重要更新，退出应用后重新打开将自动完成更新。",
-    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.2.apk",
-    "sha256": "6818e7c2e107243056e4e0730afab0692653365a11b24c5a9a65aee9346312d4",
-    "size": 54260947,
+    "version": "2.4.3",
+    "notes": "2.4.3 正式版：稳定性与体验优化。退出应用后重新打开将自动完成更新。",
+    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.3.apk",
+    "sha256": "11928d115842585e8e99f0f536491efdeb3e19e49d4b696eeefd874c92b33819",
+    "size": 54260943,
     "minUsable": "2.4.2"
   },
   "interop": {
