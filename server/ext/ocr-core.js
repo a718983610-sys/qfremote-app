@@ -85,6 +85,14 @@ function createOrderOcr(deps) {
   const attemptsByOrder = new Map();   // orderId -> [ts,...]
   const attemptsByAccount = new Map(); // username -> [ts,...]
   const cache = new Map();             // username|orderId|sha256 -> { orderNo, at }
+  const CACHE_MAX = 5000;              // F-7（发版前全量审 P3）：结果缓存总量封顶；原仅命中路径惰性删过期项，长期总量不封顶
+  function cacheSet(ckey, val, at) {
+    if (cache.size >= CACHE_MAX) {
+      for (const [k, v] of cache) { if (at - v.at >= CACHE_TTL_MS) cache.delete(k); } // 先扫已过期项
+      while (cache.size >= CACHE_MAX) { const oldest = cache.keys().next().value; if (oldest === undefined) break; cache.delete(oldest); } // 仍满按插入序删最老
+    }
+    cache.set(ckey, val);
+  }
   let glmStartsMinute = [];            // 全局 GLM 启动时刻（1 分钟窗）
   let glmDaily = { day: '', count: 0 }; // 全局 GLM 日配额计数（Asia/Shanghai 日界）
   let glmInFlight = 0;                  // 全局 GLM 并发在飞数
@@ -233,7 +241,7 @@ function createOrderOcr(deps) {
       if (!fields || fields.isBillDetail !== true) return done({ ok: true, found: false }, 'NOT_BILL');
       const ono = normOrderNo(fields.orderNo);
       if (!validOrderNo(ono)) return done({ ok: true, found: false }, 'NO_ORDERNO');
-      cache.set(ckey, { orderNo: ono, at });
+      cacheSet(ckey, { orderNo: ono, at }, at);
       return done({ ok: true, found: true, orderNo: ono, tail4: ono.slice(-4) }, 'OK', ono.slice(-4));
     } catch (e) {
       return done({ ok: true, found: false }, 'INTERNAL');

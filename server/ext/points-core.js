@@ -20,6 +20,14 @@ function shanghaiDayKey(ms) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
 }
 
+// 日键位移（PT-D1 高水位删桶界计算用）：'YYYY-MM-DD' ± N 天
+function shiftDayKey(dayKeyStr, deltaDays) {
+  const parts = String(dayKeyStr).split('-').map(Number);
+  if (parts.length !== 3 || parts.some((x) => !Number.isFinite(x))) return dayKeyStr;
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] + deltaDays));
+  return dt.toISOString().slice(0, 10);
+}
+
 // 两个 'YYYY-MM-DD' 日历日之间相差几天（按 UTC 解析日期串，纯日历差）
 function dayDiff(firstDay, day) {
   const a = Date.parse(firstDay + 'T00:00:00Z');
@@ -102,10 +110,24 @@ function ensureEarn(rec, nowMs) {
   if (e.balance == null) { e.balance = Math.floor((rec.totalSeconds || 0) / 7200); e.migratedAt = nowMs; }
   if (!e.days || typeof e.days !== 'object') e.days = {};
   if (!Array.isArray(e.ledger)) e.ledger = [];
+  // PT-D1（license-batch-20261029）：赚取日高水位单调不减。原实现按墙钟
+  // today/yesterday 删桶：服务器时钟先跳 +2 天再回拨原日，原日桶已被删、
+  // 回拨后重建空白桶，当日已发分清零，签到与 10 分双封顶可重放。新口径：
+  // 有效赚取日 effDay = max(墙钟今日, 历史高水位)，发分/签到/展示只落
+  // effDay；删桶只删严格早于 effDay-1 的桶。存量无高水位时以现有日桶与
+  // checkinDay 的最大日播种，避免升级首跑误删未来日桶。
   const today = shanghaiDayKey(nowMs);
-  const yest = shanghaiDayKey(nowMs - 86400000);
-  for (const k of Object.keys(e.days)) if (k !== today && k !== yest) delete e.days[k];
-  if (!e.days[today]) e.days[today] = blankDayBucket();
+  if (!e.earnDayHigh) {
+    let high = today;
+    for (const k of Object.keys(e.days)) if (typeof k === 'string' && k > high) high = k;
+    if (e.checkinDay && e.checkinDay > high) high = e.checkinDay;
+    e.earnDayHigh = high;
+  } else if (today > e.earnDayHigh) {
+    e.earnDayHigh = today;
+  }
+  const keepFrom = shiftDayKey(e.earnDayHigh, -1);
+  for (const k of Object.keys(e.days)) if (k < keepFrom) delete e.days[k];
+  if (!e.days[e.earnDayHigh]) e.days[e.earnDayHigh] = blankDayBucket();
   return e;
 }
 function devBucketOf(day, deviceKey, sharedDevices, dayKeyStr) {
@@ -114,7 +136,9 @@ function devBucketOf(day, deviceKey, sharedDevices, dayKeyStr) {
   if (sharedDevices && typeof sharedDevices === 'object') {
     const k = deviceKey || 'acct';
     let b = sharedDevices[k];
-    if (!b || b.day !== dayKeyStr) { b = blankDevBucket(); b.day = dayKeyStr; sharedDevices[k] = b; }
+    // PT-D1：共享设备桶只前进不回退——入参日（调用方有效赚取日）早于桶
+    // 既有日时保留原桶，回拨不得整桶重置设备维计数。
+    if (!b || !b.day || b.day < dayKeyStr) { b = blankDevBucket(); b.day = dayKeyStr; sharedDevices[k] = b; }
     return b;
   }
   const k = deviceKey || 'acct';
@@ -133,7 +157,7 @@ function grantOne(rec, e, day, dev, kind, nowMs) {
 function earnHeartbeat(rec, deviceKey, addedSec, nowMs, sharedDevices) {
   if (!rec || !(addedSec > 0)) return { grantedNow: 0 };
   const e = ensureEarn(rec, nowMs);
-  const dayKeyStr = shanghaiDayKey(nowMs);
+  const dayKeyStr = e.earnDayHigh; // PT-D1：有效赚取日（高水位），非墙钟今日
   const day = e.days[dayKeyStr];
   const dev = devBucketOf(day, deviceKey, sharedDevices, dayKeyStr);
   day.usageSec += addedSec; dev.usageSec += addedSec;
@@ -148,7 +172,7 @@ function earnHeartbeat(rec, deviceKey, addedSec, nowMs, sharedDevices) {
 }
 function earnCheckin(rec, deviceKey, nowMs, sharedDevices) {
   const e = ensureEarn(rec, nowMs);
-  const today = shanghaiDayKey(nowMs);
+  const today = e.earnDayHigh; // PT-D1：签到落在有效赚取日，回拨日不可重复签
   if (e.checkinDay === today) return { ok: false, code: 'ALREADY_CHECKED_IN', msg: '今日已签到。' };
   const day = e.days[today];
   const dev = devBucketOf(day, deviceKey, sharedDevices, today);
@@ -168,7 +192,7 @@ function earnSpend(rec, amount, note, nowMs) {
 }
 function earnView(rec, deviceKey, nowMs, sharedDevices) {
   const e = ensureEarn(rec, nowMs);
-  const today = shanghaiDayKey(nowMs);
+  const today = e.earnDayHigh; // PT-D1：展示与签到判定同落有效赚取日
   const day = e.days[today];
   const dev = devBucketOf(day, deviceKey, sharedDevices, today);
   return {

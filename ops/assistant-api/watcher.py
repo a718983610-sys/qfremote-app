@@ -5,7 +5,11 @@
 裁定经 /assistant-api/decide 回写（由助手在处理时调用，本脚本只负责发现与落盘）。
 令牌只读 token.txt（600），从不打印。点火时以 systemd/常驻方式启动。
 """
-import json, os, subprocess, sys, time, urllib.request
+import datetime, json, os, subprocess, sys, time, urllib.request
+
+def log(msg):
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"{ts} watcher[{os.getpid()}] {msg}", file=sys.stderr, flush=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN = open(os.path.join(BASE_DIR, "token.txt")).read().strip()
@@ -21,6 +25,7 @@ def ensure_forward():
     if r.returncode != 0:
         subprocess.Popen(["ssh", "-i", SSH_KEY, "-o", f"ProxyCommand={PROXY}",
                           "-o", "StrictHostKeyChecking=accept-new", "-o", "ExitOnForwardFailure=yes",
+                          "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
                           "-N", "-L", "18080:127.0.0.1:8080", "ubuntu@54.248.9.192"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(3)
@@ -34,7 +39,12 @@ def poll(cursor):
 def main():
     cursor = 0
     if os.path.exists(STATE):
-        cursor = json.load(open(STATE)).get("cursor", 0)
+        try:
+            cursor = json.load(open(STATE)).get("cursor", 0)
+        except Exception as e:
+            log(f"cursor load failed ({e}); refusing to restart from 0, exiting for supervisor restart")
+            raise
+    log(f"started, cursor={cursor}")
     while True:
         try:
             ensure_forward()
@@ -43,9 +53,12 @@ def main():
                 with open(QUEUE, "a") as f:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
             cursor = data.get("nextCursor", cursor)
-            json.dump({"cursor": cursor}, open(STATE, "w"))
+            tmp = STATE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"cursor": cursor}, f)
+            os.replace(tmp, STATE)
         except Exception as e:
-            print(f"watcher poll error: {e}", file=sys.stderr)
+            log(f"poll error: {e}")
         time.sleep(5)
 
 if __name__ == "__main__":

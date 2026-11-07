@@ -1,4 +1,4 @@
-; QFRemote v2.3.2 hand-built NSIS installer (payload = 7z archive, extracted with Nsis7z plugin,
+; QFRemote v2.4.0 hand-built NSIS installer (payload = 7z archive, extracted with Nsis7z plugin,
 ; same mechanism electron-builder uses). Compiled on Linux with native makensis;
 ; all large inputs staged on tmpfs because this VM's disk-backed mmap faults on big files.
 Unicode true
@@ -8,20 +8,20 @@ SetCompress off
 !include "FileFunc.nsh"
 
 Name "QFRemote"
-OutFile "/dev/shm/qfr/QFRemote-Setup-v2.3.2.exe"
+OutFile "/dev/shm/qfr/QFRemote-Setup-v2.4.0.exe"
 Icon "icon.ico"
 InstallDir "$LOCALAPPDATA\Programs\QFRemote"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "InstallLocation"
 RequestExecutionLevel user
-VIProductVersion "2.3.2.0"
+VIProductVersion "2.4.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=2052 "FileDescription" "QFRemote 远程控制（控制端）"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.3.2"
-VIAddVersionKey /LANG=2052 "ProductVersion" "2.3.2"
+VIAddVersionKey /LANG=2052 "FileVersion" "2.4.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "2.4.0"
 VIAddVersionKey /LANG=1033 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=1033 "FileDescription" "QFRemote Remote Control (controller)"
-VIAddVersionKey /LANG=1033 "FileVersion" "2.3.2"
-VIAddVersionKey /LANG=1033 "ProductVersion" "2.3.2"
+VIAddVersionKey /LANG=1033 "FileVersion" "2.4.0"
+VIAddVersionKey /LANG=1033 "ProductVersion" "2.4.0"
 
 !define MUI_ICON "icon.ico"
 !define MUI_UNICON "icon.ico"
@@ -43,6 +43,11 @@ LangString WELCOME_TITLE ${LANG_ENGLISH} "Welcome to QFRemote Setup"
 LangString WELCOME_TEXT ${LANG_ENGLISH} "QFRemote is the desktop controller for the QFRemote service.$\r$\n$\r$\nClick Next to install. A QFRemote shortcut will be placed on your desktop."
 
 Function .onInit
+  ; 2.4.0 组装门实证修复：静默安装（/S，软件内更新路径）不走 GUI 初始化，
+  ; $PLUGINSDIR 不会被 MUI 建出，File /oname=$PLUGINSDIR\app.7z 将塌陷到
+  ; $INSTDIR 且 Nsis7z 对不存在路径静默不解压（装完零载荷、错误标志不置位）。
+  ; 显式 InitPluginsDir 后静默与交互两路均已实测解压落地（Wine 复刻 A/B 对照）。
+  InitPluginsDir
   !insertmacro MUI_LANGDLL_DISPLAY
 FunctionEnd
 
@@ -78,8 +83,8 @@ Section "QFRemote" SEC_MAIN
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "EstimatedSize" "$0"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 2.3.2"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "2.3.2"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 2.4.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "2.4.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayIcon" "$INSTDIR\QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "UninstallString" "$INSTDIR\Uninstall QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "Publisher" "QFRemote"

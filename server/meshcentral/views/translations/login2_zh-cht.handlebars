@@ -15,7 +15,7 @@
     <script type="text/javascript" src="scripts/common-0.0.1{{min}}.js"></script>
     <script keeplink=1 type="text/javascript" src="scripts/u2f-api{{min}}.js"></script>
     {{{customJSTags}}}
-    <title>{{{title}}} - 登录</title>
+    <title>{{{title}}} - 登錄</title>
     <style>
         #body {
             background-color: cadetblue;
@@ -71,80 +71,80 @@
                             <table style="width:100%">
                                 <tr>
                                     <td>
-                                        <input id=username title="账号" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="账号" type=text maxlength=64 name=username required onchange=validateLogin(1) onkeyup=validateLogin(1,event) />
+                                        <input id=username title="帳號" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="帳號" type=text maxlength=64 name=username required onchange=validateLogin(1) onkeyup=validateLogin(1,event) />
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <input id=password title="密码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="current-password" placeholder="密码" type=password maxlength=256 name=password required onchange=validateLogin(2) onkeyup=validateLogin(2,event) />
+                                        <input id=password title="密碼" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="current-password" placeholder="密碼" type=password maxlength=256 name=password required onchange=validateLogin(2) onkeyup=validateLogin(2,event) />
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <label style="box-sizing:border-box;width:280px;display:block;text-align:left;font-size:13px;padding:6px 2px 0 2px;cursor:pointer"><input id=qfRememberDevice name=qfrememberdevice type=checkbox style="vertical-align:-2px;margin-right:6px" />记住此设备</label>
+                                        <label style="box-sizing:border-box;width:280px;display:block;text-align:left;font-size:13px;padding:6px 2px 0 2px;cursor:pointer"><input id=qfRememberDevice name=qfrememberdevice type=checkbox style="vertical-align:-2px;margin-right:6px" />記住此設備</label>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <label style="box-sizing:border-box;width:280px;display:block;text-align:left;font-size:13px;padding:6px 2px 0 2px;cursor:pointer"><input id=qfRememberCreds type=checkbox style="vertical-align:-2px;margin-right:6px" />记住账号密码</label>
-                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:12px;line-height:1.6;padding:2px 2px 0 2px;opacity:.85">勾选后，账号和密码会保存在这台设备的浏览器里，下次打开时自动填好并自动登录。只建议在您自己的设备上勾选，公共设备请勿勾选。</div>
-                                        <div id=qfAutoHint style="display:none;box-sizing:border-box;width:280px;text-align:left;font-size:12px;line-height:1.6;padding:4px 2px 0 2px;font-weight:bold">自动登录没有成功，请检查账号和密码后重新输入。</div>
+                                        <label style="box-sizing:border-box;width:280px;display:block;text-align:left;font-size:13px;padding:6px 2px 0 2px;cursor:pointer"><input id=qfRememberCreds type=checkbox style="vertical-align:-2px;margin-right:6px" />記住帳號密碼</label>
+                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:12px;line-height:1.6;padding:2px 2px 0 2px;opacity:.85">勾選後，帳號和密碼會保存在這臺設備的瀏覽器裡，下次打開時自動填好並自動登錄。只建議在您自己的設備上勾選，公共設備請勿勾選。</div>
+                                        <div id=qfAutoHint style="display:none;box-sizing:border-box;width:280px;text-align:left;font-size:12px;line-height:1.6;padding:4px 2px 0 2px;font-weight:bold">自動登錄沒有成功，請檢查帳號和密碼後重新輸入。</div>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <div id=showPassHintLink title="密码提示" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC;display:none"><a onclick="return showPassHint(event);" href="#" style="cursor:pointer">显示密码提示</a></div>
+                                        <div id=showPassHintLink title="密碼提示" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC;display:none"><a onclick="return showPassHint(event);" href="#" style="cursor:pointer">顯示密碼提示</a></div>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <input id=loginButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" onclick="submitButtonClicked('loginpanelform')" type=button value="登录" />
+                                        <input id=loginButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" onclick="submitButtonClicked('loginpanelform')" type=button value="登錄" />
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:8px 2px 0 2px">没有账号？<a href="/register" style="cursor:pointer">注册新账号</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:8px 2px 0 2px">沒有帳號？<a href="/register" style="cursor:pointer">註冊新帳號</a></div>
                                     </td>
                                 </tr>
                                 <tr id="qfAppealStatusRow" style="display:none">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:8px 2px 0 2px">账号被冻结了？<a href="/appeal/status" style="cursor:pointer">申诉进度</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:8px 2px 0 2px">帳號被凍結了？<a href="/appeal/status" style="cursor:pointer">申訴進度</a></div>
                                     </td>
                                 </tr>
                                 <tr id="qfSupportRow" style="display:none">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:2px 2px 0 2px">需要帮助？<a href="/support" style="cursor:pointer">智能客服</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:left;font-size:13px;padding:2px 2px 0 2px">需要幫助？<a href="/support" style="cursor:pointer">智能客服</a></div>
                                     </td>
                                 </tr>
                                 <tr id="qfBuyKeyRow">
                                     <td>
-                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;background:#111;color:#fff;font-size:14px;font-weight:600;border-radius:4px;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
+                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;color:#fff;font-size:14px;font-weight:600;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">購買密鑰</a>
                                     </td>
                                 </tr>
                                 <tr id="qfQueryKeyRow">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:7px 2px 0 2px"><a href="/license/status" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">查询密钥</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:7px 2px 0 2px"><a href="/license/status" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">查詢密鑰</a></div>
                                     </td>
                                 </tr>
                                 <tr id="qfRebindRow">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:5px 2px 0 2px"><a href="/license/rebind" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">申诉换绑设备</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:5px 2px 0 2px"><a href="/license/rebind" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">申訴換綁設備</a></div>
                                     </td>
                                 </tr>
                                 <tr id="topLanguageSelectRow" style="display:none"><td id="topLanguageSelect"></td></tr>
                             </table>
                             <div id="hrAccountDiv" style="display:none"><hr /></div>
                             <div id="resetAccountDiv" style="display:none;padding:2px">
-                                <span id="resetAccountSpan">忘记账号或密码？</span> <a onclick="return xgo(3,event);" href="#" style=cursor:pointer>重置账号</a>.
+                                <span id="resetAccountSpan">忘記帳號或密碼？</span> <a onclick="return xgo(3,event);" href="#" style=cursor:pointer>重置帳號</a>.
                             </div>
                             <div id="newAccountDiv" style="display:none;padding:2px;padding-top:10px">
-                                没有账号？ <a onclick="return xgo(2,event);" href="#" style=cursor:pointer>创建一个</a>.
+                                沒有帳號？ <a onclick="return xgo(2,event);" href="#" style=cursor:pointer>創建一個</a>.
                             </div>
                         </div>
                         <input id=loginformargs name="urlargs" type="hidden" value="" />
                         <div id="authStrategies" style="display:none">
                             <hr id="loginuserpasshr" style="display:none" />
-                            <div style="margin-bottom:8px">使用已有账号登录</div>
+                            <div style="margin-bottom:8px">使用已有帳號登錄</div>
                             <a id="auth-twitter" href="auth-twitter" style="display:none"><img src="images/login/twitter32.png" srcset="images/login/twitter64.png 2x" width="32" height="32" style="margin-left:3px;margin-right:3px;border-radius:3px;box-shadow:2px 2px 5px black;cursor:pointer" title="Sign-in using Twitter" /></a>
                             <a id="auth-google" href="auth-google" style="display:none"><img src="images/login/google32.png" srcset="images/login/google64.png 2x" width="32" height="32" style="margin-left:3px;margin-right:3px;border-radius:3px;box-shadow:2px 2px 5px black;cursor:pointer" title="Sign-in using Google" /></a>
                             <a id="auth-github" href="auth-github" style="display:none"><img src="images/login/github32.png" srcset="images/login/github64.png 2x" width="32" height="32" style="margin-left:3px;margin-right:3px;border-radius:3px;box-shadow:2px 2px 5px black;cursor:pointer" title="Sign-in using GitHub" /></a>
@@ -163,50 +163,50 @@
                         <input type=hidden name=action value=createaccount />
                         <div id=message2></div>
                         <div>
-                            <b>创建账号</b>
+                            <b>創建帳號</b>
                         </div>
                         <div id="passwordPolicyCallout" style="display:none"></div>
                         <table>
                             <tr id="nuUserRow">
-                                <td id="nuUser" align=right width=100>账号：</td>
+                                <td id="nuUser" align=right width=100>帳號：</td>
                                 <td><input id=ausername type=text {{{autocomplete}}}="username" name=username onchange=validateCreate(1) maxlength=64 onkeydown=haltReturn(event) onkeyup=validateCreate(1,event) /></td>
                             </tr>
                             <tr>
-                                <td id="nuEmail" align=right width=100>邮箱：</td>
+                                <td id="nuEmail" align=right width=100>郵箱：</td>
                                 <td><input id=aemail type=text {{{autocomplete}}}="email" inputmode="email" name=email onchange=validateCreate(2) maxlength=256 onkeydown=haltReturn(event) onkeyup=validateCreate(2,event) /></td>
                             </tr>
                             <tr>
-                                <td id="nuPass1" align=right>密码：</td>
+                                <td id="nuPass1" align=right>密碼：</td>
                                 <td><input id=apassword1 type=password name=password1 {{{autocomplete}}}="new-password" maxlength=256 onkeydown=haltReturn(event) onchange=validateCreate(3,event) onkeyup=validateCreate(3,event) /></td>
                             </tr>
                             <tr>
-                                <td id="nuPass2" align=right>密码：</td>
+                                <td id="nuPass2" align=right>密碼：</td>
                                 <td><input id=apassword2 type=password name=password2 {{{autocomplete}}}="new-password" maxlength=256 onkeydown=haltReturn(event) onchange=validateCreate(4,event) onkeyup=validateCreate(4,event) /></td>
                             </tr>
                             <tr id="createPanelHint" style="display:none">
-                                <td id="nuHint" align=right>密码提示：</td>
+                                <td id="nuHint" align=right>密碼提示：</td>
                                 <td><input id=apasswordhint type=text name=apasswordhint {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validateCreate(5,event) onkeyup=validateCreate(5,event) /></td>
                             </tr>
-                            <tr id=newAccountPass title="请输入创建口令">
-                                <td id="nuToken" align=right>创建口令：</td>
+                            <tr id=newAccountPass title="請輸入創建口令">
+                                <td id="nuToken" align=right>創建口令：</td>
                                 <td><input id=anewaccountpass type=password name=anewaccountpass {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validateCreate(6,event) onkeyup=validateCreate(6,event) /></td>
                             </tr>
-                            <tr id=newAccountCaptchaImg title="验证码图片">
+                            <tr id=newAccountCaptchaImg title="驗證碼圖片">
                                 <td></td>
                                 <td colspan=2><img src="{{{newAccountCaptchaImage}}}" /></td>
                             </tr>
-                            <tr id=newAccountCaptcha title="安全验证">
-                                <td id="nuCaptcha" align=right>安全验证：</td>
+                            <tr id=newAccountCaptcha title="安全驗證">
+                                <td id="nuCaptcha" align=right>安全驗證：</td>
                                 <td><input id=anewaccountcaptcha type=text name=anewaccountcaptcha {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validateCreate(7,event) onkeyup=validateCreate(7,event) /></td>
                             </tr>
                             <tr>
                                 <td colspan=2>
-                                    <div style=float:right><input id=createButton type="button" onclick="submitButtonClicked('createpanelform')" value="创建账号" disabled="disabled" /></div>
+                                    <div style=float:right><input id=createButton type="button" onclick="submitButtonClicked('createpanelform')" value="創建帳號" disabled="disabled" /></div>
                                     <div id=passWarning style="padding-top:6px"></div>
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=createformargs name="urlargs" type="hidden" value="" />
                         <input id=createformcaptcha name="captchaargs" type="hidden" value="{{{newAccountCaptcha}}}" />
                     </form>
@@ -216,21 +216,21 @@
                         <input type=hidden name=action value=resetaccount />
                         <div id=message3></div>
                         <div>
-                            <b>重置账号</b>
+                            <b>重置帳號</b>
                         </div>
                         <table style="width:100%;margin-top:4px;margin-bottom:4px">
                             <tr>
                                 <td>
-                                    <input id=remail title="邮箱" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="邮箱" type=text maxlength=256 name=email onchange=validateReset() onkeyup=validateReset(event) />
+                                    <input id=remail title="郵箱" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="郵箱" type=text maxlength=256 name=email onchange=validateReset() onkeyup=validateReset(event) />
                                 </td>
                             </tr>
                             <tr>
                                 <td>
-                                    <input id=eresetButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('resetpanelform')" value="重置账号" disabled="disabled" />
+                                    <input id=eresetButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('resetpanelform')" value="重置帳號" disabled="disabled" />
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=resetformargs name="urlargs" type="hidden" value="" />
                     </form>
                 </div>
@@ -242,14 +242,14 @@
                         <table style="width:100%">
                             <tr>
                                 <td>
-                                    <input id=tokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="验证码" type=text maxlength=50 name=token onchange=checkToken(event) onpaste=checkToken(event) onkeyup=checkToken(event) onkeydown=checkToken(event) /><br />
+                                    <input id=tokenInput {{{autocomplete}}}="one-time-code" title="驗證碼" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="驗證碼" type=text maxlength=50 name=token onchange=checkToken(event) onpaste=checkToken(event) onkeyup=checkToken(event) onkeydown=checkToken(event) /><br />
                                     <input id=hwtokenInput type=text name=hwtoken style="display:none" />
                                 </td>
                             </tr>
                             <tr>
                                 <td>
                                     <div>
-                                        <input id=tokenOkButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('tokenpanelform')" value="登录" disabled="disabled" />
+                                        <input id=tokenOkButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('tokenpanelform')" value="登錄" disabled="disabled" />
                                     </div>
                                 </td>
                             </tr>
@@ -272,7 +272,7 @@
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=tokenformargs name="urlargs" type="hidden" value="" />
                     </form>
                 </div>
@@ -283,14 +283,14 @@
                         <table style="width:100%">
                             <tr>
                                 <td>
-                                    <input id=resetTokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="验证码" type=text maxlength=50 name=token onchange=resetCheckToken(event) onpaste=resetCheckToken(event) onkeyup=resetCheckToken(event) onkeydown=resetCheckToken(event) /><br />
+                                    <input id=resetTokenInput {{{autocomplete}}}="one-time-code" title="驗證碼" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="驗證碼" type=text maxlength=50 name=token onchange=resetCheckToken(event) onpaste=resetCheckToken(event) onkeyup=resetCheckToken(event) onkeydown=resetCheckToken(event) /><br />
                                     <input id=resetHwtokenInput type=text name=hwtoken style="display:none" />
                                 </td>
                             </tr>
                             <tr>
                                 <td>
                                     <div>
-                                        <input id=resetTokenOkButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('resettokenpanelform')" value="登录" disabled="disabled" />
+                                        <input id=resetTokenOkButton style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:6px" type="button" onclick="submitButtonClicked('resettokenpanelform')" value="登錄" disabled="disabled" />
                                     </div>
                                 </td>
                             </tr>
@@ -308,7 +308,7 @@
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=resettokenformargs name="urlargs" type="hidden" value="" />
                     </form>
                 </div>
@@ -319,25 +319,25 @@
                         <div id="rpasswordPolicyCallout" style="display:none"></div>
                         <table>
                             <tr>
-                                <td id="rnuPass1" width=100 align=right>密码：</td>
+                                <td id="rnuPass1" width=100 align=right>密碼：</td>
                                 <td><input id=rapassword1 type=password name=rpassword1 {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validatePassReset(3,event) onkeyup=validatePassReset(3,event) /></td>
                             </tr>
                             <tr>
-                                <td id="rnuPass2" align=right>密码：</td>
+                                <td id="rnuPass2" align=right>密碼：</td>
                                 <td><input id=rapassword2 type=password name=rpassword2 {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validatePassReset(4,event) onkeyup=validatePassReset(4,event) /></td>
                             </tr>
                             <tr id="resetpasswordpanelHint" style="display:none">
-                                <td id="rnuHint" align=right>密码提示：</td>
+                                <td id="rnuHint" align=right>密碼提示：</td>
                                 <td><input id=rapasswordhint type=text name=rpasswordhint {{{autocomplete}}}=off maxlength=256 onkeydown=haltReturn(event) onchange=validatePassReset(5,event) onkeyup=validatePassReset(5,event) /></td>
                             </tr>
                             <tr>
                                 <td colspan=2>
-                                    <div style=float:right><input id=resetPassButton type="button" onclick="submitButtonClicked('resetpasswordpanelform')" value="重置密码" disabled="disabled" /></div>
+                                    <div style=float:right><input id=resetPassButton type="button" onclick="submitButtonClicked('resetpasswordpanelform')" value="重置密碼" disabled="disabled" /></div>
                                     <div id=rpassWarning style="padding-top:6px"></div>
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=resetpasswordformargs name="urlargs" type="hidden" value="" />
                     </form>
                 </div>
@@ -354,15 +354,15 @@
                             <tr>
                                 <td>
                                     <div>
-                                        <input id=changeEmailButton type=button value="更换邮箱" onclick="changeEmailAddress()" />
-                                        <input id=checkEmailButton2 type=button value="重新发送确认邮件" onclick="resentEmailConfirmation()" />
+                                        <input id=changeEmailButton type=button value="更換郵箱" onclick="changeEmailAddress()" />
+                                        <input id=checkEmailButton2 type=button value="重新發送確認郵件" onclick="resentEmailConfirmation()" />
                                         <input id=checkEmailButton type="button" onclick="submitButtonClicked('checkemailpanelform')" style="display:none" />
                                         <input id=checkEmailVal name=email type="hidden" value="" />
                                     </div>
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=checkemailformargs name="urlargs" type="hidden" value="" />
                     </form>
                 </div>
@@ -382,7 +382,7 @@
                                 </td>
                             </tr>
                         </table>
-                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登录</a>
+                        <hr /><a onclick="return xgo(1,event);" href="#" style=cursor:pointer>返回登錄</a>
                         <input id=pushtokenformargs name="urlargs" type="hidden" value="" />
                         <input id=pushtokenInput name="hwstate" type="hidden" value="" />
                         <input id=pushOkButton onclick="submitButtonClicked('waitpushpanelform')" style="display:none" />
@@ -395,7 +395,7 @@
         <tr style="height:20px">
             <td>
                 <div>
-                    <div id="flink" style="float:right;margin-right:4px;color:#c8c8c8">{{{rootCertLink}}}&nbsp;<a href=terms>条款与隐私</a></div>
+                    <div id="flink" style="float:right;margin-right:4px;color:#c8c8c8">{{{rootCertLink}}}&nbsp;<a href=terms>條款與隱私</a></div>
                     <div id="flink" style="margin-left:4px;color:#c8c8c8">{{{footer}}}</div>
                 </div>
             </td>
@@ -417,7 +417,7 @@
         </div>
         <div id="idx_dlgButtonBar" style="">
             <input id="idx_dlgCancelButton" type="button" value="取消" style="" onclick="dialogclose(0)">
-            <input id="idx_dlgOkButton" type="button" value="确定" style="" onclick="dialogclose(1)">
+            <input id="idx_dlgOkButton" type="button" value="確定" style="" onclick="dialogclose(1)">
         </div>
     </div>
     <script>
@@ -472,8 +472,8 @@
             // Display the right server message
             var i;
             var messageid = parseInt('{{{messageid}}}');
-            var okmessages = ['', "如账号有效，重置邮件已发送。", "邮件已发送。", "需要验证邮箱，请查收邮件并点击确认链接。", "短信已发送。", "正在发送通知…", "消息已发送。"];
-            var failmessages = ["无法创建账号。", "账号数量已达上限。", "该邮箱已被注册。", "创建口令不正确，请检查后重试。", "该账号名已被使用。", "密码不符合要求，请换一个重试。", "邮箱格式不正确，请检查后重试。", "账号不存在，请检查后重试。", "验证码不正确，请检查后重试。", "邮件发送失败，请稍后再试。", "账号已被锁定，请联系站长。", "访问被拒绝。", "登录失败，请检查账号和密码后重试。", "已申请修改密码。", "本 IP 已被暂时限制，请稍后再试。", "服务器维护中，请稍后再试。", "设备通知发送失败，请稍后再试。", "安全验证未通过，请检查后重试。"];
+            var okmessages = ['', "如帳號有效，重置郵件已發送。", "郵件已發送。", "需要驗證郵箱，請查收郵件並點擊確認鏈接。", "短信已發送。", "正在發送通知…", "消息已發送。"];
+            var failmessages = ["無法創建帳號。", "帳號數量已達上限。", "該郵箱已被註冊。", "創建口令不正確，請檢查後重試。", "該帳號名已被使用。", "密碼不符合要求，請更換後重試。", "郵箱格式不正確，請檢查後重試。", "帳號不存在，請檢查後重試。", "驗證碼不正確，請檢查後重試。", "郵件發送失敗，請稍後再試。", "帳號已被鎖定，請聯繫站長。", "訪問被拒絕。", "登錄失敗，請檢查帳號和密碼後重試。", "已申請修改密碼。", "本 IP 已被暫時限制，請稍後再試。", "服務器維護中，請稍後再試。", "設備通知發送失敗，請稍後再試。", "安全驗證未通過，請檢查後重試。"];
             if (messageid > 0) {
                 var msg = '';
                 if ((messageid < 100) && (messageid < okmessages.length)) { msg = okmessages[messageid]; }
@@ -504,7 +504,7 @@
             // Show Language Select Box if needed
             if (showLanguageSelect === 'top' || showLanguageSelect === 'bottom') {
                 var x = '<select id=d2langselect style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px" onChange="changeLanguage()">';
-                x += '<option value="*">' + "使用浏览器语言" + '</option>';
+                x += '<option value="*">' + "使用瀏覽器語言" + '</option>';
                 for (var i in serverLangs) {
                     var lang = serverLangs[i];
                     x += '<option value="' + lang + '"' + ((urlargs.lang == lang)?' selected':'') + '>' + lang + ' - ' + (loclist[lang]?loclist[lang]:loclistex[lang]) + '</option>';
@@ -524,9 +524,9 @@
             // Setup two factor cookie time
             if (twoFactorCookieDays > 0) {
                 QV('tokenInputRememberLabel', true);
-                QH('tokenInputRememberSpan', format("在本设备上记住 {0} 天。", twoFactorCookieDays));
+                QH('tokenInputRememberSpan', format("在本設備上記住 {0} 天。", twoFactorCookieDays));
                 QV('tokenInputRememberLabel2', true);
-                QH('tokenInputRememberSpan2', format("在本设备上记住 {0} 天。", twoFactorCookieDays));
+                QH('tokenInputRememberSpan2', format("在本設備上記住 {0} 天。", twoFactorCookieDays));
             } else {
                 QV('tokenInputRememberLabel', false);
                 QV('tokenInputRememberLabel2', false);
@@ -553,8 +553,8 @@
             }
 
             if (features & 0x200000) { // Email is username
-                Q('username').placeholder = "邮箱";
-                QH('resetAccountSpan', "忘记密码？");
+                Q('username').placeholder = "郵箱";
+                QH('resetAccountSpan', "忘記密碼？");
                 QV('nuUserRow', false);
             }
 
@@ -645,29 +645,29 @@
                     try { r = JSON.parse(e.data); } catch (ex) { }
                     if (r.sent === true) {
                         // Request was sent
-                        QH('message8', '<span class="msg success"><b>' + format("请求已发送，{0}。", r.code) + '</b></span><br /><br />');
+                        QH('message8', '<span class="msg success"><b>' + format("請求已發送，{0}。", r.code) + '</b></span><br /><br />');
                     } else if (r.sent === false) {
                         // Request failed to send
-                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "请求发送失败。" + '<b></span><br /><br />');
+                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "請求發送失敗。" + '<b></span><br /><br />');
                         QV('tokenInputRememberLabel2', false);
                         this.close();
                     } else if (r.approved === true) {
                         // Request approved
                         this.close();
                         QV('tokenInputRememberLabel2', false);
-                        QH('message8', '<span class="msg success"><b>' + "请求已接受。" + '</b></span><br /><br />');
+                        QH('message8', '<span class="msg success"><b>' + "請求已接受。" + '</b></span><br /><br />');
                         Q('pushtokenInput').value = r.token;
                         Q('pushOkButton').click();
                     } else {
                         // Request rejected
-                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "请求被拒绝。" + '<b></span><br /><br />');
+                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "請求被拒絕。" + '<b></span><br /><br />');
                         QV('tokenInputRememberLabel2', false);
                         this.close();
                     }
                 }
                 websocket.onclose = function (e) { QS('waitpushpanelimage')['opacity'] = '0.3'; }
                 websocket.onerror = function (e) {
-                    QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "连接出错，请检查后重试。" + '<b></span><br /><br />');
+                    QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "連接出錯，請檢查後重試。" + '<b></span><br /><br />');
                     QS('waitpushpanelimage')['opacity'] = '0.5';
                 }
             }
@@ -720,7 +720,7 @@
 
         function useEmailToken(panelAction) {
             if (otpemail != true) return;
-            setDialogMode(1, "安全登录", 3, useEmailKeyEx, "将验证码发送到登记的邮箱？", panelAction);
+            setDialogMode(1, "安全登錄", 3, useEmailKeyEx, "將驗證碼發送到登記的郵箱？", panelAction);
         }
 
         function useEmailKeyEx(b, panelAction) {
@@ -737,7 +737,7 @@
 
         function useSMSToken(panelAction) {
             if (otpsms != true) return;
-            setDialogMode(1, "安全登录", 3, useSMSTokenEx, "将验证码发送到登记的手机号？", panelAction);
+            setDialogMode(1, "安全登錄", 3, useSMSTokenEx, "將驗證碼發送到登記的手機號？", panelAction);
         }
 
         function useSMSTokenEx(b, panelAction) {
@@ -754,7 +754,7 @@
 
         function useMsgToken(panelAction) {
             if (otpmsg != true) return;
-            setDialogMode(1, "安全登录", 3, useMsgTokenEx, "将验证码发送到消息应用？", panelAction);
+            setDialogMode(1, "安全登錄", 3, useMsgTokenEx, "將驗證碼發送到消息應用？", panelAction);
         }
 
         function useMsgTokenEx(b, panelAction) {
@@ -794,7 +794,7 @@
         }
 
         function showPassHint(e) {
-            messagebox("密码提示", passhint);
+            messagebox("密碼提示", passhint);
             haltEvent(e);
             return false;
         }
@@ -878,9 +878,9 @@
                 if (!passRequirementsEx) {
                     // No password requirements, display password strength
                     var passStrength = checkPasswordStrength(Q('apassword1').value);
-                    if (passStrength >= 80) { QH('passWarning', '<span style=color:green><b>' + "密码强度：强" + '</b><span>'); }
-                    else if (passStrength >= 60) { QH('passWarning', '<span style=color:blue><b>' + "密码强度：良好" + '</b><span>'); }
-                    else { QH('passWarning', '<span style=color:red><b>' + "密码强度：弱" + '</b><span>'); }
+                    if (passStrength >= 80) { QH('passWarning', '<span style=color:green><b>' + "密碼強度：強" + '</b><span>'); }
+                    else if (passStrength >= 60) { QH('passWarning', '<span style=color:blue><b>' + "密碼強度：良好" + '</b><span>'); }
+                    else { QH('passWarning', '<span style=color:red><b>' + "密碼強度：弱" + '</b><span>'); }
                 } else {
                     // Password requirements provided, use that
                     var passReq = checkPasswordRequirements(Q('apassword1').value, passRequirements);
@@ -888,7 +888,7 @@
                         ok = false;
                         QS('nuPass1').color = '#7b241c';
                         QS('nuPass2').color = '#7b241c';
-                        QH('passWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
+                        QH('passWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密碼規則" + '</b><div>'); // This is also a link to the password policy
                         QV('passwordPolicyCallout', true);
                         QH('passwordPolicyCallout', passwordPolicyText(Q('apassword1').value));
                     } else {
@@ -927,9 +927,9 @@
                 if (!passRequirementsEx) {
                     // No password requirements, display password strength
                     var passStrength = checkPasswordStrength(Q('rapassword1').value);
-                    if (passStrength >= 80) { QH('rpassWarning', '<span style=color:green><b>' + "密码强度：强" + '</b><span>'); }
-                    else if (passStrength >= 60) { QH('rpassWarning', '<span style=color:blue><b>' + "密码强度：良好" + '</b><span>'); }
-                    else { QH('rpassWarning', '<span style=color:red><b>' + "密码强度：弱" + '</b><span>'); }
+                    if (passStrength >= 80) { QH('rpassWarning', '<span style=color:green><b>' + "密碼強度：強" + '</b><span>'); }
+                    else if (passStrength >= 60) { QH('rpassWarning', '<span style=color:blue><b>' + "密碼強度：良好" + '</b><span>'); }
+                    else { QH('rpassWarning', '<span style=color:red><b>' + "密碼強度：弱" + '</b><span>'); }
                 } else {
                     // Password requirements provided, use that
                     var passReq = checkPasswordRequirements(Q('rapassword1').value, passRequirements);
@@ -937,7 +937,7 @@
                         ok = false;
                         QS('rnuPass1').color = '#7b241c';
                         QS('rnuPass2').color = '#7b241c';
-                        QH('rpassWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
+                        QH('rpassWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密碼規則" + '</b><div>'); // This is also a link to the password policy
                         QV('rpasswordPolicyCallout', true);
                         QH('rpasswordPolicyCallout', passwordPolicyText(Q('rapassword1').value));
                     } else {
@@ -959,18 +959,18 @@
         function passwordPolicyText(pass) {
             var policy = '<div style=text-align:left>';
             var counts = strCount(pass);
-            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("Minimum length of {0}", passRequirements.min) + '<br />'; }
-            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("Maximum length of {0}", passRequirements.max) + '<br />'; }
-            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("{0} upper case", passRequirements.upper) + '<br />'; }
-            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("{0} lower case", passRequirements.lower) + '<br />'; }
-            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("{0} numeric", passRequirements.numeric) + '<br />'; }
-            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("{0} non-alphanumeric", passRequirements.nonalpha) + '<br />'; }
+            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("至少 {0} 個字符", passRequirements.min) + '<br />'; }
+            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("最多 {0} 個字符", passRequirements.max) + '<br />'; }
+            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("至少 {0} 個大寫字母", passRequirements.upper) + '<br />'; }
+            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("至少 {0} 個小寫字母", passRequirements.lower) + '<br />'; }
+            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("至少 {0} 個數字", passRequirements.numeric) + '<br />'; }
+            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("至少 {0} 個符號（非字母數字字符）", passRequirements.nonalpha) + '<br />'; }
             policy += '</div>';
             return policy;
         }
 
         function showPasswordPolicy() {
-            messagebox("密码规则", passwordPolicyText());
+            messagebox("密碼規則", passwordPolicyText());
         }
 
         function validateReset(e) {
@@ -1038,7 +1038,7 @@
         function changeEmailAddress() {
             var email = Q('unconfirmedEmail').innerHTML;
             var x = addHtmlValue("Email", '<input id=dp1email style=width:230px maxlength=256 value="' + email + '" {{{autocomplete}}}=off onchange=validateEmailAddress() onkeyup=validateEmailAddress() />');
-            setDialogMode(1, "邮箱确认", 3, changeEmailAddressEx, x);
+            setDialogMode(1, "郵箱確認", 3, changeEmailAddressEx, x);
             validateEmailAddress();
         }
 
@@ -1108,11 +1108,11 @@
 
     </script>
     <script>
-        // QFRemote 登录通道（网页通道内）：全部登录提交改走自家登录通道（/qf-login），
-        // 通道负责「记住此设备」保鲜 + 登录冻结计数/申诉拦截；勾选「记住此设备」时
-        // 通道给会话 cookie 加 30 天有效期并留下标记，后续流量由通道保鲜；
-        // 不勾选提交时先清掉旧标记（会话级登录，关浏览器即失效）。
-        // 直连 8443（软件壳内）时不改道，维持 MeshCentral 原生提交。
+        // QFRemote 登錄通道（網頁通道內）：全部登錄提交改走自家登錄通道（/qf-login），
+        // 通道負責「記住此設備」保鮮 + 登錄凍結計數/申訴攔截；勾選「記住此設備」時
+        // 通道給會話 cookie 加 30 天有效期並留下標記，後續流量由通道保鮮；
+        // 不勾選提交時先清掉舊標記（會話級登錄，關瀏覽器即失效）。
+        // 直連 8443（軟件殼內）時不改道，維持 MeshCentral 原生提交。
         (function () {
             var viaShim = location.port !== '8443';
             function qfSetRoute() {
@@ -1139,19 +1139,19 @@
                 var btn = document.getElementById('loginButton');
                 if (btn) btn.addEventListener('pointerdown', qfApplyRemember);
             });
-            // 捕获阶段兜底：鼠标、回车、脚本触发的点击都会在提交前先同步一次
+            // 捕獲階段兜底：鼠標、回車、腳本觸發的點擊都會在提交前先同步一次
             document.addEventListener('click', function (e) {
                 if (e.target && e.target.id === 'loginButton') { qfApplyRemember(); qfHandleCredsOnLogin(); }
             }, true);
 
-            // ===== 2.3.0「记住账号密码」＋会话失效自动恢复（网页端） =====
-            // 保存方式：账号明文只记在本机浏览器的 localStorage（账号本身不是
-            // 秘密）；密码不经本站页面代码落任何本地存储，而是交给浏览器自带
-            // 的密码管理器保存（PasswordCredential），下次由浏览器回填/取回。
-            // 浏览器不支持密码管理器接口时，只记账号，密码靠「记住此设备」
-            // 的 30 天会话恢复，不另存密码。
-            // 手动退出时控制台注入脚本会清掉这里的保存并打标记（qfJustLoggedOut），
-            // 本页见到标记先清凭据、本次不自动恢复；取消勾选后再登录也清。
+            // ===== 2.3.0「記住帳號密碼」＋會話失效自動恢復（網頁端） =====
+            // 保存方式：帳號明文只記在本機瀏覽器的 localStorage（帳號本身不是
+            // 秘密）；密碼不經本站頁面代碼落任何本地存儲，而是交給瀏覽器自帶
+            // 的密碼管理器保存（PasswordCredential），下次由瀏覽器回填/取回。
+            // 瀏覽器不支持密碼管理器接口時，只記帳號，密碼靠「記住此設備」
+            // 的 30 天會話恢復，不另存密碼。
+            // 手動退出時控制檯注入腳本會清掉這裡的保存並打標記（qfJustLoggedOut），
+            // 本頁見到標記先清憑據、本次不自動恢復；取消勾選後再登錄也清。
             var QF_CRED_USER = 'qfCredUser', QF_CRED_ON = 'qfCredOn', QF_TRIED = 'qfAutoTried', QF_CRED_PASS = 'qfCredPass';
             function qfLs(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return null; } }
             function qfSs(k, v) { try { if (v === undefined) return sessionStorage.getItem(k); if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) { return null; } }
@@ -1173,24 +1173,22 @@
                 var c = qfCredApi();
                 if (c && pw) {
                     try { var r = c.store(new PasswordCredential({ id: u, password: pw, name: u })); if (r && r.catch) r.catch(function () {}); } catch (e) {}
-                    qfLs(QF_CRED_PASS, null); // 有密码管理器时不留本地密码副本
-                } else if (!c && pw) {
-                    // Safari 等不支持 PasswordCredential 的浏览器：与新控制台（SPA）#39 同口径，
-                    // 密码只存本机浏览器 localStorage，下次回填并自动登录。
-                    qfLs(QF_CRED_PASS, pw);
                 }
+                // 不支持密碼管理器接口時只記帳號、不另存密碼（見上方保存方式）；
+                // 舊版曾寫入的本地密碼副本一律清除、永不再用。
+                qfLs(QF_CRED_PASS, null);
             }
             function qfAutoRestore() {
+                // 舊版本地密碼副本見值即清、永不使用（2026-10-29 審計 J-4 定案）。
+                qfLs(QF_CRED_PASS, null);
                 if (qfSs('qfJustLoggedOut') === '1') {
                     qfSs('qfJustLoggedOut', null);
-                    // 与新控制台口径对齐：手动退出只结束会话，不清已保存的账密；
-                    // 本次只回填、不自动提交，用户点「登录」即进。
+                    // 與新控制檯口徑對齊：手動退出只結束會話，不清已保存的賬密；
+                    // 本次只回填、不自動提交，用戶點「登錄」即進。
                     if (qfLs(QF_CRED_ON) === '1') {
                         var b2 = document.getElementById('qfRememberCreds'); if (b2) b2.checked = true;
                         var u2 = document.getElementById('username'); var su = qfLs(QF_CRED_USER);
                         if (u2 && su && !u2.value) u2.value = su;
-                        var p2 = document.getElementById('password'); var sp0 = qfLs(QF_CRED_PASS);
-                        if (p2 && sp0 && !p2.value) { p2.value = sp0; if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} } }
                     }
                     return;
                 }
@@ -1200,7 +1198,8 @@
                 var uEl = document.getElementById('username');
                 var savedUser = qfLs(QF_CRED_USER);
                 if (uEl && savedUser && !uEl.value) uEl.value = savedUser;
-                // 上一轮自动登录失败会带着错误提示回到本页：给一句话说明，不再重试防死循环
+                // 上一輪自動登錄已嘗試過（QF_TRIED=1）：無論 #message1 是否有文字都停手；
+                // #message1 有文字只額外顯示提示行，絕不再重試，防死循環。
                 var msg = document.getElementById('message1');
                 if (qfSs(QF_TRIED) === '1') {
                     if (msg && msg.textContent) { var h = document.getElementById('qfAutoHint'); if (h) h.style.display = 'block'; }
@@ -1208,16 +1207,8 @@
                 }
                 var c = qfCredApi();
                 if (!c || !c.get) {
-                    // 无密码管理器接口（Safari）：用本地保存的密码回填并自动登录
-                    var sp2 = qfLs(QF_CRED_PASS);
-                    var pEl2 = document.getElementById('password');
-                    var btn2 = document.getElementById('loginButton');
-                    if (sp2 && uEl && pEl2 && btn2 && uEl.value) {
-                        pEl2.value = sp2;
-                        if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} }
-                        qfSs(QF_TRIED, '1');
-                        btn2.click();
-                    }
+                    // 無密碼管理器接口（Safari 等）：不回填密碼、不自動登錄；
+                    // 恢復只靠「記住此設備」的 30 天會話，密碼由用戶手動輸入。
                     return;
                 }
                 try {
@@ -1236,7 +1227,7 @@
                 } catch (e) {}
             }
             window.addEventListener('load', function () { setTimeout(qfAutoRestore, 400); });
-            // 用户手动改动账号/密码后，允许下一次再自动恢复一次
+            // 用戶手動改動帳號/密碼後，允許下一次再自動恢復一次
             document.addEventListener('input', function (e) {
                 if (e.isTrusted && e.target && (e.target.id === 'username' || e.target.id === 'password')) qfSs(QF_TRIED, null);
             }, true);

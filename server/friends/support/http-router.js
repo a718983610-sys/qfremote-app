@@ -39,9 +39,16 @@ function createSupportRouter(deps) {
     });
   }
   function clientIp(req) {
-    const xff = req.headers['x-forwarded-for'];
-    if (xff) return String(xff).split(',')[0].trim();
-    return String(req.socket.remoteAddress || '');
+    // F-5（发版前全量审 P3）：原实现无条件信任 XFF，8445 直连者可伪造来源绕限速。
+    // 改与 forum 同口径并按 DS 门一口径收紧：仅回环直连（本机 nginx 转发）才信 XFF。
+    const stripV4Mapped = (s) => String(s || '').replace(/^::ffff:/, '');
+    const remote = stripV4Mapped(req.socket && req.socket.remoteAddress);
+    if (remote === '127.0.0.1' || remote === '::1') {
+      let xff = req.headers['x-forwarded-for'];
+      if (Array.isArray(xff)) xff = xff[0];
+      if (xff) return stripV4Mapped(String(xff).split(',')[0].trim());
+    }
+    return remote;
   }
   function sessionToken(req, body) {
     if (body && body.session) return String(body.session);

@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>QFRemote 控制台</title>
-<link rel="stylesheet" href="app.css?v=20261026-37">
+<link rel="stylesheet" href="app.css?v=20261030-240">
+<link rel="stylesheet" href="session.css?v=20261030-240">
 <link rel="icon" type="image/x-icon" href="favicon.ico?v=20261026-34">
 </head>
 <body>
@@ -40,6 +41,21 @@
   <div id="toasts" role="status"></div>
   <div id="modalRoot"></div>
 
-<script src="app.js?v=20261028-42"></script>
+  <!-- 启动兜底（W4-2）：app.js 加载或执行失败时不白页；显根后自动隐藏，10 秒未显根换失败文案 -->
+  <div id="bootFail" style="font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#5D6E84;text-align:center;padding:48px 16px;font-size:14px;line-height:1.7"><span id="bootMsg">正在加载控制台，请稍候…</span></div>
+  <noscript><div style="font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#5D6E84;text-align:center;padding:0 16px 32px;font-size:14px">本站需要启用 JavaScript 才能使用，请开启后刷新页面。</div></noscript>
+  <script>
+  (function(){
+    var b=document.getElementById('bootFail'), m=document.getElementById('bootMsg'), n=0;
+    var t=setInterval(function(){
+      var a=document.getElementById('authRoot'), s=document.getElementById('shellRoot');
+      if((a&&!a.hidden)||(s&&!s.hidden)){ b.style.display='none'; clearInterval(t); return; }
+      n++;
+      if(n===20&&m){ m.innerHTML='页面未能加载，可能是网络异常或浏览器版本过低。<br><a href="./" style="color:#2470E0">点此刷新重试</a>'; }
+    },500);
+  })();
+  </script>
+
+<script src="app.js?v=20261030-240"></script>
 </body>
 </html>

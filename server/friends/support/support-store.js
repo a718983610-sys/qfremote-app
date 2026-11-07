@@ -9,8 +9,28 @@ const path = require('path');
 
 function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch (e) {} }
 function readJson(file, fallback) {
-  try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return v == null ? fallback : v; }
-  catch (e) { return fallback; }
+  // F-2（发版前全量审 P3）：原实现解析失败静默回退空数据，下一次 save 即覆盖
+  // 损坏原件、无痕灭失。改与 events-core 隔离口径对齐并按 DS 门一收紧：
+  // ENOENT（首跑无文件）才静默回退；解析失败先改名隔离 .corrupt-* 留痕再回退；
+  // 非 ENOENT 读错误与隔离改名失败一律抛错硬停，禁止以空数据启动后写回覆盖。
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (e) {
+    if (e && e.code === 'ENOENT') return fallback;
+    console.error(JSON.stringify({ ev: 'support-store-load-error', file, err: String((e && e.message) || e) }));
+    throw e;
+  }
+  try { const v = JSON.parse(raw); return v == null ? fallback : v; }
+  catch (e) {
+    const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    try { fs.renameSync(file, corrupt); }
+    catch (renameErr) {
+      console.error(JSON.stringify({ ev: 'support-store-isolate-failed', file, err: String((renameErr && renameErr.message) || renameErr) }));
+      throw renameErr;
+    }
+    console.error(JSON.stringify({ ev: 'support-store-corrupt-isolated', file, corrupt }));
+    return fallback;
+  }
 }
 function writeJson(file, obj) {
   const tmp = file + '.tmp';

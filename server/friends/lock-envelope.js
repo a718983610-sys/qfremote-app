@@ -149,13 +149,15 @@ function parseVer(s) {
 }
 
 // 与组件 Go 侧 AllowedUpdateURL 同规则（桥侧预检，组件端还会再验一次）：
-// 本站登记的服务器就是 54.248.9.192:8443，Go 侧两条规则（直连来源任意
-// 路径 / 登记地址 + /dl/ 前缀）在此合并为一条：https + 该主机端口。
+// 本站登记地址为正式域名 app.qfremote.top（2.4.2 起，旧 IP:8443 直连源
+// 退役），规则合并为一条：https + 该域名 + 默认端口（未写端口或显式 443）。
+// 注意：组件 Go 侧的登记地址须同步改域名后组件端校验才同口径（仓外组件
+// 源码不在本仓，见 2.4.2 发布记录未结项）。
 function allowedUpdateUrl(raw) {
   let u;
   try { u = new URL(raw); } catch (e) { return false; }
   if (u.protocol !== 'https:' || u.username || u.password) return false;
-  return u.hostname === '54.248.9.192' && u.port === '8443';
+  return u.hostname === 'app.qfremote.top' && (u.port === '' || u.port === '443');
 }
 
 module.exports = { buildEnvelope, loadDispatcherKey, dispatcherPublicBase64, signingBytes, goTimeFormat, goJsonString, encryptPassword, compareVersions, allowedUpdateUrl };

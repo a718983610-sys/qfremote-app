@@ -118,7 +118,7 @@
                                 </tr>
                                 <tr id="qfBuyKeyRow">
                                     <td>
-                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;background:#111;color:#fff;font-size:14px;font-weight:600;border-radius:4px;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
+                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;color:#fff;font-size:14px;font-weight:600;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
                                     </td>
                                 </tr>
                                 <tr id="qfQueryKeyRow">
@@ -959,12 +959,12 @@
         function passwordPolicyText(pass) {
             var policy = '<div style=text-align:left>';
             var counts = strCount(pass);
-            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("Minimum length of {0}", passRequirements.min) + '<br />'; }
-            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("Maximum length of {0}", passRequirements.max) + '<br />'; }
-            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("{0} upper case", passRequirements.upper) + '<br />'; }
-            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("{0} lower case", passRequirements.lower) + '<br />'; }
-            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("{0} numeric", passRequirements.numeric) + '<br />'; }
-            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("{0} non-alphanumeric", passRequirements.nonalpha) + '<br />'; }
+            if (passRequirements.min && ((pass == null) || (pass.length < passRequirements.min))) { policy += format("至少 {0} 个字符", passRequirements.min) + '<br />'; }
+            if (passRequirements.max && ((pass == null) || (pass.length > passRequirements.max))) { policy += format("最多 {0} 个字符", passRequirements.max) + '<br />'; }
+            if (passRequirements.upper && ((pass == null) || (counts.upper < passRequirements.upper))) { policy += format("至少 {0} 个大写字母", passRequirements.upper) + '<br />'; }
+            if (passRequirements.lower && ((pass == null) || (counts.lower < passRequirements.lower))) { policy += format("至少 {0} 个小写字母", passRequirements.lower) + '<br />'; }
+            if (passRequirements.numeric && ((pass == null) || (counts.numeric < passRequirements.numeric))) { policy += format("至少 {0} 个数字", passRequirements.numeric) + '<br />'; }
+            if (passRequirements.nonalpha && ((pass == null) || (counts.nonalpha < passRequirements.nonalpha))) { policy += format("至少 {0} 个符号（非字母数字字符）", passRequirements.nonalpha) + '<br />'; }
             policy += '</div>';
             return policy;
         }
@@ -1173,14 +1173,14 @@
                 var c = qfCredApi();
                 if (c && pw) {
                     try { var r = c.store(new PasswordCredential({ id: u, password: pw, name: u })); if (r && r.catch) r.catch(function () {}); } catch (e) {}
-                    qfLs(QF_CRED_PASS, null); // 有密码管理器时不留本地密码副本
-                } else if (!c && pw) {
-                    // Safari 等不支持 PasswordCredential 的浏览器：与新控制台（SPA）#39 同口径，
-                    // 密码只存本机浏览器 localStorage，下次回填并自动登录。
-                    qfLs(QF_CRED_PASS, pw);
                 }
+                // 不支持密码管理器接口时只记账号、不另存密码（见上方保存方式）；
+                // 旧版曾写入的本地密码副本一律清除、永不再用。
+                qfLs(QF_CRED_PASS, null);
             }
             function qfAutoRestore() {
+                // 旧版本地密码副本见值即清、永不使用（2026-10-29 审计 J-4 定案）。
+                qfLs(QF_CRED_PASS, null);
                 if (qfSs('qfJustLoggedOut') === '1') {
                     qfSs('qfJustLoggedOut', null);
                     // 与新控制台口径对齐：手动退出只结束会话，不清已保存的账密；
@@ -1189,8 +1189,6 @@
                         var b2 = document.getElementById('qfRememberCreds'); if (b2) b2.checked = true;
                         var u2 = document.getElementById('username'); var su = qfLs(QF_CRED_USER);
                         if (u2 && su && !u2.value) u2.value = su;
-                        var p2 = document.getElementById('password'); var sp0 = qfLs(QF_CRED_PASS);
-                        if (p2 && sp0 && !p2.value) { p2.value = sp0; if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} } }
                     }
                     return;
                 }
@@ -1200,7 +1198,8 @@
                 var uEl = document.getElementById('username');
                 var savedUser = qfLs(QF_CRED_USER);
                 if (uEl && savedUser && !uEl.value) uEl.value = savedUser;
-                // 上一轮自动登录失败会带着错误提示回到本页：给一句话说明，不再重试防死循环
+                // 上一轮自动登录已尝试过（QF_TRIED=1）：无论 #message1 是否有文字都停手；
+                // #message1 有文字只额外显示提示行，绝不再重试，防死循环。
                 var msg = document.getElementById('message1');
                 if (qfSs(QF_TRIED) === '1') {
                     if (msg && msg.textContent) { var h = document.getElementById('qfAutoHint'); if (h) h.style.display = 'block'; }
@@ -1208,16 +1207,8 @@
                 }
                 var c = qfCredApi();
                 if (!c || !c.get) {
-                    // 无密码管理器接口（Safari）：用本地保存的密码回填并自动登录
-                    var sp2 = qfLs(QF_CRED_PASS);
-                    var pEl2 = document.getElementById('password');
-                    var btn2 = document.getElementById('loginButton');
-                    if (sp2 && uEl && pEl2 && btn2 && uEl.value) {
-                        pEl2.value = sp2;
-                        if (typeof validateLogin === 'function') { try { validateLogin(1); validateLogin(2); } catch (e) {} }
-                        qfSs(QF_TRIED, '1');
-                        btn2.click();
-                    }
+                    // 无密码管理器接口（Safari 等）：不回填密码、不自动登录；
+                    // 恢复只靠「记住此设备」的 30 天会话，密码由用户手动输入。
                     return;
                 }
                 try {

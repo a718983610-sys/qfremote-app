@@ -205,7 +205,55 @@ function accountState(key) {
   if (!st || st.day !== t) { st = { day: t, fails: 0, frozen: false }; freezeState.accounts[key] = st; }
   return st;
 }
-function saveFreeze() { try { atomicWriteJson(FREEZE_FILE, freezeState); } catch (e) { console.error('freeze 落盘失败：', e.message); } }
+// DS-R28：saveFreeze 返回是否落盘成功（原调用方不接返回值，行为不变）；
+// clear-freeze 端点据此如实回 500，不许内存已清、落盘失败却报成功。
+function saveFreeze() { try { atomicWriteJson(FREEZE_FILE, freezeState); return true; } catch (e) { console.error('freeze 落盘失败：', e.message); return false; } }
+
+// ===== 内网 clear-freeze 专用响应 =====
+function jsonReply(res, status, obj) {
+  const body = Buffer.from(JSON.stringify(obj));
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length });
+  res.end(body);
+}
+
+// DS-R28：管理端解封联动——清除本地登录页当日冻结（loginshim 为 freeze.json
+// 唯一写方）。仅回环监听内可达，并按 X-QF-Internal-Secret 同密钥文件校验；
+// 只清「当日存在且 frozen」的条目并连同 fails 清零（不清零则下一次错密立即
+// 再冻）；无条目/非当日/未冻结回 wasFrozen:false，不新建条目；落盘失败回滚
+// 内存态并回 500。
+async function handleClearFreeze(req, res) {
+  if (req.method !== 'POST') return jsonReply(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED' });
+  let secret = '';
+  try { secret = fs.readFileSync(LIC_SECRET_FILE, 'utf8').trim(); } catch (e) { secret = ''; }
+  const got = String(req.headers['x-qf-internal-secret'] || '');
+  if (!secret || got !== secret) return jsonReply(res, 403, { ok: false, code: 'FORBIDDEN' });
+  let body;
+  try {
+    body = await new Promise((resolve, reject) => {
+      let done = false; let size = 0; const chunks = [];
+      req.on('data', (c) => {
+        if (done) return;
+        size += c.length;
+        if (size > 10000) { done = true; reject(new Error('TOO_BIG')); try { req.destroy(); } catch (e) {} return; }
+        chunks.push(c);
+      });
+      req.on('end', () => { if (done) return; done = true; try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { reject(e); } });
+      req.on('error', (e) => { if (!done) { done = true; reject(e); } });
+    });
+  } catch (e) { return jsonReply(res, 400, { ok: false, code: 'BAD_JSON' }); }
+  const username = String(body.username || '').trim().toLowerCase();
+  if (!username) return jsonReply(res, 400, { ok: false, code: 'VALIDATION' });
+  const tk = todayKey();
+  const st = freezeState.accounts[username];
+  if (!st || st.day !== tk || !st.frozen) return jsonReply(res, 200, { ok: true, wasFrozen: false });
+  const oldFrozen = st.frozen; const oldFails = st.fails;
+  st.frozen = false; st.fails = 0;
+  if (!saveFreeze()) {
+    st.frozen = oldFrozen; st.fails = oldFails;
+    return jsonReply(res, 500, { ok: false, code: 'FREEZE_WRITE_FAILED' });
+  }
+  return jsonReply(res, 200, { ok: true, wasFrozen: true });
+}
 function clientIp(req) {
   const cf = req.headers['cf-connecting-ip'];
   if (cf) return String(cf);
@@ -236,9 +284,131 @@ function injectPopup(html, username) {
   return html + tag;
 }
 
+/* ===== whoami（2.4.0 前置翻牌契约，组装步 1 新增） =====
+ * GET /_qf_whoami —— 供前置 nginx 以 auth_request 子请求回填角色：
+ * 恒回 200，响应头 X-QF-Role: siteadmin|user|anon，绝不回 401/5xx。
+ * 判定机制与 ext/friends 同一：以请求 Cookie 的控制台会话（xid）开
+ * MeshCentral 控制通道，收到服务器主动下发的 userinfo 才算验真；
+ * userinfo.siteadmin === 4294967295（全权）→ siteadmin；其余验真
+ * 用户 → user；无会话/验不过/超时/任何异常 → anon（前置条 17 定案：
+ * 故障 fail-soft 落 anon，前置据此放行 SPA；站长例外在故障期失效、
+ * 可用性优先）。校验结果按 sha256(xid+'.'+xid.sig) 缓存 30 秒
+ * （照 ext 口径）：验真成功与服务器明拒（action=close）才入缓存，
+ * 超时/连接异常不缓存，避免引擎偶发迟缓把角色误冻 30 秒。缓存
+ * 上限 5000 条、写入前剪枝（照 ext DS-R02-① 口径），防根路径文档
+ * 请求每次都新开校验通道。本服务只听回环、nginx 侧 location 标
+ * internal 不对外，本端点只回角色字、不回任何账号信息。
+ */
+const WHOAMI_MC_URL = process.env.QFSHIM_MC_URL || 'wss://127.0.0.1:8443/control.ashx';
+const WHOAMI_SITEADMIN_FULL = 4294967295;
+let _whoamiWebSocket = null;
+function whoamiLoadWebSocket() {
+  if (_whoamiWebSocket) return _whoamiWebSocket;
+  try { _whoamiWebSocket = require('/opt/meshcentral/node_modules/ws'); }
+  catch (e) { _whoamiWebSocket = require('ws'); }
+  return _whoamiWebSocket;
+}
+function whoamiSessionIp(cookieHeader) {
+  try {
+    const jar = {};
+    String(cookieHeader || '').split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim(); });
+    if (!jar.xid) return null;
+    const obj = JSON.parse(Buffer.from(String(jar.xid), 'base64').toString('utf8'));
+    const ip = obj && obj.ip;
+    if (typeof ip === 'string' && ip.length <= 64 && /^[0-9a-fA-F.:%[\]]+$/.test(ip)) return ip;
+  } catch (e) { /* 解不出就走后备候选 */ }
+  return null;
+}
+const whoamiCache = new Map(); // sha256(xid+'.'+xid.sig) -> {at, role}
+const WHOAMI_CACHE_MAX = 5000;
+function whoamiCacheGet(key) {
+  const v = whoamiCache.get(key);
+  if (!v) return null;
+  if (Date.now() - v.at >= 30000) { whoamiCache.delete(key); return null; }
+  return v.role;
+}
+function whoamiCacheSet(key, role) {
+  const now = Date.now();
+  if (whoamiCache.size >= WHOAMI_CACHE_MAX) {
+    for (const [k, v] of whoamiCache) { if (!v || now - v.at >= 30000) whoamiCache.delete(k); }
+    while (whoamiCache.size >= WHOAMI_CACHE_MAX) {
+      const oldest = whoamiCache.keys().next();
+      if (oldest.done) break;
+      whoamiCache.delete(oldest.value);
+    }
+  }
+  whoamiCache.set(key, { at: now, role });
+}
+function whoamiConnectOnce(cookieHeader, timeoutMs, fwdIp) {
+  return new Promise((resolve, reject) => {
+    let WebSocket;
+    try { WebSocket = whoamiLoadWebSocket(); } catch (e) { reject(new Error('ws-unavailable')); return; }
+    const headers = { Cookie: cookieHeader, Origin: 'https://127.0.0.1:8443' };
+    if (fwdIp) headers['X-Forwarded-For'] = fwdIp;
+    const ws = new WebSocket(WHOAMI_MC_URL, { rejectUnauthorized: false, headers });
+    let done = false;
+    const timer = setTimeout(() => finish(new Error('mc-connect-timeout')), timeoutMs);
+    function finish(err, userinfo) {
+      if (done) return; done = true; clearTimeout(timer);
+      // 超时路径用 terminate 立即断（DS flash 复核建议 1）：引擎假死时
+      // close() 的关闭握手会让半开连接滞留到 ws 内部关闭超时。
+      try { if (err && err.message === 'mc-connect-timeout' && ws.terminate) ws.terminate(); else ws.close(); } catch (e) {}
+      if (err) reject(err); else resolve(userinfo);
+    }
+    ws.on('message', (data) => {
+      let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
+      if (m && m.action === 'userinfo' && m.userinfo) { finish(null, m.userinfo); return; }
+      // 服务器对无效/伪造会话立刻回 action=close：认这个信号秒拒（照 ext 口径）。
+      if (m && m.action === 'close') finish(new Error('mc-session-rejected'));
+    });
+    ws.on('error', () => finish(new Error('mc-conn-error')));
+    ws.on('close', () => finish(new Error('mc-auth-failed')));
+  });
+}
+async function whoamiResolveRole(req) {
+  const cookieHeader = String(req.headers.cookie || '');
+  const jar = {};
+  cookieHeader.split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) jar[p.slice(0, i).trim()] = p.slice(i + 1).trim(); });
+  if (!jar.xid) return 'anon';
+  const key = crypto.createHash('sha256').update(String(jar.xid) + '.' + String(jar['xid.sig'] || '')).digest('hex');
+  const cached = whoamiCacheGet(key);
+  if (cached) return cached;
+  const candidates = [];
+  const sip = whoamiSessionIp(cookieHeader);
+  if (sip) candidates.push(sip);
+  const cip = clientIp(req);
+  if (cip && !candidates.includes(cip)) candidates.push(cip);
+  candidates.push(null);
+  let role = 'anon', cacheable = false;
+  for (const ip of candidates) {
+    try {
+      const info = await whoamiConnectOnce(cookieHeader, 500, ip);
+      role = (info && info.siteadmin === WHOAMI_SITEADMIN_FULL) ? 'siteadmin' : 'user';
+      cacheable = true;
+      break;
+    } catch (e) {
+      if (e && e.message === 'mc-session-rejected') { cacheable = true; break; }
+      if (e && e.message === 'mc-connect-timeout') break; // 超时不叠试（照 ext 口径）
+    }
+  }
+  if (cacheable) whoamiCacheSet(key, role);
+  return role;
+}
+function handleWhoami(req, res) {
+  const reply = (role) => {
+    try {
+      res.writeHead(200, { 'X-QF-Role': role, 'Cache-Control': 'no-store', 'Content-Length': '0' });
+      res.end();
+    } catch (e) { /* 子请求断开不外溢 */ }
+  };
+  whoamiResolveRole(req).then(reply).catch(() => reply('anon'));
+}
+
 const server = http.createServer((req, res) => {
   let pathname = req.url;
   try { pathname = new URL(req.url, 'http://localhost').pathname; } catch (e) {}
+  if (pathname === '/internal/clear-freeze') return handleClearFreeze(req, res);
+  if (pathname === '/_qf_whoami') return handleWhoami(req, res);
   if (pathname === '/qf-login') return handleLogin(req, res);
   if (pathname === '/appeal' || pathname.startsWith('/appeal/')) return handleAppeal(req, res, pathname);
   const isLogout = pathname === '/logout' || pathname.startsWith('/logout/');
@@ -281,13 +451,29 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
   } catch (e) {
     console.warn('bancheck login-check error', e);
   }
+  // R7 中性判定（DS-R25 微修，DS 门一＋增量裁定）：密码已二次验过、MC 锁定位
+  // 在身，但台账无活动封禁——evaluate() 有活动封禁时必先回 BAN_PERM/BAN_UNTIL，
+  // 故生产可达的非封禁形状只有 allow:true→code 'OK' 与 allow:false→G1/G2/G4/G5，
+  // 落入此允许名单即属异常漂移态：只记日志、不计失败/不清零，调用方以 ok=null
+  // 记录并原样透传。
+  // W1-3（ds-p1-rest-20261029，DS 门一）：返回值由 'neutral' 更名为 'locked'，
+  // 且其余漂移形状（lc 为空、allow:true＋BAN_* 矛盾形状、未知 code、未知
+  // banCode）同归 'locked'——调用方透传时补 X-QF-Login-Result: locked 头，
+  // SPA 据此呈现中性「暂时无法登录」，不再把漂移态误报成「账号或密码不正
+  // 确」；计数与日志语义与原 'neutral'/回 false 路径一致（不计失败、不清零）。
+  if (lc && ((lc.allow === true && lc.code === 'OK') ||
+      (lc.allow === false && ['G1', 'G2', 'G4', 'G5'].indexOf(lc.code) >= 0))) {
+    console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
+    return 'locked';
+  }
+
   if (!lc || lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL')) {
     // 无活动封禁或非预期 code；MC 锁定位可能由其他原因产生，不透传封禁
     // 值得记异常日志：密码验过、MC 称 locked、台账却无活动封禁
     if (vp.ok === true && lc && (lc.allow !== false || (lc.code !== 'BAN_PERM' && lc.code !== 'BAN_UNTIL'))) {
       console.warn('bancheck inconsistent: password ok, MC locked, no active ban for', key);
     }
-    return false;
+    return 'locked';
   }
 
   // 根据 BAN_* code 和 banCode 映射门型，不暴露原始 banCode
@@ -306,8 +492,10 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
     } else if (['B1', 'B8', 'B10'].indexOf(banCode) >= 0) {
       mode = 'frozen';
     } else {
-      // 未知冻结/封禁 code；不露状态
-      return false;
+      // 未知冻结/封禁 code；不露状态（DS-R25 P3-1：补 inconsistent 日志；
+      // W1-3 起同归 'locked' 中性透传，不报密码错误）
+      console.warn('bancheck inconsistent: password ok, MC locked, active BAN_UNTIL with unknown banCode ' + banCode + ' for', key);
+      return 'locked';
     }
   }
 
@@ -391,7 +579,17 @@ function handleLogin(req, res) {
             req, res, key, usernameRaw, passwordRaw, ip, text,
             ur.statusCode, ur.headers, ubody
           );
-          if (banHandled) return;
+          if (banHandled === true) return;
+          if (banHandled === 'locked') {
+            // R7（DS-R25）＋W1-3：只记日志、不计失败/不清零、原样透传；
+            // 用已算好的 h，保留 remember cookie 处理口径，并补 locked 头
+            // 供 SPA 呈现中性提示（不再误报密码错误）
+            logAttempt(key, null, ip, false);
+            h['x-qf-login-result'] = 'locked';
+            res.writeHead(ur.statusCode, h);
+            res.end(ubody);
+            return;
+          }
           const hasLoginForm = text.includes('loginpanelform');
           let verdict = 'neutral';
           if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';
@@ -462,7 +660,18 @@ function serveFrozenVerify(req, res, body, usernameRaw, passwordRaw, key, ip) {
         req, res, key, usernameRaw, passwordRaw, ip, text,
         ur.statusCode, ur.headers, ubody
       );
-      if (banHandled) return;
+      if (banHandled === true) return;
+      if (banHandled === 'locked') {
+        // R7（DS-R25）＋W1-3：冻结路径同样中性——只记日志（blocked 保持
+        // true）、原样透传，不进冻结页、不动冻结状态；补 locked 头供 SPA
+        // 呈现中性提示
+        logAttempt(key, null, ip, true);
+        const lh = Object.assign({}, ur.headers);
+        lh['x-qf-login-result'] = 'locked';
+        res.writeHead(ur.statusCode, lh);
+        res.end(ubody);
+        return;
+      }
       const hasLoginForm = text.includes('loginpanelform');
       let verdict = 'neutral';
       if (hasLoginForm && text.includes('登录失败')) verdict = 'fail';

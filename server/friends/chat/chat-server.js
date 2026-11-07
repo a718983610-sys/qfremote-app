@@ -73,8 +73,30 @@ function emptyData() {
 class Store {
   constructor(file) {
     this.file = file;
-    try { this.data = Object.assign(emptyData(), JSON.parse(fs.readFileSync(file, 'utf8'))); }
-    catch (e) { this.data = emptyData(); }
+    // F-2（发版前全量审 P3）：原构造解析失败静默回退空数据，任一后续 save 即
+    // 覆盖损坏原件。改与 events-core 隔离口径对齐并按 DS 门一收紧：ENOENT
+    // （首跑无文件）才以空数据起；解析失败先改名隔离 .corrupt-* 留痕再起空；
+    // 非 ENOENT 读错误与隔离改名失败一律抛错硬停，禁止写回覆盖唯一原件。
+    let raw = null;
+    try { raw = fs.readFileSync(file, 'utf8'); }
+    catch (e) {
+      if (!(e && e.code === 'ENOENT')) {
+        console.error(JSON.stringify({ ev: 'chat-store-load-error', file, err: String((e && e.message) || e) }));
+        throw e;
+      }
+    }
+    if (raw === null) { this.data = emptyData(); return; }
+    try { this.data = Object.assign(emptyData(), JSON.parse(raw)); }
+    catch (e) {
+      const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      try { fs.renameSync(file, corrupt); }
+      catch (renameErr) {
+        console.error(JSON.stringify({ ev: 'chat-store-isolate-failed', file, err: String((renameErr && renameErr.message) || renameErr) }));
+        throw renameErr;
+      }
+      console.error(JSON.stringify({ ev: 'chat-store-corrupt-isolated', file, corrupt }));
+      this.data = emptyData();
+    }
   }
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
@@ -210,6 +232,112 @@ function createChatHandler(configOverrides) {
       return false; }
   }
   const gate = new FriendsGate(cfg.friendsFile);
+
+  // ---------- 全站统一档案消费（2.3.2，S5 好友/聊天线；S4 审计路线 A＋C） ----------
+  // 正本在 ext 服务（本机回环 http://127.0.0.1:${QFEXT_PORT||8448}），本服务只读：
+  // 批量 GET /internal/profile/view?usernames=a,b 取显示字段拼进 peers/会话，
+  // 头像字节经 GET /internal/profile/:username/avatar 回源、由本服务同源代理。
+  // secret 读法照 social 主服务向 ext 推事件的口径（QFLIC_SECRET_FILE 或
+  // /opt/qfremote-license/internal.secret）；secret 读不到、ext 超时/断供等
+  // 任何失败一律静默软降级：peers/会话原样返回、头像代理回 404，绝不挡聊天。
+  // 身份键红线：peers/会话/加密一律仍以账号名为键，昵称只作显示字段附加。
+  const EXT_PROFILE_PORT = parseInt(process.env.QFEXT_PORT || '8448', 10) || 8448;
+  const PROFILE_VIEW_TTL_MS = 60 * 1000;   // view 缓存 60 秒（按 username）
+  const PROFILE_VIEW_TIMEOUT_MS = 800;   // view 请求 800ms 超时
+  const PROFILE_VIEW_CACHE_MAX = 2000;   // view 缓存条数上限（核对 D8：防只写不删慢涨）
+  const profileViewCache = new Map();    // username -> { view: object|null, fetchedAt }
+  // 写缓存并封顶：超上限先清过期条目，仍超则按插入序淘汰最旧（近似 LRU，P3 量级够用）
+  function setProfileView(name, v) {
+    profileViewCache.set(name, { view: v, fetchedAt: Date.now() });
+    if (profileViewCache.size > PROFILE_VIEW_CACHE_MAX) {
+      const now2 = Date.now();
+      for (const [k, ent] of profileViewCache) { if (now2 - ent.fetchedAt >= PROFILE_VIEW_TTL_MS) profileViewCache.delete(k); }
+      while (profileViewCache.size > PROFILE_VIEW_CACHE_MAX) {
+        const oldest = profileViewCache.keys().next().value;
+        if (oldest === undefined) break;
+        profileViewCache.delete(oldest);
+      }
+    }
+  }
+  function profileSecret() {
+    try { return fs.readFileSync(process.env.QFLIC_SECRET_FILE || '/opt/qfremote-license/internal.secret', 'utf8').trim(); } catch (e) { return ''; }
+  }
+  function extProfileRequest(pathname, binary) {
+    return new Promise((resolve) => {
+      const secret = profileSecret();
+      if (!secret) return resolve(null);
+      let done = false;
+      const finish = (x) => { if (!done) { done = true; resolve(x); } };
+      let rq;
+      try {
+        rq = http.request({ hostname: '127.0.0.1', port: EXT_PROFILE_PORT, path: pathname, method: 'GET', timeout: binary ? 3000 : PROFILE_VIEW_TIMEOUT_MS, headers: { 'x-qf-internal-secret': secret } }, (rs) => {
+          const chunks = []; let total = 0;
+          const cap = binary ? 512 * 1024 : 256 * 1024;
+          // 与论坛 #6 同族口径：超限即 destroy 并立即 settle，rs error/close 兜底防 Promise 永挂
+          rs.on('data', (c) => { total += c.length; if (total > cap) { try { rq.destroy(); } catch (e) {} finish(null); return; } chunks.push(c); });
+          rs.on('end', () => finish({ status: rs.statusCode, headers: rs.headers, body: Buffer.concat(chunks) }));
+          rs.on('error', () => finish(null));
+          rs.on('close', () => finish(null));
+        });
+      } catch (e) { return finish(null); }
+      rq.on('timeout', () => { try { rq.destroy(); } catch (e) {} finish(null); });
+      rq.on('error', () => finish(null));
+      rq.end();
+    });
+  }
+  // 批量取 view：缓存新鲜的直接用，缺失/过期的合并成一次批量请求；
+  // 请求失败不写缓存（下次可重试），有旧缓存值时继续用旧值。
+  async function profileViewsFor(names) {
+    const out = {};
+    const now = Date.now();
+    const stale = [];
+    const seen = new Set();
+    for (const raw of names || []) {
+      const name = norm(raw);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const ent = profileViewCache.get(name);
+      if (ent && now - ent.fetchedAt < PROFILE_VIEW_TTL_MS) { if (ent.view) out[name] = ent.view; }
+      else stale.push(name);
+    }
+    if (stale.length) {
+      // 核对 D9：ext 批量端点单次上限 50 且整批 URL 有请求头上限 → 按 ≤50 名分批并发；
+      // 只缓存响应中实际出现的名——未返回的名不写 null 缓存（否则 >50 名时第 51 名起
+      // 被毒化缓存且每轮同序饿死），留待下轮重试。
+      const chunks = [];
+      for (let off = 0; off < stale.length; off += 50) chunks.push(stale.slice(off, off + 50));
+      await Promise.all(chunks.map(async (chunk) => {
+        const r = await extProfileRequest('/internal/profile/view?usernames=' + encodeURIComponent(chunk.join(',')));
+        let views = null;
+        if (r && r.status === 200) {
+          try { const j = JSON.parse(r.body.toString('utf8')); if (j && j.views && typeof j.views === 'object') views = j.views; } catch (e) { /* 坏响应按失败降级 */ }
+        }
+        if (views) {
+          for (const name of chunk) {
+            if (!Object.prototype.hasOwnProperty.call(views, name)) continue;
+            const v = views[name] && typeof views[name] === 'object' ? views[name] : null;
+            setProfileView(name, v);
+            if (v) out[name] = v;
+          }
+        } else {
+          for (const name of chunk) { const ent = profileViewCache.get(name); if (ent && ent.view) out[name] = ent.view; }
+        }
+      }));
+    }
+    return out;
+  }
+  // 在不改身份键（key 字段）的前提下附加显示字段：有 view 才附。
+  async function attachProfile(list, key) {
+    const views = await profileViewsFor(list.map(x => x[key]));
+    for (const item of list) {
+      const v = views[norm(item[key])];
+      if (!v) continue;
+      item.displayName = v.displayName || v.effectiveNickname || item[key];
+      item.hasAvatar = !!v.hasAvatar;
+      item.avatarUpdatedAt = v.hasAvatar && v.avatarUpdatedAt != null ? v.avatarUpdatedAt : null;
+    }
+    return list;
+  }
 
   // ---------- 登录状态托管副本（sessionCopy）的主密钥 ----------
   // 主密钥在服务器侧生成，存专用密钥文件（权限 600），默认与数据文件
@@ -433,8 +561,35 @@ function createChatHandler(configOverrides) {
     const d = store.data;
 
     if (req.method === 'GET' && p === '/chat/api/friends') {
-      // friends：纯名字清单（含系统联系人，恒在首位）；peers：同序带类型，客户端打标用
-      return sendJson(res, 200, { ok: true, friends: gate.listFriends(me), peers: gate.listPeers(me) });
+      // friends：纯名字清单（含系统联系人，恒在首位）；peers：同序带类型，客户端打标用；
+      // peers 每条附加统一档案显示字段（displayName/hasAvatar/avatarUpdatedAt，
+      // 有 view 才附、name 键不动；ext 断供时 peers 原样返回）
+      const peers = gate.listPeers(me);
+      await attachProfile(peers, 'name');
+      return sendJson(res, 200, { ok: true, friends: gate.listFriends(me), peers });
+    }
+    // ---------- 头像同源代理（2.3.2，S4 审计路线 C） ----------
+    // 聊天页对 ext 既无凭据又跨源，头像字节只能经本端点：凭现行聊天会话
+    // 鉴权（上方 authUser 已过），服务端持 internal secret 向 ext 内网字节
+    // 端点回源，透传 Content-Type/Cache-Control，版本化缓存口径同正本
+    // （?v= 对上 immutable、否则 no-store）；ext 无头像/断供一律 404。
+    // 核对 D3：pathname 仍是百分号编码形，先捕获原始段再解码校验——否则账号名含
+    // + 或 @（编码为 %2B/%40）必不匹配字符类而 404（历史邮箱型账号名亦中招）。
+    const avatarMatch = p.match(/^\/chat\/api\/avatar\/([^/]+)$/);
+    if (req.method === 'GET' && avatarMatch) {
+      let name = '';
+      try { name = norm(decodeURIComponent(avatarMatch[1])); } catch (e) { name = ''; }
+      if (!/^[a-z0-9@._+\-]{1,80}$/.test(name)) return sendJson(res, 404, { ok: false, msg: 'not found' });
+      const vq = u.searchParams.get('v');
+      const r = await extProfileRequest('/internal/profile/' + encodeURIComponent(name) + '/avatar' + (vq ? '?v=' + encodeURIComponent(vq) : ''), true);
+      if (!r || r.status !== 200) return sendJson(res, 404, { ok: false, msg: 'not found' });
+      res.writeHead(200, {
+        'Content-Type': r.headers['content-type'] || 'application/octet-stream',
+        'Cache-Control': r.headers['cache-control'] || 'no-store',
+        'Content-Length': r.body.length,
+        'X-Content-Type-Options': 'nosniff'
+      });
+      return res.end(r.body);
     }
     if (req.method === 'GET' && p === '/chat/api/support-faq') {
       // 客服一期固定答复：这是产品预置文案，不是任何用户的聊天内容。
@@ -597,7 +752,7 @@ function createChatHandler(configOverrides) {
     if (req.method === 'GET' && p === '/chat/api/poll') {
       const since = parseInt(u.searchParams.get('since') || '0', 10) || 0;
       const events = d.events.filter(e => e.seq > since && (
-        (e.type === 'msg' && (e.msg.from === me || e.msg.to === me)) ||
+        (e.type === 'msg' && !d.graveyard[e.msg.id] && (e.msg.from === me || e.msg.to === me)) ||
         (e.type === 'tomb' && e.parties.includes(me)) ||
         (e.type === 'recall' && e.parties.includes(me))));
       const read = {};
@@ -609,7 +764,8 @@ function createChatHandler(configOverrides) {
     if (req.method === 'POST' && p === '/chat/api/vault') {
       const body = await readBody(req);
       const msgId = String(body.msgId || '');
-      const origin = d.messages[msgId] || d.graveyard[msgId];
+      // CF-1：保险库写入只以仍存活的消息为正本；墓碑仅用于 tomb/recall 同步，不作为 vault 重建 origin。
+      const origin = d.messages[msgId];
       if (!origin || (origin.from !== me && origin.to !== me)) return sendJson(res, 400, { ok: false, msg: '记录校验未通过，请重试。' });
       if (!body.nonce || !body.cipher) return sendJson(res, 400, { ok: false, msg: '记录不完整，请重试。' });
       const mine = d.vault[me] = d.vault[me] || [];
@@ -706,6 +862,8 @@ function createChatHandler(configOverrides) {
         const marks = d.readMarks[convOf(me, c.with)] || {};
         return Object.assign(c, { type: peerType(c.with), myRead: marks[me] || 0, peerRead: marks[c.with] || 0 });
       }).sort((a, b) => b.lastAt - a.lastAt);
+      // 每条会话按 with 附加统一档案显示字段（同 friends 口径，with 键不动）
+      await attachProfile(list, 'with');
       return sendJson(res, 200, { ok: true, conversations: list });
     }
 
@@ -749,7 +907,7 @@ if (require.main === module) main();
  * 路由表面清单（全部）：
  *  GET  /chat, /chat/crypto-core.js, /chat/chat-client.js, /chat/libsodium-sumo.js, /chat/libsodium-wrappers.js, /chat/health
  *  POST /chat/api/login | keys/setup | keys/rewrap | keys/device | keys/device/revoke | keys/session-copy | send | vault | read | delete | recall | delete-conversation
- *  GET  /chat/api/friends | support-faq | keys/me | keys/:user | keys/device/:deviceId | keys/session-copy | poll | vault | conversations
+ *  GET  /chat/api/friends | support-faq | keys/me | keys/:user | keys/device/:deviceId | keys/session-copy | poll | vault | conversations | avatar/:username（同源头像代理，2.3.2）
  *  ——没有任何管理端点；聊天内容只以密文经过（support-faq 只返回产品预置
  *    的固定客服文案）。keys/session-copy 是唯一的钥匙原件端点：仅凭本人
  *    有效会话取回本人钥匙，口径见其上方注释。

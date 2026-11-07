@@ -140,21 +140,23 @@ function createLicenseCore(opts) {
   }
   function appendLine(file, obj) { try { fs.appendFileSync(file, JSON.stringify(obj) + '\n', { mode: 0o600 }); } catch (e) {} }
   // 客服只读镜像：掩码级公开状态（无密钥原文、无判定细节）
+  const isB6B7B9 = (code) => ['B6', 'B7', 'B9'].includes(String(code || '').toUpperCase()); // F-4（发版前全量审 P3）：封禁 code 大小写归一的单一口径，banLinkOf/writeMirror/syncAccountLinkage 三处共用
   // 封禁链判定（P5-010）：与 syncAccountLinkage 的 link==='banned' 逐字同口径——
   // 生效封禁中存在「永久」或 code∈{B6,B7,B9} 即为封禁链。功能门只认此判定，
   // 冻结类（B1/B8 等）不扩大口径。
   function banLinkOf(username, now) {
     const bans = activeBansFor(username, now);
     if (!bans || !bans.length) return false;
-    return bans.some((b) => b.permanent) || bans.some((b) => ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase())); // DEV-18/G-10：code 大小写归一
+    return bans.some((b) => b.permanent) || bans.some((b) => isB6B7B9(b.code)); // DEV-18/G-10：code 大小写归一（F-4 后走 isB6B7B9 单一口径）
   }
+  const mirrorPublishStats = { publishFailures: 0, lastPublishError: null }; // DS-R22-2：镜像发布失败可见性（累计失败数＋最近失败），经 mirrorStats() 供 ext overview 带出
   function writeMirror() {
     try {
       const now = Date.now();
       const out = Object.create(null); // DEV-27（七审 S-2）：镜像映射用无原型对象，'constructor'/'__proto__' 类键名不撞原型链
       for (const u of Object.keys(state.accounts)) {
         const v = buildStatusView(u, now);
-        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, everBanned: v.everBanned, activeBanCode: v.activeBan ? String(v.activeBan.code || '').toUpperCase() : null, banLink: banLinkOf(u, now) }; // DEV-22/F2：与 account-link 输出统一归一
+        out[u] = { displayStatus: v.displayStatus, planName: v.planName, maskedKey: v.maskedKey, trialExpiresMs: v.trialExpiresMs, keyExpiresMs: v.keyExpiresMs, webEnabled: v.webEnabled, webBy: v.webBy, everBanned: v.everBanned, activeBanCode: v.activeBan ? String(v.activeBan.code || '').toUpperCase() : null, banLink: banLinkOf(u, now) }; // DEV-22/F2：与 account-link 输出统一归一
       }
       // 补齐：只有封禁记录、没有许可账号的登录名（纯 MC 账号被封）——不补则
       // 下游读镜像取不到条目、封禁形同虚设（P5-010 采纳 DS 实现稿 O3）。
@@ -163,8 +165,8 @@ function createLicenseCore(opts) {
         if (b.endsAt && b.endsAt <= now) continue;
         const u = String(b.target); // DEV-26（六审 BUG-A）：键用 target 原样——全链精确匹配（activeBansFor 的 b.target === username），改写大小写会让 banLinkOf 永远查不到本条
         if (!u || out[u]) continue;
-        if (!(b.permanent || ['B6', 'B7', 'B9'].includes(String(b.code || '').toUpperCase()))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
-        out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
+        if (!(b.permanent || isB6B7B9(b.code))) continue; // DEV-26：联动判定直接对本条 ban（与 banLinkOf 同口径），不再拿改写过的键回查
+        out[u] = { displayStatus: 'banned', planName: null, maskedKey: null, trialExpiresMs: null, keyExpiresMs: null, webEnabled: false, webBy: null, everBanned: true, activeBanCode: String(b.code || '').toUpperCase(), banLink: true }; // DEV-22/F2＋DEV-23/#2：空码落 '' 与 account-link 及主循环统一（原 || null 与两处契约相左）
       }
       fs.mkdirSync(path.dirname(mirrorFile), { recursive: true });
       try { const dir = path.dirname(mirrorFile); const base = path.basename(mirrorFile) + '.tmp-'; const cutoff = Date.now() - 5 * 60 * 1000; for (const f of fs.readdirSync(dir)) { if (!f.startsWith(base)) continue; try { if (fs.statSync(path.join(dir, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, f)); } catch (e) {} } } catch (e) {} // DEV-23/#3＋DEV-24/DEV-25：只清 5 分钟前的残留（含自身 pid 旧残留——清扫在本轮写 tmp 之前，在场的必是旧账），活进程在写的 tmp 不碰
@@ -173,8 +175,8 @@ function createLicenseCore(opts) {
       // DEV-21：先对 tmp chown 再 rename（原子替换且落位即可读）；原「先 rename 后 chown」有不可读窗口、chown 失败即永久不可读
       let publishable = false; // DEV-25（五审 BUG-1/P1）：chown 未成绝不发布——宁可保留可读的旧镜像，也不用属主不可读的新镜像覆盖它
       try { const pw = fs.readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('qffriends:')); if (pw) { const f = pw.split(':'); fs.chownSync(tmp, Number(f[2]), Number(f[3])); publishable = true; } else { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-skip', why: 'qffriends-not-in-passwd' })); } catch (e2) {} } } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-chown-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-24/S3：无 qffriends 条目时跳过 chown 必须留痕
-      if (publishable) { fs.renameSync(tmp, mirrorFile); } else { try { fs.unlinkSync(tmp); } catch (e) {} try { console.error(JSON.stringify({ ev: 'ban-mirror-not-published', why: 'chown-unavailable-kept-old-mirror' })); } catch (e2) {} }
-    } catch (e) { try { console.error(JSON.stringify({ ev: 'ban-mirror-write-failed', err: String(e && e.message) })); } catch (e2) {} } // DEV-18/G-05：镜像写失败必须可见（原空 catch 吞噬＝F-02 同类静默机制）
+      if (publishable) { fs.renameSync(tmp, mirrorFile); if (mirrorPublishStats.lastPublishError) { mirrorPublishStats.lastPublishError = null; try { console.error(JSON.stringify({ ev: 'ban-mirror-publish-recovered', publishFailures: mirrorPublishStats.publishFailures })); } catch (e2) {} } } else { try { fs.unlinkSync(tmp); } catch (e) {} mirrorPublishStats.publishFailures += 1; mirrorPublishStats.lastPublishError = { at: now, why: 'chown-unavailable-kept-old-mirror' }; try { console.error(JSON.stringify({ ev: 'ban-mirror-not-published', why: 'chown-unavailable-kept-old-mirror', publishFailures: mirrorPublishStats.publishFailures })); } catch (e2) {} }
+    } catch (e) { mirrorPublishStats.publishFailures += 1; mirrorPublishStats.lastPublishError = { at: Date.now(), why: 'outer', err: String(e && e.message) }; try { console.error(JSON.stringify({ ev: 'ban-mirror-write-failed', err: String(e && e.message), publishFailures: mirrorPublishStats.publishFailures })); } catch (e2) {} } // DEV-18/G-05：镜像写失败必须可见（原空 catch 吞噬＝F-02 同类静默机制）
   }
   function queueOwnerMail(subject, bodyObj) {
     appendLine(mailQueue, { at: new Date().toISOString(), to: OWNER_EMAIL, subject, body: bodyObj, status: 'queued' });
@@ -267,10 +269,35 @@ function createLicenseCore(opts) {
   }
   function expireBans(now) {
     let changed = false;
+    const deviceHashesToRecheck = new Set();
     for (const b of state.bans) {
-      if (b.status === 'active' && b.endsAt && b.endsAt <= now) { b.status = 'expired'; b.liftedAt = now; b.liftedBy = 'auto-expire'; changed = true; }
+      if (b.status === 'active' && b.endsAt && b.endsAt <= now) {
+        b.status = 'expired'; b.liftedAt = now; b.liftedBy = 'auto-expire'; changed = true;
+        if (b.targetType === 'device') deviceHashesToRecheck.add(b.target);
+      }
     }
-    if (changed) for (const u of Object.keys(state.accounts)) syncAccountLinkage(u, now);
+    // DS-R01 B6 存量自愈（门二问题 1 随批补）：旧版本下封禁已自动过期、但
+    // banned 旗残留的设备不在本次翻转集合内——逐台以 activeDeviceBan 复核，
+    // 无生效设备封禁者清旗并计 changed（与下方本次到期清旗同口径）。
+    for (const dh of Object.keys(state.deviceAccounts)) {
+      const d = state.deviceAccounts[dh];
+      if (d && d.banned && !activeDeviceBan(dh, now)) { d.banned = false; changed = true; }
+    }
+    if (changed) {
+      for (const u of Object.keys(state.accounts)) syncAccountLinkage(u, now);
+      // DS-R01 B6（license-batch-20261029）：设备封禁自动到期与 liftBan 同口径
+      // 清 deviceAccounts.banned 旗——原实现只处理账号联动，设备旗残留 true
+      // 使 reportDevice 恒回 banned:true 且多账号异常建单被永久堵死。仅当该
+      // 设备已无其他生效设备封禁时才清。
+      for (const dh of deviceHashesToRecheck) {
+        const d = state.deviceAccounts[dh];
+        if (d && !activeDeviceBan(dh, now)) d.banned = false;
+      }
+      // DS-R32（dsr01-fix-batch-20261029）：expireBans 自身完成状态翻转后必须落盘。此前只改内存，
+      // 若不随后被其他 save 捕获，过期落账停留在单例内存、重启即回读旧
+      // paused 累计。仅 changed 时保存。
+      save();
+    }
     return changed;
   }
   // 联动：link 维 + 暂停计时（纯事件/到期驱动，无人工入口）
@@ -278,7 +305,7 @@ function createLicenseCore(opts) {
     const bans = activeBansFor(username, now);
     const hasPerm = bans.some((b) => b.permanent);
     const hasTimed = bans.some((b) => !b.permanent);
-    const link = hasPerm || bans.some((b) => ['B6', 'B7', 'B9'].includes(b.code)) ? 'banned' : (bans.length ? 'frozen' : 'normal');
+    const link = hasPerm || bans.some((b) => isB6B7B9(b.code)) ? 'banned' : (bans.length ? 'frozen' : 'normal'); // F-4：原此处直比 b.code 未归一，与 banLinkOf 口径不一致（潜伏），现统一 isB6B7B9
     for (const k of accountKeys(username)) {
       if (k.lifecycle === 'expired' || k.lifecycle === 'revoked') continue;
       k.link = hasPerm ? 'banned' : link;
@@ -294,9 +321,10 @@ function createLicenseCore(opts) {
     if (!input || typeof input !== 'object') throw new Error('applyBan: input must be an object'); // DEV-30（十审 S2）
     if (!Number.isFinite(now)) throw new Error('applyBan: now must be a finite ms number'); // DEV-29（九审存疑 1）
     if (input.permanent !== true && !(Number.isFinite(input.endsAt) || input.endsAt === null || (Number.isFinite(input.days) && input.days > 0 && Number.isFinite(now + input.days * 86400000) && (now + input.days * 86400000) <= 8640000000000000))) throw new Error('applyBan: non-permanent ban requires finite endsAt, explicit null endsAt, or positive days'); // DEV-29（九审 BUG-1）＋DEV-30（十审 P3-1：days 乘积须有限）：守卫与归一化同一合法口径，能落 null 的只剩显式 null（B8 手动解除型；显式 null 与 days 并传时 null 优先）
+    const target = input.targetType === 'account' ? String(input.target || '').trim().toLowerCase() : input.target; // DS-R22-4：账号型 target 单点归一（全链小写隐式契约显式化，存量零大写无迁移面）；device 型（哈希）不动
     const ban = {
       id: 'ban_' + crypto.randomBytes(6).toString('hex'),
-      targetType: input.targetType, target: input.target, code: input.code,
+      targetType: input.targetType, target: target, code: input.code,
       permanent: input.permanent === true, // DEV-27（七审 #1）：严格布尔——字符串 "false" 不得被 !! 折成永久封禁；现行调用方全传真布尔，语义不变
       startsAt: now, endsAt: input.permanent === true ? null : (Number.isFinite(input.endsAt) ? input.endsAt : (input.endsAt === null ? null : (Number.isFinite(input.days) && input.days > 0 ? now + input.days * 86400000 : null))), // DEV-27（七审 #2/#3）：endsAt 只认有限数（ISO 串等异型值回落 days 路径，不再透传成永不过期）；显式 null＝手动解除型（B8 站长冻结既定语义，调用点 server.js admin-freeze 在案）
       status: 'active', actor: input.actor || 'system', evidence: String(input.evidence || '').slice(0, 300),
@@ -306,15 +334,21 @@ function createLicenseCore(opts) {
     appendLine(bansLog, { ev: 'ban-applied', id: ban.id, targetType: ban.targetType, target: ban.targetType === 'device' ? ban.target.slice(0, 12) : ban.target, code: ban.code, permanent: ban.permanent, endsAt: ban.endsAt, actor: ban.actor, at: now });
     if (ban.targetType === 'account') {
       if (ban.permanent) {
-        // 永封即时回收按天密钥（存封禁前剩余秒数，申诉恢复用，R-02/R-05）。
+        // 永封即时回收全部套餐密钥（按天钥存封禁前剩余秒数，申诉恢复用，
+        // R-02/R-05；永久钥无到期点、快照记 null，恢复支按套餐分流）。
         // 裁决批⑥后未激活密钥无到期点（长期有效）同样须回收：剩余按全额
         // （套餐天数＋未起算叠加）计，并标记回收时未激活，恢复时还原为
         // 未激活未起算状态，不因恢复动作起算计时。
         for (const k of accountKeys(ban.target)) {
-          if (k.plan !== 'permanent' && (k.lifecycle === 'unactivated' || k.lifecycle === 'activated')) {
-            k.remainingSecAtRecycle = k.expiresBaseMs
-              ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
-              : unstartedRemainingSec(k);
+          if (k.lifecycle === 'unactivated' || k.lifecycle === 'activated') {
+            // DS-R01 B2（license-batch-20261029）：定版「永久封禁直接收回密钥」
+            // 无套餐豁免，永久套餐钥同在回收范围（原条件 plan!=='permanent'
+            // 使其永封后仍 activated、无回收落账）。
+            k.remainingSecAtRecycle = k.plan === 'permanent'
+              ? null
+              : (k.expiresBaseMs
+                ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
+                : unstartedRemainingSec(k));
             k.recycledWhileUnactivated = (k.activatedAt == null);
             k.lifecycle = 'revoked'; k.revokedReason = 'permaban'; k.revokedBanId = ban.id; k.timing = 'exhausted';
           }
@@ -335,12 +369,23 @@ function createLicenseCore(opts) {
     appendLine(bansLog, { ev: 'ban-lifted', id: ban.id, by: ban.liftedBy, appealId: opts.appealId || null, at: now });
     if (ban.targetType === 'device') { const d = state.deviceAccounts[ban.target]; if (d && !activeDeviceBan(ban.target, now)) d.banned = false; }
     if (ban.targetType === 'account') {
-      if (ban.permanent && opts.restoreKeys) {
-        // R-02：仅恢复因「该次」永封回收的密钥，逐项校验回收原因与对应封禁；
+      // DS-R37（dsr01-fix-batch-20261029）：解一封前先确认该账号是否仍有其它生效
+      // 永久封禁；若仍处于永封中，本笔解封不恢复任何回收钥（其它联动照常），
+      // 防止解一封即复活仍应被其它永封回收的密钥。
+      const otherPermActive = activeBansFor(ban.target, now).some((b) => b.permanent && b.id !== ban.id);
+      if (ban.permanent && opts.restoreKeys && !otherPermActive) {
+        // R-02：仅恢复因永封回收的密钥，逐项校验回收原因与对应封禁；
         // 'payment-fraud'（订单判假回收，revokedBanId 同为本笔封禁）申诉推翻
         // 判假时同路径恢复——判假是封禁结论的一部分，结论被推翻回收即失去依据。
+        // 【DEV-1 施工线偏差，待门二裁定】恢复匹配在 R-02 原「revokedBanId===本笔」
+        // 之外放宽为「回收源封禁已非 active」：liftAllActiveBans 按台账序逐笔解，
+        // 回收源封禁恒在前——只认本笔时先解它会被上方余封守卫挡下、随后解余封
+        // 时又不匹配，钥将永久卡 revoked（全解反而不恢复）。本放宽仅在
+        // !otherPermActive（已无任何生效永封）时生效，不改变「有余封不恢复」。
         for (const k of accountKeys(ban.target)) {
-          if (k.lifecycle === 'revoked' && (k.revokedReason === 'permaban' || k.revokedReason === 'payment-fraud') && k.revokedBanId === ban.id) {
+          const ownerBanGone = k.revokedBanId === ban.id
+            || (k.revokedBanId && !state.bans.some((b) => b.id === k.revokedBanId && b.status === 'active'));
+          if (k.lifecycle === 'revoked' && (k.revokedReason === 'permaban' || k.revokedReason === 'payment-fraud') && ownerBanGone) {
             if (k.recycledWhileUnactivated) {
               // 回收时未激活未起算：恢复原状，不落到期点、不起算（裁决批⑥）
               k.lifecycle = 'unactivated'; k.expiresBaseMs = null; k.timing = 'none'; k.pausedAccumMs = 0; k.pauseStartMs = null;
@@ -350,7 +395,13 @@ function createLicenseCore(opts) {
               // 推断——#24 一键兑换激活的密钥可以已激活但尚未绑任何设备，
               // 按槽位推断会把它误降为未激活却带着在跑的到期点，状态自相矛盾。
               k.lifecycle = 'activated';
-              if (k.expiresBaseMs) { k.expiresBaseMs = now + (k.remainingSecAtRecycle || 0) * 1000; k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'active'; }
+              if (k.plan === 'permanent') {
+                // DS-R01 B2：永久钥无到期点，恢复只还原生命周期与计时态。
+                // 计时态回 'none'——activateKey 对永久钥从不起算（plan.days
+                // 为 null），封禁前其 timing 恒为 'none'，不得留 exhausted
+                // 或因恢复动作起算。
+                k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'none';
+              } else if (k.expiresBaseMs) { k.expiresBaseMs = now + (k.remainingSecAtRecycle || 0) * 1000; k.pausedAccumMs = 0; k.pauseStartMs = null; k.timing = 'active'; }
             }
             k.everBanned = true; k.revokedReason = null; k.revokedBanId = null; k.recycledWhileUnactivated = false;
           }
@@ -373,7 +424,10 @@ function createLicenseCore(opts) {
   }
   function issueKey(username, planId, source, now, meta) {
     const plan = PLANS[planId]; if (!plan) throw new Error('bad-plan');
-    if (source !== 'paid' && source !== 'free') throw new Error('source-required');
+    // DS-R01 B3（license-batch-20261029）：来源三分——paid 付费／free 免费发放／
+    // points 积分兑换（福利中心专用）。网页门只认 paid，points 与 free 同落
+    // 非付费侧、不开网页；generateUnboundKey 不放行 points（站长生成面无此档）。
+    if (source !== 'paid' && source !== 'free' && source !== 'points') throw new Error('source-required');
     ensureAccount(username, now, {});
     const str = genKeyString();
     const rec = {
@@ -390,6 +444,22 @@ function createLicenseCore(opts) {
       orderId: (meta && meta.orderId) || null, issuedBy: (meta && meta.actor) || 'system',
       revokedReason: null, revokedBanId: null,
     };
+    // DS-R39（dsr01-fix-batch-20261029，门一 Q3 裁定「发钥即置 revoked」）：永久封禁
+    // 期间发放的钥无法产生可用权益，按「发钥即已回收」落账——revokedReason/
+    // revokedBanId/recycledWhileUnactivated 与 applyBan 永封回收同口径；该笔
+    // 永封被 liftBan(restoreKeys) 解除时此钥恢复为未激活未起算。不抛错，
+    // 避免积分兑换（先扣分后发钥）/购买发放路径异常穿透导致扣分丢权益。
+    const permBanAtIssue = activeBansFor(username, now).find((b) => b.permanent);
+    if (permBanAtIssue) {
+      rec.remainingSecAtRecycle = plan.days ? unstartedRemainingSec(rec) : null;
+      rec.recycledWhileUnactivated = true;
+      rec.lifecycle = 'revoked';
+      rec.revokedReason = 'permaban';
+      rec.revokedBanId = permBanAtIssue.id;
+      rec.timing = 'exhausted';
+      rec.revokedAt = now;
+      rec.revokedBy = rec.issuedBy;
+    }
     state.keys[rec.id] = rec; state.keyStrHashes[sha(str)] = rec.id;
     // 重新获得密钥：转赠领取后的原主人 G1 门标记与强制下线指令一并解除（17:29）
     const acct2 = state.accounts[username];
@@ -547,77 +617,6 @@ function createLicenseCore(opts) {
     }
     if (changed) save();
   }
-  // 账号密钥收回（P6-GK3，站长 2026-10-26 14:53 令，站长后台「账号
-  // 列表」行内「收回密钥」专用）：把账号名下全部在效密钥（unactivated/
-  // activated）一次性置 revoked，revokedReason='admin-reclaim'。
-  // 字段口径复用 applyBan 永封回收支（剩余秒数快照＋timing exhausted）
-  // 与 voidGeneratedKey（revokedAt/revokedBy 落账＋bansLog 台账行）。
-  // 与永封回收的分歧三处（DESIGN.md 三）：①覆盖全部套餐含永久与试用
-  // （无封禁兜底，不全收账号回不到未激活态）；②显式清空绑定槽位并在
-  // 回执/台账留释放数（永封保留 slots 是给 liftBan 恢复保真，本路无
-  // 恢复路径，保留只会让状态视图把已释放名额继续报成占用）；③结构性
-  // 不可恢复——liftBan 恢复支只认 revokedReason∈{permaban,
-  // payment-fraud} 且 revokedBanId===ban.id，本路 reason 不同且
-  // revokedBanId 恒 null，任何现行解封/改判/申诉路径都碰不到。
-  // 该钥名下 pending 转赠（含待领取）随钥死同步以 endTransfer 终结
-  // （与 expireTransfers 对死钥的终态同款）。不建封禁记录、不动账号
-  // 维试用窗（acct.trial）、不碰 keyStrHashes（退役串归档永不再生成）。
-  function reclaimAccountKeys(username, now, meta) {
-    const acct = state.accounts[username];
-    if (!acct) return { ok: false, code: 'ACCOUNT_NOT_FOUND', msg: '该账号没有许可记录，无需收回。' };
-    const actor = (meta && meta.actor) || 'owner-admin';
-    // 先落到期（与 evaluate/buildStatusView 的读时落账同口径）：已过期未落账的钥
-    // 不算在效，收回范围与 activeKeys 的在效判定对齐（DeepSeek 门二确信缺陷 #3 整改）。
-    lazyExpireKeys(username, now);
-    expireDeadPausedKeys(username, now); // 暂停态死钥同批落账（门二复核 S1 整改）
-    const targets = accountKeys(username).filter((k) => k.lifecycle === 'unactivated' || k.lifecycle === 'activated');
-    if (!targets.length) return { ok: false, code: 'NO_LIVE_KEYS', msg: '该账号名下没有可收回的密钥。' };
-    const reclaimed = [];
-    for (const k of targets) {
-      const releasedSlots = { pc: slotCount(k, 'pc'), mobile: slotCount(k, 'mobile') };
-      // 永久钥无期限，快照记 null 而非 0 秒（DeepSeek 门二存疑 D2 核实成立后整改）；
-      // 其余按既有两分支（已定到期点的算剩余秒、未起算的算未起算余量）。
-      k.remainingSecAtRecycle = (PLANS[k.plan] && PLANS[k.plan].days)
-        ? (k.expiresBaseMs
-          ? Math.max(0, Math.floor((effectiveExpiry(k, now) - now) / 1000))
-          : unstartedRemainingSec(k))
-        : null;
-      k.recycledWhileUnactivated = (k.activatedAt == null);
-      const wasLifecycle = k.lifecycle;
-      k.lifecycle = 'revoked'; k.revokedReason = 'admin-reclaim'; k.revokedBanId = null;
-      k.revokedAt = now; k.revokedBy = actor; k.timing = 'exhausted'; k.pauseStartMs = null;
-      k.slots = { pc: [], mobile: null };
-      for (const t of state.transfers) {
-        if (t.status === 'pending' && t.keyId === k.id) endTransfer(t, 'key-expired', 'key-reclaimed', now);
-      }
-      reclaimed.push({
-        keyId: k.id, maskedKey: maskKey(k.str), plan: k.plan, planName: k.planName,
-        source: k.source, wasLifecycle, releasedSlots, remainingSec: k.remainingSecAtRecycle,
-      });
-    }
-    // 台账汇总释放数与回执同源（逐钥 releasedSlots 之和），兑现设计 §一
-    // 「释放数写进回执与台账」（写码参与对照 C-05 采纳；§四清单已回填）。
-    const releasedTotal = reclaimed.reduce((a, x) => ({ pc: a.pc + x.releasedSlots.pc, mobile: a.mobile + x.releasedSlots.mobile }), { pc: 0, mobile: 0 });
-    appendLine(bansLog, { ev: 'key-admin-reclaimed', username, keyIds: reclaimed.map((r) => r.keyId), plans: reclaimed.map((r) => r.plan), releasedSlots: releasedTotal, by: actor, at: now });
-    save();
-    return { ok: true, username, reclaimed };
-  }
-  // 暂停态死钥落账：冻结/封禁的联动暂停（syncAccountLinkage）不先落到期，
-  // 钥在名义到期之后才被暂停时，到期点滑动公式下其剩余恒 ≤0、永不复活；
-  // lazyExpireKeys 按既有语义整体跳过 paused，此形态由本函数在本批收回/
-  // 预览口径内单独落为 expired，保证列表计数/preview/core 三处一致
-  // （DeepSeek 门二复核存疑 S1 核实成立后整改）。健康暂停钥的
-  // effectiveExpiry 恒 >now，永不被此函数触碰。
-  function expireDeadPausedKeys(username, now) {
-    let changed = false;
-    for (const k of accountKeys(username)) {
-      if ((k.lifecycle === 'unactivated' || k.lifecycle === 'activated') && k.timing === 'paused' && effectiveExpiry(k, now) <= now) {
-        k.lifecycle = 'expired'; k.timing = 'exhausted'; k.pauseStartMs = null; changed = true;
-        appendLine(bansLog, { ev: 'key-expired', keyId: k.id, username, at: now });
-      }
-    }
-    if (changed) save();
-  }
   function lazyExpireKeys(username, now) {
     let changed = false;
     for (const k of accountKeys(username)) {
@@ -666,6 +665,17 @@ function createLicenseCore(opts) {
     // G5 附带最近到期点，供三端拦截面渲染「已于 X 到期」（裁决批①）
     const g5ExpiryMs = (() => { const xs = accountKeys(username).filter((k) => k.lifecycle === 'expired' && k.plan !== 'trial' && k.expiresBaseMs); return xs.length ? Math.max.apply(null, xs.map((k) => effectiveExpiry(k, now))) : null; })();
     const expiredTrial = accountKeys(username).some((k) => k.lifecycle === 'expired' && k.plan === 'trial');
+    // DS-R23 P3-1：试用窗到期时间只认有限数值——expiresMs 缺失/null 时 null 会被 <= 误判为已过期；
+    // G2 携带的到期时间优先取试用窗记录，缺失时从已过期试用钥的实际到期点回收，再缺为 null。
+    const g2TrialExpiresMs = (winExp) => {
+      if (typeof winExp === 'number' && isFinite(winExp)) return winExp;
+      const tk = accountKeys(username).find((x) => x.lifecycle === 'expired' && x.plan === 'trial');
+      if (!tk) return null;
+      const e = effectiveExpiry(tk, now);
+      return (typeof e === 'number' && isFinite(e)) ? e : null;
+    };
+    const trialWinExp = (acct.trial && typeof acct.trial.expiresMs === 'number' && isFinite(acct.trial.expiresMs)) ? acct.trial.expiresMs : null;
+    const trialOver = expiredTrial || (trialWinExp !== null && trialWinExp <= now);
     // 转赠领取后原主人回 G1（站长 2026-10-25 17:29 定版）：名下已无有效密钥、
     // 无其他按天过期钥（那是 G5）、试用也不在有效期内时，一律按未激活 G1
     // 拦截并带 forceLogout 标志——不再落 G2/G4。标记在领取落盘时置位
@@ -694,9 +704,8 @@ function createLicenseCore(opts) {
       // 边界：用 <= now 判过期，与 software/qfclash 等号口径一致，且不依赖 lazyExpireKeys
       // 何时把试用钥翻成 expired；名下仍有非试用已激活钥（如赠送钥）时不下 G2，让其落 G4
       // 走「免费来源钥不含网页版」文案。
-      const trialOver = expiredTrial || (acct.trial && acct.trial.expiresMs <= now);
       const hasActivatedNonTrial = gateKeys.some((k) => k.plan !== 'trial');
-      if (trialOver && !hasActivatedNonTrial) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+      if (trialOver && !hasActivatedNonTrial) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs(trialWinExp) });
       // 存量老用户（无试用、无任何密钥记录）在网页端同样走 G1（设计稿 G1 拦截面含网页版）；
       // 免费来源持钥者走 G4。
       if (!hasAnyKey && !acct.trial) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
@@ -710,15 +719,16 @@ function createLicenseCore(opts) {
       if (acct.trial && acct.trial.expiresMs > now) return Object.assign(base, { allow: true, code: 'OK', trial: true, trialExpiresMs: acct.trial.expiresMs });
       if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
       if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
-      if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+      if (trialOver) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs(trialWinExp) });
       return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     }
     // software 渠道
     if (gateKeys.length) {
       if (ctx.deviceCode && ctx.platform) {
         const mine = gateKeys.find((k) => slotHas(k, ctx.platform, deviceHash));
-        // #26：名额按容量判——该类槽位全部绑满才算 G3（pc 满 2 台、mobile 满 1 台）
-        const slotFull = gateKeys.some((k) => slotCount(k, ctx.platform) >= (SLOT_CAPS[ctx.platform] || 1));
+        // DS-R31＋#26：名额按容量判——该类槽位「每把在效钥」全部绑满才算
+        // G3（pc 满 2 台、mobile 满 1 台）；原 some 误把「任一把满」当全满。
+        const slotFull = gateKeys.every((k) => slotCount(k, ctx.platform) >= (SLOT_CAPS[ctx.platform] || 1));
         if (!mine && slotFull) return Object.assign(base, { allow: false, code: 'G3', msgCode: 'L10' });
       }
       return Object.assign(base, { allow: true, code: 'OK' });
@@ -727,7 +737,7 @@ function createLicenseCore(opts) {
     if (pendingKeys.length) return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
     // 付费钥过期优先判 G5（已付费用户），无付费钥过期才落 G2——两状态严格区分（17:01 定版）
     if (expiredDaily) return Object.assign(base, { allow: false, code: 'G5', msgCode: 'L14', keyExpiresMs: g5ExpiryMs });
-    if (expiredTrial || (acct.trial && acct.trial.expiresMs <= now)) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: acct.trial ? acct.trial.expiresMs : null });
+    if (trialOver) return Object.assign(base, { allow: false, code: 'G2', msgCode: 'L8', trialExpiresMs: g2TrialExpiresMs(trialWinExp) });
     return Object.assign(base, { allow: false, code: 'G1', msgCode: 'L9' });
   }
 
@@ -771,8 +781,15 @@ function createLicenseCore(opts) {
   function forceLogoutState(username, now) {
     const acct = state.accounts[username];
     if (!acct || !acct.transferOutGate) return null;
+    // DS-R30（dsr01-fix-batch-20261029）：与 evaluate 同口径先做读时过期翻转，避免已到期未翻的按天钥
+    // 漏判 expiredDaily，导致转赠后原主人经 G1 强下线的门被错误保持。
+    lazyExpireKeys(username, now);
     if (activeKeys(username, now).length) return null;
     if (acct.trial && acct.trial.expiresMs > now) return null;
+    // DS-R30：expiredDaily 排除且优先于 G1，与 evaluate 转赠门一致；
+    // 不存在非试用过期钥时才可落 G1 强制下线。
+    const expiredDaily = accountKeys(username).some((k) => k.lifecycle === 'expired' && k.plan !== 'trial');
+    if (expiredDaily) return null;
     return { active: true, since: acct.transferOutGate.at, transferId: acct.transferOutGate.transferId, keyId: acct.transferOutGate.keyId, gateAfter: 'G1' };
   }
   function decideDeviceReview(reviewId, decision, actor, now) {
@@ -884,14 +901,31 @@ function createLicenseCore(opts) {
       return { ok: false, code, msg, offense, offenseApplied };
     };
     if (!rec || rec.username !== username) return fail('KEY_INVALID', '密钥无效或不属于该账号，请核对后重试。');
+    // DS-R01 B5（license-batch-20261029）：绑定前先按全局口径懒过期翻转——
+    // 原实现只认 lifecycle 字面值，已到期未翻转的钥可绑定成功（占槽＋假成功）。
+    // lazyExpireKeys 跳过 timing==='paused' 的钥，封禁暂停中的钥不误判过期；
+    // rec 为台账对象引用，翻转后下方 expired 判定直接生效。
+    lazyExpireKeys(username, now);
     if (rec.lifecycle === 'expired') return { ok: false, code: 'G5', msg: expiredText(rec, now) + '请购买新密钥。', expiredAt: rec.expiresBaseMs ? effectiveExpiry(rec, now) : null };
     if (rec.lifecycle === 'revoked') return { ok: false, code: 'KEY_REVOKED', msg: '该密钥已作废，无法绑定。' };
     const slot = platform === 'mobile' ? 'mobile' : 'pc';
     migrateSlots(rec);
     if (slotHas(rec, slot, dh)) return { ok: true, already: true, slot }; // 本设备重复确认不算失败
-    if (slotCount(rec, slot) >= SLOT_CAPS[slot]) return fail('KEY_BOUND', '该密钥已被绑定，无法再次绑定。一枚密钥仅可绑定两台电脑与一部手机；如需在其他设备使用，请购买新密钥。异常绑定行为将按《用户协议》相关约定处理。');
+    if (slotCount(rec, slot) >= SLOT_CAPS[slot]) {
+      // DS-R01 B4（license-batch-20261029）：槽满提示不是违规——定版「该密钥
+      // 已被绑定」只提示、不计 B10 犯次。原实现走 fail() 无条件计 attempts，
+      // 正常用户 10 分钟内重试 3 次即被记犯冻号。此处不经 fail()、不动
+      // bindAbuse，回执形状与 fail() 一致；save() 保留上方 migrateSlots 与
+      // ensureAccount 的结构落盘。
+      save();
+      return { ok: false, code: 'KEY_BOUND', msg: '该密钥已被绑定，无法再次绑定。一枚密钥仅可绑定两台电脑与一部手机；如需在其他设备使用，请购买新密钥。异常绑定行为将按《用户协议》相关约定处理。', offense: null, offenseApplied: false };
+    }
     slotAdd(rec, slot, dh);
     activateKey(rec, now); // 首次绑定即激活：未起算密钥自此刻起算（裁决批⑥）
+    // DS-R38（dsr01-fix-batch-20261029）：激活后立即联动账号状态——限时封禁/冻结
+    // 下的新钥须即刻进入 paused（pauseStartMs=now），不再等下一次 evaluate
+    // 才暂停（原实现新钥在冻结期内仍正常计时耗天数）。
+    syncAccountLinkage(username, now);
     save();
     return { ok: true, slot };
   }
@@ -997,6 +1031,9 @@ function createLicenseCore(opts) {
   // ---------- 订单 / 支付 ----------
   function createOrder(username, planId, now) {
     const plan = PLANS[planId]; if (!plan) throw new Error('bad-plan');
+    // DS-R40（dsr01-fix-batch-20261029）：试用套餐无订单支付面，createOrder 与
+    // grantPurchase 同口径拒绝 trial，避免生成只能卡在 pending_payment 的坏单。
+    if (planId === 'trial') throw new Error('bad-plan');
     ensureAccount(username, now, {});
     const order = { id: 'ord_' + crypto.randomBytes(8).toString('hex'), username, plan: planId, amount: plan.price, status: 'pending_payment', createdAt: now, keyId: null, channel: 'web' };
     state.orders[order.id] = order; save();
@@ -1007,7 +1044,18 @@ function createLicenseCore(opts) {
     if (!order) return { ok: false, code: 'NOT_FOUND' };
     if (order.status === 'paid' && order.keyId) return { ok: true, duplicated: true }; // 幂等：同单只发一次
     if (Number(amount) !== order.amount) { order.status = 'exception'; save(); return { ok: false, code: 'AMOUNT_MISMATCH' }; }
-    const g = grantPurchase(order.username, order.plan, 'paid', now, { orderId: order.id, actor: 'sim-pay' });
+    let g;
+    try {
+      g = grantPurchase(order.username, order.plan, 'paid', now, { orderId: order.id, actor: 'sim-pay' });
+    } catch (e) {
+      // DS-R40（门一 Q4 裁定，新 code GRANT_FAILED）：grantPurchase 对 trial/坏档/
+      // 冲突等抛错必须落订单异常并回失败，不得让异常穿透支付回调把订单
+      // 永久卡在 pending_payment；错误摘要入 note 供对账。
+      order.status = 'exception';
+      order.note = 'grant-failed:' + String((e && e.message) || e).slice(0, 120);
+      save();
+      return { ok: false, code: 'GRANT_FAILED', msg: '支付回调发放失败，请核对订单与套餐。' };
+    }
     if (g.alreadyPermanent) { order.status = 'exception'; order.note = 'already-permanent'; save(); return { ok: false, code: 'ALREADY_PERMANENT', msg: '该账号已持有永久套餐，不可重复购买。' }; }
     order.status = 'paid'; order.paidAt = now; order.keyId = g.key.id; save();
     return { ok: true, duplicated: false, stacked: !!g.stacked, swapped: !!g.swapped, keyId: g.key.id, maskedKey: maskKey(g.key.str) };
@@ -1057,7 +1105,11 @@ function createLicenseCore(opts) {
       const stackedKey = issued ? null : Object.values(state.keys).find((k) => k.username === username && ((k.grantStamps && k.grantStamps[orderId]) || k.lastGrantOrderId === orderId));
       const found = issued || stackedKey;
       if (found) {
-        if (found.plan !== planId) {
+        // DS-R34（dsr01-fix-batch-20261029）：恢复校验按来源分流——orderId 命中的
+        // 发行钥（issued）必须与订单 plan 一致；grantStamps/lastGrantOrderId
+        // 命中的叠加钥（stackedKey）只核归属戳，其 plan 仍为叠加前旧档、
+        // 不得比对（原实现对叠加恢复一律抛 grant-order-conflict 把订单卡死）。
+        if (issued && found.plan !== planId) {
           appendLine(bansLog, { ev: 'grant-record-conflict', orderId, keyId: found.id, recPlan: found.plan, username, plan: planId, at: now });
           throw new Error('grant-order-conflict');
         }
@@ -1276,6 +1328,11 @@ function createLicenseCore(opts) {
     expireTransfers(now);
     const k = state.keys[keyId];
     if (!k || k.username !== username) return { ok: false, code: 'NOT_FOUND', msg: '密钥不存在或不属于该账号。' };
+    // DS-R33（dsr01-fix-batch-20261029）：发起时先校验受赠账号——空/本人硬拒，
+    // 避免产生坏单以及自转单领取后把已激活钥重置回未激活、烧转赠次数。
+    const to = String(toUsername || '').trim().toLowerCase();
+    if (!to) return { ok: false, code: 'VALIDATION', msg: '请输入受赠账号。' };
+    if (to === username) return { ok: false, code: 'SELF_TRANSFER', msg: '不能转赠给自己。' };
     // 裁决批②（发起侧）：赠方账号处于封禁/冻结状态时不得发起转赠（硬拒）
     if (activeBansFor(username, now).length) return { ok: false, code: 'ACCOUNT_BANNED', msg: '账号当前处于封禁或冻结状态，无法发起转赠。' };
     // 定版（站长 17:04）：只有付费来源密钥可转赠；试用及其它免费发放来源一律硬拒
@@ -1283,7 +1340,7 @@ function createLicenseCore(opts) {
     if (k.transferredOnce) return { ok: false, code: 'TRANSFER_USED', msg: '该密钥已转赠过一次，不能再次转赠。' };
     if (k.lifecycle === 'expired' || k.lifecycle === 'revoked') return { ok: false, code: 'KEY_DEAD', msg: '该密钥已失效，不能转赠。' };
     if (state.transfers.some((t) => t.keyId === keyId && t.status === 'pending')) return { ok: false, code: 'TRANSFER_PENDING', msg: '该密钥已有一笔待确认的转赠。' };
-    const t = { id: 'tr_' + crypto.randomBytes(6).toString('hex'), keyId, from: username, to: String(toUsername || '').toLowerCase(), status: 'pending', createdAt: now, decidedAt: null };
+    const t = { id: 'tr_' + crypto.randomBytes(6).toString('hex'), keyId, from: username, to, status: 'pending', createdAt: now, decidedAt: null };
     state.transfers.push(t); save();
     return { ok: true, transfer: t };
   }
@@ -1328,9 +1385,18 @@ function createLicenseCore(opts) {
     const pending = mine.find((t) => t.to === username && t.status === 'pending');
     const keyDeadExpired = k.lifecycle === 'expired' || (k.expiresBaseMs && effectiveExpiry(k, now) <= now);
     const keyDeadRevoked = k.lifecycle === 'revoked';
+    // DS-R33：存量自转单（from===to）统一按无效密钥拒绝，不进入领取/状态提示
+    // 分支（防已激活钥被领取重置）；与 initiateTransfer 的新单拦截同向。
+    if (pending && pending.from === pending.to) {
+      return { ok: false, code: 'KEY_INVALID', msg: '密钥无效，请核对后重试。' };
+    }
     if (!pending) {
-      // 本人的单已因密钥到期终结：按 17:14/17:23 定版回「密钥已过期」（带到期日期，裁决批①）
-      if (mine.some((t) => t.to === username && t.status === 'key-expired') || keyDeadExpired) {
+      // DS-R35（dsr01-fix-batch-20261029）：KEY_EXPIRED 仅限「存在发给本人的 key-expired
+      // 转赠记录」或「密钥归属本人且 keyDeadExpired」；他人过期钥不暴露状态，
+      // 落入下方统一 KEY_INVALID（原口径仅凭 keyDeadExpired 即可探测他人钥
+      // 的存在性与到期时间）。原 17:14/17:23 定版的本人回执口径不变。
+      const ownKeyExpired = k.username === username && keyDeadExpired;
+      if (mine.some((t) => t.to === username && t.status === 'key-expired') || ownKeyExpired) {
         return { ok: false, code: 'KEY_EXPIRED', msg: expiredText(k, now), expiredAt: k.expiresBaseMs ? effectiveExpiry(k, now) : null };
       }
       if (mine.some((t) => t.to === username && t.status === 'expired')) {
@@ -1384,6 +1450,10 @@ function createLicenseCore(opts) {
         && !state.transfers.some((t) => t.keyId === k.id && t.status === 'pending');
       if (resaleOk) {
         const fromUser = k.username;
+        // DS-R36（dsr01-fix-batch-20261029）：转售赎回同样要求原持有者无生效封禁/冻结；
+        // 否则被封禁持有者的未激活钥可继续流转，与 pending 转赠的
+        // SENDER_BANNED 口径不一致。命中回 SENDER_BANNED（门一 Q2 裁定）。
+        if (activeBansFor(fromUser, now).length) return { ok: false, code: 'SENDER_BANNED', msg: '转出账号当前状态异常，该密钥暂时无法领取。' };
         ensureAccount(username, now, {});
         const sAcct = ensureAccount(fromUser, now, {});
         sAcct.transferOutGate = { at: now, transferId: null, keyId: k.id, to: username, via: 'resale' };
@@ -1531,6 +1601,10 @@ function createLicenseCore(opts) {
     const bans = activeBansFor(username, now);
     const perm = bans.find((b) => b.permanent);
     const timed = bans[0];
+    // DS-R41（dsr01-fix-batch-20261029）：activeBan 展示与 displayStatus 同口径
+    // 永久优先；原实现恒取 bans[0]，永封与限时封并存时 status 显示永久、
+    // activeBan 却显示限时条，口径分裂。
+    const activeBanRec = perm || bans[0];
     let displayStatus = '正常', statusNote = '';
     if (perm) { displayStatus = '已封禁'; statusNote = '原因类别：' + perm.code + (perm.endsAt ? '' : '（永久）') + '。如对处理结果有异议，可提交申诉。'; }
     else if (timed) {
@@ -1566,11 +1640,11 @@ function createLicenseCore(opts) {
       webEnabled: validPaid || trialInPeriod,
       // 网页版开通依据：'paid' 已激活付费钥、'trial' 账号试用在期、null 未开通。
       // 供展示/客服文案区分「付费开通」与「试用期内开通」；旧消费端忽略即可。
-      // 注：许可镜像（writeMirror）本轮未纳入此字段，镜像消费端取不到时按未区分处理。
+      // 许可镜像（writeMirror）主循环与封禁补齐已同步纳入此字段，消费端可读取。
       webBy: validPaid ? 'paid' : (trialInPeriod ? 'trial' : null),
       trialExpiresMs: acct && acct.trial ? acct.trial.expiresMs : null,
       keyExpiresMs: primary && primary.expiresBaseMs ? effectiveExpiry(primary, now) : null,
-      activeBan: bans.length ? { code: bans[0].code, permanent: !!bans[0].permanent, endsAt: bans[0].endsAt, id: bans[0].id } : null,
+      activeBan: activeBanRec ? { code: activeBanRec.code, permanent: !!activeBanRec.permanent, endsAt: activeBanRec.endsAt, id: activeBanRec.id } : null,
       hasKey: !!primary, keyId: primary ? primary.id : null,
       // 显示普查补字段（2026-10-26）：主钥生命周期/套餐/来源/时长小时数与
       // 服务端统一剩余时长文案——端上不得再凭 keyExpiresMs 是否为空猜永久。
@@ -1592,7 +1666,7 @@ function createLicenseCore(opts) {
     grantPurchase, initiateTransfer, confirmTransfer, rejectTransfer, cancelTransfer, listTransfers, expireTransfers, transferTtlMs, claimByKeyString, listClaimableTransfers, forceLogoutState, decideDeviceReview, overrideDeviceReview, sealedExpired, markPurged,
     activateKey, primaryKeyOf, expiredText, remainTextForKey,
     rebindEligibility, rebindEligibilityByHash, executeRebind, executeRebindByHash,
-    shadowLog,
+    shadowLog, mirrorStats: () => mirrorPublishStats,
     getBan: (id) => state.bans.find((b) => b.id === id) || null,
     adjustBanEnds: (id, endsAt, now) => { const b = state.bans.find((x) => x.id === id); if (b && b.status === 'active') { b.endsAt = endsAt; save(); } return b || null; },
     setContact: (username, email, now) => { ensureAccount(username, now, {}); state.accounts[username].contactEmail = email; save(); },

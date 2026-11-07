@@ -18,10 +18,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const EVENT_TYPES = ['order', 'appeal', 'rebind', 'device_review', 'forum', 'support'];
+const EVENT_TYPES = ['order', 'appeal', 'rebind', 'device_review', 'forum', 'support', 'profile_mod'];
 const TYPE_NAMES = {
   order: '付款订单', appeal: '申诉', rebind: '换绑申请',
   device_review: '设备异常待复核', forum: '论坛待审', support: '客服工单',
+  profile_mod: '资料申诉',
 };
 const MAX_EVENTS = 3000;
 
@@ -36,21 +37,56 @@ function createEventsCore(deps) {
   const ownerTokenPlainFile = deps.ownerTokenPlainFile || '/opt/qfremote-ext/owner-api-token.txt';
   try { fs.mkdirSync(dataDir, { recursive: true }); } catch (e) {}
 
+  // EV-1 兜底：可选销账前置断言（deps.resolveGuard），返回 false 或抛错即拒绝
+  // 销账；未注入时行为与旧版逐字一致。guard 只决定「能不能标 done」，不参与
+  // 裁定本身（补丁源 verify-ev1-20261026，DS 门一 2026-10-29 裁定部署）。
+  const resolveGuard = typeof deps.resolveGuard === 'function' ? deps.resolveGuard : null;
+  // EV-2/EV-3（DS 门一成稿，ds-p1-rest-20261029）：三态加载——ENOENT 静默空启；
+  // 读/解析/形状异常一律告警＋原件改名隔离后空启，原件永不被后续 save() 覆盖；
+  // seq 高水位恢复为 max(seq, max(id))，防重号与游标回退；元素逐个验对象＋数值 id。
   let store = { seq: 0, items: [] };
   try {
     const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (v && Array.isArray(v.items)) store = v;
-  } catch (e) {}
-  function save() {
-    if (store.items.length > MAX_EVENTS) {
-      const done = store.items.filter((e) => e.status === 'done');
-      const keep = store.items.filter((e) => e.status !== 'done')
-        .concat(done.slice(-Math.max(0, MAX_EVENTS - store.items.filter((e) => e.status !== 'done').length)));
-      store.items = keep.sort((a, b) => a.id - b.id);
+    if (!v || !Array.isArray(v.items) || !v.items.every((entry) => entry && typeof entry === 'object' && typeof entry.id === 'number' && !Number.isNaN(entry.id))) {
+      throw new Error('events store shape invalid');
     }
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(store, null, 1), { mode: 0o600 });
-    fs.renameSync(tmp, file);
+    store = v;
+    const maxId = v.items.reduce((acc, e) => Math.max(acc, e.id), 0);
+    const parsedSeq = (typeof v.seq === 'number' && !Number.isNaN(v.seq)) ? v.seq : 0;
+    const targetSeq = Math.max(parsedSeq, maxId);
+    if (targetSeq !== v.seq) {
+      log({ ev: 'review-events-seq-adjusted', oldSeq: (v.seq === undefined ? null : v.seq), newSeq: targetSeq });
+      store.seq = targetSeq;
+    }
+  } catch (e) {
+    if (!(e && e.code === 'ENOENT')) {
+      log({ ev: 'review-events-load-error', err: String((e && e.message) || e) });
+      const corrupt = file + '.corrupt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      try { fs.renameSync(file, corrupt); } catch (renameErr) { log({ ev: 'review-events-load-isolate-failed', err: String((renameErr && renameErr.message) || renameErr) }); }
+    }
+  }
+  // EV-4/EV-5（DS 门一成稿，final-fix-batchC-20261029）：save() 失败不直穿
+  // 调用方——结构化告警＋storeDirty 标记，下一次 save 成功清标（整表重写
+  // 天然自愈）；修剪 allowance<=0 时 done 保留 0 条（旧写 slice(-0) 等于
+  // 全取，pending>=MAX 时总量可超上限）。
+  let storeDirty = false;
+  function save() {
+    try {
+      if (store.items.length > MAX_EVENTS) {
+        const pend = store.items.filter((e) => e.status !== 'done');
+        const allowance = Math.max(0, MAX_EVENTS - pend.length);
+        const done = store.items.filter((e) => e.status === 'done');
+        const keep = pend.concat(allowance > 0 ? done.slice(-allowance) : []);
+        store.items = keep.sort((a, b) => a.id - b.id);
+      }
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 1), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+      storeDirty = false;
+    } catch (e) {
+      storeDirty = true;
+      log({ ev: 'review-events-save-failed', err: String((e && e.message) || e) });
+    }
   }
 
   function enqueue(type, refId, summary) {
@@ -69,6 +105,11 @@ function createEventsCore(deps) {
   function resolve(type, refId, actor, result) {
     const ev = store.items.find((e) => e.type === type && e.refId === String(refId) && e.status === 'pending');
     if (!ev) return null;
+    if (resolveGuard) {
+      let ok = false;
+      try { ok = resolveGuard(type, ev.refId, actor, result) !== false; } catch (e) { ok = false; }
+      if (!ok) { log({ ev: 'review-event-resolve-blocked', type, refId: ev.refId, eventId: ev.id, actor: actor || null }); return null; }
+    }
     ev.status = 'done'; ev.handledBy = actor || null; ev.handledAt = Date.now(); ev.result = result || null;
     save();
     log({ ev: 'review-event-resolved', type, refId: ev.refId, eventId: ev.id, actor: ev.handledBy, result: ev.result });
@@ -97,12 +138,15 @@ function createEventsCore(deps) {
   // ---------- 接口令牌（只存哈希；明文只落 600 文件） ----------
   // 双槽并存：顶层四字段＝助手槽（qfa_，行为不变）；owner 子对象＝站长
   // 全开槽（qfo_，decide 不受订单阶段限制），两槽独立生成/吊销。
+  // 单写者约束（DS-R26-③）：assistant-token.json 只许运行中的 ext 进程
+  // 经本模块读写，外部工具一律经管理端点生成/吊销，禁直改文件；meta 为
+  // 读-改-写整文件，writeTokenMeta 的 tmp 用 pid 后缀隔离多进程误并发写。
   function readTokenMeta() {
     try { const v = JSON.parse(fs.readFileSync(tokenMetaFile, 'utf8')); if (v && typeof v === 'object') return v; } catch (e) {}
     return { status: 'none', hash: null, createdAt: null, lastUsedAt: null };
   }
   function writeTokenMeta(m) {
-    const tmp = tokenMetaFile + '.tmp';
+    const tmp = tokenMetaFile + '.tmp-' + process.pid;
     fs.writeFileSync(tmp, JSON.stringify(m, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, tokenMetaFile);
   }
@@ -117,14 +161,35 @@ function createEventsCore(deps) {
       owner: { status: owner.status, createdAt: owner.createdAt, lastUsedAt: owner.lastUsedAt, plainFile: ownerTokenPlainFile },
     };
   }
+  // EV-7（DS 门一成稿，final-fix-batchC-20261029）：先写明文（tmp＋rename，
+  // 0600）后写 meta；meta 写失败则告警＋尽力删除刚写明文并抛错——meta 是
+  // 校验权威，明文无 meta 对应即惰性文件，不会出现「meta 已生效而明文
+  // 缺失/仍是旧值」的不一致。DEV-E2：tmp 带 0600 模式＋rename 后再 chmod，
+  // 保住明文文件 600 口径（DS 稿未带模式，此处按现行口径补齐）。
+  function writePlainThenMeta(plainFile, content, writeMeta) {
+    const tmp = plainFile + '.tmp';
+    try {
+      fs.writeFileSync(tmp, content, { mode: 0o600 });
+      fs.renameSync(tmp, plainFile);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (ignored) {}
+      throw e;
+    }
+    try { fs.chmodSync(plainFile, 0o600); } catch (ignored) {}
+    try {
+      writeMeta();
+    } catch (e) {
+      log({ ev: 'review-token-meta-write-failed', plainFile, err: String((e && e.message) || e) });
+      try { fs.unlinkSync(plainFile); } catch (ignored) {}
+      throw e;
+    }
+  }
   function generateToken() {
     // 读-改-写单槽：顶层四字段＝助手槽，owner 子对象原样保留（旧版整对象覆写会抹掉 owner 槽）
     const m = readTokenMeta();
     const plain = 'qfa_' + crypto.randomBytes(32).toString('hex');
     m.status = 'active'; m.hash = sha256(plain); m.createdAt = Date.now(); m.lastUsedAt = null;
-    writeTokenMeta(m);
-    fs.writeFileSync(tokenPlainFile, plain + '\n', { mode: 0o600 });
-    try { fs.chmodSync(tokenPlainFile, 0o600); } catch (e) {}
+    writePlainThenMeta(tokenPlainFile, plain + '\n', () => writeTokenMeta(m));
     log({ ev: 'assistant-token-generated' });
     return { ok: true, status: 'active', plainFile: tokenPlainFile };
   }
@@ -132,7 +197,7 @@ function createEventsCore(deps) {
     const m = readTokenMeta();
     m.status = 'revoked'; m.hash = null; // createdAt/lastUsedAt 保留（与旧版语义一致）
     writeTokenMeta(m);
-    try { fs.unlinkSync(tokenPlainFile); } catch (e) {}
+    try { fs.unlinkSync(tokenPlainFile); } catch (e) { if (!e || e.code !== 'ENOENT') log({ ev: 'review-token-plain-unlink-failed', slot: 'assistant', err: String((e && e.message) || e) }); }
     log({ ev: 'assistant-token-revoked' });
     return { ok: true, status: 'revoked' };
   }
@@ -142,9 +207,7 @@ function createEventsCore(deps) {
     const owner = ownerSlot(m) || {};
     owner.status = 'active'; owner.hash = sha256(plain); owner.createdAt = Date.now(); owner.lastUsedAt = null;
     m.owner = owner;
-    writeTokenMeta(m);
-    fs.writeFileSync(ownerTokenPlainFile, plain + '\n', { mode: 0o600 });
-    try { fs.chmodSync(ownerTokenPlainFile, 0o600); } catch (e) {}
+    writePlainThenMeta(ownerTokenPlainFile, plain + '\n', () => writeTokenMeta(m));
     log({ ev: 'owner-token-generated' });
     return { ok: true, status: 'active', plainFile: ownerTokenPlainFile };
   }
@@ -154,7 +217,7 @@ function createEventsCore(deps) {
     owner.status = 'revoked'; owner.hash = null; // createdAt/lastUsedAt 保留
     m.owner = owner;
     writeTokenMeta(m);
-    try { fs.unlinkSync(ownerTokenPlainFile); } catch (e) {}
+    try { fs.unlinkSync(ownerTokenPlainFile); } catch (e) { if (!e || e.code !== 'ENOENT') log({ ev: 'review-token-plain-unlink-failed', slot: 'owner', err: String((e && e.message) || e) }); }
     log({ ev: 'owner-token-revoked' });
     return { ok: true, status: 'revoked' };
   }

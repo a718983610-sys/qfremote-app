@@ -134,6 +134,70 @@ function createLockBridge(deps) {
     log('lock', msg);
   }
 
+  /* ---------- 机主登记名别名表（账号改名兼容，lock-devices-empty-20261029） ----------
+     组件登记的机主名（被控机 device.json 的 OwnerUsername）在账号改名后成为旧名，
+     服务端改名流程动不了被控机本地文件，桥按现名直认必然失配、/lock/devices 回空。
+     别名表 /opt/qfremote-lock/owner-alias.json 由运维依据改名记录维护：
+       { "aliases": { "<现名>": ["<曾用名>", ...] } }
+     判定语义不变（仍只认「登记名属于请求者本人」），仅把请求者的曾用名纳入比对。
+     文件缺失＝无别名（常态降级）；内容损坏＝保留上次好表＋节流日志，绝不抛错。 */
+  const OWNER_ALIAS_PATH = '/opt/qfremote-lock/owner-alias.json';
+  const OWNER_ALIAS_RELOAD_MS = 30000;
+  let ownerAliasIndex = new Map(); // fold(登记名) -> fold(现名)
+  let ownerAliasMtimeMs = -1;
+  let ownerAliasLastCheck = 0;
+  function foldName(s) { return typeof s === 'string' ? s.trim().toLowerCase() : ''; }
+  function loadOwnerAliases(force) {
+    const now = Date.now();
+    if (!force && (now - ownerAliasLastCheck) < OWNER_ALIAS_RELOAD_MS) return;
+    ownerAliasLastCheck = now;
+    let st;
+    try { st = fs.statSync(OWNER_ALIAS_PATH); } catch (e) {
+      if (ownerAliasMtimeMs !== -1) { ownerAliasIndex = new Map(); ownerAliasMtimeMs = -1; }
+      return;
+    }
+    if (!force && ownerAliasMtimeMs === st.mtimeMs) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(OWNER_ALIAS_PATH, 'utf8'));
+      const src = (raw && typeof raw === 'object' && raw.aliases && typeof raw.aliases === 'object' && !Array.isArray(raw.aliases))
+        ? raw.aliases : raw;
+      const idx = new Map();
+      if (src && typeof src === 'object' && !Array.isArray(src)) {
+        for (const cur of Object.keys(src)) {
+          const c = foldName(cur);
+          const olds = src[cur];
+          if (!c || !Array.isArray(olds)) continue;
+          for (const o of olds) {
+            const k = foldName(o);
+            if (!k || k === c) continue;
+            const prev = idx.get(k);
+            // 【门二 P1】同一曾用名映射到两个不同现名＝表内冲突：整表拒绝（保留上次好表），
+            // 绝不 last-wins 静默串扰到另一个账号。
+            if (prev && prev !== c) throw new Error('别名表冲突：曾用名 ' + o + ' 同时映射到 ' + prev + ' 与 ' + c + '，本版别名表已拒绝加载');
+            idx.set(k, c);
+          }
+        }
+      }
+      ownerAliasIndex = idx;
+      ownerAliasMtimeMs = st.mtimeMs;
+    } catch (e) {
+      logThrottled('alias-bad', 'lock 机主别名表读取失败（保留上次好表继续服务）：' + (e && e.message), 60000);
+    }
+  }
+  // 登记名是否属于请求者：现名直认，或登记名是请求者的曾用名（别名表命中）。
+  // 直认与别名共用同一 fold 语义（trim+小写），避免与 eqFold 无 trim 的口径漂移（门二存疑 1）。
+  function ownerNameMatches(me, recorded) {
+    const recFold = foldName(recorded);
+    if (recFold && recFold === foldName(me)) return true;
+    loadOwnerAliases(false);
+    const target = ownerAliasIndex.get(recFold);
+    if (target && target === foldName(me)) {
+      logThrottled('alias-hit-' + foldName(me), 'lock 机主判定经别名表命中：登记名 ' + recorded + ' → 现名 ' + me + '（账号改名兼容）。', 60000);
+      return true;
+    }
+    return false;
+  }
+
   function svcNotifyReady() {
     const w = svc.waiters.splice(0);
     for (const fn of w) { try { fn(); } catch (e) {} }
@@ -354,7 +418,7 @@ function createLockBridge(deps) {
     if (!entry) return false;
     let ttl;
     if (!entry.status) ttl = STATUS_MISS_TTL_MS;
-    else if (entry.status.ownerUsername && eqFold(entry.status.ownerUsername, me)) ttl = STATUS_TTL_MS;
+    else if (entry.status.ownerUsername && ownerNameMatches(me, entry.status.ownerUsername)) ttl = STATUS_TTL_MS;
     else ttl = STATUS_TTL_NONOWNER_MS;
     return (Date.now() - entry.at) < ttl;
   }
@@ -445,7 +509,7 @@ function createLockBridge(deps) {
   // 只认组件登记机主：status.json 的 ownerUsername 与请求账号大小写不敏感相等。
   // status 读不到或没登记名 → 一律判非机主（保守；写操作本来也要求先读到 status）。
   function isOwner(me, node, status) {
-    return !!(status && status.ownerUsername && eqFold(status.ownerUsername, me));
+    return !!(status && status.ownerUsername && ownerNameMatches(me, status.ownerUsername));
   }
 
   /* ---------- HTTP 小工具 ---------- */
@@ -676,6 +740,7 @@ function createLockBridge(deps) {
     }
   }
 
+  loadOwnerAliases(true);
   if (bridgeCfg) svcConnect();
   // 按用户清 xid 桥缓存（ext ban-purge 联动调用；DS 稿 §4.3）
   function purgeUser(username) {

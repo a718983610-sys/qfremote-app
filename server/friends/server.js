@@ -943,7 +943,7 @@ function main() {
     if (forumBaseCache.url && now - forumBaseCache.at < 600000) return Promise.resolve(forumBaseCache.url);
     return new Promise((resolve) => {
       try {
-        const rq = https.get('https://a718983610-sys.github.io/qfremote-website/product.json', { timeout: 8000 }, (r) => {
+        const rq = https.get('https://qfremote.top/product.json', { timeout: 8000 }, (r) => {
           let d = '';
           r.on('data', c => { d += c; if (d.length > 262144) rq.destroy(); });
           r.on('end', () => {
@@ -1123,7 +1123,7 @@ function main() {
       if (me && isBanLinked(me)) {
         try {
           const ck = parseCookies(req);
-          if (ck.qfr_frd) { delete state.sessions[crypto.createHash('sha256').update(ck.qfr_frd).digest('hex')]; saveState(); }
+          if (ck.qfr_frd) { const sid = crypto.createHash('sha256').update(ck.qfr_frd).digest('hex'); if (Object.prototype.hasOwnProperty.call(state.sessions, sid)) { delete state.sessions[sid]; saveState(); } }
         } catch (e) {}
         log({ ev: 'ban-gate-deny', user: me, path: p });
         return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁。如果你认为封错了，可以在登录页提交申诉。' });
