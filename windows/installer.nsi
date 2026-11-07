@@ -85,6 +85,19 @@ Function QFHealAgentMsh
     ClearErrors
     FileRead $R0 $R1
     IfErrors healClose
+    ; 发版前深查实证修复（2026-11-07，NSIS 探针＋Wine 实测）：FileRead
+    ; 读回的行带行尾符（目标行内容 50 字、读回 51 字），不先剥掉尾部
+    ; CR/LF 就全行 StrCmp，地址已正确的机器也会被误判为需修复、白白
+    ; 多弹一次 UAC（助手脚本内有正则复核兜底，不会误改，但提示不该弹）。
+  healTrim:
+    StrCpy $R3 $R1 1 -1
+    StrCmp $R3 "$\r" healCut
+    StrCmp $R3 "$\n" healCut
+    Goto healTrimDone
+  healCut:
+    StrCpy $R1 $R1 -1
+    Goto healTrim
+  healTrimDone:
     StrCpy $R2 $R1 11
     StrCmp $R2 "MeshServer=" 0 healLoop
     StrCmp $R1 "MeshServer=wss://app.qfremote.top:8443/agent.ashx" 0 healClose

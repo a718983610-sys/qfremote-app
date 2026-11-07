@@ -60,6 +60,12 @@ try {
     healFn.includes('StrCmp $R9 1 healReturn'));
   ok('A12-heal-skips-when-no-agent',
     healFn.includes('StrCmp $R7 1 0 healReturn'));
+  // 发版前深查修复（2026-11-07）：FileRead 读回行带行尾符，预检全行
+  // 比较前必须先剥 CR/LF，否则已正确的机器会被误判、白弹一次 UAC。
+  ok('A13-heal-strips-line-endings-before-compare',
+    healFn.includes('healTrim:') &&
+    healFn.includes('StrCmp $R3 "$\\r" healCut') &&
+    healFn.includes('StrCmp $R3 "$\\n" healCut'));
 
   // ---- B. qf-agent-heal.ps1 ----
   ok('B1-ps1-target', PS1.includes("'" + TARGET + "'") || PS1.includes(TARGET));
