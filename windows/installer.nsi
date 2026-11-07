@@ -64,6 +64,45 @@ Function .onInstSuccess
   instSuccessDone:
 FunctionEnd
 
+; 2.4.3 本机 agent 自愈（站长 2026-11-07 令：不要让他动手）：
+;   安装器本体保持 RequestExecutionLevel user（不动既有安装/静默更新/
+;   装后拉起口径，拉起的应用仍是普通权限）；只在装后段由下方的
+;   QFHealAgentMsh 预检本机 MeshAgent.msh，确需改地址时才以 runas 方式
+;   提权拉起 qf-agent-heal.ps1（弹一次 UAC），无 agent 或地址已正确时
+;   不拉起、不弹提示。预检与提权助手任何一步失败都静默跳过，绝不影响
+;   App 的安装与更新（fail-soft）。助手脚本随安装器发到 $TEMP，
+;   打包时须把 qf-agent-heal.ps1 与 installer.nsi、icon.ico 一并备到
+;   编译目录（与 icon.ico 同口径）；脚本内目标地址与下方预检逐字一致。
+Function QFHealAgentMsh
+  ; $R7 = 1 文件存在且已打开；$R9 = 1 该行已是目标值。
+  StrCpy $R7 0
+  StrCpy $R9 0
+  ClearErrors
+  FileOpen $R0 "$PROGRAMFILES\Mesh Agent\MeshAgent.msh" r
+  IfErrors healDone
+  StrCpy $R7 1
+  healLoop:
+    ClearErrors
+    FileRead $R0 $R1
+    IfErrors healClose
+    StrCpy $R2 $R1 11
+    StrCmp $R2 "MeshServer=" 0 healLoop
+    StrCmp $R1 "MeshServer=wss://app.qfremote.top:8443/agent.ashx" 0 healClose
+    StrCpy $R9 1
+  healClose:
+    FileClose $R0
+  healDone:
+  StrCmp $R7 1 0 healReturn
+  StrCmp $R9 1 healReturn
+  ; 需改：有文件但无行（追加）或行值过期（替换）。提权助手双保险复核，
+  ; 用户拒绝 UAC（1223）或助手缺失都静默跳过，不动安装结果。
+  DetailPrint "正在修复本机远程服务配置（需确认一次系统提示）…"
+  ClearErrors
+  ExecShell "runas" "powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File '$TEMP\qf-agent-heal.ps1'"
+  ClearErrors
+  healReturn:
+FunctionEnd
+
 Section "QFRemote" SEC_MAIN
   SetOutPath "$INSTDIR"
   DetailPrint "正在解压程序文件，请稍候…"
@@ -89,6 +128,11 @@ Section "QFRemote" SEC_MAIN
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "UninstallString" "$INSTDIR\Uninstall QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "Publisher" "QFRemote"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "InstallLocation" "$INSTDIR"
+
+  ; 2.4.3 本机 agent 自愈（装后段）：先把提权助手脚本备到临时目录
+  ; （仅约 2KB，不随 App 安装），是否执行由预检函数决定。
+  File "/oname=$TEMP\qf-agent-heal.ps1" "qf-agent-heal.ps1"
+  Call QFHealAgentMsh
 SectionEnd
 
 Section "Uninstall"
