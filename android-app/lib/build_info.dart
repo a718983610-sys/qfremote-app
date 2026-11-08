@@ -6,4 +6,4 @@ const String kBuildDate = '2026-11-07';
 /// 其值由构建系统从 pubspec 写入包内）；本常量只作 PackageInfo 未就绪时的
 /// 兜底与客户端版本头的取值来源。改版时必须与 pubspec 同步改，
 /// test/client_version_test.dart 会逐字比对两处，不一致 CI 直接红。
-const String kAppVersion = '2.4.3';
+const String kAppVersion = '2.4.4';
