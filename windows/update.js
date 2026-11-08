@@ -72,9 +72,20 @@ function getBuffer(rawUrl, timeoutMs) {
   });
 }
 
+// 自愈结果回带（2.4.4）：客户端启动自愈（agent-heal.js）有结果后，
+// 下次取清单时在 URL 后带 ?heal=<结果>（白名单取值，无个人信息），
+// 清单仍是静态文件、服务端只在 Caddy 访问日志里留痕；取失败不重试、
+// 不影响更新。成功取到后清掉（一次结果只带一次）。
+let healReport = null;
+function setHealReport(outcome) {
+  healReport = (typeof outcome === 'string' && /^[a-z_]+$/.test(outcome)) ? outcome : null;
+}
+
 // 取清单并校验。返回 {version, notes, url(绝对地址), sha256, size} 或抛错（调用方安静处理）。
 async function fetchManifest(timeoutMs) {
-  const buf = await getBuffer(RELEASE_URL, timeoutMs || 8000);
+  const fetchUrl = healReport ? RELEASE_URL + '?heal=' + encodeURIComponent(healReport) : RELEASE_URL;
+  const buf = await getBuffer(fetchUrl, timeoutMs || 8000);
+  healReport = null;
   let m;
   try { m = JSON.parse(buf.toString('utf8')); } catch (e) { throw new Error('更新清单格式不正确'); }
   if (!m || typeof m.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(m.version)) throw new Error('更新清单缺少版本号');
@@ -186,4 +197,4 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   }
 }
 
-module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File };
+module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File, setHealReport };

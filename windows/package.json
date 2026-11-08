@@ -1,6 +1,6 @@
 {
   "name": "qfremote",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "description": "QFRemote 远程控制 — Windows 控制端",
   "main": "main.js",
   "author": "QFRemote",
@@ -30,6 +30,7 @@
       "lock.js",
       "creds.js",
       "autologin.js",
+      "agent-heal.js",
       "device-key.js",
       "license.js",
       "device-code.js",

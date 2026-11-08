@@ -126,6 +126,8 @@ const server = http.createServer((req, res) => {
     result.fatal = e.message;
   } finally {
     server.close();
+    // 2.4.4：沙箱 /tmp 每次是干净的，先建目录再写结果，否则 ENOENT 误报失败。
+    fs.mkdirSync(path.dirname(OUT), { recursive: true });
     fs.writeFileSync(OUT, JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ pass: result.pass, cases: result.cases, fatal: result.fatal || null }));
     process.exit(result.pass ? 0 : 1);

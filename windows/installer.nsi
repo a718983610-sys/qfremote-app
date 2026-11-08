@@ -1,4 +1,4 @@
-; QFRemote v2.4.3 hand-built NSIS installer (payload = 7z archive, extracted with Nsis7z plugin,
+; QFRemote v2.4.4 hand-built NSIS installer (payload = 7z archive, extracted with Nsis7z plugin,
 ; same mechanism electron-builder uses). Compiled on Linux with native makensis;
 ; all large inputs staged on tmpfs because this VM's disk-backed mmap faults on big files.
 Unicode true
@@ -6,22 +6,25 @@ SetCompress off
 !addplugindir "/dev/shm/qfr/plugins"
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
+!include "StrFunc.nsh"
+${Using:StrFunc} StrLoc
+${Using:StrFunc} StrStr
 
 Name "QFRemote"
-OutFile "/dev/shm/qfr/QFRemote-Setup-v2.4.3.exe"
+OutFile "/dev/shm/qfr/QFRemote-Setup-v2.4.4.exe"
 Icon "icon.ico"
 InstallDir "$LOCALAPPDATA\Programs\QFRemote"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "InstallLocation"
 RequestExecutionLevel user
-VIProductVersion "2.4.3.0"
+VIProductVersion "2.4.4.0"
 VIAddVersionKey /LANG=2052 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=2052 "FileDescription" "QFRemote 远程控制（控制端）"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.4.3"
-VIAddVersionKey /LANG=2052 "ProductVersion" "2.4.3"
+VIAddVersionKey /LANG=2052 "FileVersion" "2.4.4"
+VIAddVersionKey /LANG=2052 "ProductVersion" "2.4.4"
 VIAddVersionKey /LANG=1033 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=1033 "FileDescription" "QFRemote Remote Control (controller)"
-VIAddVersionKey /LANG=1033 "FileVersion" "2.4.3"
-VIAddVersionKey /LANG=1033 "ProductVersion" "2.4.3"
+VIAddVersionKey /LANG=1033 "FileVersion" "2.4.4"
+VIAddVersionKey /LANG=1033 "ProductVersion" "2.4.4"
 
 !define MUI_ICON "icon.ico"
 !define MUI_UNICON "icon.ico"
@@ -64,56 +67,146 @@ Function .onInstSuccess
   instSuccessDone:
 FunctionEnd
 
-; 2.4.3 本机 agent 自愈（站长 2026-11-07 令：不要让他动手）：
-;   安装器本体保持 RequestExecutionLevel user（不动既有安装/静默更新/
-;   装后拉起口径，拉起的应用仍是普通权限）；只在装后段由下方的
-;   QFHealAgentMsh 预检本机 MeshAgent.msh，确需改地址时才以 runas 方式
-;   提权拉起 qf-agent-heal.ps1（弹一次 UAC），无 agent 或地址已正确时
-;   不拉起、不弹提示。预检与提权助手任何一步失败都静默跳过，绝不影响
-;   App 的安装与更新（fail-soft）。助手脚本随安装器发到 $TEMP，
-;   打包时须把 qf-agent-heal.ps1 与 installer.nsi、icon.ico 一并备到
-;   编译目录（与 icon.ico 同口径）；脚本内目标地址与下方预检逐字一致。
+; 2.4.4 本机 agent 自愈加固（站长 2026-11-09 令：修复到底）：
+;   2.4.3 真机验收失败的根因：安装器预检跳过或 ExecShell runas 静默
+;   失败时零留痕——%TEMP% 里只有脚本、没有 qf-agent-heal.log，
+;   即 PS1 根本没被拉起。本版堵住两条路：
+;   (1) .msh 定位兜底：Program Files → Program Files (x86) →
+;       服务 ImagePath（解析 MeshAgent.exe 所在目录）；
+;   (2) runas 失败换 nsExec + Start-Process -Verb RunAs 再拉一次；
+;   (3) 修复后复读 .msh 验证（最多 4 次、每次隔 5 秒）；
+;   (4) 任何跳过/失败都写安装器日志
+;       %TEMP%\qf-agent-heal-installer.log（每次安装重建，模式 w；
+;       2.4.4 教训：FileOpen "a" 在 Wine 实测中会从文件头覆写，
+;       不可信，故不用追加模式，日志改为单次累积写出）。
+;   仍 fail-soft：自愈任何一步失败都不影响 App 安装与更新。
+;   App 启动时另有自检兜底（windows/agent-heal.js），安装器没跑到
+;   的情况由它补上；两者以日志时间戳互斥（120 秒内不双弹 UAC）。
 Function QFHealAgentMsh
-  ; $R7 = 1 文件存在且已打开；$R9 = 1 该行已是目标值。
+  ; 寄存器：$R0 句柄/临时；$R1 行/临时；$R2 临时；$R3 临时；
+  ; $R4 阶段（0=初始裁决，1=验证轮询）；$R5 日志累积；
+  ; $R6 解析到的 .msh 全路径；$R7 1=已定位；$R8 验证剩余次数；$R9 1=该行已是目标值。
+  StrCpy $R5 ""
   StrCpy $R7 0
+  ; ---- 定位 .msh：PF → PFx86 → ImagePath ----
+  IfFileExists "$PROGRAMFILES\Mesh Agent\MeshAgent.msh" 0 +3
+    StrCpy $R6 "$PROGRAMFILES\Mesh Agent\MeshAgent.msh"
+    StrCpy $R7 1
+  StrCmp $R7 1 resolveDone
+  IfFileExists "$PROGRAMFILES32\Mesh Agent\MeshAgent.msh" 0 +3
+    StrCpy $R6 "$PROGRAMFILES32\Mesh Agent\MeshAgent.msh"
+    StrCpy $R7 1
+  StrCmp $R7 1 resolveDone
+  ReadRegStr $R0 HKLM "SYSTEM\CurrentControlSet\Services\Mesh Agent" "ImagePath"
+  StrCmp $R0 "" resolveFail
+  ${StrLoc} $R1 $R0 "MeshAgent.exe" ">"
+  StrCmp $R1 "" resolveFail
+  IntOp $R1 $R1 + 13
+  StrCpy $R2 $R0 $R1
+  StrCpy $R3 $R2 1
+  ; 注意：NSIS 相对跳转 +N = 跳过 N-1 条（+1 即下一条，不跳过），
+  ; 故此处不用 +1、必须用 +2 才能跳过下面这一条（探针 probe7/probe8 实证）。
+  StrCmp $R3 '"' 0 +2
+    StrCpy $R2 $R2 "" 1
+  StrLen $R3 $R2
+  IntOp $R3 $R3 - 13
+  IntCmp $R3 0 resolveFail resolveFail 0
+  StrCpy $R4 $R2 $R3
+  StrCpy $R6 "$R4MeshAgent.msh"
+  IfFileExists $R6 0 resolveFail
+  StrCpy $R7 1
+  Goto resolveDone
+resolveFail:
+  StrCpy $R5 "$R5INSTALLER: no agent msh found (pf/pfx86/imagepath)$\r$\n"
+  Goto healReturn
+resolveDone:
+  ; ---- 读 .msh，定 $R9（1=该行已是目标值） ----
+  StrCpy $R4 0
+readMsh:
   StrCpy $R9 0
   ClearErrors
-  FileOpen $R0 "$PROGRAMFILES\Mesh Agent\MeshAgent.msh" r
-  IfErrors healDone
-  StrCpy $R7 1
-  healLoop:
-    ClearErrors
-    FileRead $R0 $R1
-    IfErrors healClose
-    ; 发版前深查实证修复（2026-11-07，NSIS 探针＋Wine 实测）：FileRead
-    ; 读回的行带行尾符（目标行内容 50 字、读回 51 字），不先剥掉尾部
-    ; CR/LF 就全行 StrCmp，地址已正确的机器也会被误判为需修复、白白
-    ; 多弹一次 UAC（助手脚本内有正则复核兜底，不会误改，但提示不该弹）。
-  healTrim:
-    StrCpy $R3 $R1 1 -1
-    StrCmp $R3 "$\r" healCut
-    StrCmp $R3 "$\n" healCut
-    Goto healTrimDone
-  healCut:
-    StrCpy $R1 $R1 -1
-    Goto healTrim
-  healTrimDone:
-    StrCpy $R2 $R1 11
-    StrCmp $R2 "MeshServer=" 0 healLoop
-    StrCmp $R1 "MeshServer=wss://app.qfremote.top:8443/agent.ashx" 0 healClose
-    StrCpy $R9 1
-  healClose:
-    FileClose $R0
-  healDone:
-  StrCmp $R7 1 0 healReturn
-  StrCmp $R9 1 healReturn
-  ; 需改：有文件但无行（追加）或行值过期（替换）。提权助手双保险复核，
-  ; 用户拒绝 UAC（1223）或助手缺失都静默跳过，不动安装结果。
+  FileOpen $R0 $R6 r
+  IfErrors readDone
+readLoop:
+  ClearErrors
+  FileRead $R0 $R1
+  IfErrors readClose
+readTrim:
+  StrCpy $R3 $R1 1 -1
+  StrCmp $R3 "$\r" readCut
+  StrCmp $R3 "$\n" readCut
+  Goto readTrimDone
+readCut:
+  StrCpy $R1 $R1 -1
+  Goto readTrim
+readTrimDone:
+  StrCpy $R2 $R1 11
+  StrCmp $R2 "MeshServer=" 0 readLoop
+  StrCmp $R1 "MeshServer=wss://app.qfremote.top:8443/agent.ashx" 0 readClose
+  StrCpy $R9 1
+readClose:
+  FileClose $R0
+readDone:
+  StrCmp $R4 1 verifyPhase
+  ; ---- 初始裁决 ----
+  StrCmp $R9 1 alreadyCorrect
+  Goto launchHelper
+alreadyCorrect:
+  ; 已正确：查服务是否在跑；停着也拉起助手（PS1 负责启服务）
+  ; 注意：${StrStr} 未找到时不保证置错误标志（探针实证），
+  ; 必须以返回串是否为空判定，不可用 IfErrors。
+  nsExec::ExecToStack 'sc query "Mesh Agent"'
+  Pop $R0
+  Pop $R1
+  ${StrStr} $R2 $R1 "STOPPED"
+  StrCmp $R2 "" 0 svcStopped
+  ${StrStr} $R2 $R1 "RUNNING"
+  StrCmp $R2 "" 0 svcRunning
+  StrCpy $R5 "$R5INSTALLER: skip already correct, service state unknown [$R6]$\r$\n"
+  Goto healReturn
+svcStopped:
+  StrCpy $R5 "$R5INSTALLER: already correct but service stopped [$R6]$\r$\n"
+  Goto launchHelper
+svcRunning:
+  StrCpy $R5 "$R5INSTALLER: skip already correct and running [$R6]$\r$\n"
+  Goto healReturn
+launchHelper:
   DetailPrint "正在修复本机远程服务配置（需确认一次系统提示）…"
+  StrCpy $R5 "$R5INSTALLER: launch runas [$R6]$\r$\n"
   ClearErrors
   ExecShell "runas" "powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File '$TEMP\qf-agent-heal.ps1'"
+  IfErrors 0 launchVerify
+  StrCpy $R5 "$R5INSTALLER: runas failed, fallback Start-Process$\r$\n"
+  nsExec::ExecToStack "powershell -NoProfile -Command $\"Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$TEMP\qf-agent-heal.ps1' -Verb RunAs -WindowStyle Hidden$\""
+  Pop $R0
+  Pop $R1
+  StrCpy $R5 "$R5INSTALLER: fallback exit=[$R0]$\r$\n"
+launchVerify:
+  StrCpy $R4 1
+  StrCpy $R8 4
+  Sleep 5000
+  Goto readMsh
+verifyPhase:
+  StrCmp $R9 1 verifyOk
+  IntOp $R8 $R8 - 1
+  IntCmp $R8 0 verifyFail verifyWait verifyWait
+verifyWait:
+  Sleep 5000
+  Goto readMsh
+verifyOk:
+  StrCpy $R5 "$R5INSTALLER: msh verified correct [$R6]$\r$\n"
+  Goto healReturn
+verifyFail:
+  StrCpy $R5 "$R5INSTALLER: msh verify failed after retries [$R6]$\r$\n"
+  Goto healReturn
+healReturn:
+  ; 安装器日志单独成文件、一次写出（不用 "a" 追加，见头注）。
   ClearErrors
-  healReturn:
+  FileOpen $R0 "$TEMP\qf-agent-heal-installer.log" w
+  IfErrors healEnd
+  FileWrite $R0 $R5
+  FileClose $R0
+healEnd:
 FunctionEnd
 
 Section "QFRemote" SEC_MAIN
@@ -135,8 +228,8 @@ Section "QFRemote" SEC_MAIN
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "EstimatedSize" "$0"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 2.4.3"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "2.4.3"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 2.4.4"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "2.4.4"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayIcon" "$INSTDIR\QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "UninstallString" "$INSTDIR\Uninstall QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "Publisher" "QFRemote"

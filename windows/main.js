@@ -8,6 +8,7 @@ const svcUrlsMod = require('./svc-urls');
 const viewsMod = require('./views');
 const { createWatchdog } = require('./watchdog');
 const updater = require('./update');
+const agentHeal = require('./agent-heal');
 const installerLaunch = require('./installer-launch');
 const lockBridgeMod = require('./lock');
 const credsMod = require('./creds');
@@ -2478,6 +2479,90 @@ async function startupUpdateGate() {
   openForceWindow(manifest);
   return true;
 }
+// ---------- 本机 agent 自愈 · 启动兜底（2.4.4） ----------
+// 2.4.3 只在安装器装后段做自愈；站长笔记本上升 2.4.3 后仍离线，
+// 且 %TEMP% 里没有 qf-agent-heal.log——PS1 根本没被拉起执行，
+// 安装器预检悄悄跳过。启动兜底是第二道防线：每次启动异步自检，
+// 发现地址过期／服务停着／文件比进程新时提权修复（弹一次 UAC），
+// 失败留痕（本地日志＋更新检查回带）＋人话提示，不拦启动、不报错码。
+async function runStartupAgentHeal() {
+  if (process.platform !== 'win32') return;
+  try {
+    const state = await agentHeal.checkAgentState();
+    if (state.action === 'none') return;
+    const now = new Date();
+    // 进行中守卫：安装器刚拉起 PS1（120 秒内有启动行且无 RESULT）时，
+    // 别跟着再弹一次 UAC；等下次启动再看结果。
+    if (agentHeal.isHealInProgress(agentHeal.readHealLogText(), now)) {
+      agentHeal.appendHealLog('startup check: heal already in progress, skip');
+      return;
+    }
+    const st = (settings.agentHeal && typeof settings.agentHeal === 'object') ? settings.agentHeal : {};
+    if (!agentHeal.shouldAttempt(st, now, app.getVersion())) return;
+    // 记一次尝试（同日计数；换版本或隔天清零）
+    const today = now.toDateString();
+    const lastDay = st.lastAttemptISO ? new Date(st.lastAttemptISO).toDateString() : null;
+    const attemptsToday = (lastDay === today) ? (st.attemptsToday || 0) + 1 : 1;
+    settings.agentHeal = {
+      lastAttemptISO: now.toISOString(),
+      attemptsToday,
+      lastOutcome: st.lastOutcome || null,
+      lastVersion: app.getVersion(),
+      consecutiveFailures: st.consecutiveFailures || 0
+    };
+    saveSettings();
+    agentHeal.appendHealLog('startup check: action=' + state.action + ' msh=' + (state.msh.path || 'not-found') + ' service=' + (state.service.status || 'missing'));
+    const ps1 = agentHeal.resolveHealScriptPath({
+      resourcesPath: (process.resourcesPath || ''),
+      dirname: __dirname,
+      tempDir: os.tmpdir()
+    });
+    if (!ps1) {
+      agentHeal.appendHealLog('heal script not found, outcome=unknown');
+      recordHealOutcome('unknown');
+      return;
+    }
+    const res = await agentHeal.runHealElevated(ps1, {});
+    const outcome = (res && res.outcome) || 'unknown';
+    const prev = settings.agentHeal || {};
+    const okOutcomes = ['fixed', 'already_correct', 'service_started', 'restarted_stale_config', 'no_agent'];
+    settings.agentHeal = Object.assign({}, prev, {
+      lastOutcome: outcome,
+      consecutiveFailures: okOutcomes.includes(outcome) ? 0 : (prev.consecutiveFailures || 0) + 1
+    });
+    saveSettings();
+    agentHeal.appendHealLog('outcome=' + outcome);
+    recordHealOutcome(outcome);
+  } catch (e) { /* 安静失败：自愈绝不影响启动 */ }
+}
+
+// 自愈结果处理：白名单内的结果走更新检查回带（下次取清单时 ?heal=，
+// 进 Caddy 访问日志，服务端可查）；失败时人话提示（成功／无需修复
+// 不打扰；UAC 被拒第 2 次连续失败起才提示，避免一次被拒就反复弹窗）。
+function recordHealOutcome(outcome) {
+  try {
+    if (agentHeal.REPORTABLE.includes(outcome)) {
+      updater.setHealReport(outcome);
+      updater.fetchManifest(8000).catch(() => {});
+    }
+  } catch (e) { /* ignore */ }
+  const msg = agentHeal.healOutcomeMessage(outcome);
+  if (!msg) return;
+  const st = settings.agentHeal || {};
+  if (outcome === 'denied' && (st.consecutiveFailures || 0) < 2) return;
+  showHealFailure(msg);
+}
+
+async function showHealFailure(msg) {
+  try {
+    const owner = (win && !win.isDestroyed()) ? win : undefined;
+    await dialog.showMessageBox(owner, {
+      type: 'warning', title: 'QFRemote', message: msg,
+      buttons: ['知道了'], defaultId: 0, noLink: true
+    });
+  } catch (e) { /* ignore */ }
+}
+
 // 强更页自测（仅 QFREMOTE_PREVIEW=force）：截强更页 -> 点「立即更新」走真下载 ->
 // 等核对结果 -> 再截一轮 -> 把阶段结果与「下载完待更仍在」的断言写 JSON -> 退出。
 async function runForcePreviewFlow() {
@@ -2698,6 +2783,11 @@ app.whenReady().then(async () => {
   createWindow();
   // 软件内更新：启动后自动查一次（失败安静无提示，见 update.js 文件头）
   setTimeout(() => { runUpdateCheck().catch(() => {}); }, 2000);
+  // 本机 agent 自愈兜底（2.4.4）：启动后异步自检 .msh，发现地址过期
+  // 即提权修复（弹一次 UAC），不拦启动、不影响更新检查。
+  // 延迟 5 秒（原 3 秒）：给安装器刚拉完的自愈留出写入日志的时间，
+  // 让进行中守卫（120 秒）能看到启动行，避免双弹 UAC。
+  setTimeout(() => { runStartupAgentHeal().catch(() => {}); }, 5000);
 });
 
 app.on('before-quit', () => flushConsoleCookies());
