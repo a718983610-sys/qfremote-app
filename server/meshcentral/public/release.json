@@ -1,20 +1,20 @@
 {
-  "version": "2.4.3",
-  "notes": "2.4.3 正式版：电脑端更新时自动修复本机连接配置，连接更稳定可靠。退出软件后重新打开将自动完成更新。",
-  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.3.exe",
-  "sha256": "1767c8d06acb1ea032869a6c837f051b020794c259cb974224e531cbeb7c9bd0",
-  "size": 122104321,
-  "minUsable": "2.4.3",
+  "version": "2.4.4",
+  "notes": "2.4.4 正式版：电脑端启动时也会自动检测并修复本机远程服务的连接配置，更新完设备直接恢复在线，无需手动操作。退出软件后重新打开将自动完成更新。",
+  "url": "https://app.qfremote.top/dl/QFRemote-Setup-v2.4.4.exe",
+  "sha256": "e1a55075e50edcd8a3dda38fe409c15f0390527fe5a8989ea667907378cb1229",
+  "size": 122133944,
+  "minUsable": "2.4.4",
   "android": {
-    "version": "2.4.3",
-    "notes": "2.4.3 正式版：稳定性与体验优化。退出应用后重新打开将自动完成更新。",
-    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.3.apk",
-    "sha256": "11928d115842585e8e99f0f536491efdeb3e19e49d4b696eeefd874c92b33819",
+    "version": "2.4.4",
+    "notes": "2.4.4 正式版：稳定性与体验优化。退出应用后重新打开将自动完成更新。",
+    "url": "https://app.qfremote.top/dl/QFRemote-v2.4.4.apk",
+    "sha256": "6fe31de2109eeb166347108a70b5306df0a0a409a28e7cb52a381906cd31f651",
     "size": 54260943,
-    "minUsable": "2.4.3"
+    "minUsable": "2.4.4"
   },
   "interop": {
     "window": 2,
-    "minVersion": "2.4.3"
+    "minVersion": "2.4.4"
   }
 }
