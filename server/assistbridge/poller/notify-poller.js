@@ -16,6 +16,13 @@
 //   ~/workspace/qfremote/assistant-api/bridge-token.txt  (0600)
 // via the BRIDGE_TOKEN_FILE env var. The token value is never printed.
 //
+// Transport rule (2026-11-09 leak: the token reached local exec logs via a
+// failed command's argv — error output echoes the command line): the token
+// NEVER travels in argv. It rides on stdin as the first line of the python
+// program (`TOKEN = "<json>"`), and the program body follows from line 2.
+// argv carries only method/path/body-b64, so neither a failed call's error
+// nor the server's process list can expose the token.
+//
 // Cron wiring (parent creates the cron): every 1 minute run --list; if it
 // reports pending events, tell the owner in chat, then run --ack for each
 // event told. The ACK is what unblocks a waiting session open (fail-closed).
@@ -44,19 +51,23 @@ function loadToken() {
     return tok;
 }
 
-// One authenticated bridge call over SSH+TCP-loopback. Returns the parsed
-// JSON body. The python program goes via stdin (python3 -) because the SSH
-// wrapper joins argv into one remote shell command, where newlines would
-// split a -c program; the body travels base64 (shell-safe argv).
-function bridgeCall(method, urlPath, bodyObj, token) {
+// Build the remote bridge call: program text + argv for `python3 -` over SSH.
+// The token NEVER travels in argv: it is embedded as the first line of the
+// program text (stdin), `TOKEN = "<json>"`, and the program body follows
+// from line 2. argv carries only method/path/body-b64. A failed call's
+// error output echoes the command line, and the token would also be
+// visible in the server's process list while the call runs — stdin avoids
+// both. Exported for the regression test (tests/poller.test.js).
+function buildBridgeCall(method, urlPath, bodyObj, token) {
     const body = bodyObj ? JSON.stringify(bodyObj) : '';
+    const bodyB64 = body ? Buffer.from(body, 'utf8').toString('base64') : '-';
     const py = [
         'import socket, sys',
-        'method, path, token = sys.argv[1], sys.argv[2], sys.argv[3]',
-        "body = '' if sys.argv[4] == '-' else __import__('base64').b64decode(sys.argv[4]).decode()",
+        'method, path = sys.argv[1], sys.argv[2]',
+        "body = '' if sys.argv[3] == '-' else __import__('base64').b64decode(sys.argv[3]).decode()",
         "b = body.encode() if body else b''",
         "h = method + ' ' + path + ' HTTP/1.1\\r\\nHost: bridge\\r\\nContent-Type: application/json\\r\\n'",
-        "if token: h += 'Authorization: Bearer ' + token + '\\r\\n'",
+        "if TOKEN: h += 'Authorization: Bearer ' + TOKEN + '\\r\\n'",
         "h += 'Content-Length: ' + str(len(b)) + '\\r\\nConnection: close\\r\\n\\r\\n'",
         'req = h.encode() + b',
         's = socket.socket(socket.AF_INET, socket.SOCK_STREAM)',
@@ -71,8 +82,17 @@ function bridgeCall(method, urlPath, bodyObj, token) {
         'raw = data.decode("utf-8", "replace")',
         'print(raw.split("\\r\\n\\r\\n", 1)[1] if "\\r\\n\\r\\n" in raw else raw)',
     ].join('\n');
-    const bodyB64 = body ? Buffer.from(body, 'utf8').toString('base64') : '-';
-    const out = sshOut(['python3', '-', method, urlPath, token || '-', bodyB64], py);
+    const program = 'TOKEN = ' + JSON.stringify(token || '') + '\n' + py;
+    return { args: ['python3', '-', method, urlPath, bodyB64], program };
+}
+
+// One authenticated bridge call over SSH+TCP-loopback. Returns the parsed
+// JSON body. The python program goes via stdin (python3 -) because the SSH
+// wrapper joins argv into one remote shell command, where newlines would
+// split a -c program; the body travels base64 (shell-safe argv).
+function bridgeCall(method, urlPath, bodyObj, token) {
+    const { args, program } = buildBridgeCall(method, urlPath, bodyObj, token);
+    const out = sshOut(args, program);
     return JSON.parse(out);
 }
 
@@ -104,4 +124,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { listPending, ackEvent };
+module.exports = { listPending, ackEvent, buildBridgeCall };
