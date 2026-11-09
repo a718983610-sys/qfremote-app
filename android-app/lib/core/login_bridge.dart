@@ -47,11 +47,18 @@ class LoginProbe {
   /// 「记住账号密码」勾选状态（壳注入的框），还没注入时为 null。
   final bool? rememberPassword;
 
+  /// 兜底判定量（B5）：#loginpanel 不存在但页面含可见密码框时为 true；
+  /// #loginpanel 本身是否存在。
+  final bool hasPasswordInput;
+  final bool hasLoginPanel;
+
   const LoginProbe({
     required this.state,
     this.username = '',
     this.rememberDevice,
     this.rememberPassword,
+    this.hasPasswordInput = false,
+    this.hasLoginPanel = false,
   });
 
   bool get isLogin => state == 'login';
@@ -75,6 +82,8 @@ class LoginProbe {
         rememberPassword: v['rememberPassword'] is bool
             ? v['rememberPassword'] as bool
             : null,
+        hasPasswordInput: v['hasPasswordInput'] == true,
+        hasLoginPanel: v['hasLoginPanel'] == true,
       );
     } catch (_) {
       return null;
@@ -83,6 +92,8 @@ class LoginProbe {
 }
 
 /// 探针脚本：只读页面状态，回传 JSON 字符串（见 LoginProbe.parse）。
+/// 2.4.5 B5 兜底：#loginpanel 不存在但页面含可见 input[type=password]
+/// 也判 login；同时回传 hasPasswordInput/hasLoginPanel 供 Dart 侧分级。
 const String kLoginProbeJs = r'''(function () {
   function visible(el) {
     if (!el) return false;
@@ -93,7 +104,9 @@ const String kLoginProbeJs = r'''(function () {
   }
   var panel = document.getElementById('loginpanel');
   var pw = document.getElementById('password');
-  var isLogin = !!(panel && pw && visible(pw));
+  var pwAny = document.querySelector('input[type="password"]');
+  var pwVisible = !!(pwAny && visible(pwAny));
+  var isLogin = !!((panel && pw && visible(pw)) || (!panel && pwVisible));
   var hasConsole = !!document.querySelector('#logoutControl, #logoutMenuOption, #masthead, #topMenu, #page_leftbar');
   var rd = document.getElementById('qfRememberDevice');
   var rp = document.getElementById('qfRememberPassword');
@@ -102,7 +115,9 @@ const String kLoginProbeJs = r'''(function () {
     state: isLogin ? 'login' : (hasConsole ? 'console' : 'unknown'),
     username: u ? u.value : '',
     rememberDevice: rd ? !!rd.checked : null,
-    rememberPassword: rp ? !!rp.checked : null
+    rememberPassword: rp ? !!rp.checked : null,
+    hasPasswordInput: pwVisible,
+    hasLoginPanel: !!panel
   });
 })()''';
 

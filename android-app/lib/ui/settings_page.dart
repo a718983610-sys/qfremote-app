@@ -15,6 +15,11 @@ class SettingsPage extends StatefulWidget {
   final ThemeChoice themeChoice;
   final bool rememberDevice;
   final bool rememberPassword;
+
+  /// 远程控制时屏幕常亮（2.4.5 B9，默认开；测试构造可不传）。
+  final bool keepScreenOn;
+  final void Function(bool value)? onToggleKeepScreenOn;
+
   final String currentVersion;
   final void Function(ThemeChoice choice) onThemeChoice;
   final void Function(bool value) onToggleRememberDevice;
@@ -31,6 +36,8 @@ class SettingsPage extends StatefulWidget {
     required this.themeChoice,
     required this.rememberDevice,
     required this.rememberPassword,
+    this.keepScreenOn = true,
+    this.onToggleKeepScreenOn,
     required this.currentVersion,
     required this.onThemeChoice,
     required this.onToggleRememberDevice,
@@ -48,6 +55,7 @@ class _SettingsPageState extends State<SettingsPage> {
   late ThemeChoice _theme = widget.themeChoice;
   late bool _rememberDevice = widget.rememberDevice;
   late bool _rememberPassword = widget.rememberPassword;
+  late bool _keepScreenOn = widget.keepScreenOn;
 
   String get _themeLabel => switch (_theme) {
         ThemeChoice.followSystem => '跟随系统',
@@ -146,6 +154,18 @@ class _SettingsPageState extends State<SettingsPage> {
                       onChanged: (v) {
                         setState(() => _rememberPassword = v);
                         widget.onToggleRememberPassword(v);
+                      },
+                    ),
+                  ),
+                  _row(
+                    title: '远程控制时屏幕常亮',
+                    sub: '开着远程画面时手机不自动熄屏',
+                    trailing: Switch(
+                      value: _keepScreenOn,
+                      activeThumbColor: QfPalette.brand,
+                      onChanged: (v) {
+                        setState(() => _keepScreenOn = v);
+                        widget.onToggleKeepScreenOn?.call(v);
                       },
                     ),
                     last: true,

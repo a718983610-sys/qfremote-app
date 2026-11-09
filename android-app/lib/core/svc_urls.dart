@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/probe.dart' show trustedHttpClient;
+
 import 'constants.dart';
 
 /// 服务地址单点收口（2.2.0）：所有入口（好友/论坛/注册/积分/管理）只许从这里取地址。
@@ -35,11 +37,29 @@ class SvcUrls {
   /// 好友页：地址恒定口径（见类注释）。
   String get friendsUrl => kFriendsUrl;
 
+  /// 服务地址白名单（2.4.5 B15，与 Windows 端 W-20 同口径）：
+  /// 只接受 app.qfremote.top 及其子域的 https 地址。product.json 被
+  /// 劫持/投毒也只能指向自家源，指向任意 https 源的地址一律丢弃并
+  /// 回落写死兜底；会话 cookie 只向白名单内地址移植（见
+  /// main.dart _transplantSessionToExt）。
+  static bool isTrustedSvcUrl(String? url) {
+    if (url == null) return false;
+    if (!url.startsWith('https://') || url.length <= 10 || url.contains(' ')) {
+      return false;
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    final host = uri.host.toLowerCase();
+    return host == kServerHost || host.endsWith('.$kServerHost');
+  }
+
   /// 已退役源过滤：旧版本写入本地缓存（或旧清单下发）的临时隧道地址
   /// 一律视为无效、回落正式兜底——该隧道已拆除，落上去就是死链（H-1）。
+  /// 2.4.5 起改为白名单制：不在白名单内的地址一律无效（黑名单制已被
+  /// 白名单覆盖，trycloudflare 同样被白名单拦下）。
   static String? _validSvcUrl(String? url) {
     if (url == null) return null;
-    if (url.contains('trycloudflare.com')) return null;
+    if (!isTrustedSvcUrl(url)) return null;
     return url;
   }
 
@@ -128,11 +148,10 @@ class SvcUrls {
       ? '$profileApiBase/avatar'
       : '$profileApiBase/avatar?v=$avatarUpdatedAt';
 
-  static bool _usable(String? v) =>
-      v != null && v.startsWith('https://') && v.length > 10 && !v.contains(' ');
+  static bool _usable(String? v) => isTrustedSvcUrl(v);
 
   /// 从 product.json 的 JSON 文本里取 web.* 地址（纯函数，供自测）。
-  /// 返回字段名 → 地址的映射，只收 https 的字符串值。
+  /// 返回字段名 → 地址的映射，只收白名单内的 https 字符串值。
   static Map<String, String> parseProductWeb(String body) {
     final root = jsonDecode(body);
     if (root is! Map<String, dynamic>) {
@@ -196,8 +215,9 @@ class SvcUrls {
   }
 
   Future<Map<String, String>?> _fetchProductWeb() async {
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 6);
+    // 2.4.5 B15/B3：走同一证书校验（系统默认公共 CA，不再用默认
+    // HttpClient 绕过信任口径）。
+    final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 6));
     try {
       final req = await client
           .getUrl(Uri.parse(kProductJsonUrl))

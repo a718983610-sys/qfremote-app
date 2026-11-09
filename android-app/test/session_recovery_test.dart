@@ -118,6 +118,23 @@ void main() {
       await kv.write('qf_saved_username', 'alice');
       expect(await store.loadCredentials(), isNull);
     });
+
+    test('B22：凭据一次写——单 key JSON，旧分开 key 不残留', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      await store.saveCredentials('alice', 'secret-1');
+      expect(kv.map.keys, ['qf_saved_creds']);
+      expect((await store.loadCredentials())?.password, 'secret-1');
+      // 旧版残留的分开 key 也能兼容读，但写后不再留
+      await kv.write('qf_saved_username', 'bob');
+      await kv.write('qf_saved_password', 'old-pass');
+      await store.saveCredentials('carol', 'secret-2');
+      expect(kv.map.containsKey('qf_saved_username'), isFalse);
+      expect(kv.map.containsKey('qf_saved_password'), isFalse);
+      expect((await store.loadCredentials())?.username, 'carol');
+      await store.clearCredentials();
+      expect(kv.map, isEmpty);
+    });
   });
 
   group('登录桥脚本', () {

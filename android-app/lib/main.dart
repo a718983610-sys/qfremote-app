@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'build_info.dart';
 import 'core/client_header.dart';
@@ -15,6 +17,7 @@ import 'core/constants.dart';
 import 'core/license.dart';
 import 'core/login_bridge.dart';
 import 'core/session_recovery.dart';
+import 'core/session_stage.dart';
 import 'core/chat_device.dart';
 import 'core/slot_nav.dart';
 import 'core/svc_urls.dart';
@@ -25,10 +28,13 @@ import 'core/watchdog_core.dart';
 import 'services/credential_store.dart';
 import 'services/device_code.dart';
 import 'services/device_key_vault.dart';
+import 'services/device_presence.dart';
 import 'services/forum_sso.dart';
 import 'services/license_client.dart';
+import 'services/native_channels.dart';
 import 'services/points.dart';
 import 'services/probe.dart';
+import 'services/session_log.dart';
 import 'services/settings.dart';
 import 'services/updater.dart';
 import 'ui/about.dart';
@@ -103,16 +109,23 @@ class _WebViewEvaluator implements WatchdogEvaluator {
   Future<String> detect() async {
     final c = controller;
     if (c == null) throw StateError('页面尚未就绪');
-    final r = await c.evaluateJavascript(source: kDetectJs);
+    // B13：JS 求值 5 秒超时，挂起的求值不许拖住后续所有拍。
+    final r = await c.evaluateJavascript(source: kDetectJs).timeout(
+        const Duration(seconds: 5));
     final s = _clean(r);
-    return const ['login', 'disconnected', 'partial', 'ok'].contains(s) ? s : 'unknown';
+    return const ['login', 'disconnected', 'partial', 'ok', 'connecting']
+            .contains(s)
+        ? s
+        : 'unknown';
   }
 
   @override
   Future<bool> clickReconnect() async {
     final c = controller;
     if (c == null) return false;
-    final r = await c.evaluateJavascript(source: kClickJs);
+    // B13：点击求值同样 5 秒超时。
+    final r = await c.evaluateJavascript(source: kClickJs).timeout(
+        const Duration(seconds: 5));
     return r == true || _clean(r) == 'true';
   }
 }
@@ -161,8 +174,67 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  final _updateService = UpdateService();
+  UpdateService? _updateServiceField;
+
+  /// 更新服务（懒建：B24 客户端版本头取 PackageInfo 读到的包版本）。
+  UpdateService get _updateService => _updateServiceField ??=
+      UpdateService(clientVersion: _currentVersion);
+
   final _evaluator = _WebViewEvaluator();
+
+  /// 会话持久日志（A10）：preflight/阶段/超时/agent_stale 全链留痕。
+  final _sessionLog = SessionLog();
+
+  /// 登录身份代数（A6/B6）：登录成功/手动退出/强制下线时递增；在途的
+  /// 探针/恢复响应回来时代数已变则丢弃并触发一次 _refreshAuthState，
+  /// 不静默吞掉、不许旧响应写入新登录态。
+  int _authGen = 0;
+
+  // ---- 2.4.5 会话阶段机（A1/A2/A3/A5/A9） ----
+  /// 当前会话路由的 nodeid（裸 id）与设备名（预检回参）。
+  String? _sessionNodeid;
+  String? _sessionDeviceName;
+
+  /// 阶段 watcher：1 秒一拍，仅顶层 URL 为会话路由时运行。
+  Timer? _sessionTimer;
+  SessionStage _sessionStage = SessionStage.iframeAttach;
+  DateTime? _sessionStageSince;
+  DateTime? _sessionStartedAt;
+  bool _sessionConnecting = false;
+  bool _sessionFailed = false;
+  bool _lastSessionFailed = false;
+  bool _sessionCardShowing = false;
+  String _lastSessionSummary = '暂无会话记录';
+  String? _preflightFor;
+  bool _preflightBusy = false;
+
+  /// 服务端时钟偏移（B22）：预检回包 serverTime - 本机 now，快照
+  /// savedAt 优先按服务端时间算，本地时钟只作兜底。
+  Duration? _serverClockOffset;
+
+  /// 屏幕常亮当前是否已开（B9）：退出会话/切后台时清。
+  bool _keepScreenOnActive = false;
+
+  // ---- 2.4.5 冷启动看门狗（B1） ----
+  Timer? _bootLoadWatchdog;
+  Timer? _splashDeadlineTimer;
+
+  // ---- 2.4.5 其他计数器 ----
+  int _unknownProbeStreak = 0; // B5：登录探针连续 unknown 拍数
+  int _probeFailStreak = 0; // B4：探活连续失败次数
+  int _authDeadStreak = 0; // B7：心跳连续 authDead 次数
+  int _chatTickCount = 0; // B25：聊天页探针分频
+  int _offlineAttempts = 0; // B11：离线自动重试总次数（上限 10）
+  bool _offlineRetryStopped = false;
+  int _licenseRetryCount = 0; // B21：许可门失败重试次数（上限 3）
+  Timer? _licenseRetryTimer;
+  int _updateCheckRetries = 0; // B16：会话内更新检查失败重试（上限 3）
+  Timer? _updateCheckRetryTimer;
+  bool _gateRecheckDone = false; // B16：弱网放行后只重跑一次更新门
+  String _recoveryStepText = ''; // A7：恢复盖小字写明当前步
+  bool _awaitingRestoreLoad = false; // B6：快照恢复 reload 后等 onLoadStop 再计时
+  bool _certErrorShown = false; // B3：证书异常卡本会话只弹一次
+
 
   QfSettings? _settings;
   PackageInfo? _pkg;
@@ -283,11 +355,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _pendingSubmitAuto = false;
   bool _autoSubmitInFlight = false;
 
-  ExtService get _extService =>
-      _ext ??= ExtService(cookieProvider: _consoleCookieHeader);
+  ExtService get _extService => _ext ??= ExtService(
+      cookieProvider: _consoleCookieHeader, clientVersion: _currentVersion);
 
-  LicenseClient get _licenseService => _licenseClient ??=
-      LicenseClient(cookieProvider: _consoleCookieHeader);
+  LicenseClient get _licenseService => _licenseClient ??= LicenseClient(
+      cookieProvider: _consoleCookieHeader, clientVersion: _currentVersion);
 
   /// 许可/积分拉取的未登录短路（SUP-P0-06）：「我的」槽在 IndexedStack 里
   /// 常驻构建，其许可区与积分会在未登录时也急切拉取、成对空打 401。
@@ -313,7 +385,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
+    final resumed = state == AppLifecycleState.resumed;
+    final wasForeground = _foreground;
+    _foreground = resumed;
+    if (!mounted) return;
+    if (resumed && !wasForeground) {
+      // B8：回前台立即复核（不等定时器）：探活 + 登录探针 + 看护一拍；
+      // 会话进行态且 connecting 超阶段超时，立即弹原生失败卡。
+      unawaited(_runProbe());
+      if (_isConsolePage) {
+        unawaited(_probeLogin().then((p) async {
+          if (p != null && p.isLogin) {
+            await _onLoginPageDetected(fromConsole: true);
+          }
+        }));
+      }
+      unawaited(_watchdog?.tickNow() ?? Future<void>.value());
+      if (_sessionConnecting) _sessionTick();
+      _startLoginLoop();
+      _startWatchdogIfNeeded();
+    } else if (!resumed && wasForeground) {
+      // B8：切后台暂停看护与登录探针（后台 evaluateJavascript 空转耗电
+      // 且排队），退出会话常亮；回前台时重建。
+      _watchdog?.stop();
+      _watchdog = null;
+      _loginTimer?.cancel();
+      _loginTimer = null;
+      _clearKeepScreenOn();
+    }
+  }
+
+  void _startWatchdogIfNeeded() {
+    if (_watchdog == null && _web != null) _startWatchdog();
   }
 
   /// 系统深浅切换时跟随（仅限从没手动选过主题的用户；选过的听用户的）。
@@ -336,10 +439,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _watchdog?.stop();
+    _sessionTimer?.cancel();
+    _bootLoadWatchdog?.cancel();
+    _splashDeadlineTimer?.cancel();
+    _licenseRetryTimer?.cancel();
+    _updateCheckRetryTimer?.cancel();
     _offlineTimer?.cancel();
     _probeTimer?.cancel();
     _heartbeatTimer?.cancel();
     _loginTimer?.cancel();
+    // B12：释放各槽页面资源（WebView 控制器随 widget 销毁，本处只清页面）。
+    unawaited(_homeWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
+    unawaited(_filesWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
+    unawaited(_friendsWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
+    unawaited(_forumWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
+    unawaited(_web?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
+    _clearKeepScreenOn();
     super.dispose();
   }
 
@@ -387,10 +502,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       _booted = true;
     });
+    // B1：启动画面 30 秒总上限——超时仍未进控制台/登录页，自动退场并
+    // 弹「加载超时」+ 重试（见 _startSplashDeadline）。
+    _startSplashDeadline();
     await _launchGate(settings);
     _startProbeLoop();
     unawaited(SvcUrls.instance.ensureResolved());
     _startHeartbeatLoop();
+  }
+
+  /// 启动画面总上限 30 秒（B1）：到时仍盖着启动画面，强制退场并弹
+  /// 「加载超时，请检查网络后重试」+ 重试按钮，禁止无限盖屏。
+  void _startSplashDeadline() {
+    _splashDeadlineTimer?.cancel();
+    _splashDeadlineTimer = Timer(const Duration(seconds: 30), () {
+      if (!mounted || !_splashVisible || _offline) return;
+      setState(() => _splashVisible = false);
+      _snack('加载超时，请检查网络后重试。');
+      unawaited(_sessionLog.log('boot-load-timeout',
+          extra: 'splash-deadline-30s'));
+    });
   }
 
   // ---------------- 积分心跳与站长判定（2.2.0） ----------------
@@ -424,14 +555,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (cookie == null) return;
     _heartbeatTicks++;
     final signal = await _extService.heartbeatSignal();
+    // B7：连续 2 次 authDead（401/403）＝登录已死，立即触发探针复核
+    // （不等 60 秒定时器），并清掉本地会话快照（防过期快照下一轮又被
+    // 拿去撞，见 A7）；网络不通（null）只安静跳过，绝不误清快照。
+    if (signal != null && signal.status == AuthStatus.authDead) {
+      _authDeadStreak++;
+      if (_authDeadStreak >= 2) {
+        _authDeadStreak = 0;
+        unawaited(_sessionLog.log('auth-dead-heartbeat'));
+        try {
+          await _enqueueAuth(() => _credStore.clearSession());
+        } catch (_) {}
+        _savedSession = null;
+        final probe = await _probeLogin();
+        if (probe != null && probe.isLogin && mounted) {
+          await _onLoginPageDetected(fromConsole: true);
+        }
+      }
+      return;
+    }
+    _authDeadStreak = 0;
     if (signal != null && signal.forceLogout) {
       await _handleForceLogoutSignal(signal.gateCode ?? 'G1');
       return;
+    }
+    // A7-3：心跳成功顺带刷新快照摘取时间（只更新 savedAt，不改 cookie
+    // 值），避免「快照摘取时间陈旧 → 服务端轮换后快照整体作废」。
+    if (signal != null && _savedSession != null) {
+      unawaited(_touchSnapshot());
     }
     if (_heartbeatTicks % 5 == 1) {
       final admin = await _extService.checkIsAdmin();
       if (mounted && admin != _isAdmin) setState(() => _isAdmin = admin);
     }
+  }
+
+  /// 快照摘取时间刷新：同组 cookie、savedAt 记为现在（服务端时间优先）。
+  Future<void> _touchSnapshot() async {
+    final snap = _savedSession;
+    if (snap == null) return;
+    final now = _serverNow();
+    final fresh = SessionSnapshot(cookies: snap.cookies, savedAt: now);
+    try {
+      await _enqueueAuth(() => _credStore.saveSession(fresh));
+      _savedSession = fresh;
+      _lastSnapshotAt = now;
+    } catch (_) {}
+  }
+
+  /// 现在（服务端时间优先：预检回包 serverTime 算出的偏移；无偏移时本地钟）。
+  DateTime _serverNow() {
+    final off = _serverClockOffset;
+    return off == null ? DateTime.now() : DateTime.now().add(off);
   }
 
   /// 打开站长管理页：先用控制台会话换一次性令牌，再以壳内页打开管理页
@@ -493,16 +668,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (report == null && me == null && !_licenseErrorSnacked) {
         _licenseErrorSnacked = true;
         _snack('许可信息读取失败，请检查网络后重试。');
+        // B21：许可门失败不再只提示一次就放行——进控制台后每 5 分钟
+        // 重试一次（最多 3 次），成功后清标记。
+        _scheduleLicenseRetry();
       }
     } catch (_) {
       // 许可检查本身失败不锁死使用：口径同上，只提示不拦截
       if (mounted && !_licenseErrorSnacked) {
         _licenseErrorSnacked = true;
         _snack('许可信息读取失败，请检查网络后重试。');
+        _scheduleLicenseRetry();
       }
     } finally {
       _licenseCheckBusy = false;
     }
+  }
+
+  /// 许可门失败重试（B21）：5 分钟后重跑一次，最多 3 次；成功后
+  /// _runLicenseGateCheck 内无失败分支即不再排期，标记由调用方清。
+  void _scheduleLicenseRetry() {
+    if (_licenseRetryCount >= 3) return;
+    _licenseRetryCount++;
+    _licenseRetryTimer?.cancel();
+    _licenseRetryTimer = Timer(const Duration(minutes: 5), () {
+      if (!mounted || !_chromeVisible) return;
+      _licenseCheckedThisSession = false;
+      _licenseErrorSnacked = false;
+      unawaited(_runLicenseGateCheck());
+    });
   }
 
   /// 执行门裁决。返回 true＝已落拦截/登出态，调用方到此为止。
@@ -639,7 +832,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 切槽：已加载过的槽直接显示（保活，不重载、不闪白）；
   /// 没加载过的按登录态首次加载。
+  /// A2：上次会话以失败收尾时，切回设备槽先对设备槽执行一次冷启
+  /// （about:blank → _startUrl），不许带着脏 iframe 续用。
   void _activateSlot(AppSlot slot) {
+    if (slot == AppSlot.devices && _lastSessionFailed && _web != null) {
+      _lastSessionFailed = false;
+      unawaited(_sessionLog.log('session-cold-restart',
+          nodeid: _sessionNodeid ?? ''));
+      unawaited(_web!
+          .loadUrl(urlRequest: URLRequest(url: WebUri('about:blank')))
+          .then((_) => _web?.loadUrl(
+              urlRequest: URLRequest(url: WebUri(_startUrl)))));
+    }
     if (_slot != slot) setState(() => _slot = slot);
     _maybeLoadSlot(slot);
   }
@@ -678,6 +882,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final cookies =
           await CookieManager.instance().getCookies(url: WebUri(kServerOrigin));
       final origin = SvcUrls.instance.extOrigin;
+      // B15：种 cookie 前校验目标 origin 在白名单内（app.qfremote.top
+      // 及其子域），否则跳过移植（页面打开后由服务端自行走登录）。
+      if (!SvcUrls.isTrustedSvcUrl(origin)) return;
       for (final c in cookies) {
         final v = c.value.toString();
         if ((c.name == 'xid' || c.name == 'xid.sig' || c.name == 'qfrem') &&
@@ -706,13 +913,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         urlRequest: URLRequest(url: WebUri(SvcUrls.instance.homeUrl)));
   }
 
-  /// 登录成功后预加载首页/好友/论坛槽（再次点开即达）。
+  /// 登录成功后预加载首页槽（B12：好友/论坛槽改为懒加载，等用户第一
+  /// 次点到底栏时再加载，不再登录瞬间三路并发打同一服务器）。
   void _preloadSlots() {
     if (_slotsPreloaded) return;
     _slotsPreloaded = true;
     _maybeLoadSlot(AppSlot.home);
-    _maybeLoadSlot(AppSlot.friends);
-    _maybeLoadSlot(AppSlot.forum);
   }
 
   /// 好友/论坛槽的 WebView 设置（与控制台同口径：脚本/存储/三方 cookie 全开）。
@@ -734,12 +940,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         supportMultipleWindows: true,
       );
 
-  /// 新窗口请求（target=_blank 等）就地打开：不跳外部浏览器、不丢当前页
-  /// 上下文（页面返回键仍可回）。返回 false＝不创建新窗口。
+  /// 新窗口请求（target=_blank 等）：自有源才就地打开；外站新窗口一律
+  /// 走系统浏览器（B19），不许在壳内打开（顶栏仍是 QFRemote，易钓鱼），
+  /// 也不许冲掉控制台会话上下文。返回 false＝不创建新窗口。
   Future<bool> _onCreateWindowInPlace(
       InAppWebViewController controller, CreateWindowAction action) async {
     final u = action.request.url;
     if (u != null && (u.scheme == 'http' || u.scheme == 'https')) {
+      if (!SvcUrls.instance.isOwnOrigin(u.toString())) {
+        try {
+          await launchUrl(Uri.parse(u.toString()),
+              mode: LaunchMode.externalApplication);
+        } catch (_) {}
+        return false;
+      }
       try {
         await controller.loadUrl(urlRequest: URLRequest(url: u));
       } catch (_) {}
@@ -759,7 +973,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 槽内导航口径（与控制台一致）：跳登出地址＝手动退出；只放行 http/https。
+  /// 槽内导航口径（与控制台一致）：跳登出地址＝手动退出；只放行 http/https；
+  /// 外站链接改走系统浏览器（B19），不在壳内打开。
   Future<NavigationActionPolicy?> _slotUrlPolicy(
       InAppWebViewController controller, NavigationAction action) async {
     final url = action.request.url;
@@ -769,27 +984,84 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _noteManualLogout();
     }
     if (url.scheme == 'http' || url.scheme == 'https') {
+      if (!SvcUrls.instance.isOwnOrigin(url.toString())) {
+        try {
+          await launchUrl(Uri.parse(url.toString()),
+              mode: LaunchMode.externalApplication);
+        } catch (_) {}
+        return NavigationActionPolicy.CANCEL;
+      }
       return NavigationActionPolicy.ALLOW;
     }
     return NavigationActionPolicy.CANCEL;
   }
 
-  /// 证书挑战（与控制台一致）：只认自家主机＋端口，其余拒绝。
+  /// 证书挑战（2.4.5 B3）：公共 CA 走系统默认校验——本回调只在系统
+  /// 校验失败时才被调用，失败一律 CANCEL，不 PROCEED；同时弹证书异常卡。
   Future<ServerTrustAuthResponse> _onTrustChallenge(
       InAppWebViewController controller,
       URLAuthenticationChallenge challenge) async {
-    final host = challenge.protectionSpace.host;
-    final port = challenge.protectionSpace.port;
-    final ok = port != null && isTrustedWebViewHostPort(host, port);
+    if (!_certErrorShown && mounted) {
+      _certErrorShown = true;
+      unawaited(_sessionLog.log('cert-rejected',
+          extra: 'host=${challenge.protectionSpace.host}'));
+      _showCertError();
+    }
     return ServerTrustAuthResponse(
-      action: ok
-          ? ServerTrustAuthResponseAction.PROCEED
-          : ServerTrustAuthResponseAction.CANCEL,
+      action: ServerTrustAuthResponseAction.CANCEL,
+    );
+  }
+
+  /// 证书异常卡（B3）：文案＋复制诊断（最近 20 条阶段日志）。
+  Future<void> _showCertError() async {
+    if (!mounted) return;
+    final diag = await _diagnosticsTextFull();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('服务器证书异常'),
+        content: const Text(
+            '服务器证书无效，已停止连接（证书无效），请检查网络或稍后重试。'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: diag));
+              if (ctx.mounted) Navigator.of(ctx).pop();
+              _snack('诊断信息已复制。');
+            },
+            child: const Text('复制诊断'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
     );
   }
 
   /// 系统返回键分级：先页内后退 → 再回设备槽 → 最后退出（纯裁决见 slot_nav）。
+  /// A4：会话失败态下第一次按弹原生确认（重试/返回设备列表），不执行
+  /// goBack()；会话建立中（connecting）按返回键先弹「正在建立会话，
+  /// 确定退出吗？」。
   Future<void> _handleSystemBack() async {
+    if (_sessionFailed) {
+      final retry = await _confirmSessionFailedBack();
+      if (retry == true) {
+        await _retrySession();
+      } else if (retry == false) {
+        _exitSessionToDevices();
+      }
+      return;
+    }
+    if (_sessionConnecting) {
+      final leave = await _confirmLeaveConnecting();
+      if (leave != true) return;
+      _stopSessionWatcher();
+      _clearKeepScreenOn();
+    }
     final can = switch (_slot) {
       AppSlot.home => _homeCanGoBack,
       AppSlot.files => _filesCanGoBack,
@@ -807,6 +1079,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       case BackAction.exitApp:
         await SystemNavigator.pop();
     }
+  }
+
+  /// 会话失败态返回键确认：true＝重试会话，false＝返回设备列表，
+  /// null＝留在失败卡。
+  Future<bool?> _confirmSessionFailedBack() async {
+    if (!mounted) return null;
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('会话已失败'),
+        content: const Text('当前会话已失败，要重试会话还是返回设备列表？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('返回设备列表'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('重试会话'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 会话建立中返回键确认：true＝确定退出会话建立。
+  Future<bool?> _confirmLeaveConnecting() async {
+    if (!mounted) return null;
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('正在建立会话'),
+        content: const Text('正在建立远程会话，确定退出吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('继续等待'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('确定退出'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 打开论坛槽：先走免登桥（无会话且有已存凭据时换回 qfr_frm），
@@ -878,6 +1195,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       pendingVersion: pendingValid ? pending : null,
       isLaunchCheck: true,
     );
+    // B16：弱网放行（passOffline）时记待复核标记——进控制台后网络恢复
+    // 时立即重跑一次更新门（见 _maybeRecheckGate），不许长期停留在
+    // 低于 minUsable 的旧版而无感知。
+    if (decision == UpdateDecision.passOffline) {
+      await settings.setPendingGateRecheck(true);
+    }
     if (decision == UpdateDecision.forceAtLaunch && manifest?.android != null) {
       if (!mounted) return;
       setState(() {
@@ -893,6 +1216,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     setState(() => _gateDone = true);
+  }
+
+  /// 弱网放行后的更新门复核（B16）：进控制台后网络恢复（退出离线或
+  /// 探活首次成功）时立即重跑一次 _launchGate 逻辑；命中强更线即弹
+  /// 强制更新页（即使在会话中，minUsable 命中时也弹强更页）。
+  Future<void> _maybeRecheckGate() async {
+    final settings = _settings;
+    if (settings == null || !settings.pendingGateRecheck || _gateRecheckDone) {
+      return;
+    }
+    _gateRecheckDone = true;
+    await settings.setPendingGateRecheck(false);
+    await _launchGate(settings);
   }
 
   // ---------------- 自动重新登录＋记住账号密码（2.3.0） ----------------
@@ -959,11 +1295,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 不再另设 JS 处理器——页面不主动取钥匙，钥匙只经壳单向递入内存。
   }
 
+  /// 会话阶段打点处理器（2.4.5 A1）：网页层在 markSessionStage 时经
+  /// window.flutter_inappwebview.callHandler('qfSessionStage', {...})
+  /// 回传 {stage: 'iframe-attach'|'iframe-load'|'webapp-ready'|
+  /// 'peer-connecting'|'video-ready', nodeid}；Dart 侧据此推进阶段
+  /// watcher、重置本阶段超时计时。handler 未就绪时由 1 秒探针兜底。
+  void _registerSessionStageHandler(InAppWebViewController controller) {
+    controller.addJavaScriptHandler(
+      handlerName: 'qfSessionStage',
+      callback: (args) {
+        if (args.isEmpty) return;
+        final first = args.first;
+        String? stageName;
+        if (first is Map) {
+          stageName = first['stage']?.toString();
+          final nid = first['nodeid']?.toString();
+          if (nid != null && nid.isNotEmpty) _sessionNodeid = nid;
+        } else if (first is String) {
+          stageName = first;
+        }
+        final stage = switch (stageName) {
+          'iframe-attach' => SessionStage.iframeAttach,
+          'iframe-load' => SessionStage.iframeLoad,
+          'webapp-ready' => SessionStage.webappReady,
+          'peer-connecting' => SessionStage.peerConnecting,
+          'video-ready' => SessionStage.videoReady,
+          _ => null,
+        };
+        if (stage != null) _onSessionStageReached(stage, viaHandler: true);
+      },
+    );
+  }
+
   Future<LoginProbe?> _probeLogin() async {
     final web = _web;
     if (web == null) return null;
     try {
-      final r = await web.evaluateJavascript(source: kLoginProbeJs);
+      // B13：探针求值 5 秒超时，挂起不拖下一拍。
+      final r = await web.evaluateJavascript(source: kLoginProbeJs).timeout(
+          const Duration(seconds: 5));
       var s = r?.toString() ?? '';
       if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
         try {
@@ -983,7 +1353,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final web = _web;
     if (web == null) return false;
     try {
-      final r = await web.evaluateJavascript(source: js);
+      // B13：求值 5 秒超时。
+      final r = await web.evaluateJavascript(source: js).timeout(
+          const Duration(seconds: 5));
       return r == true || r?.toString() == 'true';
     } catch (_) {
       return false;
@@ -1041,10 +1413,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     var orchestrated = false;
     try {
-      final raw = await web.evaluateJavascript(source: kChatStateProbeJs);
+      // B13：聊天页连续求值每步 5 秒超时，挂起不拖下一拍。
+      final raw = await web.evaluateJavascript(source: kChatStateProbeJs).timeout(
+          const Duration(seconds: 5));
       final st = parseChatState(raw?.toString());
       if (st != null) {
-        final capsRaw = await web.evaluateJavascript(source: kChatCapsProbeJs);
+        final capsRaw = await web.evaluateJavascript(source: kChatCapsProbeJs).timeout(
+            const Duration(seconds: 5));
         final caps = parseChatCaps(capsRaw?.toString());
         final step = planChatUnlock(
           manualLogout: _autoLogin.suppressedByManualLogout,
@@ -1055,7 +1430,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         switch (step) {
           case ChatUnlockStep.custodyUnlock:
             final r = await web.evaluateJavascript(
-                source: buildChatCustodyUnlockScript());
+                source: buildChatCustodyUnlockScript()).timeout(
+                const Duration(seconds: 5));
             debugPrint('QFCHAT custody-unlock -> $r');
             orchestrated = true;
           case ChatUnlockStep.deviceUnlock:
@@ -1064,17 +1440,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             final script = step == ChatUnlockStep.deviceUnlock
                 ? buildChatDeviceUnlockScript(key)
                 : buildChatDeviceEnrollScript(key);
-            final r = await web.evaluateJavascript(source: script);
+            final r = await web.evaluateJavascript(source: script).timeout(
+                const Duration(seconds: 5));
             debugPrint('QFCHAT $step -> $r');
             orchestrated = true;
           case ChatUnlockStep.credentialUnlock:
             final r = await web.evaluateJavascript(
-                source: buildChatCredentialUnlockScript(pass!));
+                source: buildChatCredentialUnlockScript(pass!)).timeout(
+                const Duration(seconds: 5));
             debugPrint('QFCHAT credential-unlock -> $r');
             orchestrated = true;
           case ChatUnlockStep.custodyEnroll:
             final r = await web.evaluateJavascript(
-                source: buildChatCustodyEnrollScript());
+                source: buildChatCustodyEnrollScript()).timeout(
+                const Duration(seconds: 5));
             debugPrint('QFCHAT custody-enroll -> $r');
             orchestrated = true;
           case ChatUnlockStep.none:
@@ -1087,7 +1466,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (orchestrated) return; // 已走解锁步的拍不再叠加注入
     try {
       final r = await web.evaluateJavascript(
-          source: buildChatBridgeJs(username: user, password: pass));
+          source: buildChatBridgeJs(username: user, password: pass)).timeout(
+          const Duration(seconds: 5));
       debugPrint('QFCHAT bridge -> $r');
     } catch (_) {
       // 页面正在跳转：下一拍再来
@@ -1101,6 +1481,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _loginTickBusy = true;
       try {
         await _chatTick();
+        // B25：聊天页每 5 拍（10 秒）顺带跑一次控制台登录探针（不阻塞
+        // _chatTick）；探针确认掉登录时先提示，切回设备槽立即走恢复链。
+        _chatTickCount++;
+        if (_chatTickCount % 5 == 0) {
+          final probe = await _probeLogin();
+          if (probe != null && probe.isLogin && mounted) {
+            _snack('登录已过期，正在恢复…');
+            await _onLoginPageDetected(fromConsole: true);
+          }
+        }
       } finally {
         _loginTickBusy = false;
       }
@@ -1108,27 +1498,70 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (!_isConsolePage) return;
     _loginTickBusy = true;
+    // A6：发起探针时捕获身份代数；await 回来后代数已变（登录成功/
+    // 手动退出/强制下线）则整单丢弃并触发一次 _refreshAuthState，
+    // 不静默吞掉、不许旧响应写入新登录态。
+    final gen = _authGen;
     try {
       final probe = await _probeLogin();
       if (probe == null || !mounted) return;
+      if (gen != _authGen) {
+        unawaited(_refreshAuthState());
+        return;
+      }
       if (probe.isConsole) {
+        _unknownProbeStreak = 0;
         _prevProbeState = 'console';
         await _onConsoleDetected();
       } else if (probe.isLogin) {
+        _unknownProbeStreak = 0;
         final fromConsole = _prevProbeState == 'console';
         _prevProbeState = 'login';
         await _onLoginPageDetected(fromConsole: fromConsole);
+      } else {
+        // unknown：页面还没画完，这一拍不动作、也不覆盖上一个确定状态；
+        // B5：连续 5 拍（10 秒）unknown → 强制退恢复盖/启动画面，露出生页
+        // 原样 + 提示，不得永久蓝屏。
+        _unknownProbeStreak++;
+        if (_unknownProbeStreak >= 5) {
+          _unknownProbeStreak = 0;
+          unawaited(_sessionLog.log('login-probe-unknown',
+              extra: 'url=$_currentUrl hasPw=${probe.hasPasswordInput} '
+                  'hasPanel=${probe.hasLoginPanel}'));
+          if (mounted && (_recoveryCover || _splashVisible)) {
+            setState(() {
+              _recoveryCover = false;
+              _splashVisible = false;
+            });
+            _snack('页面状态识别失败，请手动登录或重试。');
+          }
+        }
       }
-      // unknown：页面还没画完，这一拍不动作、也不覆盖上一个确定状态
     } finally {
       _loginTickBusy = false;
     }
   }
 
+  /// 身份代数变化后的状态重读（A6）：重读 cookie + 重探针一次，
+  /// 让新登录态尽快落定，而不是等下一拍 2 秒定时器。
+  Future<void> _refreshAuthState() async {
+    if (!mounted) return;
+    final probe = await _probeLogin();
+    if (probe == null || !mounted) return;
+    if (probe.isConsole) {
+      await _onConsoleDetected();
+    } else if (probe.isLogin) {
+      await _onLoginPageDetected(fromConsole: _prevProbeState == 'console');
+    }
+  }
+
   /// 探针确认已在控制台：落盘挂起的登录提交、刷新会话快照、收尾恢复盖子。
   Future<void> _onConsoleDetected() async {
+    // A6：每个 await 之后校验身份代数，变了即 return（本轮响应已过期）。
+    final gen = _authGen;
     if (!_injectedThisLoad) {
       await _injectBridge(fillSaved: false);
+      if (gen != _authGen) return;
       _injectedThisLoad = true;
     }
     final pending = _pendingSubmit;
@@ -1167,12 +1600,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_settings?.credentialBlocked ?? false) {
       await _settings?.setCredentialBlocked(false);
     }
+    if (gen != _authGen) return;
+    // A6：新鲜登录过渡（恢复轮进行中或框架刚出现）才递增身份代数；
+    // 探针每 2 秒的常规命中不递增（否则代数永远在变）。
+    final freshLogin = _episodeRunning || !_chromeVisible;
     _autoLogin.onLoginSuccess();
+    if (freshLogin) _authGen++;
     _episodeRunning = false;
     _episodeFinished = false; // 回到控制台：下一次掉登录算新一轮
     _stepWaitUntil = null;
     _failureSnackShown = false;
     await _maybeSnapshotSession();
+    if (gen != _authGen && !freshLogin) return;
     // 已登录：框架顶栏/标签出现，并预加载好友/论坛槽。
     // 落点切回首页槽（阶段 D 定版）：未登录期间 _slot 被收尾逻辑钉在
     // 设备槽（登录页所在，SUP-P0-06），只在 chrome 由无到有这一拍切回；
@@ -1183,7 +1622,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _slot = AppSlot.home;
       });
     }
-    _preloadSlots();
+    // B26：首屏任务排队错峰——许可门（拦人）立即跑，槽预加载（体验）
+    // 500ms 后再跑，不与许可门/更新检查三路并发抢服务器。
+    Future<void>.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) _preloadSlots();
+    });
     // 2.3.1：会话建立成功后立即跑许可门（§3 时机：先于任何设备连接动作；
     // 函数内有每会话一次的守卫，探针反复命中不会重复打）
     unawaited(_runLicenseGateCheck());
@@ -1215,10 +1658,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
       }
       if ((map['xid'] ?? '').isEmpty) return;
-      final snap = SessionSnapshot(cookies: map, savedAt: DateTime.now());
+      // B22：savedAt 优先按服务端时间（预检回包算出的偏移），本地时钟兜底。
+      final snap = SessionSnapshot(cookies: map, savedAt: _serverNow());
       await _enqueueAuth(() => _credStore.saveSession(snap));
       _savedSession = snap;
-      _lastSnapshotAt = DateTime.now();
+      _lastSnapshotAt = _serverNow();
       debugPrint('QFLOGIN session snapshot saved (${map.keys.join(',')})');
     } catch (_) {
       // 摘不到就算了：下次探针再试，不影响使用
@@ -1228,12 +1672,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 探针确认掉回登录页：按恢复链裁决下一步，全程盖住不闪登录页。
   /// [fromConsole]：上一拍还在控制台、这一拍掉回登录页（同页跳变也算新一轮）。
   Future<void> _onLoginPageDetected({required bool fromConsole}) async {
-    // 挂起的提交超过 6 秒还没进控制台 = 这次登录没成：丢弃挂起；
+    // 挂起的提交超过 10 秒还没进控制台 = 这次登录没成：丢弃挂起；
     // 若是自动提交的，置凭据拦截（落盘），防旧密码反复去撞登录冻结。
+    // B14：慢网容忍从 6 秒放宽到 10 秒。
     final pendingAt = _pendingSubmitAt;
     if (_pendingSubmit != null &&
         pendingAt != null &&
-        DateTime.now().difference(pendingAt) > const Duration(seconds: 6)) {
+        DateTime.now().difference(pendingAt) > const Duration(seconds: 10)) {
       final wasAuto = _pendingSubmitAuto;
       _pendingSubmit = null;
       _pendingSubmitAt = null;
@@ -1338,22 +1783,82 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _splashVisible = true;
       });
     }
-    _autoLogin.recordAttempt(step);
     if (step == RecoveryStep.restoreSession) {
+      // A7：恢复链先验快照——带快照 cookie 调轻量接口验活；401/403
+      // 即判快照已死（服务端已撤销/过期），跳过 reload()+6 秒等待，
+      // 直接走凭据登录，不拖 6 秒。
+      _recoveryStepText = '正在验证会话…';
+      if (mounted) setState(() {});
+      final snap = _savedSession!;
+      final cookieHeader = snap.cookies.entries
+          .map((e) => '${e.key}=${e.value}')
+          .join('; ');
+      final check = await verifySnapshotAlive(cookieHeader);
+      if (check == SnapshotCheck.authDead) {
+        unawaited(_sessionLog.log('snapshot-dead'));
+        try {
+          await _enqueueAuth(() => _credStore.clearSession());
+        } catch (_) {}
+        _savedSession = null;
+        // 本轮快照已记一次？未记——直接改裁决：跳过快照步走凭据。
+        // 记一笔 session 尝试（防无凭据时本轮空转），再重新裁决。
+        _autoLogin.recordAttempt(RecoveryStep.restoreSession);
+        if (mounted) setState(() => _recoveryCover = true);
+        await _onLoginPageDetected(fromConsole: false);
+        return;
+      }
+      _autoLogin.recordAttempt(step);
       debugPrint('QFLOGIN recovery: session restore');
-      await _applySessionSnapshot(_savedSession!);
-      _stepWaitUntil = DateTime.now().add(const Duration(seconds: 6));
+      await _applySessionSnapshot(snap);
+      // B6：先 reload()，等 onLoadStop 回来再置 _stepWaitUntil（见
+      // _onPageLoaded 里的 _awaitingRestoreLoad），避免「已发导航 +
+      // 6 秒盲等」窗口；等待期内用户点退出立即 stopLoading + 清快照。
+      _awaitingRestoreLoad = true;
+      _recoveryStepText = '正在恢复会话…';
+      if (mounted) setState(() {});
       await _web?.reload();
     } else if (step == RecoveryStep.credentialLogin) {
       debugPrint('QFLOGIN recovery: credential silent login');
+      _recoveryStepText = '正在用已存账号登录…';
+      if (mounted) setState(() {});
       await _injectBridge(fillSaved: true);
       await Future<void>.delayed(const Duration(milliseconds: 450));
-      _autoSubmitInFlight = true;
-      final clicked = await _evalJsBool(kSubmitLoginJs);
-      debugPrint('QFLOGIN silent submit clicked=$clicked');
+      // B14：点不到登录按钮（clicked==false）不记凭据尝试——按钮出现
+      // 前最多等 4 秒（2 秒后重试一次点按钮），仍点不到才放手等下一拍，
+      // 不烧掉唯一一次凭据尝试。
+      var clicked = false;
+      for (var attempt = 0; attempt < 2 && !clicked; attempt++) {
+        if (attempt > 0) {
+          await Future<void>.delayed(const Duration(seconds: 2));
+        }
+        _autoSubmitInFlight = true;
+        clicked = await _evalJsBool(kSubmitLoginJs);
+        debugPrint('QFLOGIN silent submit clicked=$clicked (try $attempt)');
+      }
       Future<void>.delayed(
           const Duration(seconds: 2), () => _autoSubmitInFlight = false);
+      if (!clicked) {
+        // 本轮不记数、不锁死：短暂等待后由下一拍探针重新裁决。
+        _stepWaitUntil = DateTime.now().add(const Duration(seconds: 2));
+        return;
+      }
+      _autoLogin.recordAttempt(step);
       _stepWaitUntil = DateTime.now().add(const Duration(seconds: 8));
+    }
+  }
+
+  /// 取消恢复（A7/B14）：恢复盖上的「取消恢复，直接登录」——停掉本轮
+  /// 恢复、露出生登录页，用户可手动登录。
+  void _cancelRecovery() {
+    _episodeRunning = false;
+    _episodeFinished = true;
+    _stepWaitUntil = null;
+    _recoveryStepText = '';
+    if (mounted) {
+      setState(() {
+        _recoveryCover = false;
+        _splashVisible = false;
+      });
     }
   }
 
@@ -1382,13 +1887,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 置闸停自动恢复 + 清会话、清凭据、清记住标记。重复调用无副作用。
   void _noteManualLogout() {
     if (_autoLogin.suppressedByManualLogout && _savedCreds == null) return;
+    // B6：先停掉在途导航（已发出的 reload 不会被取消是旧竞态根因），
+    // 再清 cookie；同时递增身份代数，在途恢复响应回来即丢弃。
+    unawaited(_web?.stopLoading());
+    _authGen++;
     _autoLogin.onManualLogout();
     _pendingSubmit = null;
     _pendingSubmitAt = null;
     _episodeRunning = false;
     _episodeFinished = true; // 退出后停在登录页：不许再开恢复轮
     _stepWaitUntil = null;
+    _awaitingRestoreLoad = false;
     _failureSnackShown = false;
+    _stopSessionWatcher();
+    _clearKeepScreenOn();
     debugPrint('QFLOGIN manual logout: clearing auth state');
     // 框架复位：落设备槽（登录页所在，SUP-P0-06；此前写回首页槽会把人
     // 晾在空白槽上）、收起顶栏/标签、槽位账本作废（不残留上个账号页面）；
@@ -1440,27 +1952,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await CookieManager.instance().deleteAllCookies();
     } catch (_) {}
-    // 各 WebView 槽页面清空，防止下个账号看到上个账号的保活页
-    try {
-      await _homeWeb?.loadUrl(
-          urlRequest: URLRequest(url: WebUri('about:blank')));
-      await _filesWeb?.loadUrl(
-          urlRequest: URLRequest(url: WebUri('about:blank')));
-      await _friendsWeb?.loadUrl(
-          urlRequest: URLRequest(url: WebUri('about:blank')));
-      await _forumWeb?.loadUrl(
-          urlRequest: URLRequest(url: WebUri('about:blank')));
-    } catch (_) {}
+    // B27：各 WebView 槽页面清空改为并行 + 各 3 秒超时（超时即跳过，
+    // 不阻塞退出）；弱网下任一槽卡住也不拖住整条清场链。
+    Future<void> blank(InAppWebViewController? c) async {
+      if (c == null) return;
+      try {
+        await c
+            .loadUrl(urlRequest: URLRequest(url: WebUri('about:blank')))
+            .timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
+
+    await Future.wait([
+      blank(_homeWeb),
+      blank(_filesWeb),
+      blank(_friendsWeb),
+      blank(_forumWeb),
+    ]);
     _friendsCurrentUrl = '';
   }
 
   /// 原生菜单「退出账号」：清干净后走服务端登出地址回登录页。
+  /// B27：等 _clearAuthState() 完成后再导航到 /logout，不再两路导航
+  /// （清槽空白页 vs 登出地址）在同一 _web 上互相覆盖。
   Future<void> _manualLogoutFromMenu() async {
     _gateCreds = null;
     if (_gateDecision != null && mounted) {
       setState(() => _gateDecision = null);
     }
     _noteManualLogout();
+    await _clearAuthState();
     await _web?.loadUrl(
         urlRequest: URLRequest(url: WebUri('$kServerOrigin/logout')));
     if (mounted) _snack('已退出账号');
@@ -1479,9 +2000,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ProbeResult(ok: false, at: DateTime.now(), elapsedMs: 0, error: '检测中');
     }
     _probeBusy = true;
-    final r = await probeServer();
+    final r = await probeServer(clientVersion: _currentVersion);
     _probeBusy = false;
     if (mounted) setState(() => _lastProbe = r);
+    // B4：连续 2 次失败（且不在会话进行态）→ 进离线卡；成功清零。
+    // B16：探活首次成功且有待复核标记 → 立即重跑更新门。
+    if (r.ok) {
+      final wasFailing = _probeFailStreak > 0;
+      _probeFailStreak = 0;
+      if (wasFailing) unawaited(_maybeRecheckGate());
+    } else {
+      _probeFailStreak++;
+      if (_probeFailStreak >= 2 && !_sessionConnecting && !_offline) {
+        _enterOffline();
+      }
+    }
     return r;
   }
 
@@ -1497,6 +2030,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (e) {
       // 异常原文只进日志，用户面走四态文案（VM-03 口径）。
       debugPrint('QFUPDATE check failed: $e');
+      // B16：会话内更新检查失败后 10 分钟重试一次（最多 3 次），
+      // 仍失败则在关于页显示失败态而非「已经是最新版」。
+      _scheduleUpdateCheckRetry();
       return AboutUpdateResult.failed();
     }
     final entry = manifest.android;
@@ -1524,6 +2060,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return AboutUpdateResult.upToDate();
   }
 
+  /// 会话内更新检查失败重试（B16）：10 分钟后重跑一次，最多 3 次。
+  void _scheduleUpdateCheckRetry() {
+    if (_updateCheckRetries >= 3) return;
+    _updateCheckRetries++;
+    _updateCheckRetryTimer?.cancel();
+    _updateCheckRetryTimer = Timer(const Duration(minutes: 10), () {
+      if (!mounted) return;
+      unawaited(_sessionUpdateCheck());
+    });
+  }
+
   Future<ReleaseEntry?> _sessionUpdateCheck({bool manual = false}) async {
     final result = await _sessionUpdateCheckDetail();
     if (result.status == AboutUpdateStatus.available) {
@@ -1543,6 +2090,435 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return null;
   }
 
+  // ---------------- 会话阶段机（2.4.5 A1/A2/A3/A5/A8/A9/B1/B9） ----------------
+  // 结构性前提：Android 没有原生远程会话实现——远程控制全程是设备槽
+  // WebView 打开控制台、复用网页 SPA 的会话 iframe。Dart 侧的阶段机
+  // 由两路驱动：网页侧 qfSessionStage handler 打点（优先）＋ 1 秒
+  // 探针读 Sess/#deskstatus/#Desk 兜底（handler 未就绪时）。
+
+  int _stageIndex(SessionStage s) => SessionStage.values.indexOf(s);
+
+  /// 冷启动看门狗（B1）：_web 首次 loadUrl 时启动 15 秒看门狗，超时无
+  /// onLoadStop 且无 onReceivedError → _enterOffline()（离线卡＋立即
+  /// 重试）并记 boot-load-timeout 日志。
+  void _startBootLoadWatchdog() {
+    if (_firstLoaded || _bootLoadWatchdog != null) return;
+    _bootLoadWatchdog = Timer(const Duration(seconds: 15), () {
+      _bootLoadWatchdog = null;
+      if (!mounted || _firstLoaded || _offline) return;
+      unawaited(_sessionLog.log('boot-load-timeout', extra: '15s-no-loadstop'));
+      _enterOffline();
+    });
+  }
+
+  /// 会话路由变化（顶层 #session/ 路由或 ?node=&viewmode= 深链）：
+  /// 进入会话先跑预检（A5/A9），离开会话停 watcher、清常亮。
+  void _onSessionRouteChanged(String url) {
+    final route = parseSessionRoute(url);
+    if (route == null) {
+      if (_sessionConnecting || _sessionFailed) {
+        _stopSessionWatcher();
+        _exitSessionCleanup();
+      }
+      return;
+    }
+    final nodeid = bareNodeId(route.nodeid);
+    if (_sessionConnecting && _sessionNodeid == nodeid) return;
+    if (_sessionFailed && _sessionNodeid == nodeid && _sessionCardShowing) {
+      return;
+    }
+    unawaited(_runPreflight(nodeid));
+  }
+
+  /// 会话预检（A5/A9）：打开会话前先调服务端预检接口，8 秒内出卡，
+  /// 不进「正在建立会话…」。通过才启动阶段 watcher；失败按三级分级出卡。
+  Future<void> _runPreflight(String nodeid) async {
+    if (_preflightBusy && _preflightFor == nodeid) return;
+    _preflightBusy = true;
+    _preflightFor = nodeid;
+    final startedAt = DateTime.now();
+    DevicePresence? presence;
+    var timedOut = false;
+    try {
+      presence = await DevicePresenceClient(
+        cookieProvider: _consoleCookieHeader,
+      ).fetchPresence(nodeid).timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      timedOut = true;
+    } catch (_) {
+      timedOut = true;
+    }
+    _preflightBusy = false;
+    if (!mounted) return;
+    if (presence?.serverTime != null) {
+      _serverClockOffset =
+          presence!.serverTime!.difference(DateTime.now());
+    }
+    final outcome = classifyPreflight(presence, timedOut: timedOut);
+    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
+    unawaited(_sessionLog.log(
+      'session_preflight',
+      nodeid: nodeid,
+      extra: 'outcome=$outcome code=${presence?.code ?? 'none'} '
+          'elapsedMs=$elapsedMs',
+    ));
+    if (outcome == PreflightOutcome.ok) {
+      _sessionDeviceName = (presence?.name ?? '').isNotEmpty
+          ? presence!.name
+          : nodeid;
+      _startSessionWatcher(nodeid);
+      return;
+    }
+    if (outcome == PreflightOutcome.offlineStale) {
+      unawaited(_sessionLog.log('agent_stale',
+          nodeid: nodeid,
+          extra: 'lastPongAgeMs=${presence?.lastAgentPongAgeMs}'));
+    }
+    _sessionDeviceName = (presence?.name ?? '').isNotEmpty
+        ? presence!.name
+        : nodeid;
+    _showPreflightCard(outcome, presence);
+  }
+
+  /// 阶段 watcher 启动：1 秒一拍（仅会话路由内运行）。
+  void _startSessionWatcher(String nodeid) {
+    _stopSessionWatcher();
+    _sessionNodeid = nodeid;
+    _sessionStage = SessionStage.iframeAttach;
+    _sessionStageSince = DateTime.now();
+    _sessionStartedAt = DateTime.now();
+    _sessionConnecting = true;
+    _sessionFailed = false;
+    _sessionCardShowing = false;
+    unawaited(_sessionLog.log('session-start', nodeid: nodeid));
+    _sessionTimer?.cancel();
+    _sessionTimer = Timer.periodic(const Duration(seconds: 1), (_) => _sessionTick());
+    _setKeepScreenOnForSession(true);
+  }
+
+  void _stopSessionWatcher() {
+    _sessionTimer?.cancel();
+    _sessionTimer = null;
+    _sessionConnecting = false;
+  }
+
+  /// 退出会话清理：恢复缩放、清常亮（B9/A8）。
+  void _exitSessionCleanup() {
+    _sessionFailed = false;
+    _sessionCardShowing = false;
+    _clearKeepScreenOn();
+    _applySessionZoom(false);
+  }
+
+  /// 阶段 watcher 一拍：探针读数 → 阶段推进；阶段超时/总超时 → 失败卡。
+  Future<void> _sessionTick() async {
+    if (!mounted || _web == null || !_sessionConnecting) return;
+    final now = DateTime.now();
+    final totalElapsed = _sessionStartedAt == null
+        ? 0
+        : now.difference(_sessionStartedAt!).inSeconds;
+    if (totalElapsed > kSessionTotalTimeoutSec) {
+      _failSession(_sessionStage, codeOverride: 'TIMEOUT_SESSION');
+      return;
+    }
+    SessionProbeReading? reading;
+    try {
+      final r = await _web!
+          .evaluateJavascript(source: kSessionStateJs)
+          .timeout(const Duration(seconds: 5));
+      var s = r?.toString() ?? '';
+      if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+        try {
+          final decoded = jsonDecode(s);
+          if (decoded is String) s = decoded;
+        } catch (_) {}
+      }
+      reading = SessionProbeReading.parse(s);
+    } catch (_) {
+      reading = null;
+    }
+    if (reading != null && mounted && _sessionConnecting) {
+      _onSessionStageReached(mapSessionProbe(reading));
+    }
+    if (!_sessionConnecting) return;
+    final since = _sessionStageSince;
+    if (since != null) {
+      final stageElapsed = now.difference(since).inSeconds;
+      final limit = kSessionStageTimeouts[_sessionStage] ?? 20;
+      if (stageElapsed > limit) {
+        _failSession(_sessionStage);
+      }
+    }
+  }
+
+  /// 阶段推进（只前进不后退；handler 打点与探针兜底共用）。
+  void _onSessionStageReached(SessionStage stage, {bool viaHandler = false}) {
+    if (!_sessionConnecting || _sessionFailed) return;
+    if (_stageIndex(stage) < _stageIndex(_sessionStage)) return;
+    final isNew = _stageIndex(stage) > _stageIndex(_sessionStage);
+    if (isNew) {
+      _sessionStage = stage;
+      _sessionStageSince = DateTime.now();
+      final elapsedMs = _sessionStartedAt == null
+          ? 0
+          : DateTime.now().difference(_sessionStartedAt!).inMilliseconds;
+      unawaited(_sessionLog.log(sessionStageLogName(stage),
+          nodeid: _sessionNodeid ?? '',
+          extra: 'elapsedMs=$elapsedMs via=${viaHandler ? 'handler' : 'probe'}'));
+      if (stage == SessionStage.videoReady) {
+        _sessionConnecting = false;
+        _sessionTimer?.cancel();
+        _sessionTimer = null;
+        final secs = (elapsedMs / 1000).toStringAsFixed(1);
+        _lastSessionSummary =
+            '${_sessionDeviceName ?? _sessionNodeid ?? '设备'} · video-ready · $secs秒 · 成功';
+        if (mounted) setState(() {});
+        // A8：会话进行态关闭双指缩放（远程桌面自带缩放，避免手势抢占）。
+        _applySessionZoom(true);
+        _setKeepScreenOnForSession(true);
+      }
+    }
+  }
+
+  /// 会话失败：记日志＋失败卡（TIMEOUT 加阶段名＋设备名＋耗时＋三按钮）。
+  void _failSession(SessionStage stage,
+      {bool viaWatchdog = false, String? codeOverride}) {
+    if (_sessionFailed) return;
+    _sessionFailed = true;
+    _lastSessionFailed = true;
+    _sessionConnecting = false;
+    _sessionTimer?.cancel();
+    _sessionTimer = null;
+    final code = codeOverride ?? sessionTimeoutCode(stage);
+    final elapsedSec = _sessionStartedAt == null
+        ? 0
+        : DateTime.now().difference(_sessionStartedAt!).inSeconds;
+    _lastSessionSummary =
+        '${_sessionDeviceName ?? _sessionNodeid ?? '设备'} · $code · $elapsedSec秒 · 失败';
+    unawaited(_sessionLog.log('timeout-stage',
+        nodeid: _sessionNodeid ?? '',
+        extra: 'code=$code stage=${sessionStageLogName(stage)} '
+            'elapsedSec=$elapsedSec via=${viaWatchdog ? 'watchdog' : 'watcher'}'));
+    _clearKeepScreenOn();
+    if (mounted) setState(() {});
+    _showSessionFailureCard(code, elapsedSec);
+  }
+
+  /// 原生会话失败卡（A1/A3）：错误码＋设备名＋耗时＋三个按钮
+  /// （重试会话／一键修复／返回设备列表）＋复制诊断。
+  Future<void> _showSessionFailureCard(String code, int elapsedSec) async {
+    if (!mounted || _sessionCardShowing) return;
+    _sessionCardShowing = true;
+    final device = _sessionDeviceName ?? _sessionNodeid ?? '设备';
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('会话建立失败'),
+        content: Text(
+            '设备：$device\n错误码：$code\n已耗时：$elapsedSec 秒\n\n请重试会话，或用一键修复检查被控端状态。'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final diag = await _diagnosticsTextFull();
+              if (!ctx.mounted) return;
+              await Clipboard.setData(ClipboardData(text: diag));
+              if (ctx.mounted) Navigator.of(ctx).pop('copied');
+            },
+            child: const Text('复制诊断'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('exit'),
+            child: const Text('返回设备列表'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('repair'),
+            child: const Text('一键修复'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop('retry'),
+            child: const Text('重试会话'),
+          ),
+        ],
+      ),
+    );
+    _sessionCardShowing = false;
+    if (!mounted) return;
+    switch (result) {
+      case 'retry':
+        await _retrySession();
+      case 'repair':
+        await _showRepairGuidance();
+      case 'exit':
+        _exitSessionToDevices();
+      case 'copied':
+        _snack('诊断信息已复制。');
+        // 复制后仍留在失败态：重新弹卡（不丢重试入口）。
+        _showSessionFailureCard(code, elapsedSec);
+      default:
+        break;
+    }
+  }
+
+  /// 重试会话：重新走 preflight → iframe-attach 全链路（A4：不是只
+  /// 刷新顶层页）。
+  Future<void> _retrySession() async {
+    final nodeid = _sessionNodeid;
+    if (nodeid == null) return;
+    _sessionFailed = false;
+    _lastSessionFailed = false;
+    _preflightFor = null;
+    await _runPreflight(nodeid);
+    if (mounted && _sessionConnecting) {
+      await _web?.reload();
+    }
+  }
+
+  /// 退出会话回设备列表（失败卡/返回键共用）。
+  void _exitSessionToDevices() {
+    _stopSessionWatcher();
+    _exitSessionCleanup();
+    _web?.loadUrl(urlRequest: URLRequest(url: WebUri(_startUrl)));
+    _activateSlot(AppSlot.devices);
+  }
+
+  /// 预检失败卡（A9 三级分级，8 秒内出卡，不进「正在建立会话…」）。
+  Future<void> _showPreflightCard(
+      PreflightOutcome outcome, DevicePresence? presence) async {
+    if (!mounted) return;
+    final text = preflightCardText(outcome, presence);
+    final nodeid = _sessionNodeid ?? presence?.nodeid ?? '';
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text(text.title),
+        content: Text(text.body),
+        actions: [
+          if (outcome == PreflightOutcome.preflightTimeout)
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('force'),
+              child: const Text('仍要尝试连接'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('exit'),
+            child: const Text('返回设备列表'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('repair'),
+            child: const Text('一键修复'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop('retry'),
+            child: const Text('重试预检'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    switch (result) {
+      case 'retry':
+        _preflightFor = null;
+        if (nodeid.isNotEmpty) await _runPreflight(nodeid);
+      case 'repair':
+        await _showRepairGuidance();
+      case 'force':
+        // 二次确认后才挂 iframe，本次标记为 preflight-skipped 写进日志。
+        unawaited(_sessionLog.log('preflight-skipped', nodeid: nodeid));
+        if (nodeid.isNotEmpty) _startSessionWatcher(nodeid);
+      case 'exit':
+        _exitSessionToDevices();
+      default:
+        break;
+    }
+  }
+
+  /// 一键修复（协调人定案 5）：手机上跑不了 qf-agent-heal.ps1，点了没
+  /// 反应的按钮就是假按钮——改为调服务端预检＋给出笔记本侧修复指引
+  /// （重启 Mesh Agent 服务的文字步骤），修好后可直接重试预检。
+  Future<void> _showRepairGuidance() async {
+    if (!mounted) return;
+    final device = _sessionDeviceName ?? _sessionNodeid ?? '该设备';
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('一键修复'),
+        content: Text(
+            '正在为 $device 检查被控端状态。\n\n'
+            '请在笔记本上操作：\n'
+            '1. 按 Win+R，输入 services.msc 回车；\n'
+            '2. 找到 Mesh Agent 服务，右键「重新启动」；\n'
+            '3. 等 10 秒后，回到手机点「重新预检」。\n\n'
+            '若服务不在列表里，说明 agent 未安装或已被卸载，'
+            '需重新安装被控端。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('close'),
+            child: const Text('知道了'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop('recheck'),
+            child: const Text('重新预检'),
+          ),
+        ],
+      ),
+    );
+    if (result == 'recheck' && mounted) {
+      final nodeid = _sessionNodeid;
+      if (nodeid != null) {
+        _preflightFor = null;
+        await _runPreflight(nodeid);
+      }
+    }
+  }
+
+  /// 屏幕常亮（B9）：进入会话路由或 Sess.state==connected 时开，
+  /// 退出会话/切后台时清；设置页开关默认开。
+  Future<void> _setKeepScreenOnForSession(bool on) async {
+    if (!on) {
+      _clearKeepScreenOn();
+      return;
+    }
+    if (!(_settings?.keepScreenOn ?? true)) return;
+    _keepScreenOnActive = true;
+    await NativeChannels.setKeepScreenOn(true);
+  }
+
+  void _clearKeepScreenOn() {
+    if (!_keepScreenOnActive) return;
+    _keepScreenOnActive = false;
+    unawaited(NativeChannels.setKeepScreenOn(false));
+  }
+
+  /// 会话进行态缩放开关（A8）：会话中关双指缩放（远程桌面自带缩放），
+  /// 退出会话恢复。setSettings 需给全量设置（6.x 会整体替换）。
+  Future<void> _applySessionZoom(bool sessionActive) async {
+    final web = _web;
+    if (web == null) return;
+    try {
+      await web.setSettings(
+        settings: InAppWebViewSettings(
+          javaScriptEnabled: true,
+          domStorageEnabled: true,
+          databaseEnabled: true,
+          cacheEnabled: true,
+          thirdPartyCookiesEnabled: true,
+          supportZoom: !sessionActive,
+          builtInZoomControls: !sessionActive,
+          displayZoomControls: false,
+          useShouldOverrideUrlLoading: true,
+          mediaPlaybackRequiresUserGesture: false,
+          allowsInlineMediaPlayback: true,
+          iframeAllow: 'fullscreen',
+          applicationNameForUserAgent: 'QFRemote',
+          supportMultipleWindows: true,
+        ),
+      );
+    } catch (_) {
+      // 机型/插件不支持时安静跳过，不挡会话
+    }
+  }
+
   // ---------------- 下载/安装 ----------------
 
   Future<Directory> _updatesDir() async {
@@ -1557,6 +2533,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _openInstaller(File file) async {
     final result = await OpenFilex.open(file.path);
     if (result.type != ResultType.done && mounted) {
+      // B18：安装器失败先查未知应用安装开关——被关时弹带「去设置开启」
+      // 的引导，不再只报文件路径让用户自己找。
+      final canInstall = await NativeChannels.canInstallUnknown();
+      if (canInstall == false && mounted) {
+        final go = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('需要允许安装未知应用'),
+            content: const Text(
+                'QFRemote 需要「允许安装未知应用」权限才能安装更新，请在系统设置里开启。'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('去设置开启'),
+              ),
+            ],
+          ),
+        );
+        if (go == true) {
+          await NativeChannels.openUnknownAppSourcesSettings();
+        }
+        return;
+      }
       _snack('安装包打开失败（${result.message}），文件位于：${file.path}');
     }
   }
@@ -1567,7 +2570,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _watchdog?.stop();
     _watchdog = WatchdogCore(
       evaluator: _evaluator,
-      enabled: () => mounted && _gateDone && !_offline && _forceEntry == null,
+      enabled: () =>
+          mounted && _gateDone && !_offline && _forceEntry == null && _foreground,
       onStatus: (s) {
         if (mounted) setState(() {});
         debugPrint('QFWATCHDOG status=$s');
@@ -1576,11 +2580,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _settings?.incWatchdogReconnects();
         debugPrint('QFWATCHDOG clicked');
       },
+      // A1/B10：看护判定 connecting-stuck（「正在建立会话…」持续 25 秒
+      // 无画布）→ 原生会话失败卡（TIMEOUT_PEER_CONNECTING）。
+      onConnectingStuck: () {
+        if (_sessionConnecting && !_sessionFailed) {
+          _failSession(SessionStage.peerConnecting, viaWatchdog: true);
+        }
+      },
       log: (m) => debugPrint('QFWATCHDOG $m'),
     )..start();
   }
 
   Future<void> _onPageLoaded() async {
+    // B1：首屏加载成功即取消冷启动看门狗；B6：快照恢复的 reload 回来后
+    // 才开始 6 秒等待计时。
+    _bootLoadWatchdog?.cancel();
+    _bootLoadWatchdog = null;
+    if (_awaitingRestoreLoad) {
+      _awaitingRestoreLoad = false;
+      _stepWaitUntil = DateTime.now().add(const Duration(seconds: 6));
+    }
     if (_mainFrameFailed) {
       // 错误页的 loadStop：不算加载成功（整页断线页继续盖着，等重试成功再退场）。
       // 只处理启动画面退场，让断线卡片露出来。
@@ -1622,6 +2641,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _splashVisible = false;
     _settings?.incOfflineCount();
     _offlineIdx = 0;
+    _offlineAttempts = 0;
+    _offlineRetryStopped = false;
     _scheduleOfflineRetry();
     _runProbe();
     if (mounted) setState(() {});
@@ -1629,6 +2650,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _scheduleOfflineRetry() {
     _offlineTimer?.cancel();
+    // B11：自动重试总次数上限 10 次（约 5 分钟），超限后停在离线卡片
+    // 并改文案为「已停止自动重试」，保留手动重试按钮。
+    if (_offlineAttempts >= 10) {
+      _offlineRetryStopped = true;
+      if (mounted) setState(() {});
+      return;
+    }
     final secs = _offlineBackoff[_offlineIdx.clamp(0, _offlineBackoff.length - 1)];
     _offlineSecondsLeft = secs;
     if (mounted) setState(() {});
@@ -1641,8 +2669,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (_offlineSecondsLeft <= 0) {
         t.cancel();
         if (_offlineIdx < _offlineBackoff.length - 1) _offlineIdx++;
-        _web?.reload();
-        _scheduleOfflineRetry();
+        _offlineAttempts++;
+        // 重载前先探活（B11）：探活不通则跳过本次重载，省一次完整页面加载。
+        unawaited(_runProbe().then((r) {
+          if (!mounted || !_offline) return;
+          if (r.ok) _web?.reload();
+          _scheduleOfflineRetry();
+        }));
       }
       setState(() {});
     });
@@ -1652,58 +2685,172 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _offlineTimer?.cancel();
     _offline = false;
     _offlineIdx = 0;
+    _offlineAttempts = 0;
+    _offlineRetryStopped = false;
+    // B16：网络恢复后立即重跑弱网放行时欠下的更新门复核。
+    unawaited(_maybeRecheckGate());
     if (mounted) setState(() {});
   }
 
   /// 控制台页面里点到的文件下载：带上 WebView 的会话 Cookie 去下，
   /// 存到本应用的下载目录（与 Windows 版下载行为对齐）。
+  /// 2.4.5 B23：下载前读 Content-Length，超过 500MB 或剩余空间不足
+  /// 时先弹确认；下载中显示进度＋取消按钮（取消即关连接＋删文件）；
+  /// 文件名限 100 字符。
   Future<void> _handlePageDownload(DownloadStartRequest req) async {
+    HttpClient? client;
+    var cancelled = false;
+    File? targetFile;
+    // 进度态：由对话框内的 StatefulBuilder 经 setState 刷新。
+    var received = 0;
+    var total = -1;
+    void Function()? refreshProgress;
+    // 进度对话框开关（声明在 try 之外：catch 里也要能关掉它）。
+    var dialogOpen = false;
+    void closeProgressDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
     try {
       final cookies = await CookieManager.instance().getCookies(url: req.url);
       // 证书校验端口跟随下载地址本身（各服务面同为自家域名源；此前写死
       // 控制台端口，从好友/聊天页发起的下载会被证书校验拒掉）
-      final client = trustedHttpClient(
+      client = trustedHttpClient(
           connectionTimeout: const Duration(seconds: 20), port: req.url.port);
+      final request = await client.getUrl(Uri.parse(req.url.toString()));
+      applyClientVersionHeader(request);
+      if (cookies.isNotEmpty) {
+        request.headers.set(HttpHeaders.cookieHeader,
+            cookies.map((c) => '${c.name}=${c.value}').join('; '));
+      }
+      // 响应头超时 20 秒：服务器接受连接却不回话时不许无声挂死（H-5）。
+      final res = await request.close().timeout(const Duration(seconds: 20));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw const FormatException('下载失败，服务器返回异常状态，请稍后重试。');
+      }
+      total = res.contentLength;
+      const maxDownloadBytes = 500 * 1024 * 1024;
+      if (total > maxDownloadBytes) {
+        final ok = mounted
+            ? await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('下载大文件'),
+                  content: Text(
+                      '该文件约 ${(total / 1024 / 1024).toStringAsFixed(0)}MB，超过 500MB，确定要下载吗？'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('取消'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      child: const Text('继续下载'),
+                    ),
+                  ],
+                ),
+              )
+            : false;
+        if (ok != true) return;
+      }
+      final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
+      final dir = Directory('${base.path}/downloads');
+      await dir.create(recursive: true);
+      var name = (req.suggestedFilename ?? '').trim();
+      if (name.isEmpty) {
+        final seg = Uri.parse(req.url.toString()).pathSegments;
+        name = seg.isNotEmpty ? seg.last : 'download.bin';
+      }
+      name = name.replaceAll(RegExp(r'[^\w.\- ]'), '_');
+      if (name.isEmpty || name == '.' || name == '..') name = 'download.bin';
+      if (name.length > 100) name = name.substring(0, 100);
+      final file = File('${dir.path}/$name');
+      targetFile = file;
+      final sink = file.openWrite();
+      // 进度对话框：进度条＋取消（取消即关连接＋删半截文件）。
+      if (mounted) {
+        dialogOpen = true;
+        unawaited(showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => StatefulBuilder(
+            builder: (ctx2, setDialogState) {
+              refreshProgress = () {
+                if (dialogOpen) setDialogState(() {});
+              };
+              final pct = total > 0
+                  ? (received / total).clamp(0.0, 1.0)
+                  : null;
+              return AlertDialog(
+                title: Text('正在下载 $name'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    LinearProgressIndicator(value: pct),
+                    const SizedBox(height: 10),
+                    Text(total > 0
+                        ? '已下载 ${(received / 1024).toStringAsFixed(0)}KB / ${(total / 1024).toStringAsFixed(0)}KB'
+                        : '已下载 ${(received / 1024).toStringAsFixed(0)}KB'),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      cancelled = true;
+                      dialogOpen = false;
+                      client?.close(force: true);
+                      Navigator.of(ctx2).pop();
+                    },
+                    child: const Text('取消下载'),
+                  ),
+                ],
+              );
+            },
+          ),
+        ).then((_) => dialogOpen = false));
+      }
       try {
-        final request = await client.getUrl(Uri.parse(req.url.toString()));
-        applyClientVersionHeader(request);
-        if (cookies.isNotEmpty) {
-          request.headers.set(HttpHeaders.cookieHeader,
-              cookies.map((c) => '${c.name}=${c.value}').join('; '));
-        }
-        // 响应头超时 20 秒：服务器接受连接却不回话时不许无声挂死（H-5）。
-        final res = await request.close().timeout(const Duration(seconds: 20));
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          throw const FormatException('下载失败，服务器返回异常状态，请稍后重试。');
-        }
-        final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
-        final dir = Directory('${base.path}/downloads');
-        await dir.create(recursive: true);
-        var name = (req.suggestedFilename ?? '').trim();
-        if (name.isEmpty) {
-          final seg = Uri.parse(req.url.toString()).pathSegments;
-          name = seg.isNotEmpty ? seg.last : 'download.bin';
-        }
-        name = name.replaceAll(RegExp(r'[^\w.\- ]'), '_');
-        if (name.isEmpty || name == '.' || name == '..') name = 'download.bin';
-        final file = File('${dir.path}/$name');
-        final sink = file.openWrite();
         // 正文无数据超时 30 秒（不设总时限，大文件慢速不断）：连续 30 秒
         // 没有任何新数据才判卡死（H-5）。
-        await res.timeout(const Duration(seconds: 30)).pipe(sink);
-        if (mounted) {
-          _snack('已下载：$name', action: SnackBarAction(
-            label: '打开',
-            onPressed: () => OpenFilex.open(file.path),
-          ));
+        await for (final chunk in res.timeout(const Duration(seconds: 30))) {
+          if (cancelled) break;
+          received += chunk.length;
+          sink.add(chunk);
+          refreshProgress?.call();
         }
       } finally {
-        client.close(force: true);
+        await sink.close();
+      }
+      closeProgressDialog();
+      if (cancelled) {
+        try {
+          if (await file.exists()) await file.delete();
+        } catch (_) {}
+        if (mounted) _snack('已取消下载。');
+        return;
+      }
+      if (mounted) {
+        _snack('已下载：$name', action: SnackBarAction(
+          label: '打开',
+          onPressed: () => OpenFilex.open(file.path),
+        ));
       }
     } catch (e) {
+      closeProgressDialog();
+      if (cancelled) return;
       // 异常原文只进日志，用户面统一中文映射（H-5/VM-03 口径）。
       debugPrint('QF page download failed: $e');
+      try {
+        if (targetFile != null && await targetFile.exists()) {
+          await targetFile.delete();
+        }
+      } catch (_) {}
       if (mounted) _snack(pageDownloadFailureText(e));
+    } finally {
+      client?.close(force: true);
     }
   }
 
@@ -1790,6 +2937,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               : (s.themePref == 'dark' ? ThemeChoice.dark : ThemeChoice.blue),
           rememberDevice: s.rememberDevice,
           rememberPassword: s.rememberPassword,
+          keepScreenOn: s.keepScreenOn,
+          onToggleKeepScreenOn: (v) async {
+            await _settings?.setKeepScreenOn(v);
+            if (!v) _clearKeepScreenOn();
+          },
           currentVersion: _currentVersion,
           onThemeChoice: (choice) async {
             final settings = _settings;
@@ -1866,9 +3018,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final bytes = await web.takeScreenshot();
       if (bytes == null) throw StateError('截图失败：未获取到画面。');
+      // B20：截图后空白校验——解码 PNG 后采样四角＋中心像素，方差为零
+      // 即判空白（硬件加速画布在部分机型返回空白图），提示用户重试或
+      // 用系统截图，不保存空白图冒充成功。
+      if (await _isBlankImage(bytes)) {
+        if (mounted) _snack('截图为空白，请重试或用系统截图。');
+        return;
+      }
       final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
       final dir = Directory('${base.path}/screenshots');
       await dir.create(recursive: true);
+      // B20：截图目录 30 天滚动清理（最多保留 50 张）。
+      await _pruneScreenshots(dir);
       final now = DateTime.now();
       String two(int n) => n.toString().padLeft(2, '0');
       final name = 'QFRemote-${now.year}${two(now.month)}${two(now.day)}-'
@@ -1883,17 +3044,85 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 截图空白判定（B20，纯逻辑可单测逻辑见 screenshotBlank）：解码后
+  /// 采样四角＋中心 5 个像素，全同色即判空白。
+  Future<bool> _isBlankImage(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data == null) return false;
+      final w = image.width;
+      final h = image.height;
+      final pixels = <int>{
+        _pixelAt(data, w, 0, 0),
+        _pixelAt(data, w, w - 1, 0),
+        _pixelAt(data, w, 0, h - 1),
+        _pixelAt(data, w, w - 1, h - 1),
+        _pixelAt(data, w, w ~/ 2, h ~/ 2),
+      };
+      return pixels.length == 1;
+    } catch (_) {
+      return false; // 解不出来不误判为空白
+    }
+  }
+
+  int _pixelAt(ByteData data, int width, int x, int y) {
+    final off = (y * width + x) * 4;
+    return data.getUint32(off);
+  }
+
+  /// 截图目录滚动清理：超 30 天或超 50 张时删最旧的。
+  Future<void> _pruneScreenshots(Directory dir) async {
+    try {
+      final files = await dir.list().toList();
+      final pngs = files.whereType<File>().toList();
+      final cutoff = DateTime.now().subtract(const Duration(days: 30));
+      for (final f in pngs) {
+        try {
+          final stat = await f.stat();
+          if (stat.modified.isBefore(cutoff)) await f.delete();
+        } catch (_) {}
+      }
+      final remaining = (await dir.list().toList()).whereType<File>().toList();
+      if (remaining.length > 50) {
+        remaining.sort((a, b) {
+          final am = a.statSync().modified;
+          final bm = b.statSync().modified;
+          return am.compareTo(bm);
+        });
+        for (final f in remaining.sublist(0, remaining.length - 50)) {
+          try {
+            await f.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
   String _diagnosticsText() {
     final p = _lastProbe;
     final s = _settings;
     return [
       'QFRemote 安卓版诊断信息',
       '版本：v$_currentVersion（构建日期 $kBuildDate）',
+      '清单版本：${_updateEntry?.version ?? '未检查'}',
       '系统：${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
       '服务器连通性检测：${p == null ? '尚未检测' : p.describe()}',
       '整页断线次数：${s?.offlineCount ?? 0}',
       '自动重连次数：${s?.watchdogReconnects ?? 0}',
+      // A10：最近一次会话（设备＋阶段＋耗时＋结果）＋最近 20 条阶段日志。
+      '最近一次会话：$_lastSessionSummary',
     ].join('\n');
+  }
+
+  /// 带最近 20 条阶段日志的完整诊断文本（关于页「复制诊断信息」用）。
+  Future<String> _diagnosticsTextFull() async {
+    final base = _diagnosticsText();
+    final lines = await _sessionLog.recentLines(20);
+    if (lines.isEmpty) return base;
+    return '$base\n最近 20 条会话日志：\n${lines.join('\n')}';
   }
 
   void _showAbout() {
@@ -1909,7 +3138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         checkUpdateDetail: _sessionUpdateCheckDetail,
         download: _downloadApk,
         openInstaller: _openInstaller,
-        diagnosticsText: () async => _diagnosticsText(),
+        diagnosticsText: () async => _diagnosticsTextFull(),
         fetchPoints: _fetchPointsWhenLoggedIn,
       ),
     );
@@ -2094,8 +3323,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _web = controller;
                             _evaluator.controller = controller;
                             _registerLoginHandlers(controller);
+                            _registerSessionStageHandler(controller);
                             _startWatchdog();
                             _startLoginLoop();
+                            // B1：首次加载启动 15 秒冷启动看门狗。
+                            _startBootLoadWatchdog();
                           },
                           shouldOverrideUrlLoading: (controller, action) async {
                             final url = action.request.url;
@@ -2107,12 +3339,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               _noteManualLogout();
                             }
                             if (url.scheme == 'http' || url.scheme == 'https') {
+                              // B19：外站链接走系统浏览器，不在壳内打开。
+                              if (!SvcUrls.instance.isOwnOrigin(url.toString())) {
+                                try {
+                                  await launchUrl(Uri.parse(url.toString()),
+                                      mode: LaunchMode.externalApplication);
+                                } catch (_) {}
+                                return NavigationActionPolicy.CANCEL;
+                              }
                               return NavigationActionPolicy.ALLOW;
                             }
                             return NavigationActionPolicy.CANCEL;
                           },
                           onLoadStart: (controller, url) {
                             _mainFrameFailed = false;
+                            _startBootLoadWatchdog();
                             if (url != null) {
                               _currentUrl = url.toString();
                               _injectedThisLoad = false;
@@ -2121,24 +3362,41 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           },
                           onLoadStop: (controller, url) => _onPageLoaded(),
                           onReceivedError: (controller, request, error) {
+                            _bootLoadWatchdog?.cancel();
+                            _bootLoadWatchdog = null;
                             if (request.isForMainFrame == true) {
                               _mainFrameFailed = true;
                               _enterOffline();
                             }
                           },
-                          onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                            // 证书只认自家主机：逐个核对主机+端口（自家域名源），其余一律拒绝
-                            final host = challenge.protectionSpace.host;
-                            final port = challenge.protectionSpace.port;
-                            final ok = port != null && isTrustedWebViewHostPort(host, port);
-                            return ServerTrustAuthResponse(
-                              action: ok
-                                  ? ServerTrustAuthResponseAction.PROCEED
-                                  : ServerTrustAuthResponseAction.CANCEL,
-                            );
+                          // B2：主框 HTTP 错误可见——≥500 进离线卡；401/403
+                          // 走登录恢复链（不进离线卡，见 B7）。
+                          onReceivedHttpError: (controller, request, response) {
+                            _bootLoadWatchdog?.cancel();
+                            _bootLoadWatchdog = null;
+                            if (request.isForMainFrame != true) return;
+                            final code = response.statusCode;
+                            if (code != null && code >= 500) {
+                              _mainFrameFailed = true;
+                              _enterOffline();
+                            } else if (code == 401 || code == 403) {
+                              unawaited(_probeLogin().then((p) async {
+                                if (p != null && p.isLogin && mounted) {
+                                  await _onLoginPageDetected(fromConsole: true);
+                                }
+                              }));
+                            }
                           },
+                          // B3：证书走系统默认校验，失败一律 CANCEL（见
+                          // _onTrustChallenge，不 PROCEED）。
+                          onReceivedServerTrustAuthRequest:
+                              _onTrustChallenge,
                           onUpdateVisitedHistory: (controller, url, isReload) async {
-                            if (url != null) _currentUrl = url.toString();
+                            if (url != null) {
+                              _currentUrl = url.toString();
+                              // A1/A5：会话路由变化 → 预检＋阶段 watcher。
+                              _onSessionRouteChanged(url.toString());
+                            }
                             final can = await controller.canGoBack();
                             if (mounted) setState(() => _canGoBack = can);
                           },
@@ -2284,8 +3542,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: OfflineView(
                     palette: _palette,
                     secondsLeft: _offlineSecondsLeft,
+                    autoRetryStopped: _offlineRetryStopped,
                     onRetryNow: () {
                       _offlineTimer?.cancel();
+                      _offlineAttempts = 0;
+                      _offlineRetryStopped = false;
                       _web?.reload();
                       _scheduleOfflineRetry();
                     },
@@ -2296,7 +3557,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: SplashView(
                     palette: _palette,
                     version: _currentVersion,
-                    note: _recoveryCover ? '正在恢复登录…' : null,
+                    note: _recoveryCover
+                        ? (_recoveryStepText.isNotEmpty
+                            ? _recoveryStepText
+                            : '正在恢复登录…')
+                        : null,
+                    onCancelRecovery:
+                        _recoveryCover ? _cancelRecovery : null,
                   ),
                 ),
             ],

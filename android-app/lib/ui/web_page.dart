@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-import '../core/constants.dart';
+import '../core/svc_urls.dart';
 import 'frame.dart';
 import 'theme.dart';
 
@@ -13,7 +16,11 @@ import 'theme.dart';
 /// 底部 inset——壳内网页（网页 SPA）自身已按 env(safe-area-inset-bottom)
 /// 给底导航/弹窗/贴底按钮留白，原生侧再叠一层会双计留白并压缩网页高度。
 /// 若将来装入不自带安全区的第三方页，先在网页侧补 env() 再评估本页。
-class ShellWebPage extends StatelessWidget {
+///
+/// 2.4.5 B2/B3/B19：主框 HTTP ≥500 时显示原生「页面加载失败，重试」条，
+/// 不直接展示服务端错误页；证书校验走系统默认（失败一律 CANCEL，不
+/// PROCEED）；外站链接改走系统浏览器打开，不在壳内打开（防钓鱼）。
+class ShellWebPage extends StatefulWidget {
   final QfPalette palette;
   final String title;
   final String url;
@@ -26,15 +33,60 @@ class ShellWebPage extends StatelessWidget {
   });
 
   @override
+  State<ShellWebPage> createState() => _ShellWebPageState();
+}
+
+class _ShellWebPageState extends State<ShellWebPage> {
+  InAppWebViewController? _controller;
+  bool _httpFailed = false;
+  int? _httpStatus;
+
+  Future<void> _openExternal(Uri url) async {
+    try {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法打开此外链，请稍后重试。')),
+        );
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final p = widget.palette;
     return Scaffold(
-      backgroundColor: palette.pageColor,
+      backgroundColor: p.pageColor,
       body: Column(
         children: [
-          QfPageHeader(title: title, onBack: () => Navigator.of(context).pop()),
+          QfPageHeader(title: widget.title, onBack: () => Navigator.of(context).pop()),
+          if (_httpFailed)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              color: const Color(0xFFFDECEA),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
+                      style: const TextStyle(color: Color(0xFF7A1F1A), fontSize: 13),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _httpFailed = false);
+                      _controller?.reload();
+                    },
+                    child: const Text('重试'),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: InAppWebView(
-              initialUrlRequest: URLRequest(url: WebUri(url)),
+              initialUrlRequest: URLRequest(url: WebUri(widget.url)),
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
@@ -46,24 +98,41 @@ class ShellWebPage extends StatelessWidget {
                 allowsInlineMediaPlayback: true,
                 applicationNameForUserAgent: 'QFRemote',
               ),
+              onWebViewCreated: (controller) => _controller = controller,
               shouldOverrideUrlLoading: (controller, action) async {
                 final u = action.request.url;
                 if (u == null) return NavigationActionPolicy.CANCEL;
-                if (u.scheme == 'http' || u.scheme == 'https') {
-                  return NavigationActionPolicy.ALLOW;
+                if (u.scheme != 'http' && u.scheme != 'https') {
+                  return NavigationActionPolicy.CANCEL;
                 }
-                return NavigationActionPolicy.CANCEL;
+                // 外站链接走系统浏览器，不在壳内打开（B19）。
+                if (!SvcUrls.instance.isOwnOrigin(u.toString())) {
+                  unawaited(_openExternal(Uri.parse(u.toString())));
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
+              onLoadStop: (controller, url) {
+                if (mounted && _httpFailed) setState(() => _httpFailed = false);
+              },
+              onReceivedHttpError: (controller, request, response) {
+                // 主框 HTTP ≥500：不展示服务端错误页原文，显示原生失败条（B2）。
+                if (request.isForMainFrame == true &&
+                    response.statusCode != null &&
+                    response.statusCode! >= 500) {
+                  if (mounted) {
+                    setState(() {
+                      _httpFailed = true;
+                      _httpStatus = response.statusCode;
+                    });
+                  }
+                }
               },
               onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                // 只在证书出错时才会走到这里：仅自家主机＋端口放行，其余拒绝
-                // （与主框架同一条信任口径，不放宽）。
-                final host = challenge.protectionSpace.host;
-                final port = challenge.protectionSpace.port;
-                final ok = port != null && isTrustedWebViewHostPort(host, port);
+                // 2.4.5 B3：公共 CA 走系统默认校验；本回调只在系统校验
+                // 失败时才被调用，失败一律 CANCEL，不 PROCEED。
                 return ServerTrustAuthResponse(
-                  action: ok
-                      ? ServerTrustAuthResponseAction.PROCEED
-                      : ServerTrustAuthResponseAction.CANCEL,
+                  action: ServerTrustAuthResponseAction.CANCEL,
                 );
               },
             ),

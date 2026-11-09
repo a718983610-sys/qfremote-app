@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../core/session_recovery.dart';
@@ -70,6 +72,11 @@ class SavedCredentials {
 ///   摘存，供掉登录时先行恢复。
 /// 手动退出账号时 clearAll 一次清干净（三样全清）。
 class CredentialStore {
+  /// 2.4.5 B22：凭据一次写——账号密码合并成一个 JSON 值写单个 key
+  /// （qf_saved_creds），读时整体解析，缺任一字段按无存处理；两次写
+  /// 之间崩溃不再留半截凭据。旧版两个分开的 key（qf_saved_username /
+  /// qf_saved_password）只作读兼容，写/清时一并处理。
+  static const _kCreds = 'qf_saved_creds';
   static const _kUsername = 'qf_saved_username';
   static const _kPassword = 'qf_saved_password';
   static const _kSession = 'qf_session_snapshot';
@@ -79,12 +86,34 @@ class CredentialStore {
   CredentialStore([SecureKvStore? kv]) : _kv = kv ?? FlutterSecureKvStore();
 
   Future<void> saveCredentials(String username, String password) async {
-    await _kv.write(_kUsername, username);
-    await _kv.write(_kPassword, password);
+    await _kv.write(
+        _kCreds, jsonEncode({'username': username, 'password': password}));
+    // 旧版分开的 key 不再写新值，残留的旧值清掉，免得新旧两份打架。
+    await _kv.delete(_kUsername);
+    await _kv.delete(_kPassword);
   }
 
   /// 取已存凭据：账号密码缺任一项（或为空）都按没存处理，绝不回半截。
   Future<SavedCredentials?> loadCredentials() async {
+    final raw = await _kv.read(_kCreds);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final v = jsonDecode(raw);
+        if (v is Map<String, dynamic>) {
+          final u = v['username'];
+          final p = v['password'];
+          if (u is String &&
+              u.isNotEmpty &&
+              p is String &&
+              p.isNotEmpty) {
+            return SavedCredentials(username: u, password: p);
+          }
+        }
+      } catch (_) {
+        // 新 key 损坏：落到旧 key 兼容读
+      }
+      return null;
+    }
     final u = await _kv.read(_kUsername);
     final p = await _kv.read(_kPassword);
     if (u == null || u.isEmpty || p == null || p.isEmpty) return null;
@@ -92,6 +121,7 @@ class CredentialStore {
   }
 
   Future<void> clearCredentials() async {
+    await _kv.delete(_kCreds);
     await _kv.delete(_kUsername);
     await _kv.delete(_kPassword);
   }

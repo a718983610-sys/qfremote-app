@@ -10,7 +10,17 @@ class SplashView extends StatelessWidget {
 
   /// 附加小字（如自动恢复登录中），为空不显示。
   final String? note;
-  const SplashView({super.key, required this.palette, required this.version, this.note});
+
+  /// 恢复进行中时的取消入口（2.4.5 A7/B14）：点后取消恢复、直接露登录页。
+  final VoidCallback? onCancelRecovery;
+
+  const SplashView({
+    super.key,
+    required this.palette,
+    required this.version,
+    this.note,
+    this.onCancelRecovery,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -80,6 +90,20 @@ class SplashView extends StatelessWidget {
                 ),
               ),
             ],
+            if (onCancelRecovery != null) ...[
+              const SizedBox(height: 18),
+              OutlinedButton(
+                onPressed: onCancelRecovery,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: palette.isDark ? Colors.white : const Color(0xFF1F2D47),
+                  side: BorderSide(
+                      color: palette.isDark ? Colors.white38 : const Color(0xFF9AA1AB)),
+                  minimumSize: const Size(0, 48),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('取消恢复，直接登录'),
+              ),
+            ],
             const SizedBox(height: 26),
             Text('v$version',
                 style: TextStyle(
@@ -100,11 +124,16 @@ class OfflineView extends StatelessWidget {
   final QfPalette palette;
   final int secondsLeft;
   final VoidCallback onRetryNow;
+
+  /// 自动重试已达上限停住（2.4.5 B11：10 次后停在卡片上，只留手动重试）。
+  final bool autoRetryStopped;
+
   const OfflineView({
     super.key,
     required this.palette,
     required this.secondsLeft,
     required this.onRetryNow,
+    this.autoRetryStopped = false,
   });
 
   @override
@@ -146,7 +175,9 @@ class OfflineView extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                '网络恢复后将自动回到控制台，无需操作。\n将在 $secondsLeft 秒后自动重试',
+                autoRetryStopped
+                    ? '已停止自动重试，请检查网络后点立即重试'
+                    : '网络恢复后将自动回到控制台，无需操作。\n将在 $secondsLeft 秒后自动重试',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: palette.onCardDim, fontSize: 13, height: 1.5),
               ),

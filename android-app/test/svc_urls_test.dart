@@ -5,13 +5,26 @@ import 'package:qfremote/services/points.dart';
 
 void main() {
   group('SvcUrls.parseProductWeb', () {
-    test('取 web 四字段', () {
+    test('取 web 四字段（自家源）', () {
       final m = SvcUrls.parseProductWeb(
-          '{"web":{"forumUrl":"https://a.example/forum","registerUrl":"https://a.example/register","pointsUrl":"https://a.example/points","adminUrl":"https://a.example/admin"}}');
-      expect(m['forumUrl'], 'https://a.example/forum');
-      expect(m['registerUrl'], 'https://a.example/register');
-      expect(m['pointsUrl'], 'https://a.example/points');
-      expect(m['adminUrl'], 'https://a.example/admin');
+          '{"web":{"forumUrl":"https://app.qfremote.top/forum","registerUrl":"https://app.qfremote.top/register","pointsUrl":"https://app.qfremote.top/points","adminUrl":"https://app.qfremote.top/admin"}}');
+      expect(m['forumUrl'], 'https://app.qfremote.top/forum');
+      expect(m['registerUrl'], 'https://app.qfremote.top/register');
+      expect(m['pointsUrl'], 'https://app.qfremote.top/points');
+      expect(m['adminUrl'], 'https://app.qfremote.top/admin');
+    });
+
+    test('B15：非白名单源一律丢弃（任意 https 不再信任）', () {
+      final m = SvcUrls.parseProductWeb(
+          '{"web":{"forumUrl":"https://a.example/forum","registerUrl":"https://evil.example/register","pointsUrl":"https://app.qfremote.top.evil.example/points","adminUrl":"https://app.qfremote.top/admin"}}');
+      expect(m, {'adminUrl': 'https://app.qfremote.top/admin'});
+      expect(SvcUrls.isTrustedSvcUrl('https://evil.example/points'), isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top.evil.example/x'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://sub.app.qfremote.top/points'),
+          isTrue);
+      expect(SvcUrls.isTrustedSvcUrl('http://app.qfremote.top/points'), isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://trycloudflare.com/x'), isFalse);
     });
 
     test('缺字段/非 https 值被丢弃', () {

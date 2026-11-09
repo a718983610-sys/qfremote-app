@@ -1,8 +1,12 @@
 package com.qfremote.android
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.Signature
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -34,6 +38,54 @@ class MainActivity : FlutterActivity() {
                     result.error(e.code, e.message, null)
                 } catch (e: Exception) {
                     result.error("INSPECT_FAILED", e.message ?: "APK 签名核验失败", null)
+                }
+            }
+        // 2.4.5 B9：会话进行态屏幕常亮（FLAG_KEEP_SCREEN_ON），退出会话/
+        // 切后台时清。B18：未知应用安装开关查询＋跳系统设置。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "qfremote/screen")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "setKeepScreenOn") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                val on = call.argument<Boolean>("on") ?: false
+                runOnUiThread {
+                    if (on) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+                result.success(true)
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "qfremote/install")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "canInstallUnknown" -> {
+                        val can = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            packageManager.canRequestPackageInstalls()
+                        } else {
+                            true
+                        }
+                        result.success(can)
+                    }
+                    "openUnknownAppSourcesSettings" -> {
+                        try {
+                            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                Intent(
+                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:$packageName"),
+                                )
+                            } else {
+                                Intent(Settings.ACTION_SECURITY_SETTINGS)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("OPEN_SETTINGS_FAILED", e.message ?: "打开设置失败", null)
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
     }
