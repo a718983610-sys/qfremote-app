@@ -75,7 +75,8 @@ FunctionEnd
 ;   service-stopped）。中间态（START_PENDING/STOP_PENDING）等 10 秒
 ;   再查一次，不当正常放行。runas 失败换 nsExec + Start-Process
 ;   -Verb RunAs 再拉一次；修复后复 Detect（最多 4 次、每次隔 5 秒）。
-;   任何跳过/失败都写安装器日志 %TEMP%\qf-agent-heal-installer.log。
+;   任何跳过/失败都写安装器日志（统一追加进 %TEMP%\qf-agent-heal.log，
+;   与 PS1/App 共用同一份日志，W-09①）。
 ;   仍 fail-soft：自愈失败不影响 App 安装与更新；App 启动时另有
 ;   自检兜底（windows/agent-heal.js），两者以日志时间戳互斥
 ;   （120 秒内不双弹 UAC）。
@@ -86,9 +87,13 @@ Function QFHealAgentMsh
   ;   service-pending → 等 10 秒再 Detect 一次（最多 2 次），仍 pending 拉起 Repair；
   ;   msh-wrong-target/stale-config/service-stopped → 拉起 Repair（提权）。
   ; 修复后复 Detect 最多 4 次、每次隔 5 秒，确认 local-ok 才算修好。
-  ; 仍 fail-soft：自愈任何一步失败都不影响 App 安装与更新；日志见
-  ; %TEMP%\qf-agent-heal-installer.log（每次安装重建，模式 w；
-  ; 2.4.4 教训：FileOpen "a" 在 Wine 实测中会从文件头覆写，不可信）。
+  ; 仍 fail-soft：自愈任何一步失败都不影响 App 安装与更新；日志统一
+  ; 追加进 %TEMP%\qf-agent-heal.log（W-09①，与 PS1/App 同一份）：
+  ; 本函数只在 healReturn 写一次，且写在 PS1 Detect/Repair 跑完之后，
+  ; PS1 已写的行在前、安装器行在后；模式 "a" 追加，写前 FileSeek 0 END
+  ; 显式定位到文件尾（2.4.4 教训：Wine 下 FileOpen "a" 曾从文件头覆写，
+  ; 显式 seek 到尾是针对该坑的防护；真机 Windows 上 "a" 本就追加到尾）。
+  ; 绝不用 "w" 打开统一日志——"w" 会截断 PS1/App 已写的内容。
   ; 寄存器：$R0 句柄/退出码；$R1 nsExec 输出；$R2 StrStr 结果；$R3 pending 重查计数；
   ; $R4 阶段（0=初始裁决，1=验证轮询）；$R5 日志累积；$R8 验证剩余次数。
   StrCpy $R5 ""
@@ -170,10 +175,13 @@ verifyFail:
   StrCpy $R5 "$R5INSTALLER: msh verify failed after retries$\r$\n"
   Goto healReturn
 healReturn:
-  ; 安装器日志单独成文件、一次写出（不用 "a" 追加，见头注）。
+  ; W-09①：安装器日志追加进统一日志 %TEMP%\qf-agent-heal.log（与 PS1/
+  ; App 共用），不用独立文件、不用 "w"（"w" 会截断 PS1 已写的内容）。
+  ; "a" 追加＋FileSeek 0 END 显式定位到尾，见函数头注。
   ClearErrors
-  FileOpen $R0 "$TEMP\qf-agent-heal-installer.log" w
+  FileOpen $R0 "$TEMP\qf-agent-heal.log" a
   IfErrors healEnd
+  FileSeek $R0 0 END
   FileWrite $R0 $R5
   FileClose $R0
 healEnd:

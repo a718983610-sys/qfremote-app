@@ -91,11 +91,13 @@ function Get-ServiceStatus {
 }
 
 # ---- 只读检测：与 agent-heal.js localCode() 同一张分类表 ----
+# W-09② 判定优先级与 JS 一致：服务缺失优先于文件缺失——
+# 两者同缺时 JS localCode 先返 service-missing，本函数亦先查服务。
 function Detect-Code {
-  $msh = Resolve-MshPath
-  if (-not $msh) { return 'msh-missing' }
   $status = Get-ServiceStatus
   if (-not $status) { return 'service-missing' }
+  $msh = Resolve-MshPath
+  if (-not $msh) { return 'msh-missing' }
   if ($status -eq 'StartPending' -or $status -eq 'StopPending') { return 'service-pending' }
   $raw = [IO.File]::ReadAllText($msh)
   if ($raw -notmatch '(?m)^MeshServer=wss://app\.qfremote\.top:8443/agent\.ashx\r?$') {
@@ -268,6 +270,11 @@ if ($svcNow -and ($svcNow.Status -eq 'StartPending' -or $svcNow.Status -eq 'Stop
     $okPending = Restart-AgentServiceOnce
     if ($okPending) {
       Write-HealLog 'RESULT: service_restarted'
+    } else {
+      # W-06：强制重启失败必须有一行 RESULT: 行（Restart-AgentServiceOnce
+      # 内层重试失败时亦会写 service_restart_failed，此处再补一行兜底，
+      # 保证 App 侧 parseHealLog 必能取到 service_restart_failed 而非 unknown）。
+      Write-HealLog 'RESULT: service_restart_failed'
     }
     Write-HealLog 'QFRemote agent heal done'
     exit 0

@@ -2748,7 +2748,24 @@ async function runStartupAgentHeal(opts) {
         }
         bootLog('agentHeal.helper-unavailable', (hr && hr.code) || 'unknown');
       } catch (e) { bootLog('agentHeal.helper-throw', e && e.message || String(e)); }
-      // 2) 回落 runas UAC。
+      // 2) 回落 runas UAC。W-15：拉起前先用 whitelist.json 验
+      // qf-agent-heal.ps1 的 SHA-256（复用 sys-helper.js 的
+      // loadWhitelist/verifyFileHash，与 maybeInstallSystemServices
+      // 同一套校验逻辑，不另写一套）。校验不过（hash 不符，或白名单
+      // 读不到/无此条目——verifyFileHash 此时返 false）记 bootLog＋
+      // heal 日志并跳过拉起，绝不拉起被改过的脚本；helper 路不受影响
+      //（helper 服务端执行前自验白名单，见 sys-helper.js）。
+      try {
+        const wl = sysHelper.loadWhitelist({ resourcesPath: process.resourcesPath || '', dirname: path.join(__dirname, 'syshelper') });
+        if (!sysHelper.verifyFileHash(ps1, wl)) {
+          bootLog('agentHeal.heal-script-hash-mismatch', path.basename(ps1));
+          agentHeal.appendHealLog('heal script hash mismatch, skip runas code=' + code);
+          return { outcome: 'unknown', denied: false, skipped: true };
+        }
+      } catch (e) {
+        bootLog('agentHeal.heal-script-hash-throw', e && e.message || String(e));
+        return { outcome: 'unknown', denied: false, skipped: true };
+      }
       const res = await agentHeal.runHealElevated(ps1, {});
       return res;
     };

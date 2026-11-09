@@ -192,6 +192,9 @@ try {
   ok('M5-wrong-target', heal.localCode(st({ found: true, meshServer: OLD }, svcRun)) === 'msh-wrong-target');
   ok('M6-msh-missing', heal.localCode(st({ found: false }, svcRun)) === 'msh-missing');
   ok('M7-local-ok', heal.localCode(st({ found: true, meshServer: TARGET }, svcRun, { mshMtime: t0, procStart: t1 })) === 'local-ok');
+  // W-09②/观察项②：服务与文件双缺失时，JS 与 PS1 均先判 service-missing
+  //（PS1 Detect-Code 顺序见 agent-heal-test.js G11）。
+  ok('M8-double-missing-service-first', heal.localCode(st({ found: false }, { exists: false, status: null })) === 'service-missing');
 
   // ---- N. parsePresenceResponse＋judgeTriggered（W-04 服务端判官） ----
   const pr = (j) => heal.parsePresenceResponse(j);
@@ -276,6 +279,14 @@ try {
   // 服务端无确认：unknown → server-unconfirmed
   const rP7 = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: async () => null, runRepair: fixRepair, log: logNoop });
   ok('P7-server-unconfirmed', rP7.outcome === 'unverified' && rP7.code === 'server-unconfirmed');
+  // 故障注入观察项①：本地修过一轮（stale→修→local-ok），随后 presence
+  // 首次查询即 ONLINE，应报 fixed 而非 already_correct；未修过（P1，
+  // rounds===0）仍报 already_correct。修过就是修过。
+  let p8Calls = 0;
+  const rP8 = await heal.runHealLadder({
+    checkState: async () => { p8Calls++; return p8Calls === 1 ? staleState : okState; },
+    probeConnectivity: probePass, queryPresence: onlinePresence, runRepair: fixRepair, log: logNoop });
+  ok('P8-repaired-then-online-is-fixed', rP8.outcome === 'fixed' && rP8.rounds === 1);
 
   result.pass = Object.values(result.cases).every((c) => c.pass);
 } catch (e) {

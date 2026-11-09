@@ -143,6 +143,8 @@ function decideAction(o) {
 
 // 本地四查的共享分类码（JS / PS1 Detect / 安装器三处同一张表）：
 // 由 decideAction 映射；'none' 且服务在、文件对 → local-ok。
+// W-09② 判定优先级：服务缺失优先于文件缺失——两者同缺时返
+// service-missing（PS1 Detect-Code 同顺序，见 qf-agent-heal.ps1）。
 function localCode(state) {
   const s = state || {};
   const svc = s.service || {};
@@ -594,7 +596,15 @@ async function runHealLadder(deps) {
   if (!p1 || p1.verdict === 'unknown') {
     return { outcome: 'unverified', code: HEAL_CODES.SERVER_UNCONFIRMED, rounds };
   }
-  if (p1.verdict === 'online') return { outcome: 'already_correct', code: HEAL_CODES.ONLINE, rounds };
+  if (p1.verdict === 'online') {
+    // 故障注入观察项①：本轮已执行过修复（rounds>0＝runRepair 被调用过，
+    // 如 PS1 Repair 被拉起/服务被重启/.msh 被重写），即使 presence 首次
+    // 查询即 ONLINE，也报 fixed 而非 already_correct——修过就是修过，
+    // 否则服务端 ?heal= 日志会把「修过」记成「本来就对」。
+    // 只有本轮未执行任何修复（rounds===0）且 presence 确认在线时，
+    // 才报 already_correct。
+    return { outcome: rounds > 0 ? 'fixed' : 'already_correct', code: HEAL_CODES.ONLINE, rounds };
+  }
   if (p1.verdict === 'not-found') {
     return { outcome: 'unverified', code: HEAL_CODES.NOT_FOUND, rounds };
   }

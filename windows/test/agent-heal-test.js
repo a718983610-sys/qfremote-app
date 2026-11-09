@@ -12,8 +12,9 @@
  *  D. 目标地址双文件一致（NSIS 预检与 PS1 逐字同值）。
  *  E. 2.4.4 安装器加固断言：.msh 定位兜底（PFx86＋ImagePath）、
  *     runas 失败换方式重试、修复后复读验证、失败留痕（安装器日志，
- *     不用不可信的 "a" 追加）、服务状态查法（StrStr 以返回串判、
- *     不用 IfErrors）、跳过本身留痕；
+ *     2.4.5 W-09①起统一追加进 %TEMP%\qf-agent-heal.log，模式 "a"＋
+ *     FileSeek 0 END 显式定位到尾，绝不用 "w" 截断）、服务状态查法
+ *     （StrStr 以返回串判、不用 IfErrors）、跳过本身留痕；
  *  F. 2.4.4 PS1 v2 断言：启动行（供 App 进行中守卫识别）、RESULT 全集、
  *     已正确仍管服务、服务重启重试、定位兜底、陈旧配置检测。
  *  G. 2.4.5 断言：安装器 Detect 委托、锁 Section、版本 2.4.5、IfErrors
@@ -152,9 +153,15 @@ try {
     healFn.includes('Sleep 5000') &&
     healFn.includes('INSTALLER: msh verified correct') &&
     healFn.includes('INSTALLER: msh verify failed after retries'));
-  ok('E5-installer-log-single-write-no-append',
-    healFn.includes('FileOpen $R0 "$TEMP\\qf-agent-heal-installer.log" w') &&
-    !healFn.includes('qf-agent-heal-installer.log" a'));
+  // 2.4.5 W-09①：安装器日志统一追加进 %TEMP%\qf-agent-heal.log
+  //（与 PS1/App 同一份），模式 "a"＋FileSeek 0 END 显式定位到尾；
+  // 独立文件 qf-agent-heal-installer.log 已废弃，绝不用 "w" 打开
+  // 统一日志（"w" 会截断 PS1/App 已写的内容）。
+  ok('E5-installer-log-unified-append',
+    healFn.includes('FileOpen $R0 "$TEMP\\qf-agent-heal.log" a') &&
+    healFn.includes('FileSeek $R0 0 END') &&
+    !healFn.includes('qf-agent-heal-installer.log') &&
+    !healFn.includes('"$TEMP\\qf-agent-heal.log" w'));
   ok('E6-no-self-written-sc-query',
     !healFn.includes('sc query "Mesh Agent"') &&
     healFn.includes('${StrStr} $R2 $R1 "DETECT: local-ok"') &&
@@ -232,6 +239,20 @@ try {
     'msh-wrong-target', 'stale-config', 'service-stopped'];
   ok('G8-code-table-consistent',
     codes.every((c) => healJs.includes("'" + c + "'") && PS1.includes("'" + c + "'") && healFn.includes('DETECT: ' + c)));
+  // W-09②/观察项②：Detect 判定优先级统一为服务缺失优先——PS1
+  // Detect-Code 内 service-missing 的 return 先于 msh-missing 的 return
+  // 出现；JS localCode 同顺序（M8 双缺失用例见 agent-heal-startup-test.js）。
+  const detectFn = segment(PS1, 'function Detect-Code {', '$detectCode = Detect-Code');
+  ok('G11-detect-order-service-first',
+    detectFn.includes("return 'service-missing'") &&
+    detectFn.includes("return 'msh-missing'") &&
+    detectFn.indexOf("return 'service-missing'") < detectFn.indexOf("return 'msh-missing'"));
+  // W-06：pending 强制重启失败分支（$okPending 为假）必有一行
+  // RESULT: service_restart_failed，不再只写 done 即 exit 0。
+  const pendingBlk = segment(PS1, 'service still pending after wait, forcing restart', "Write-HealLog 'QFRemote agent heal done'");
+  ok('G12-pending-fail-has-result',
+    pendingBlk.includes('$okPending = Restart-AgentServiceOnce') &&
+    pendingBlk.includes('RESULT: service_restart_failed'));
   const uninst = segment(NSI, 'Section "Uninstall"', 'SectionEnd');
   ok('G9-uninstall-stops-helper-services',
     uninst.includes("sc stop QFLockSvc") && uninst.includes("sc delete QFLockSvc") &&

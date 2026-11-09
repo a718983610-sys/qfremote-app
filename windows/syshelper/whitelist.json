@@ -1,9 +1,9 @@
 {
   "files": {
-    "QFSysHelper.exe": "8c7cff6cdf116d2b7c46b0270fd2f70eac107f86184c0cca73f87a620a859df0",
+    "QFSysHelper.exe": "eb5903298b9188dba381122622cc711eefe66735964d72a1ae0230849d00e560",
     "install-system-services.ps1": "0502ac9c70a3e666b8df85f86fab1bf167705c0193de4fae3963450d1b9ce8e6",
     "install.ps1": "6198d3e5481c021139a62740329978b2c3f48e38c6825aeaa25c920d7622b32b",
-    "qf-agent-heal.ps1": "f9540f984fbe0120ce278050988b01229c5755996ace3818dad4acecd7f7d860"
+    "qf-agent-heal.ps1": "96b4efbe9685ff1998dc80c8c59acdce32af4325611a6edd1cc3cf8896641257"
   },
   "version": "2.4.5"
 }
