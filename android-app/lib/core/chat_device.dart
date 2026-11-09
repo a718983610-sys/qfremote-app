@@ -144,7 +144,7 @@ const String kChatCapsProbeJs =
 
 /// 合并探针脚本（B13 返修）：一次求值同时取回聊天状态与页面能力，
 /// 替代原来每拍先 kChatStateProbeJs 再 kChatCapsProbeJs 的两次顺序求值。
-/// 回传 JSON：{state: <qfChatState()>, caps: {custodyUnlock, custodyEnroll,
+/// 回传 JSON：{state: `qfChatState()`, caps: {custodyUnlock, custodyEnroll,
 /// shellUnlock}}；页面没就绪时 state/caps 均为 null。
 const String kChatCombinedProbeJs =
     '(function(){try{'
