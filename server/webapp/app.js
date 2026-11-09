@@ -328,10 +328,16 @@ function validateLockPw(pw) {
    修 C3/C6（原 fetchNodeMap 串行：lockApi 6224ms + fetchControlNodes 618ms，且无单飞）：
    ① 快源＝/lock/devices（服务端已做缓存/单飞，命中 <1s），先返回、先可用；
    ② 慢源＝控制通道全量 nodes（补好友共享设备的 id），后台回填同一份缓存，不阻塞导航与面板首屏；
-   ③ 全流程 single-flight；页内缓存 60s 有效（原随页生死且永不刷新）。 */
+   ③ 全流程 single-flight；页内缓存 60s 有效（原随页生死且永不刷新）。
+   X-05：设备页首屏传 {deferSlow:true} 时慢源不在首屏建控制 WS（浏览器直连
+   /control.ashx 另开一条 WS 是深查验收「≤1 条新 WS」超标的根源），改为记
+   nodeMapSlowDeferred，延迟到下一次非首屏取数（设备详情/锁面板等真正需要
+   节点 id 时）再建；首屏缺失的共享设备 id 由 openSession 的服务端 resolve
+   端点兜底（5 秒缓存＋单飞，不另开浏览器 WS）。 */
 let nodeMapCache = null;
 let nodeMapInflight = null;
 let nodeMapSlowInflight = null;
+let nodeMapSlowDeferred = false; // X-05：首屏 deferSlow 后待补的慢源探测（下次非首屏取数时起）
 const NODE_MAP_TTL_MS = 60000;
 const CONTROL_PROBE_MS = 1500;      // 控制通道探测上限（原 6000，与慢源定位一致）
 /* NAV_LOOKUP_BUDGET_MS（900ms 点按竞态预算）已随 2.4.0 会话直达删除：解析改走
@@ -392,8 +398,21 @@ function fetchControlNodes(timeoutMs) {
     ws.onclose = () => { clearTimeout(timer); finish({}); };
   });
 }
+/* X-05：慢源探测单入口——开一条浏览器直连 /control.ashx 的 WS 取全量 nodes。
+   只在真正需要节点 id 时调用（见 fetchNodeMap 的 deferSlow），设备页首屏不调。 */
+function startSlowProbe() {
+  if (nodeMapSlowInflight) return;
+  nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)
+    .then((grouped) => { applyControlNodes(grouped); refreshDevRowIds(document); })
+    .catch(() => {})
+    .then(() => { nodeMapSlowInflight = null; });
+}
 async function fetchNodeMap(opts) {
   const force = !!(opts && opts.force);
+  const deferSlow = !!(opts && opts.deferSlow);
+  // X-05：首屏 defer 过的慢源，在下一次非首屏取数时补起（哪怕本次命中页内缓存
+  // 直接返回，也要把 WS 建起来，否则共享设备 id 会一直缺到 TTL 过期）。
+  if (!deferSlow && nodeMapSlowDeferred && !nodeMapSlowInflight) { nodeMapSlowDeferred = false; startSlowProbe(); }
   if (nodeMapInflight) return nodeMapInflight;                 // single-flight
   const nm0 = ensureNodeMap();
   if (!force && nm0.at && (Date.now() - nm0.at) < NODE_MAP_TTL_MS) return nm0;
@@ -414,13 +433,10 @@ async function fetchNodeMap(opts) {
     } catch (e) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }
     const nm = ensureNodeMap();
     nm.lockStatus = lockStatus; nm.lockError = lockError; nm.at = Date.now();
-    // 慢源不阻塞：后台拉控制通道全量 nodes，回来只回填缓存（供后续导航/共享设备用）
-    if (!nodeMapSlowInflight) {
-      nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)
-        .then((grouped) => { applyControlNodes(grouped); refreshDevRowIds(document); })
-        .catch(() => {})
-        .then(() => { nodeMapSlowInflight = null; });
-    }
+    // 慢源不阻塞：后台拉控制通道全量 nodes，回来只回填缓存（供后续导航/共享设备用）。
+    // X-05：首屏 deferSlow 时只记待补、不建 WS（见文件头注释）。
+    if (deferSlow) nodeMapSlowDeferred = true;
+    else startSlowProbe();
     return nm;
   })().then((v) => { nodeMapInflight = null; return v; },
             (e) => { nodeMapInflight = null; throw e; });
@@ -1653,7 +1669,7 @@ const Sess = {
   stage: '', stageAt: 0, webappReady: false, preflight: null, maskCode: '', navFallback: '',
   forcedConnectN: 0, connectingSince: 0, connectAttempts: [],
   lostSince: 0, lostReloaded: false, reconnectN: 0, lastLostTry: 0,
-  lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, stageTextSec: -1,
+  lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, morphRetryAt: 0, stageTextSec: -1,
 };
 let QF_SESS_CTX = null;
 function sessOn(target, type, fn, opts) { target.addEventListener(type, fn, opts); Sess.listeners.push([target, type, fn, opts]); }
@@ -1679,7 +1695,7 @@ function teardownSession() {
   Sess.stage = ''; Sess.stageAt = 0; Sess.webappReady = false; Sess.stageTextSec = -1;
   Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
-  Sess.morphTries = 0;
+  Sess.morphTries = 0; Sess.morphRetryAt = 0;
 }
 
 /* ---------- presence 预检与阶段文案（W-01/W-02/W-12 共用） ---------- */
@@ -1696,8 +1712,16 @@ async function checkPresence(nodeid) {
   if (!id) return { ok: false, code: 'VALIDATION' };
   try {
     const r = await api('/api/device/presence?nodeid=' + encodeURIComponent(id), { timeoutMs: 8000, retry: false });
-    if (r && r.json && typeof r.json === 'object') return r.json;
+    /* W-01：401 判断必须在 JSON 返回之前——通用 api() 对 401 也会解析并
+       返回 JSON 体（服务端 presence 路由 401 同回 {ok:false,
+       code:'UNAUTHORIZED'}），先认 JSON 会让 AUTH 分支永远走不到，登录
+       过期进会话只见 TIMEOUT 遮罩、走不到 sessionDied('preflight')。
+       另：JSON 体里 code 为 UNAUTHORIZED 同样当 AUTH（防状态码丢失时漏判）。 */
     if (r && r.status === 401) return { ok: false, code: 'AUTH' };
+    if (r && r.json && typeof r.json === 'object') {
+      if (r.json.code === 'UNAUTHORIZED') return { ok: false, code: 'AUTH' };
+      return r.json;
+    }
     return { ok: false, code: 'TIMEOUT' };
   } catch (e) { return { ok: false, code: 'TIMEOUT' }; }
 }
@@ -2007,7 +2031,7 @@ function frameNavigate(url) {
 }
 
 async function buildSessionFrame(view, preflightResult) {
-  Sess.pendingVm = 0;   // DS P2-1：新一轮构建起算，旧待办形态清零
+  Sess.pendingVm = 0; Sess.morphRetryAt = 0; // DS P2-1：新一轮构建起算，旧待办形态清零
   Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
   Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
@@ -2099,7 +2123,7 @@ function onFrameLoad(view, gen) {
   setTimeout(() => driveConnect(), 700);
   if (Sess.pendingVm) {
     const pv = Sess.pendingVm, pg = Sess.pendingGen;
-    Sess.pendingVm = 0;
+    Sess.pendingVm = 0; Sess.morphRetryAt = 0;
     /* DS P2-1：消费时校验世代——待办形态须为当前会话世代登记者，
        跨会话/跨构建残留一律丢弃，不把下一会话切去旧形态。 */
     if (pv !== Sess.linkedVm && pg === Sess.gen) { Sess.linkedVm = pv; if (tryGo(pv)) Sess.morphTries = 0; }
@@ -2224,11 +2248,11 @@ function failStage(view, code, stageName) {
 
 /* 哨兵：onload＋8 秒同源尺寸/结构观察＋三级错误卡（空白/被拒/无 id），
    兼容模式顶层打开为用户主动触发的第 3 级（DS-DESIGN 哨兵规格）。
-   2.4.5（W-02/W-07）：20 秒总闸＋40 秒 FAIL 改为阶段超时阶梯——
-   iframe-attach 8s / iframe-load 12s / webapp-ready 15s /
-   peer-connecting 25s / video-ready 20s，总上限 60 秒；任一阶段超时即按该
-   阶段落专用码遮罩，不再等总闸；自动重载一次的旧语义由阶段超时取代（重载
-   本身治标且会丢阶段诊断，协调人 2.4.5 定案以阶段超时为准）。
+   2.4.5（W-02/W-07）：阶段超时阶梯——iframe-attach 8s / iframe-load 12s /
+   webapp-ready 15s / peer-connecting 25s / video-ready 20s；总闸 30 秒兜底
+   （深查原规格：总闸缩到 30 秒且只重载一次的语义不变——连接 20 秒未完成
+   自动重载一次，Sess.reloaded 只许一次，总闸按首次 t0 计、不因重载顺延；
+   任一阶段超时或总闸到即按该阶段落专用码遮罩）。
    lost 态（W-07）不再无限挂着：进 lost 记 lostSince，每 5 秒主动重连一次
    （真实次数进条文），30 秒未恢复自动重建一次，重建后仍 lost 满 20 秒落 FAIL。 */
 function startSentinel(view) {
@@ -2278,14 +2302,27 @@ function startSentinel(view) {
       } else if (p === 'blank') {
         driveConnect(); // 帧尚未绑定目标文档时 driveConnect 内部的 href 身份口径会自行拦下
       }
-      // 阶段超时阶梯（每阶段只看本阶段内耗时）＋总上限 60 秒兜底。
+      // 阶段超时阶梯（每阶段只看本阶段内耗时）＋总闸 30 秒兜底（W-02 深查原规格）。
       if (Sess.stage === 'iframe-attach' && now - Sess.stageAt > 8000) { failStage(view, 'TIMEOUT_IFRAME_LOAD', 'iframe-attach'); return; }
       if (Sess.stage === 'iframe-load' && now - Sess.stageAt > 12000) { failStage(view, 'TIMEOUT_IFRAME_LOAD', 'iframe-load'); return; }
       if (Sess.stage === 'webapp-ready' && !Sess.webappReady && now - Sess.stageAt > 15000 && p === 'blank') { failStage(view, 'TIMEOUT_WEBAPP_READY', 'webapp-ready'); return; }
       if (Sess.stage === 'peer-connecting' && now - Sess.stageAt > 25000) { failStage(view, 'TIMEOUT_PEER_CONNECTING', 'peer-connecting'); return; }
-      if (now - Sess.t0 > 60000) { failStage(view, 'TIMEOUT', 'connecting'); return; }
+      // W-02：连接 20 秒未完成且尚未重载过，自动重载一次（只许一次）：重建帧、
+      // 阶段回到 iframe-attach、连接计数清零；总闸按首次 t0 计，不因重载顺延，
+      // 重载后最多再给 10 秒（30 秒总闸到即 FAIL）。failStage 经 reloaded 透传，
+      // FAIL 遮罩「已自动重载过一次」只在真的重载过时才出现（非死文案）。
+      if (!Sess.reloaded && now - Sess.t0 > 20000) {
+        Sess.reloaded = true; Sess.connectN = 0; Sess.lastConnectTry = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
+        setStage(view, 'iframe-attach');
+        armFrameLoad(view, () => onFrameLoad(view, Sess.gen)); // W-08：重载导航也重装世代校验
+        try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
+        try { console.debug('[qf-sess] 连接 20 秒未完成，自动重载一次。'); } catch (e2) {}
+        return;
+      }
+      if (now - Sess.t0 > 30000) { failStage(view, 'TIMEOUT', 'connecting'); return; }
     } else if (Sess.state === 'connected') {
       if (p === 'lost') { setLost(view); return; }
+      retryPendingMorph(view); // X-11：已连接态待办形态到点自动再试一次 go()（只一次，两次失败才弹确认）
       if (p === 'blank') {
         if (!Sess.blankSince) Sess.blankSince = now;
         else if (now - Sess.blankSince > 16000) { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
@@ -2379,7 +2416,7 @@ function setConnected(view) {
   if (Sess.name) { try { localStorage.setItem('qfLastSessionDevice', Sess.name); } catch (e) {} }
   // X-11：连上后若有待办形态切换，重试一次 go()（setMorph 的等待路径）。
   if (Sess.pendingVm && Sess.pendingGen === Sess.gen) {
-    const pv = Sess.pendingVm; Sess.pendingVm = 0;
+    const pv = Sess.pendingVm; Sess.pendingVm = 0; Sess.morphRetryAt = 0;
     if (pv !== Sess.linkedVm && tryGo(pv)) { Sess.linkedVm = pv; Sess.morphTries = 0; }
   }
 }
@@ -2644,6 +2681,35 @@ function applyMorphChrome(view) {
     const f = $('#qfInputField', view); if (f) setTimeout(() => { try { f.focus({ preventScroll: true }); } catch (e) {} }, 350);
   }
 }
+/* X-11：形态切换「重建前确认」框（setMorph 第二次失败与哨兵自动重试第二次
+   失败共用）：不静默断连，用户点了才 frameNavigate 重建；取消则留在原形态。 */
+function askMorphRebuild(view) {
+  const kindCn = Sess.kind === 'terminal' ? '终端' : (Sess.kind === 'files' ? '文件管理' : '桌面');
+  confirmModal('切换形态需要重建会话', '切换到' + kindCn + '需要重建会话，当前画面将中断，是否继续？', '重建会话', () => {
+    if (!Sess.active) return;
+    Sess.pendingVm = 0; Sess.morphRetryAt = 0; Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
+    const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
+    const st = $('#qfStrip', view); if (st) st.hidden = true;
+    setBadge(view, 'wait', '连接中');
+    setStage(view, 'iframe-attach');
+    armFrameLoad(view, () => onFrameLoad(view, Sess.gen));
+    frameNavigate(sessionDeepLinkCurrent());
+  });
+}
+/* X-11：已连接态下待办形态的自动再试一次——哨兵每轮复核，到点（setMorph 第一次
+   失败后 1.5 秒，给引擎一点就绪时间）才试一次 go()，只试一次：成功即切过去并
+   清待办；失败即记第二次失败并弹重建确认框。onFrameLoad/setConnected 的既有
+   重试路径不变（帧加载/状态迁移时仍先试）。 */
+function retryPendingMorph(view) {
+  if (!Sess.pendingVm || Sess.pendingGen !== Sess.gen) return false;
+  if (Sess.morphRetryAt && performance.now() < Sess.morphRetryAt) return false;
+  Sess.morphRetryAt = 0;
+  const pv = Sess.pendingVm;
+  if (pv !== Sess.linkedVm && tryGo(pv)) { Sess.pendingVm = 0; Sess.linkedVm = pv; Sess.morphTries = 0; return true; }
+  Sess.morphTries = (Sess.morphTries || 0) + 1;
+  if (Sess.morphTries >= 2) { Sess.morphTries = 0; askMorphRebuild(view); }
+  return false;
+}
 function setMorph(view, kind) {
   if (!QF_SESSION_VM[kind] || kind === Sess.kind) return;
   Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind];
@@ -2655,24 +2721,18 @@ function setMorph(view, kind) {
     if (tryGo(Sess.vm)) { Sess.linkedVm = Sess.vm; Sess.morphTries = 0; }
     else if (Sess.state === 'connected' || Sess.state === 'lost') {
       /* X-11：go() 不可用时先不重建——记为待办形态并 toast 等待，等 onFrameLoad/
-         setConnected 下一轮再试一次 go()；两次都失败才弹确认框，用户点了才
-         frameNavigate 重建（原来是点一下就直接断连重建，无确认、无回退）。 */
+         setConnected 下一轮再试一次 go()；已连接态下既无 frame load 也无状态迁移
+         时，由哨兵经 retryPendingMorph 在 1.5 秒后自动再试一次；两次都失败才弹
+         确认框，用户点了才 frameNavigate 重建（原来是点一下就直接断连重建，
+         无确认、无回退）。 */
       Sess.pendingVm = Sess.vm; Sess.pendingGen = Sess.gen;
       Sess.morphTries = (Sess.morphTries || 0) + 1;
       const kindCn = kind === 'terminal' ? '终端' : (kind === 'files' ? '文件管理' : '桌面');
       if (Sess.morphTries >= 2) {
-        Sess.morphTries = 0;
-        confirmModal('切换形态需要重建会话', '切换到' + kindCn + '需要重建会话，当前画面将中断，是否继续？', '重建会话', () => {
-          if (!Sess.active) return;
-          Sess.pendingVm = 0; Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
-          const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
-          const st = $('#qfStrip', view); if (st) st.hidden = true;
-          setBadge(view, 'wait', '连接中');
-          setStage(view, 'iframe-attach');
-          armFrameLoad(view, () => onFrameLoad(view, Sess.gen));
-          frameNavigate(sessionDeepLinkCurrent());
-        });
+        Sess.morphTries = 0; Sess.morphRetryAt = 0;
+        askMorphRebuild(view);
       } else {
+        Sess.morphRetryAt = performance.now() + 1500; // 哨兵到点自动再试一次
         toast('正在切换到' + kindCn + '，请稍候…', 'info');
       }
     } else { Sess.pendingVm = Sess.vm; Sess.pendingGen = Sess.gen; }
@@ -2741,8 +2801,12 @@ Views.devices = async function (view, param, seq) {
     <div id="devList"><div class="card"><div class="skel" style="height:52px"></div></div></div>
     <div class="note blue">可把文件发送到同账号的另一台设备（单文件上限 200 MB，离线暂存 24 小时）：在「我的文件」页选择「发送文件到其他设备」即可。</div>`;
   // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染；
-  // 落地后把节点 id 盖进设备行（数据携带解析），并把上次会话设备升级为深链预热
-  fetchNodeMap().then(() => {
+  // 落地后把节点 id 盖进设备行（数据携带解析），并把上次会话设备升级为深链预热。
+  // X-05：首屏传 deferSlow——慢源控制 WS 不在首屏并行另开（见 fetchNodeMap），
+  // 首屏只剩 /lock/devices＋/home/api/stats＋/api/friends/me 三路 HTTP 取数，
+  // 共用服务端 5 秒缓存＋单飞的一条控制 WS；共享设备 id 缺失时由点按的
+  // resolve 端点兜底。
+  fetchNodeMap({ deferSlow: true }).then(() => {
     if (seq !== renderSeq || S.route.name !== 'devices') return;   // DS P1-1：晚到回调世代校验——已离开设备页/已重渲即整段丢弃，不升级预热框
     refreshDevRowIds(view);
     try { const last = localStorage.getItem('qfLastSessionDevice'); const id = last && nodeIdFor(last); if (id) upgradePreheat(id, 11); } catch (e) {}
@@ -2764,7 +2828,7 @@ Views.devices = async function (view, param, seq) {
   const paint = (tab) => {
     // 批A-A4：三页签分开渲染——'all' 合并我的与共享；共享行归属读映射字段 group（原误读 d.from 永不显示）
     const mineRows = mine.map(devRowHtml);
-    const sharedRows = shared.map(d => devRowHtml({ name: d.name || d.device || '', os: d.os || '好友共享', group: d.group || '', online: !!d.online }));
+    const sharedRows = shared.map(d => devRowHtml({ name: d.name || d.device || '', os: d.os || '好友共享', group: d.group || '', online: !!d.online, onlineUnknown: !!d.onlineUnknown }));
     let rows, emptyHtml;
     if (tab === 'shared') {
       rows = sharedRows;

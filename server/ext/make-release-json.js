@@ -21,6 +21,11 @@
  *           QFRemote-Setup-v2.4.5.exe QFRemote-v2.4.5.apk
  *         逐项比对 size/sha256/url 文件名/version/minUsable，
  *         全部一致 exit 0，任一不一致 exit 1 并逐项报错。
+ *         minUsable 有意不抬（§5.3 条件不满足、发版时 minUsable 仍为旧版）
+ *         时，须显式传 --allow-min-usable，否则 --check 把
+ *         minUsable≠version 记为失败；传了该标志时该项不记失败（其余
+ *         size/sha256/url/version 仍逐项比对）。不传标志保持原行为，
+ *         防误抬/误不抬。
  *
  * 注意：本脚本只生成文件内容，不翻线上 release.json、不改 minUsable
  * 的翻牌决策；翻牌由协调人在包建好验过后做。
@@ -37,7 +42,7 @@ function sha256File(p) {
 }
 
 function parseArgs(argv) {
-  const a = { exe: null, apk: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, files: [] };
+  const a = { exe: null, apk: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [] };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     const next = () => { if (i + 1 >= argv.length) fail('参数 ' + t + ' 缺少值'); return argv[++i]; };
@@ -45,6 +50,7 @@ function parseArgs(argv) {
     else if (t === '--apk') a.apk = next();
     else if (t === '--version') a.version = next();
     else if (t === '--min-usable') a.minUsable = next();
+    else if (t === '--allow-min-usable') a.allowMinUsable = true;
     else if (t === '--notes') a.notes = next();
     else if (t === '--notes-android') a.notesAndroid = next();
     else if (t === '--out') a.out = next();
@@ -113,7 +119,12 @@ function checkMode(a) {
   expect('exe url 文件名', doc.url && path.basename(doc.url), path.basename(exeP));
   expect('apk url 文件名', doc.android && doc.android.url && path.basename(doc.android.url), path.basename(apkP));
   expect('version', doc.version, doc.android && doc.android.version);
-  if (doc.minUsable !== doc.version) problems.push('minUsable(' + doc.minUsable + ')与 version(' + doc.version + ')不一致——翻牌前请确认是有意为之');
+  // §5.3 条件不满足、minUsable 有意不抬时：须显式传 --allow-min-usable，
+  // 该项不记失败（其余项仍逐项比对）；不传标志保持原行为（报失败）。
+  if (doc.minUsable !== doc.version) {
+    if (a.allowMinUsable) console.log('提示：minUsable(' + doc.minUsable + ')与 version(' + doc.version + ')不一致，已按 --allow-min-usable 视为有意不抬，不记失败。');
+    else problems.push('minUsable(' + doc.minUsable + ')与 version(' + doc.version + ')不一致——翻牌前请确认是有意为之（有意不抬时传 --allow-min-usable）');
+  }
   if (problems.length) {
     console.error('校验失败（' + problems.length + ' 项）：');
     problems.forEach(p => console.error('  - ' + p));

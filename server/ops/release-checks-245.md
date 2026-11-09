@@ -14,8 +14,8 @@ cat /opt/meshcentral/meshcentral-data/config.json
 
 逐项核对（与仓库 `server/nginx/qfremote-proxy` 的反代口径一致）：
 
-- [ ] `cert` 为 `app.qfremote.top`（不得残留旧 IP `13.196.115.142` /
-      `54.248.9.192`；证书名仍旧 IP 即不过）
+- [ ] `cert` 为 `app.qfremote.top`（不得残留已退役的旧 IP 字面量；
+      证书名仍为旧 IP 即不过）
 - [ ] `agentAliasDNS` 含 `app.qfremote.top`
 - [ ] `trustedProxy` 覆盖本机反代（127.0.0.1 / cloudflared 回环）
 - [ ] `ports`：`8443`（控制台）/ `8444`（注册）/ `8445`（好友）/

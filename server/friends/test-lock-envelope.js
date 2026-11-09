@@ -9,7 +9,7 @@ function t(name, cond) { if (cond) { pass++; console.log('ok  -', name); } else 
 const SHA = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 // 测试用假 IP（TEST-NET-1 段 203.0.113.0/24，RFC 5737 文档专用，绝非生产地址）：
-// 旧生产 IP 54.248.9.192 已退役，测试里的旧地址一律用它代替；
+// 旧生产 IP 已退役，测试里的旧地址一律用它代替；
 // 「旧 IP 拒」断言测的是「非域名/IP 直连地址一律拒」，不依赖具体旧 IP 值。
 const TEST_OLD_URL = 'https://203.0.113.1:8443';
 

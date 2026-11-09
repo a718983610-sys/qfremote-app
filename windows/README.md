@@ -25,7 +25,7 @@
 # 以下为历史版本说明
 
 给 QFRemote 服务端（MeshCentral，https://app.qfremote.top ）配的 Windows 桌面控制端：
-（2026-11-10 2.4.5：旧 IP 54.248.9.192 已退役，统一走域名 app.qfremote.top；端口映射：旧 :8443/:8444/:8445 直连端口改为域名 :443 同源反代，/friends、/register、/release.json、/dl/ 均同源。）
+（2026-11-10 2.4.5：旧生产 IP 已退役，统一走域名 app.qfremote.top；端口映射：旧 :8443/:8444/:8445 直连端口改为域名 :443 同源反代，/friends、/register、/release.json、/dl/ 均同源。）
 Electron 外壳，双击打开就是控制台，免开浏览器、免点证书警告；登录状态会记住，下次免登。
 
 ## v1.0.5 内容（在 v1.0.4 基础上）
