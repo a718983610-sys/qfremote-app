@@ -191,13 +191,29 @@ class ExtService {
   }
 
   /// 我的积分/使用时长：取不到返回 null（关于页显示「—」）。
+  /// 401/403（登录已死）与网络不通都回 null——要区分两者用
+  /// [fetchMeResult]（B7 返修：带 authDead 标记）。
   Future<PointsInfo?> fetchMe() async {
+    final r = await fetchMeResult();
+    return r.info;
+  }
+
+  /// 我的积分/使用时长（带鉴权标记版，B7）：
+  /// authDead=true＝服务端明确回了 401/403（登录已过期），调用方据此
+  /// 显示「登录已过期，请重新登录」而非空白占位；info==null 且
+  /// authDead==false＝网络不通/其他失败，按旧口径处理。
+  /// [fetchMe] 保持旧签名供未认标记的调用方继续用（向后兼容）。
+  Future<({PointsInfo? info, bool authDead})> fetchMeResult() async {
     final r = await _send('GET', '${urls.pointsApiBase}/api/me');
-    if (r == null || r.$1 != 200) return null;
+    if (r == null) return (info: null, authDead: false);
+    if (r.$1 == 401 || r.$1 == 403) {
+      return (info: null, authDead: true);
+    }
+    if (r.$1 != 200) return (info: null, authDead: false);
     try {
-      return PointsInfo.parse(r.$2);
+      return (info: PointsInfo.parse(r.$2), authDead: false);
     } catch (_) {
-      return null;
+      return (info: null, authDead: false);
     }
   }
 

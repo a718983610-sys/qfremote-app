@@ -79,10 +79,26 @@ class LicenseClient {
   }
 
   /// 本人许可概览（付费与激活区 + 门裁决 + forceLogout 信号）。
+  /// 401/403 与网络不通都回 null——要区分两者用 [fetchLicenseMeResult]
+  ///（B7 返修：带 authDead 标记）。
   Future<LicenseMe?> fetchLicenseMe() async {
+    final r = await fetchLicenseMeResult();
+    return r.me;
+  }
+
+  /// 本人许可概览（带鉴权标记版，B7）：
+  /// authDead=true＝服务端明确回了 401/403（登录已过期），调用方据此
+  /// 显示「登录已过期，请重新登录」＋重新登录入口，而非空白占位；
+  /// me==null 且 authDead==false＝网络不通/其他失败，按旧口径处理。
+  /// [fetchLicenseMe] 保持旧签名供未认标记的调用方继续用（向后兼容）。
+  Future<({LicenseMe? me, bool authDead})> fetchLicenseMeResult() async {
     final r = await _send('GET', '${urls.licenseApiBase}/api/me');
-    if (r == null || r.$1 != 200) return null;
-    return LicenseMe.tryParse(r.$2);
+    if (r == null) return (me: null, authDead: false);
+    if (r.$1 == 401 || r.$1 == 403) {
+      return (me: null, authDead: true);
+    }
+    if (r.$1 != 200) return (me: null, authDead: false);
+    return (me: LicenseMe.tryParse(r.$2), authDead: false);
   }
 
   /// 绑定密钥到本机手机槽（契约 §3 bind；结果文案一律用服务端正式提示）。

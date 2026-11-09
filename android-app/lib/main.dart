@@ -18,6 +18,7 @@ import 'core/license.dart';
 import 'core/login_bridge.dart';
 import 'core/session_recovery.dart';
 import 'core/session_stage.dart';
+import 'core/session_perf.dart';
 import 'core/chat_device.dart';
 import 'core/slot_nav.dart';
 import 'core/svc_urls.dart';
@@ -124,8 +125,14 @@ class _WebViewEvaluator implements WatchdogEvaluator {
     final c = controller;
     if (c == null) return false;
     // B13：点击求值同样 5 秒超时。
+    // B10 返修：kClickJs 点不到掩码「重试」时回 'no-retry-button'
+    // （如已是 FAIL 态、掩码未展开），记一笔日志再回 false，不静默吞掉。
     final r = await c.evaluateJavascript(source: kClickJs).timeout(
         const Duration(seconds: 5));
+    if (_clean(r) == 'no-retry-button') {
+      debugPrint('QFWATCHDOG reconnect click: no retry button in mask');
+      return false;
+    }
     return r == true || _clean(r) == 'true';
   }
 }
@@ -151,6 +158,21 @@ String pageDownloadFailureText(Object e) {
     return '保存失败，请检查存储空间或权限后重试。';
   }
   return '下载失败，请稍后重试。';
+}
+
+/// 截图空白判定（B20 返修，纯逻辑可单测）：采样 3×3 九宫格 9 个像素，
+/// 全部同色**且为纯黑或纯白**才判空白。
+/// 旧口径（5 像素全同色即判空白）会把合法均匀画面（纯色壁纸等）误判为
+/// 空白；新口径下均匀彩色画面不再误判。
+/// 注意：纯黑画面（远程黑屏、锁屏黑画面）与纯白画面仍会被判空白——
+/// 采样仍不可靠的边界，须真机 3 次截图人工比对验证，见回报 B20。
+bool isBlankSample(List<int> pixels) {
+  if (pixels.isEmpty) return false;
+  final first = pixels.first;
+  if (pixels.any((p) => p != first)) return false;
+  // RGBA 32 位像素：纯黑 (0,0,0,255) 或纯白 (255,255,255,255)。
+  // ByteData.getUint32 读出的是大端拼接值：黑 0x000000FF，白 0xFFFFFFFF。
+  return first == 0x000000FF || first == 0xFFFFFFFF;
 }
 
 class _PendingSubmit {
@@ -208,6 +230,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _preflightFor;
   bool _preflightBusy = false;
 
+  /// 会话性能 HUD（A8 返修）：帧率/RTT/回显延迟/画质档位，见
+  /// lib/core/session_perf.dart 的口径说明（度量不到写「未度量」）。
+  final _perfTracker = SessionPerfTracker();
+
+  /// 会话进行态（video-ready 后）才为真：HUD 只在此时可见。
+  bool _sessionActive = false;
+
+  /// video-ready 后的性能采样定时器（探针间隔跟随画质档位）。
+  Timer? _perfTimer;
+
   /// 服务端时钟偏移（B22）：预检回包 serverTime - 本机 now，快照
   /// savedAt 优先按服务端时间算，本地时钟只作兜底。
   Duration? _serverClockOffset;
@@ -228,6 +260,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _offlineRetryStopped = false;
   int _licenseRetryCount = 0; // B21：许可门失败重试次数（上限 3）
   Timer? _licenseRetryTimer;
+  /// B7 返修：最近一次许可/积分拉取是否明确遇到 401/403（登录已过期）。
+  /// 为真时「我的」页与许可区显示「登录已过期，请重新登录」＋重新登录
+  /// 入口，不再显示空白占位；成功拉取后清掉。
+  bool _meAuthDead = false;
+  bool _licenseAuthDead = false;
   int _updateCheckRetries = 0; // B16：会话内更新检查失败重试（上限 3）
   Timer? _updateCheckRetryTimer;
   bool _gateRecheckDone = false; // B16：弱网放行后只重跑一次更新门
@@ -252,6 +289,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   bool _offline = false;
   bool _mainFrameFailed = false; // 本次主框架加载已报错：随后而来的 loadStop 是错误页，不算成功
+  /// B2 返修：主框 404 时为真，根 Stack 盖「页面不存在（HTTP 404）」卡
+  /// ＋重试按钮，不静默展示服务端 404 页；下次导航/加载成功即清。
+  bool _http404 = false;
   bool _sessionCheckScheduled = false;
   int _offlineIdx = 0;
   int _offlineSecondsLeft = 0;
@@ -336,6 +376,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   SavedCredentials? _savedCreds;
   SessionSnapshot? _savedSession;
   Timer? _loginTimer;
+  /// 登录循环的起步定时器（B13 相位错峰用，见 _startLoginLoop）。
+  Timer? _loginLoopStarter;
   bool _loginTickBusy = false;
   String _currentUrl = '';
   // 一轮掉登录（episode）的生命周期：一轮只从「新页面加载」或「刚还在控制台、
@@ -365,8 +407,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 常驻构建，其许可区与积分会在未登录时也急切拉取、成对空打 401。
   /// 未检出登录（chrome 未出现）前一律不发请求、按无数据处理；登录检出
   /// 后 MePage 随 chrome 翻转重建（build 里 key 绑定），届时再真拉。
-  Future<PointsInfo?> _fetchPointsWhenLoggedIn() =>
-      _chromeVisible ? _extService.fetchMe() : Future<PointsInfo?>.value();
+  /// B7 返修：用带 authDead 标记的 fetchMeResult——401/403 时记
+  /// _meAuthDead（「我的」页据此显示「登录已过期，请重新登录」），
+  /// 网络不通时不置标记（仍按旧口径显示「—」）。
+  Future<PointsInfo?> _fetchPointsWhenLoggedIn() async {
+    if (!_chromeVisible) return null;
+    final r = await _extService.fetchMeResult();
+    // 只有本次取不到数据时才按 401/403 置过期标记；取到了就清标记。
+    final dead = r.info == null &&
+        (r.authDead || _isRecentAuthFailure(_extService.lastAuthFailureAt));
+    if (mounted && dead != _meAuthDead) {
+      setState(() => _meAuthDead = dead);
+    }
+    return r.info;
+  }
+
+  /// 最近 5 分钟内有过 401/403 记录（lastAuthFailureAt 的调用方读取，
+  /// B7：新标记之外的第二路判定，供未走 Result 的旧调用方兜底）。
+  bool _isRecentAuthFailure(DateTime? at) =>
+      at != null &&
+      DateTime.now().difference(at) < const Duration(minutes: 5);
+
+  /// 登录已过期后的重新登录入口（B7）：只清会话快照（不碰已存凭据），
+  /// 重开恢复轮走凭据静默登录；恢复链试完仍不行就露登录页（桥会回填
+  /// 已存账号，用户点登录即可）。不走手动退出（那会清掉已存凭据）。
+  Future<void> _reloginAfterAuthDead() async {
+    try {
+      await _enqueueAuth(() => _credStore.clearSession());
+    } catch (_) {}
+    _savedSession = null;
+    _meAuthDead = false;
+    _licenseAuthDead = false;
+    _licenseCheckedThisSession = false;
+    _licenseErrorSnacked = false;
+    _episodeFinished = false;
+    _episodeRunning = false;
+    _stepWaitUntil = null;
+    if (mounted) setState(() {});
+    _activateSlot(AppSlot.devices);
+    await _web?.reload();
+  }
 
   Future<List<MyLicenseKey>?> _fetchMyKeysWhenLoggedIn() => _chromeVisible
       ? _licenseService.fetchMyKeys()
@@ -411,6 +491,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _watchdog = null;
       _loginTimer?.cancel();
       _loginTimer = null;
+      _loginLoopStarter?.cancel();
+      _loginLoopStarter = null;
       _clearKeepScreenOn();
     }
   }
@@ -448,6 +530,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _probeTimer?.cancel();
     _heartbeatTimer?.cancel();
     _loginTimer?.cancel();
+    _loginLoopStarter?.cancel();
+    _perfTimer?.cancel();
     // B12：释放各槽页面资源（WebView 控制器随 widget 销毁，本处只清页面）。
     unawaited(_homeWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
     unawaited(_filesWeb?.loadUrl(urlRequest: URLRequest(url: WebUri('about:blank'))));
@@ -485,7 +569,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _savedSession = null;
     }
     final canRecover = (_savedCreds != null ||
-            (_savedSession?.isFresh(DateTime.now()) ?? false)) &&
+            (_savedSession?.isFresh(DateTime.now(),
+                    serverNow: _serverNow()) ??
+                false)) &&
         (settings.rememberDevice || settings.rememberPassword);
     if (canRecover) {
       // 只先盖住；episode 由登录探针在确认掉登录后正式开启
@@ -609,6 +695,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return off == null ? DateTime.now() : DateTime.now().add(off);
   }
 
+  /// B22 返修：预检跑过后用服务端时间重算快照新鲜度。冷启恢复路径在
+  /// 预检前只能按本地时间判定（_serverNow() 此时即本地时间）；一旦
+  /// 服务端时间到手，若快照按服务端时间已过期（本地钟偏慢时才会发生），
+  /// 立即清掉快照并记日志，不静默沿用本地钟的旧结论。快照仍新鲜时
+  /// 什么都不做（不改 savedAt，只重算判定）。
+  Future<void> _recheckSnapshotFreshness() async {
+    final snap = _savedSession;
+    if (snap == null || _serverClockOffset == null) return;
+    final fresh =
+        snap.isFresh(DateTime.now(), serverNow: _serverNow());
+    if (fresh) return;
+    unawaited(_sessionLog.log('snapshot-stale-server-clock',
+        extra: 'savedAt=${snap.savedAt.toIso8601String()}'));
+    try {
+      await _enqueueAuth(() => _credStore.clearSession());
+    } catch (_) {}
+    _savedSession = null;
+  }
+
   /// 打开站长管理页：先用控制台会话换一次性令牌，再以壳内页打开管理页
   /// （收编 P1：不再劫持设备槽 WebView，令牌 URL 口径不变）；
   /// 换不到令牌时直接打开管理页（服务端会自行走登录）。
@@ -650,8 +755,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           return;
         }
       }
-      final me = await _licenseService.fetchLicenseMe();
+      // B7 返修：用带 authDead 标记的 fetchLicenseMeResult——401/403
+      // 时记 _licenseAuthDead（许可区据此显示「登录已过期，请重新登录」
+      // ＋重新登录入口），不再只回 null 让调用方显示空白占位。
+      final meResult = await _licenseService.fetchLicenseMeResult();
+      final me = meResult.me;
       if (!mounted) return;
+      if (meResult.authDead ||
+          _isRecentAuthFailure(_licenseService.lastAuthFailureAt)) {
+        _licenseAuthDead = true;
+        if (!_licenseErrorSnacked) {
+          _licenseErrorSnacked = true;
+          _snack('登录已过期，请重新登录。');
+        }
+        _scheduleLicenseRetry();
+      } else if (me != null && _licenseAuthDead) {
+        if (mounted) setState(() => _licenseAuthDead = false);
+      }
       if (me != null) {
         if (me.username != null && me.username!.isNotEmpty) {
           _gateUsername = me.username!;
@@ -754,8 +874,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 拦截面「重新检查」/购买返回后复查：判定放行（或影子只记录）即消解
   /// 拦截；仍是 enforce 的未允许判定则换上最新拦截面。
   Future<void> _recheckLicense() async {
-    final me = await _licenseService.fetchLicenseMe();
+    final result = await _licenseService.fetchLicenseMeResult();
+    final me = result.me;
     if (!mounted) return;
+    // B7 返修：401/403 时明确报「登录已过期」，不再与网络失败混为一谈。
+    if (result.authDead ||
+        _isRecentAuthFailure(_licenseService.lastAuthFailureAt)) {
+      setState(() => _licenseAuthDead = true);
+      _snack('登录已过期，请重新登录。');
+      return;
+    }
+    if (me != null && _licenseAuthDead) {
+      setState(() => _licenseAuthDead = false);
+    }
     if (me == null) {
       _snack('许可信息读取失败，请检查网络后重试。');
       return;
@@ -967,7 +1098,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       InAppWebViewController controller, WebUri? url) async {
     if (!isShellContentPage(url?.toString())) return;
     try {
-      await controller.evaluateJavascript(source: buildShellChromeHideScript());
+      // B13 返修：注入求值包 5 秒超时，超时按本步跳过并记日志。
+      await controller
+          .evaluateJavascript(source: buildShellChromeHideScript())
+          .timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      debugPrint('QFSHELL chrome inject timeout, skipped this load');
     } catch (_) {
       // 页面已切走：下一页加载完成时再注入
     }
@@ -1244,8 +1380,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _startLoginLoop() {
     _loginTimer?.cancel();
-    _loginTimer =
-        Timer.periodic(const Duration(seconds: 2), (_) => _loginTick());
+    _loginTimer = null;
+    _loginLoopStarter?.cancel();
+    // B13 返修：看护与登录探针相位错峰——看护首拍在启动后 800ms
+    // （WatchdogCore.start），登录首拍错开到 1800ms，之后登录 2 秒一拍、
+    // 看护 4 秒一拍，两拍起始错开 1 秒，避免同拍并发求值堆积。
+    _loginLoopStarter = Timer(const Duration(milliseconds: 1800), () {
+      if (!mounted) return;
+      _loginTimer =
+          Timer.periodic(const Duration(seconds: 2), (_) => _loginTick());
+    });
   }
 
   /// 注册登录桥的两个 JS 处理器（登录提交回传 / 手动退出回传）。
@@ -1374,11 +1518,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       fillSaved: fillSaved,
     );
     try {
-      final r = await web.evaluateJavascript(source: js);
+      // B13 返修：桥注入求值包 5 秒超时，超时按本步跳过并记日志，
+      // 不许挂起的求值拖住后续所有拍。
+      final r = await web.evaluateJavascript(source: js).timeout(
+          const Duration(seconds: 5));
       debugPrint('QFLOGIN bridge -> $r');
       if (fillSaved && r?.toString().contains('filled') == true) {
         _filledThisLoad = true;
       }
+    } on TimeoutException {
+      debugPrint('QFLOGIN bridge inject timeout, skipped this tick');
     } catch (_) {
       // 页面正在跳转：这一拍算了，下一拍再来
     }
@@ -1413,14 +1562,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     var orchestrated = false;
     try {
-      // B13：聊天页连续求值每步 5 秒超时，挂起不拖下一拍。
-      final raw = await web.evaluateJavascript(source: kChatStateProbeJs).timeout(
-          const Duration(seconds: 5));
-      final st = parseChatState(raw?.toString());
+      // B13 返修：状态＋能力合并为一次求值（kChatCombinedProbeJs），
+      // 一次 evaluateJavascript 取回全部聊天状态，Dart 侧一次解析；
+      // 本拍最多再有一次动作求值（解锁步）或一次桥注入，不再 3～5 次
+      // 顺序求值。求值 5 秒超时，挂起不拖下一拍。
+      final raw = await web.evaluateJavascript(source: kChatCombinedProbeJs)
+          .timeout(const Duration(seconds: 5));
+      final combined = parseChatCombined(raw?.toString());
+      final st = combined?.state;
       if (st != null) {
-        final capsRaw = await web.evaluateJavascript(source: kChatCapsProbeJs).timeout(
-            const Duration(seconds: 5));
-        final caps = parseChatCaps(capsRaw?.toString());
+        final caps = combined!.caps;
         final step = planChatUnlock(
           manualLogout: _autoLogin.suppressedByManualLogout,
           state: st,
@@ -1740,7 +1891,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     _stepWaitUntil = null;
-    final hasSession = _savedSession?.isFresh(DateTime.now()) ?? false;
+    // B22 返修：isFresh 的 serverNow 参数真正接线——快照新鲜度按服务端
+    // 时间（预检回包 serverTime 算出的偏移）判定，本地时钟只作兜底；
+    // 冷启且预检未跑时 _serverNow() 即本地时间，预检跑过后见
+    // _recheckSnapshotFreshness() 用服务端时间重算一次。
+    final hasSession = _savedSession?.isFresh(DateTime.now(),
+            serverNow: _serverNow()) ??
+        false;
     final hasCreds = _savedCreds != null;
     final step =
         _autoLogin.next(hasFreshSession: hasSession, hasCredentials: hasCreds);
@@ -2153,6 +2310,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (presence?.serverTime != null) {
       _serverClockOffset =
           presence!.serverTime!.difference(DateTime.now());
+      // B22 返修：预检跑过、服务端时间到手后，用服务端时间重算一次
+      // 快照新鲜度——冷启时先按本地时间记的「新鲜」若按服务端时间已
+      // 过期，立即清掉快照，不静默沿用本地钟。
+      unawaited(_recheckSnapshotFreshness());
     }
     final outcome = classifyPreflight(presence, timedOut: timedOut);
     final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
@@ -2180,7 +2341,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _showPreflightCard(outcome, presence);
   }
 
-  /// 阶段 watcher 启动：1 秒一拍（仅会话路由内运行）。
+  /// 阶段 watcher 启动：1 秒一拍（仅会话路由内运行；low 画质档 2 秒一拍）。
   void _startSessionWatcher(String nodeid) {
     _stopSessionWatcher();
     _sessionNodeid = nodeid;
@@ -2190,20 +2351,97 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _sessionConnecting = true;
     _sessionFailed = false;
     _sessionCardShowing = false;
+    _sessionActive = false;
+    _perfTracker.reset();
     unawaited(_sessionLog.log('session-start', nodeid: nodeid));
     _sessionTimer?.cancel();
-    _sessionTimer = Timer.periodic(const Duration(seconds: 1), (_) => _sessionTick());
+    _sessionTimer = Timer.periodic(
+        Duration(seconds: _perfTracker.probeIntervalSec),
+        (_) => _sessionTick());
     _setKeepScreenOnForSession(true);
+    // A8：弱网降质档位透传——会话建立时把画质档位写进顶层页面
+    // `window.__qfSessionQuality`（参数名 quality，与网页端约定的
+    // `quality=low` 同名；网页侧当前无 quality 处理，待接线后生效，
+    // 当前 low 档真正生效的是 Dart 侧降采样，见 session_perf.dart）。
+    unawaited(_applySessionQuality());
+  }
+
+  /// 把当前画质档位透传进会话页面（best-effort，失败不挡会话），
+  /// 并按档位重建采样定时器（normal 1 秒 / low 2 秒）。
+  Future<void> _applySessionQuality() async {
+    final web = _web;
+    final q = _perfTracker.quality == SessionQuality.low ? 'low' : 'normal';
+    if (web != null) {
+      try {
+        await web
+            .evaluateJavascript(
+                source: 'window.__qfSessionQuality = '
+                    '"$q"; "ok";')
+            .timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // 透传失败不挡会话：low 档的 Dart 侧降采样照常生效
+      }
+    }
+    if (_sessionConnecting) {
+      _sessionTimer?.cancel();
+      _sessionTimer = Timer.periodic(
+          Duration(seconds: _perfTracker.probeIntervalSec),
+          (_) => _sessionTick());
+    }
+    if (_sessionActive) _startPerfTimer();
+  }
+
+  /// video-ready 后的性能采样定时器（A8 HUD 用；间隔跟随画质档位）。
+  void _startPerfTimer() {
+    _perfTimer?.cancel();
+    _perfTimer = Timer.periodic(
+        Duration(seconds: _perfTracker.probeIntervalSec),
+        (_) => _perfTick());
+  }
+
+  void _stopPerfTimer() {
+    _perfTimer?.cancel();
+    _perfTimer = null;
+  }
+
+  /// 会话进行态一拍性能采样：探针往返耗时＋rAF 帧数记进 tracker，
+  /// HUD 与诊断据此刷新；求值 5 秒超时按本拍跳过。
+  Future<void> _perfTick() async {
+    if (!mounted || _web == null || !_sessionActive) return;
+    final sw = Stopwatch()..start();
+    try {
+      final r = await _web!
+          .evaluateJavascript(source: kSessionStateJs)
+          .timeout(const Duration(seconds: 5));
+      sw.stop();
+      var s = r?.toString() ?? '';
+      if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+        try {
+          final decoded = jsonDecode(s);
+          if (decoded is String) s = decoded;
+        } catch (_) {}
+      }
+      final reading = SessionProbeReading.parse(s);
+      _perfTracker.recordProbe(
+          rttMs: sw.elapsedMilliseconds, fps: reading?.fps);
+      if (mounted) setState(() {});
+    } catch (_) {
+      // 本拍跳过，下一拍继续
+    }
   }
 
   void _stopSessionWatcher() {
     _sessionTimer?.cancel();
     _sessionTimer = null;
+    _stopPerfTimer();
     _sessionConnecting = false;
+    _sessionActive = false;
   }
 
   /// 退出会话清理：恢复缩放、清常亮（B9/A8）。
   void _exitSessionCleanup() {
+    _sessionActive = false;
+    _stopPerfTimer();
     _sessionFailed = false;
     _sessionCardShowing = false;
     _clearKeepScreenOn();
@@ -2222,10 +2460,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     SessionProbeReading? reading;
+    // A8：记探针往返耗时（Dart→页面求值一来一回）与 rAF 帧数进 HUD。
+    final probeSw = Stopwatch()..start();
     try {
       final r = await _web!
           .evaluateJavascript(source: kSessionStateJs)
           .timeout(const Duration(seconds: 5));
+      probeSw.stop();
       var s = r?.toString() ?? '';
       if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
         try {
@@ -2234,6 +2475,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         } catch (_) {}
       }
       reading = SessionProbeReading.parse(s);
+      _perfTracker.recordProbe(
+          rttMs: probeSw.elapsedMilliseconds, fps: reading?.fps);
     } catch (_) {
       reading = null;
     }
@@ -2269,6 +2512,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _sessionConnecting = false;
         _sessionTimer?.cancel();
         _sessionTimer = null;
+        // A8：出画面即进入会话进行态，HUD 可见，开始性能采样。
+        _sessionActive = true;
+        _startPerfTimer();
         final secs = (elapsedMs / 1000).toStringAsFixed(1);
         _lastSessionSummary =
             '${_sessionDeviceName ?? _sessionNodeid ?? '设备'} · video-ready · $secs秒 · 成功';
@@ -2287,6 +2533,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _sessionFailed = true;
     _lastSessionFailed = true;
     _sessionConnecting = false;
+    _sessionActive = false;
+    _stopPerfTimer();
     _sessionTimer?.cancel();
     _sessionTimer = null;
     final code = codeOverride ?? sessionTimeoutCode(stage);
@@ -2733,14 +2981,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       total = res.contentLength;
       const maxDownloadBytes = 500 * 1024 * 1024;
-      if (total > maxDownloadBytes) {
+      // B23 返修：下载前检查剩余空间（StatFs 经 qfremote/storage 通道；
+      // 取不到时保守处理——不拦截下载但记日志，不谎报空间充足）。
+      // 剩余空间 < 文件大小（Content-Length，未知大小时按 500MB 阈值）
+      // 时先弹确认，文案含剩余空间与文件大小，用户确认后才下。
+      // 复用既有 >500MB 确认弹框样式（同一弹框、同一按钮）。
+      final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
+      final dir = Directory('${base.path}/downloads');
+      await dir.create(recursive: true);
+      final freeBytes = await NativeChannels.getFreeSpaceBytes(dir.path);
+      if (freeBytes == null) {
+        debugPrint('QF page download: free space unknown, proceed anyway');
+      }
+      final requiredBytes = total > 0 ? total : maxDownloadBytes;
+      final lowSpace =
+          freeBytes != null && freeBytes < requiredBytes;
+      String fmtMb(int bytes) =>
+          '${(bytes / 1024 / 1024).toStringAsFixed(1)}MB';
+      if (total > maxDownloadBytes || lowSpace) {
+        final sizeText = total > 0
+            ? '该文件约 ${fmtMb(total)}'
+            : '该文件大小未知（按 500MB 估算）';
+        final spaceText = freeBytes == null
+            ? '剩余空间未知'
+            : '设备剩余空间约 ${fmtMb(freeBytes)}';
         final ok = mounted
             ? await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('下载大文件'),
                   content: Text(
-                      '该文件约 ${(total / 1024 / 1024).toStringAsFixed(0)}MB，超过 500MB，确定要下载吗？'),
+                      '$sizeText，$spaceText${lowSpace ? '，剩余空间不足以放下该文件' : '，超过 500MB'}，确定要下载吗？'),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.of(ctx).pop(false),
@@ -2756,9 +3027,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             : false;
         if (ok != true) return;
       }
-      final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
-      final dir = Directory('${base.path}/downloads');
-      await dir.create(recursive: true);
       var name = (req.suggestedFilename ?? '').trim();
       if (name.isEmpty) {
         final seg = Uri.parse(req.url.toString()).pathSegments;
@@ -3018,9 +3286,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final bytes = await web.takeScreenshot();
       if (bytes == null) throw StateError('截图失败：未获取到画面。');
-      // B20：截图后空白校验——解码 PNG 后采样四角＋中心像素，方差为零
-      // 即判空白（硬件加速画布在部分机型返回空白图），提示用户重试或
-      // 用系统截图，不保存空白图冒充成功。
+      // B20 返修：截图后空白校验——解码 PNG 后采样 3×3 九宫格 9 点，
+      // 全同色且为纯黑/纯白才判空白（均匀彩色画面不再误判），提示用户
+      // 重试或用系统截图，不保存空白图冒充成功。
       if (await _isBlankImage(bytes)) {
         if (mounted) _snack('截图为空白，请重试或用系统截图。');
         return;
@@ -3044,8 +3312,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 截图空白判定（B20，纯逻辑可单测逻辑见 screenshotBlank）：解码后
-  /// 采样四角＋中心 5 个像素，全同色即判空白。
+  /// 截图空白判定（B20，纯逻辑见顶层 isBlankSample）：解码后采样
+  /// 3×3 九宫格 9 个像素，全同色且为纯黑/纯白才判空白。
   Future<bool> _isBlankImage(Uint8List bytes) async {
     try {
       final codec = await ui.instantiateImageCodec(bytes);
@@ -3055,14 +3323,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (data == null) return false;
       final w = image.width;
       final h = image.height;
-      final pixels = <int>{
-        _pixelAt(data, w, 0, 0),
-        _pixelAt(data, w, w - 1, 0),
-        _pixelAt(data, w, 0, h - 1),
-        _pixelAt(data, w, w - 1, h - 1),
-        _pixelAt(data, w, w ~/ 2, h ~/ 2),
-      };
-      return pixels.length == 1;
+      // B20 返修：3×3 九宫格 9 点采样（四角＋四边中点＋中心），
+      // 全同色且为纯黑/纯白才判空白（见顶层 isBlankSample）。
+      final xs = <int>{0, w ~/ 2, w - 1};
+      final ys = <int>{0, h ~/ 2, h - 1};
+      final pixels = <int>[
+        for (final y in ys)
+          for (final x in xs) _pixelAt(data, w, x, y),
+      ];
+      return isBlankSample(pixels);
     } catch (_) {
       return false; // 解不出来不误判为空白
     }
@@ -3114,6 +3383,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       '自动重连次数：${s?.watchdogReconnects ?? 0}',
       // A10：最近一次会话（设备＋阶段＋耗时＋结果）＋最近 20 条阶段日志。
       '最近一次会话：$_lastSessionSummary',
+      // A8：性能 HUD 数值（帧率/RTT/回显延迟/画质档位，见 session_perf.dart）。
+      _perfTracker.diagnosticsLine(),
     ].join('\n');
   }
 
@@ -3353,6 +3624,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           },
                           onLoadStart: (controller, url) {
                             _mainFrameFailed = false;
+                            _http404 = false;
                             _startBootLoadWatchdog();
                             if (url != null) {
                               _currentUrl = url.toString();
@@ -3369,14 +3641,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               _enterOffline();
                             }
                           },
-                          // B2：主框 HTTP 错误可见——≥500 进离线卡；401/403
-                          // 走登录恢复链（不进离线卡，见 B7）。
+                          // B2：主框 HTTP 错误可见——≥500 进离线卡；404 明确
+                          // 提示「页面不存在（HTTP 404）」＋重试按钮，不静默
+                          // 展示服务端 404 页；401/403 走登录恢复链（不进
+                          // 离线卡，见 B7）。
                           onReceivedHttpError: (controller, request, response) {
                             _bootLoadWatchdog?.cancel();
                             _bootLoadWatchdog = null;
                             if (request.isForMainFrame != true) return;
                             final code = response.statusCode;
-                            if (code != null && code >= 500) {
+                            if (code == 404) {
+                              _mainFrameFailed = true;
+                              if (mounted) {
+                                setState(() => _http404 = true);
+                              }
+                            } else if (code != null && code >= 500) {
                               _mainFrameFailed = true;
                               _enterOffline();
                             } else if (code == 401 || code == 403) {
@@ -3407,6 +3686,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             _handlePageDownload(request);
                           },
                         ),
+                            // A8：会话进行态性能 HUD（帧率/RTT/回显延迟/画质
+                            // 档位，口径见 session_perf.dart；点「低画质」
+                            // 切档，点「标准」切回；半透明小条，不挡远程操作
+                            // 主区，须真机确认遮挡与可读性）。
+                            if (_sessionActive)
+                              Positioned(
+                                left: 10,
+                                top: 10,
+                                child: Material(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          _perfTracker.hudText(),
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 11),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        GestureDetector(
+                                          onTap: () {
+                                            setState(() {
+                                              _perfTracker.quality =
+                                                  _perfTracker.quality ==
+                                                          SessionQuality.low
+                                                      ? SessionQuality.normal
+                                                      : SessionQuality.low;
+                                            });
+                                            unawaited(
+                                                _applySessionQuality());
+                                          },
+                                          child: Text(
+                                            _perfTracker.quality ==
+                                                    SessionQuality.low
+                                                ? '标准画质'
+                                                : '低画质',
+                                            style: const TextStyle(
+                                                color: Color(0xFFFFC107),
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w700),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
                             // 断线卡片/启动画面已提至根 Stack（SUP-P0-06）：
                             // 不再困在本槽内，前台是哪个槽都看得见。
                           ],
@@ -3469,6 +3800,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               : '未记住此设备，下次打开需要重新登录',
                           fallbackUser: _savedCreds?.username,
                           fetchPoints: _fetchPointsWhenLoggedIn,
+                          // B7 返修：积分拉取遇 401/403 时「我的」页显示
+                          // 「登录已过期，请重新登录」＋重新登录入口。
+                          authDead: _meAuthDead,
+                          onRelogin: _reloginAfterAuthDead,
                           fetchProfile: () => _extService.fetchProfile(),
                           fetchProfileAvatar: (info) =>
                               _extService.fetchProfileAvatar(info),
@@ -3483,11 +3818,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               '官网', SvcUrls.instance.websiteUrl),
                           licenseSection: LicenseSection(
                             palette: _palette,
+                            // B7 返修：许可区拉取遇 401/403 时显示「登录已过期，
+                            // 请重新登录」＋重新登录入口（见 LicenseSection
+                            // 的 authDead/onRelogin）；成功后入口消失。
+                            authDead: _licenseAuthDead,
+                            onRelogin: _reloginAfterAuthDead,
                             fetchLicense: () async {
                               // 未登录短路（SUP-P0-06）：不发请求
                               if (!_chromeVisible) return null;
-                              final me =
-                                  await _licenseService.fetchLicenseMe();
+                              final result = await _licenseService
+                                  .fetchLicenseMeResult();
+                              final dead = result.authDead ||
+                                  _isRecentAuthFailure(_licenseService
+                                      .lastAuthFailureAt);
+                              if (mounted && dead != _licenseAuthDead) {
+                                setState(
+                                    () => _licenseAuthDead = dead);
+                              }
+                              final me = result.me;
                               // §7.5.7：/me 附带 forceLogout 时立即执行
                               if (me != null && me.forceLogout) {
                                 unawaited(_handleForceLogoutSignal(
@@ -3550,6 +3898,67 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       _web?.reload();
                       _scheduleOfflineRetry();
                     },
+                  ),
+                ),
+              // B2 返修：主框 404 卡——「页面不存在（HTTP 404）」＋重试
+              // 按钮（与 ≥500 离线卡同款式：白卡＋主按钮，不展示服务端
+              // 404 页原文）；点重试清标记并重载当前页。
+              if (_http404 && !_offline)
+                Positioned.fill(
+                  child: Container(
+                    color: _palette.pageColor,
+                    child: SafeArea(
+                      child: Center(
+                        child: Container(
+                          margin:
+                              const EdgeInsets.symmetric(horizontal: 28),
+                          padding:
+                              const EdgeInsets.fromLTRB(26, 30, 26, 26),
+                          decoration: BoxDecoration(
+                            color: _palette.cardColor,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: _palette.cardBorder),
+                            boxShadow: _palette.cardShadow,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '页面不存在（HTTP 404）',
+                                style: TextStyle(
+                                    color: _palette.onCard,
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w600),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                '要打开的页面不存在或已被删除，请检查地址后重试。',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    color: _palette.onCardDim,
+                                    fontSize: 13,
+                                    height: 1.5),
+                              ),
+                              const SizedBox(height: 20),
+                              FilledButton(
+                                onPressed: () {
+                                  setState(() => _http404 = false);
+                                  _web?.reload();
+                                },
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: QfPalette.brand,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 30, vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14)),
+                                ),
+                                child: const Text('重试'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               if (_splashVisible)

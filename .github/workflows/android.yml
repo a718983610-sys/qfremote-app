@@ -10,15 +10,25 @@ on:
       - 'android-app/**'
       - '.github/workflows/android.yml'
 
+# 产物版本号（2.4.5 返修 CI①）：单点参数化——改这里即改产物名
+# （QFRemote-v<APP_VERSION>.apk / QFRemote-v<APP_VERSION>-apk），
+# 不再写死旧版号；与 android-app/pubspec.yaml 的 version 保持一致。
+env:
+  APP_VERSION: '2.4.5'
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # CI②：ubuntu-latest 迁移告警消除——钉死 ubuntu-24.04，不再跟随
+    # latest 浮动；checkout/setup-java/upload-artifact 升到 v5
+    #（Node 24 运行时，消除 Node 20 deprecation 告警）；flutter-action
+    # 保持 v2（当前最新主版本，无 v3 可升）。
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -82,12 +92,12 @@ jobs:
           echo "build-tools: $BT"
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
-          cp "$APK" build/app/outputs/flutter-apk/QFRemote-v2.4.4.apk
+          cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION.apk"
           ls -la build/app/outputs/flutter-apk/
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: QFRemote-v2.4.4-apk
-          path: android-app/build/app/outputs/flutter-apk/QFRemote-v2.4.4.apk
+          name: QFRemote-v${{ env.APP_VERSION }}-apk
+          path: android-app/build/app/outputs/flutter-apk/QFRemote-v${{ env.APP_VERSION }}.apk
           if-no-files-found: error

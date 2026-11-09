@@ -142,6 +142,69 @@ const String kChatCapsProbeJs =
     'shellUnlock:typeof window.qfShellUnlock==="function"'
     '});}catch(e){return "";}})()';
 
+/// 合并探针脚本（B13 返修）：一次求值同时取回聊天状态与页面能力，
+/// 替代原来每拍先 kChatStateProbeJs 再 kChatCapsProbeJs 的两次顺序求值。
+/// 回传 JSON：{state: <qfChatState()>, caps: {custodyUnlock, custodyEnroll,
+/// shellUnlock}}；页面没就绪时 state/caps 均为 null。
+const String kChatCombinedProbeJs =
+    '(function(){try{'
+    'var s=null,c=null;'
+    'if(typeof window.qfChatState==="function"){s=window.qfChatState();}'
+    'c={custodyUnlock:typeof window.qfShellCustodyUnlock==="function",'
+    'custodyEnroll:typeof window.qfShellCustodyEnroll==="function",'
+    'shellUnlock:typeof window.qfShellUnlock==="function"};'
+    'return JSON.stringify({state:s,caps:c});'
+    '}catch(e){return "";}})()';
+
+/// 合并探针的解析结果（state/caps 任一解析失败即为 null，本拍不动作）。
+class ChatCombinedProbe {
+  final ChatPageState? state;
+  final ChatPageCaps caps;
+
+  const ChatCombinedProbe({required this.state, required this.caps});
+}
+
+/// 解析合并探针返回值（容错口径同 parseChatState/parseChatCaps）。
+ChatCombinedProbe? parseChatCombined(String? raw) {
+  if (raw == null) return null;
+  var s = raw.trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    try {
+      final decoded = jsonDecode(s);
+      if (decoded is String) s = decoded;
+    } catch (_) {
+      return null;
+    }
+  }
+  if (s.isEmpty || s == 'null') return null;
+  try {
+    final data = jsonDecode(s);
+    if (data is! Map) return null;
+    ChatPageState? state;
+    final st = data['state'];
+    if (st is Map) {
+      state = ChatPageState(
+        hasToken: st['hasToken'] == true,
+        locked: st['locked'] == true,
+        unlocked: st['unlocked'] == true,
+        hasShellDeviceCopy: st['hasShellDeviceCopy'] == true,
+        hasCustodyCopy: st['hasCustodyCopy'] == true,
+      );
+    }
+    final cp = data['caps'];
+    final caps = cp is Map
+        ? ChatPageCaps(
+            custodyUnlockHook: cp['custodyUnlock'] == true,
+            custodyEnrollHook: cp['custodyEnroll'] == true,
+            shellUnlockHook: cp['shellUnlock'] == true,
+          )
+        : const ChatPageCaps();
+    return ChatCombinedProbe(state: state, caps: caps);
+  } catch (_) {
+    return null;
+  }
+}
+
 /// 页面程序钩子就位情况。
 class ChatPageCaps {
   final bool custodyUnlockHook;

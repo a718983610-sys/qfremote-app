@@ -189,8 +189,8 @@ void main() {
       svc.downloadApk(truncManifest.android!, dir, (_, _, _) {}),
       throwsA(anything),
     );
-    final partAfterTrunc =
-        File('${dir.path}/${truncManifest.android!.fileName}.part');
+    final partAfterTrunc = File(
+        '${dir.path}/${UpdateService.partFileName(truncManifest.android!)}');
     expect(await partAfterTrunc.exists(), isTrue,
         reason: '断流后 .part 须保留供续传');
     expect(await partAfterTrunc.length(), 80000);
@@ -252,8 +252,8 @@ void main() {
       impatient.downloadApk(hangManifest.android!, dir, (_, _, _) {}),
       throwsA(anything),
     );
-    final partAfterStall =
-        File('${dir.path}/${hangManifest.android!.fileName}.part');
+    final partAfterStall = File(
+        '${dir.path}/${UpdateService.partFileName(hangManifest.android!)}');
     expect(await partAfterStall.exists(), isTrue,
         reason: '假死后 .part 须保留供续传');
     expect(await partAfterStall.length(), 100000);

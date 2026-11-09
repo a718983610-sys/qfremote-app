@@ -7,6 +7,7 @@ import 'package:qfremote/services/credential_store.dart';
 import 'package:qfremote/services/device_code.dart';
 import 'package:qfremote/ui/license_gate.dart';
 import 'package:qfremote/ui/license_section.dart';
+import 'package:qfremote/ui/me_page.dart';
 import 'package:qfremote/ui/theme.dart';
 
 void main() {
@@ -666,7 +667,7 @@ void main() {
       ));
       await tester.pump();
       await tester.pump();
-      expect(find.text('许可信息读取失败，请检查网络后重试。'), findsOneWidget);
+      expect(find.text('许可信息读取失败，点重试。'), findsOneWidget);
       expect(find.text('重试'), findsOneWidget);
       expect(find.text('QFRemote 试用套餐'), findsNothing);
     });
@@ -820,6 +821,91 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('兑换KEY'), findsNothing);
+    });
+
+    testWidgets('B7：许可拉取遇 401/403 显示「登录已过期，请重新登录」＋重新登录入口，不显示空白占位', (tester) async {
+      var reloginTaps = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async => null,
+              authDead: true,
+              onRelogin: () => reloginTaps++,
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('登录已过期，请重新登录'), findsOneWidget);
+      expect(find.text('重新登录'), findsOneWidget);
+      // 空白占位卡（套餐/密钥一律「—」）不得出现
+      expect(find.text('当前套餐'), findsNothing);
+      await tester.tap(find.text('重新登录'));
+      expect(reloginTaps, 1);
+    });
+
+    testWidgets('B7：MePage 积分拉取遇 401/403 显示「登录已过期，请重新登录」＋重新登录入口', (tester) async {
+      var reloginTaps = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: MePage(
+          palette: const QfPalette(QfThemeMode.blue),
+          currentVersion: '2.4.5',
+          hasUpdate: false,
+          updateVersion: null,
+          rememberLine: '已记住此设备，30 天内不用再登录',
+          fallbackUser: 'qfverify',
+          fetchPoints: () async => null,
+          authDead: true,
+          onRelogin: () => reloginTaps++,
+          onOpenSettings: () {},
+          onCheckUpdate: () {},
+          onAccountAction: () {},
+          onLogout: () {},
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('登录已过期，请重新登录'), findsOneWidget);
+      expect(find.text('重新登录'), findsOneWidget);
+      await tester.tap(find.text('重新登录'));
+      expect(reloginTaps, 1);
+    });
+
+    testWidgets('B21：许可读取失败常驻「许可信息读取失败，点重试」＋重试按钮，点重试立即重拉', (tester) async {
+      var fetches = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: LicenseSection(
+              palette: const QfPalette(QfThemeMode.blue),
+              fetchLicense: () async {
+                fetches++;
+                return null;
+              },
+              onBind: (_) async => null,
+              onClaim: (_) async => null,
+              onPurchase: () {},
+              onStatusQuery: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('许可信息读取失败，点重试。'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+      await tester.tap(find.text('重试'));
+      await tester.pump();
+      await tester.pump();
+      expect(fetches, greaterThanOrEqualTo(2));
+      expect(find.text('许可信息读取失败，点重试。'), findsOneWidget);
     });
   });
 }

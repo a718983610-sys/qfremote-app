@@ -11,6 +11,22 @@ class NativeChannels {
       MethodChannel('qfremote/screen');
   static const MethodChannel _install =
       MethodChannel('qfremote/install');
+  static const MethodChannel _storage =
+      MethodChannel('qfremote/storage');
+
+  /// 指定目录所在分区的可用空间（字节，B23）：MainActivity 经 StatFs 取
+  /// 值；取不到（通道不可用/路径无效）返回 null——调用方按保守处理
+  /// （不拦截下载但记日志，不谎报空间充足）。
+  static Future<int?> getFreeSpaceBytes(String path) async {
+    try {
+      final r = await _storage.invokeMethod<int>(
+          'getFreeSpaceBytes', {'path': path});
+      if (r == null || r < 0) return null;
+      return r;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// 会话进行时开常亮，退出时关。通道不可用时安静 false（不挡会话）。
   static Future<bool> setKeepScreenOn(bool on) async {

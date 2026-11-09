@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
+import android.os.StatFs
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -57,6 +58,26 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 result.success(true)
+            }
+        // 2.4.5 B23：下载前剩余空间检查（StatFs 取指定目录所在分区
+        // 可用字节；路径无效/异常时回 null，Dart 侧保守处理不拦截）。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "qfremote/storage")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "getFreeSpaceBytes") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                try {
+                    val path = call.argument<String>("path")
+                    if (path.isNullOrBlank()) {
+                        result.success(null)
+                        return@setMethodCallHandler
+                    }
+                    val stat = StatFs(path)
+                    result.success(stat.availableBytes)
+                } catch (e: Exception) {
+                    result.success(null)
+                }
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "qfremote/install")
             .setMethodCallHandler { call, result ->

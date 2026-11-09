@@ -74,6 +74,19 @@ class UpdateService {
   /// 2.4.5 B17：断点续传——失败不删 .part（保留 24 小时内可续传，换
   /// 版本即失效由大小/哈希校验兜底），下次带 `Range: bytes=<已收>-`；
   /// 服务器不支持 Range（回 200）时回落全量重下并记日志。
+  /// B17 返修：.part 文件名带 entry.sha256 前 8 位前缀
+  /// （`<sha8>_<fileName>.part`），换版本即新名、旧 .part 自然失效；
+  /// 下载前检查 .part 修改时间，超过 24 小时即删掉重下（不续传）；
+  /// 旧固定名 `<fileName>.part` 残留按过期处理（删掉重下，不续传）。
+  /// .part 文件名（B17 返修）：`<sha256前8位>_<fileName>.part`。
+  static String partFileName(ReleaseEntry entry) =>
+      '${entry.sha256.substring(0, 8)}_${entry.fileName}.part';
+
+  /// .part 是否已过期（B17 返修）：修改时间超过 24 小时即过期，不续传。
+  static bool isPartExpired(DateTime modified, {DateTime? now}) {
+    final ref = now ?? DateTime.now();
+    return ref.difference(modified) > const Duration(hours: 24);
+  }
   Future<File> downloadApk(
     ReleaseEntry entry,
     Directory destDir,
@@ -90,16 +103,30 @@ class UpdateService {
       throw const FormatException('下载失败，请稍后重试。');
     }
     final dest = File('${destDir.path}/${entry.fileName}');
-    final part = File('${dest.path}.part');
-    // 残留 .part 比清单还大＝换版本/已损坏，从头下。
+    // B17 返修：.part 带 sha256 前缀命名（换版本即新名、旧 .part 自然
+    // 失效）；旧固定名残留按过期处理，直接删掉重下，不续传。
+    final legacyPart = File('${dest.path}.part');
+    if (await legacyPart.exists()) {
+      await _quietDelete(legacyPart);
+      debugPrint('QFUPDATE legacy .part removed (renamed scheme)');
+    }
+    final part = File('${destDir.path}/${partFileName(entry)}');
+    // 残留 .part 比清单还大＝换版本/已损坏，从头下；超过 24 小时＝过期，
+    // 删掉重下（不续传）。
     var resumed = 0;
     try {
       if (await part.exists()) {
-        final len = await part.length();
-        if (len > entry.size) {
+        final stat = await part.stat();
+        if (isPartExpired(stat.modified)) {
+          debugPrint('QFUPDATE .part expired (>24h), restart full download');
           await _quietDelete(part);
         } else {
-          resumed = len;
+          final len = await part.length();
+          if (len > entry.size) {
+            await _quietDelete(part);
+          } else {
+            resumed = len;
+          }
         }
       }
     } catch (_) {

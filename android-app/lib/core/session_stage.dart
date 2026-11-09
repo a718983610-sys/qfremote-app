@@ -79,9 +79,18 @@ String bareNodeId(String nodeid) =>
 /// 会话状态探针脚本（兜底读数；网页侧 qfSessionStage handler 就绪时优先
 /// 用 handler 打点，本脚本只作 handler 未就绪时的 1 秒轮询）。
 /// 回传 JSON 字符串：frameExists/frameReady(QF_PRE.ready)/winReady
-/// (QF_PRE.winReady)/sessState/deskStatus/canvasW/canvasH。
+/// (QF_PRE.winReady)/sessState/deskStatus/canvasW/canvasH/fps。
+/// fps 口径（A8）：顶层文档 requestAnimationFrame 自上拍以来的计数，
+/// 即 WebView 渲染帧率估算，不是中继出帧率；首拍为 0（计数器刚启动）。
 const String kSessionStateJs = r'''(function () {
-  var out = {frameExists:false, frameReady:false, winReady:false, sessState:'', deskStatus:'', canvasW:0, canvasH:0};
+  var out = {frameExists:false, frameReady:false, winReady:false, sessState:'', deskStatus:'', canvasW:0, canvasH:0, fps:0};
+  try {
+    var fc = window.__qfFps;
+    if (!fc) {
+      fc = window.__qfFps = {n:0};
+      (function loop(){ fc.n++; requestAnimationFrame(loop); })();
+    }
+    out.fps = fc.n; fc.n = 0;
   try {
     var pre = window.QF_PRE || null;
     if (pre) { out.frameExists = !!pre.frame; out.frameReady = !!pre.ready; out.winReady = !!pre.winReady; }
@@ -115,6 +124,9 @@ class SessionProbeReading {
   final int canvasW;
   final int canvasH;
 
+  /// 最近一拍 rAF 帧数（WebView 渲染帧率估算，见 kSessionStateJs）。
+  final int fps;
+
   const SessionProbeReading({
     required this.frameExists,
     required this.frameReady,
@@ -123,6 +135,7 @@ class SessionProbeReading {
     required this.deskStatus,
     required this.canvasW,
     required this.canvasH,
+    this.fps = 0,
   });
 
   static SessionProbeReading? parse(String raw) {
@@ -142,6 +155,7 @@ class SessionProbeReading {
         deskStatus: v['deskStatus'] is String ? v['deskStatus'] as String : '',
         canvasW: v['canvasW'] is int ? v['canvasW'] as int : 0,
         canvasH: v['canvasH'] is int ? v['canvasH'] as int : 0,
+        fps: v['fps'] is int ? v['fps'] as int : 0,
       );
     } catch (_) {
       return null;

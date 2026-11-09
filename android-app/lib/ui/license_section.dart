@@ -19,6 +19,13 @@ class LicenseSection extends StatefulWidget {
   final VoidCallback onPurchase;
   final VoidCallback onStatusQuery;
 
+  /// B7 返修：许可拉取遇 401/403（登录已过期）时为真——许可区显示
+  /// 「登录已过期，请重新登录」＋重新登录入口，不再显示空白占位。
+  final bool authDead;
+
+  /// B7 返修：重新登录入口（只清会话快照、走凭据恢复链，不清已存凭据）。
+  final VoidCallback? onRelogin;
+
   /// 决策 #24 兑换KEY（可选接线：三者齐备才显示兑换卡）。
   final Future<List<MyLicenseKey>?> Function()? fetchMyKeys;
   final Future<LicenseOpResult?> Function(String key)? onRedeem;
@@ -32,6 +39,8 @@ class LicenseSection extends StatefulWidget {
     required this.onClaim,
     required this.onPurchase,
     required this.onStatusQuery,
+    this.authDead = false,
+    this.onRelogin,
     this.fetchMyKeys,
     this.onRedeem,
     this.onRedeemId,
@@ -202,10 +211,44 @@ class _LicenseSectionState extends State<LicenseSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // B7 返修：登录已过期时许可区置顶提示＋重新登录入口（成功拉取后
+        // 父级清标记，入口消失），不再显示空白占位。
+        if (widget.authDead) ...[
+          _card(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('登录已过期，请重新登录',
+                    style: TextStyle(
+                        color: p.onCard,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text('当前登录已过期，许可信息无法读取，请重新登录后查看。',
+                    style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+                const SizedBox(height: 10),
+                FilledButton(
+                  onPressed: widget.onRelogin,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: QfPalette.brand,
+                    minimumSize: const Size(0, 48),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: const Text('重新登录',
+                      style: TextStyle(fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         if (trialText != null) ...[
           TrialBar(palette: p, text: trialText, onPurchase: widget.onPurchase),
           const SizedBox(height: 12),
         ],
+        // B7：登录已过期时不显示空白占位卡（上方已有过期提示＋重登入口）。
+        if (!widget.authDead)
         _card(
           child: _loading && me == null
               ? Text('正在读取许可信息…',
@@ -214,7 +257,10 @@ class _LicenseSectionState extends State<LicenseSection> {
                   ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('许可信息读取失败，请检查网络后重试。',
+                        // B21 返修：常驻重试入口——许可读取失败时一直显示
+                        // 「许可信息读取失败，点重试」＋重试按钮（点即立即
+                        // 重新拉取，不依赖 5 分钟后台重试）；成功后入口消失。
+                        Text('许可信息读取失败，点重试。',
                             style:
                                 TextStyle(color: p.onCard, fontSize: 13.5)),
                         const SizedBox(height: 8),

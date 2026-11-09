@@ -17,7 +17,7 @@ import 'theme.dart';
 /// 给底导航/弹窗/贴底按钮留白，原生侧再叠一层会双计留白并压缩网页高度。
 /// 若将来装入不自带安全区的第三方页，先在网页侧补 env() 再评估本页。
 ///
-/// 2.4.5 B2/B3/B19：主框 HTTP ≥500 时显示原生「页面加载失败，重试」条，
+/// 2.4.5 B2/B3/B19：主框 HTTP ≥500/404 时显示原生「页面加载失败，重试」条，
 /// 不直接展示服务端错误页；证书校验走系统默认（失败一律 CANCEL，不
 /// PROCEED）；外站链接改走系统浏览器打开，不在壳内打开（防钓鱼）。
 class ShellWebPage extends StatefulWidget {
@@ -70,7 +70,9 @@ class _ShellWebPageState extends State<ShellWebPage> {
                 children: [
                   Expanded(
                     child: Text(
-                      '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
+                      _httpStatus == 404
+                          ? '页面不存在（HTTP 404），请重试。'
+                          : '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
                       style: const TextStyle(color: Color(0xFF7A1F1A), fontSize: 13),
                     ),
                   ),
@@ -117,9 +119,12 @@ class _ShellWebPageState extends State<ShellWebPage> {
               },
               onReceivedHttpError: (controller, request, response) {
                 // 主框 HTTP ≥500：不展示服务端错误页原文，显示原生失败条（B2）。
+                // B2 返修：404 同款处理——显示「页面不存在（HTTP 404）」
+                // ＋重试按钮，不静默展示服务端 404 页。
                 if (request.isForMainFrame == true &&
                     response.statusCode != null &&
-                    response.statusCode! >= 500) {
+                    (response.statusCode! >= 500 ||
+                        response.statusCode! == 404)) {
                   if (mounted) {
                     setState(() {
                       _httpFailed = true;

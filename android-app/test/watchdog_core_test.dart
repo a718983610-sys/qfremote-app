@@ -152,4 +152,25 @@ void main() {
       expect(events, isEmpty);
     });
   });
+
+  group('kClickJs（B10 返修：点掩码「重试」）', () {
+    test('优先按 data-act="retry" 定位掩码重试按钮', () {
+      expect(kClickJs, contains('data-act="retry"'));
+    });
+
+    test('文本「重试」作后备；无重试按钮时回 no-retry-button，不静默', () {
+      expect(kClickJs, contains("'重试'"));
+      expect(kClickJs, contains('no-retry-button'));
+    });
+
+    test('不再找「连接／重新连接」——掩码里没有这两个按钮', () {
+      expect(kClickJs, isNot(contains("'连接'")));
+      expect(kClickJs, isNot(contains("'重新连接'")));
+    });
+
+    test('保留祖先校验（#qfFrame 或 .qf-session-layer），不误点列表页', () {
+      expect(kClickJs, contains('qf-session-layer'));
+      expect(kClickJs, contains("qfFrame"));
+    });
+  });
 }

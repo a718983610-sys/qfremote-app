@@ -12,7 +12,11 @@ import 'dart:async';
 ///      跨域/读不到返回 'unknown'；顶层含「正在建立会话…」且无画布时
 ///      判定 'connecting'，持续 25 秒回调 onConnectingStuck（2.4.5 A1）。
 ///   3. 两次确认：连续两次轮询都判定 'disconnected' 才真正去点按钮。
-///   4. 点击前用同一套严格条件在页面里重新定位按钮，找不到就不点。
+///   4. 点击目标（B10 返修）：点会话掩码的「重试」按钮
+///     （`data-act="retry"` 优先，文本「重试」后备），不是「连接／
+///      重新连接」——掩码里没有那两个按钮。点前校验祖先含 #qfFrame
+///      或 .qf-session-layer；掩码无「重试」时返回 'no-retry-button'
+///      并记日志，不静默吞掉；点后 2 秒复核并记 reconnect-click-noop。
 ///
 /// 重试策略（不设次数上限、永不放弃、但不疯狂刷屏）：
 ///   - 轮询间隔 pollMs（默认 4 秒）；
@@ -102,10 +106,22 @@ const String kDetectJs = r'''(function () {
   return 'ok';
 })()''';
 
-/// 页面内点击脚本（与 Windows 版 CLICK_JS 原样一致）：
-/// 用与检测完全相同的严格条件重新定位按钮再点，点到返回 true。
-/// 2.4.5 B10：点前校验按钮祖先含 #qfFrame 或会话层 .qf-session-layer，
-/// 否则不点（设备列表页的同名「连接」入口不再被误点）。
+/// 页面内点击脚本（2.4.5 B10 返修：点击链闭环版，不再沿用 Windows 版
+/// CLICK_JS 的「连接／重新连接」目标——网页侧会话掩码里根本没有这
+/// 两个按钮，旧脚本恒返回 false，自动重连等于没修）。
+///
+/// 点击链（检测到 disconnected → 点掩码「重试」→ 2 秒后复核）：
+///   1. 目标是顶层会话层（.qf-session-layer）内掩码 #qfMask 的「重试」
+///      按钮：优先按 `data-act="retry"` 定位（网页 app.js 约 1825 行，
+///      `<button data-act="retry">重试</button>`），文本「重试」作后备。
+///      evaluateJavascript 只跑在主框、够不着 iframe 内按钮是既定约
+///      束，本脚本只在顶层文档内点，不绕开它。
+///   2. 点前校验按钮祖先含 #qfFrame 或 .qf-session-layer（保留既有
+///      祖先校验，不误点设备列表页的按钮）。
+///   3. 掩码里没有「重试」按钮时（如已是 FAIL 态、掩码未展开）返回
+///      'no-retry-button'（不是静默 false），Dart 侧记日志
+///      `reconnect-click-no-retry-button`；点到返回 true，余者 false。
+/// 返回：true | 'no-retry-button' | false。
 const String kClickJs = r'''(function () {
   function visible(el) {
     if (!el) return false;
@@ -123,14 +139,21 @@ const String kClickJs = r'''(function () {
     }
     return false;
   }
-  var BTNS = ['连接', '重新连接', 'Connect', 'Reconnect'];
+  // 优先：掩码「重试」按钮（data-act="retry"，网页 app.js 约 1825 行）。
+  var retry = document.querySelector('[data-act="retry"]');
+  if (retry && visible(retry) && inSessionLayer(retry)) {
+    retry.click();
+    return true;
+  }
+  // 后备：会话层内文本恰好为「重试」的可见按钮。
   var btns = document.querySelectorAll('button, a, input[type="button"], input[type="submit"]');
   for (var j = 0; j < btns.length; j++) {
     var b = btns[j];
     var bt = ((b.textContent || b.value || '') + '').trim();
-    if (BTNS.indexOf(bt) >= 0 && visible(b) && inSessionLayer(b)) { b.click(); return true; }
+    if (bt === '重试' && visible(b) && inSessionLayer(b)) { b.click(); return true; }
   }
-  return false;
+  // 掩码里没有可点的「重试」：明确回 no-retry-button，不静默吞掉。
+  return 'no-retry-button';
 })()''';
 
 /// 看护需要的页面求值能力（由 WebView 控制器实现；单元测试用假实现）。

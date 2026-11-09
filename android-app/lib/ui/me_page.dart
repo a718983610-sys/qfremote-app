@@ -19,6 +19,13 @@ class MePage extends StatefulWidget {
   final String? fallbackUser;
   final Future<PointsInfo?> Function() fetchPoints;
 
+  /// B7 返修：积分拉取遇 401/403（登录已过期）时为真——「我的」页显示
+  /// 「登录已过期，请重新登录」＋重新登录入口，不再只显示空白占位。
+  final bool authDead;
+
+  /// B7 返修：重新登录入口（只清会话快照、走凭据恢复链，不清已存凭据）。
+  final VoidCallback? onRelogin;
+
   /// 统一档案取数（2.3.2 S4 接驳，可选注入）：为空或取不到时，个人卡
   /// 回退现行显示（积分 user → 已存账号名 → 「已登录」＋品牌占位）。
   final Future<ProfileInfo?> Function()? fetchProfile;
@@ -45,6 +52,8 @@ class MePage extends StatefulWidget {
     required this.rememberLine,
     required this.fallbackUser,
     required this.fetchPoints,
+    this.authDead = false,
+    this.onRelogin,
     this.fetchProfile,
     this.fetchProfileAvatar,
     required this.onOpenSettings,
@@ -153,6 +162,38 @@ class _MePageState extends State<MePage> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
               children: [
+                // B7 返修：登录已过期时置顶提示＋重新登录入口，不显示空白占位。
+                if (widget.authDead) ...[
+                  _card(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('登录已过期，请重新登录',
+                            style: TextStyle(
+                                color: p.onCard,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700)),
+                        const SizedBox(height: 4),
+                        Text('当前登录已过期，积分与许可信息无法读取，请重新登录后查看。',
+                            style: TextStyle(
+                                color: p.onCardDim, fontSize: 12.5)),
+                        const SizedBox(height: 10),
+                        FilledButton(
+                          onPressed: widget.onRelogin,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: QfPalette.brand,
+                            minimumSize: const Size(0, 48),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10)),
+                          ),
+                          child: const Text('重新登录',
+                              style: TextStyle(fontWeight: FontWeight.w700)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 _card(
                   child: Row(
                     children: [
