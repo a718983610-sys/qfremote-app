@@ -47,6 +47,7 @@ function setup() {
         acksPath: path.join(dir, 'acks.jsonl'),
         replayDir: path.join(dir, 'replays'),
         disabledPath: path.join(dir, 'DISABLED'),
+        coolingPath: path.join(dir, 'COOLING'),
         idleTimeoutMs: 120000, maxSessionMs: 30 * 60 * 1000, coolingMs: 5 * 60 * 1000,
         ackTimeoutMs: 5000, ackPollMs: 100,
         controlEnabled: false, unicodeLE: false, snapshotRatePerSec: 10,
@@ -230,4 +231,27 @@ test('bridge: owner-remote-kill needs the owner role', async (t) => {
     const reopen = await httpReq(port, 'POST', '/session/open', assistantTok, { nodeId: LAPTOP });
     assert.equal(reopen.status, 503);
     assert.equal(JSON.parse(reopen.body.toString()).error, 'cooling');
+});
+
+test('bridge: cooling survives a restart (deadline persisted to disk)', async (t) => {
+    const { bridge, assistantTok } = setup();
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const kill = await httpReq(port, 'POST', '/kill', assistantTok);
+    assert.equal(kill.status, 200);
+    const coolingUntil = JSON.parse((await httpReq(port, 'GET', '/status', assistantTok)).body.toString()).coolingUntil;
+    assert.ok(coolingUntil > Date.now());
+    // Restart the bridge process (new instance, same config dir).
+    await bridge.stop();
+    const bridge2 = new Bridge(bridge.cfg, { kvmFactory: (opts) => new FakeKvm(opts) });
+    bridge2.start();
+    t.after(async () => { await bridge2.stop(); });
+    const port2 = await waitPort(bridge2);
+    const st2 = JSON.parse((await httpReq(port2, 'GET', '/status', assistantTok)).body.toString());
+    assert.equal(st2.coolingUntil, coolingUntil, 'cooling deadline must survive the restart');
+    // DISABLED is still on disk too, so open is refused as bridge-disabled
+    // (which takes precedence over cooling).
+    const reopen = await httpReq(port2, 'POST', '/session/open', assistantTok, { nodeId: LAPTOP });
+    assert.equal(reopen.status, 503);
+    assert.equal(JSON.parse(reopen.body.toString()).error, 'bridge-disabled');
 });

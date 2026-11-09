@@ -25,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { loadConfig } = require('./config');
+const { loadConfig, DEFAULTS } = require('./config');
 const { TokenStore, extractToken } = require('./tokens');
 const { AuditLog, textDetail, keyDetail, mouseDetail, snapshotDetail } = require('./audit');
 const { Outbox } = require('./notify');
@@ -39,13 +39,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class Bridge {
     constructor(cfg, deps = {}) {
-        this.cfg = cfg;
+        // Fill any missing key from DEFAULTS: a caller that builds cfg by
+        // hand (tests, minimal config files) must never leave a path
+        // undefined — _persistCooling would silently write nowhere.
+        this.cfg = Object.assign({}, DEFAULTS, cfg);
         this.tokens = new TokenStore(cfg.tokensPath);
         this.audit = new AuditLog(cfg.auditDir);
         this.outbox = new Outbox(cfg.outboxPath, cfg.acksPath);
         this.kvmFactory = deps.kvmFactory || ((opts) => new KvmSession(opts));
         this.session = null;          // null | {id, nodeId, tokenId, state, kvm, replay, openedAt, lastActivityAt, counters, observeTokenId}
         this.coolingUntil = 0;
+        this._restoreCooling(); // a restart must not dodge the cooling window
         this.startedAt = Date.now();
         this.snapshotChain = Promise.resolve(); // serialize snapshots (global concurrency 1)
         this.lastSnapshotAt = 0;
@@ -91,6 +95,18 @@ class Bridge {
 
     _isDisabled() { return fs.existsSync(this.cfg.disabledPath); }
     _isCooling() { return Date.now() < this.coolingUntil; }
+    // Cooling survives restarts: the deadline is written to disk on every
+    // kill and re-read at boot. (Found by the 2026-11-09 acceptance: a plain
+    // restart used to clear the in-memory window.)
+    _persistCooling() {
+        try { fs.writeFileSync(this.cfg.coolingPath, JSON.stringify({ coolingUntil: this.coolingUntil }) + '\n', { mode: 0o600 }); } catch (e) {}
+    }
+    _restoreCooling() {
+        try {
+            const doc = JSON.parse(fs.readFileSync(this.cfg.coolingPath, 'utf8'));
+            if (doc.coolingUntil && doc.coolingUntil > Date.now()) this.coolingUntil = doc.coolingUntil;
+        } catch (e) { /* no cooling file yet */ }
+    }
 
     // ---------- HTTP plumbing ----------
     async _readBody(req, limit = 65536) {
@@ -394,6 +410,7 @@ class Bridge {
         // file on the server. Also starts the 5-minute cooling window.
         fs.writeFileSync(this.cfg.disabledPath, JSON.stringify({ by: a.rec.id, at: Date.now(), reason: 'local-kill' }) + '\n', { mode: 0o600 });
         this.coolingUntil = Date.now() + this.cfg.coolingMs;
+        this._persistCooling();
         this.audit.append('bridge-killed', { by: a.rec.id, disabled: true, coolingUntil: this.coolingUntil });
         return this._json(res, 200, { ok: true, killed: true, disabled: true, close: rec });
     }
@@ -403,6 +420,7 @@ class Bridge {
         if (!a.ok) return this._err(res, a.code, a.error);
         const rec = await this._closeSession('owner-remote-kill');
         this.coolingUntil = Date.now() + this.cfg.coolingMs;
+        this._persistCooling();
         this.audit.append('owner-remote-kill', { by: a.rec.id, coolingUntil: this.coolingUntil });
         return this._json(res, 200, { ok: true, killed: true, close: rec });
     }

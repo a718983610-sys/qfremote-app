@@ -22,6 +22,7 @@ const DEFAULTS = {
     acksPath: '/opt/qfremote-bridge/acks.jsonl',
     replayDir: '/opt/qfremote-bridge/replays',
     disabledPath: '/opt/qfremote-bridge/DISABLED',
+    coolingPath: '/opt/qfremote-bridge/COOLING',
     idleTimeoutMs: 120000,          // idle (no input/snapshot call) -> close
     maxSessionMs: 30 * 60 * 1000,   // absolute session length -> force close
     coolingMs: 5 * 60 * 1000,       // after local-kill / owner-remote-kill
