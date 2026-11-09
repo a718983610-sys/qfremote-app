@@ -695,6 +695,7 @@ async function validateConsoleCookie(cookieHeader, clientIpHint) {
   if (jar['xid.sig']) parts.push('xid.sig=' + jar['xid.sig']);
   const cookieStr = parts.join('; ');
   let out = null;
+  let lastErrMsg = '';
   for (let attempt = 0; attempt < 2 && !out; attempt++) {
     let sess = null;
     try {
@@ -703,11 +704,18 @@ async function validateConsoleCookie(cookieHeader, clientIpHint) {
       const user = String(info._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
       if (user) out = { user, siteadmin: info.siteadmin || 0 };
     } catch (e) {
+      lastErrMsg = (e && e.message) || 'unknown';
       if (e && e.message === 'mc-session-rejected') break; // 明确拒绝不再重试
     } finally { if (sess) { try { sess.ws.close(); } catch (e) {} } }
   }
   pruneValidateCache(Date.now());
-  validateCache.set(key, { at: Date.now(), user: out ? out.user : null, siteadmin: out ? out.siteadmin : 0 });
+  // X-06 缓存口径（2.4.5 定版，三类失败分开处理）：
+  //  成功 → 缓存 30 秒；明确拒绝（mc-session-rejected，真无效会话）→ 缓存 30 秒，防反复打 MC；
+  //  网络类失败（mc-connect-timeout / mc-conn-error / mc-auth-failed 等）→ 一律不缓存，
+  //  防一次服务端抖动放大成 30 秒全站 401（与 checkSession「网络异常不踢下线」口径对齐）。
+  if (out) validateCache.set(key, { at: Date.now(), user: out.user, siteadmin: out.siteadmin });
+  else if (lastErrMsg === 'mc-session-rejected') validateCache.set(key, { at: Date.now(), user: null, siteadmin: 0 });
+  else log({ ev: 'validate-not-cached', reason: lastErrMsg || 'unknown' });
   return out;
 }
 
@@ -822,6 +830,28 @@ function savePoints() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(POINTS_FILE + '.tmp', JSON.stringify(pointsData, null, 1), { mode: 0o600 });
   fs.renameSync(POINTS_FILE + '.tmp', POINTS_FILE);
+}
+// X-17：心跳写盘 5 秒合并窗口——同一进程 5 秒内多次心跳只落盘一次，其余的
+// 记一次延时落盘（5 秒窗口一到即补写，不丢分）。只改落盘节奏，不改积分计算
+// 口径。写盘失败时调用方在响应里带 persisted:false，前端下次心跳重带一次。
+let pointsLastSaveMs = 0;
+let pointsSaveTimer = null;
+function savePointsSoon() {
+  const now = Date.now();
+  if (now - pointsLastSaveMs >= 5000) {
+    savePoints();
+    pointsLastSaveMs = now;
+    return { saved: true, deferred: false };
+  }
+  if (!pointsSaveTimer) {
+    const wait = 5000 - (now - pointsLastSaveMs);
+    pointsSaveTimer = setTimeout(() => {
+      pointsSaveTimer = null;
+      try { savePoints(); pointsLastSaveMs = Date.now(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+    }, wait);
+    if (pointsSaveTimer && pointsSaveTimer.unref) pointsSaveTimer.unref();
+  }
+  return { saved: false, deferred: true };
 }
 
 // ---------- 账号库只读解析（照 mcdb.js 的 loadDb 做法） ----------
@@ -1429,7 +1459,214 @@ function licVerifyLocked(mapKey) {
 // 这与网页控制台自身取设备列表是同一条真实路径，不是数据库猜测。
 // R4 口径：会话验真/取数都走 mcConnectCookie 的候选 IP 链（xid 内登录
 // IP 优先 → XFF 还原的请求 IP → 无转发），与既有小服务完全一致。
-function mcFetchNodes(cookieHeader, clientIpHint) {
+// ---------- 设备在线观测（W-10 / §4.2 第一步，不动 MC 本体） ----------
+// 服务端原来回答「在线吗」的唯一依据是 agent 的 TCP 长连接位 conn&1；
+// agent 假死但 TCP 未断时该位不翻转，服务端会持续谎报在线。本表记录的是
+// 「服务端最后一次亲眼见到某节点在线的时间」（观测时间，不是 agent 心跳
+// 时间）：每次 mcFetchNodes 成功拿到 nodes 回包就打戳。局限（须诚实说明）：
+// conn 位为 1 的节点每次观测都会刷新 lastSeenOnlineMs，所以第一步只能解决
+// 「conn 位已翻转但调用方还在用旧缓存」的 stale，不能解决「conn 位本身不
+// 翻转」的假死——后者须 §4.2 第二步（持久观测 WS）才根治，2.4.5 未排进，
+// 不得对外宣称「已解决假死」。
+// 观测表按「账号|nodeid」分键： presence 只在调用方自己的可见回包里找节点，
+// 找不到即 NOT_FOUND；跨账号的观测记录绝不用来回答另一账号的查询（防越权
+// 泄露他人设备存在性）。
+const PRESENCE_FRESH_MS = 120000;   // fresh：age ≤ 120 秒（预检放行）
+const PRESENCE_STALE_MS = 300000;   // STALE：120–300 秒；OFFLINE：>300 秒或本次观测 conn=0
+const presenceObs = new Map(); // '<user>|<nodeid>' -> {lastSeenOnlineMs, lastSeenOfflineMs}
+function presenceObsKey(user, nodeid) { return String(user || '').toLowerCase() + '|' + normalizeNodeId(nodeid); }
+function observeNodesForPresence(nodesByMesh, user, now) {
+  now = now || Date.now();
+  if (!nodesByMesh || typeof nodesByMesh !== 'object') return;
+  for (const d of flattenMeshNodes(nodesByMesh)) {
+    const k = presenceObsKey(user, d.nodeid);
+    const e = presenceObs.get(k) || {};
+    if (d.online) e.lastSeenOnlineMs = now;
+    else { e.lastSeenOfflineMs = now; /* 保留上次 lastSeenOnlineMs，供算「最后在线是多久前」 */ }
+    presenceObs.set(k, e);
+  }
+  // 剪枝：最后在线超过 1 小时的观测记录不再用于 STALE/UNKNOWN 判定，直接丢弃
+  if (presenceObs.size > 2000) {
+    for (const [k, v] of presenceObs) { if (!v || !v.lastSeenOnlineMs || now - v.lastSeenOnlineMs > 3600000) presenceObs.delete(k); }
+  }
+}
+function presenceObsFor(user, nodeid) {
+  const e = presenceObs.get(presenceObsKey(user, nodeid));
+  if (!e || !e.lastSeenOnlineMs) return { lastAgentPong: null, lastAgentPongAgeMs: null };
+  return { lastAgentPong: e.lastSeenOnlineMs, lastAgentPongAgeMs: Date.now() - e.lastSeenOnlineMs };
+}
+// 全局观测表（§4.2 第二步持久观测 WS 的写入目标）：nodeid -> {lastSeenOnlineMs, lastSeenOfflineMs}。
+// 与按账号分的 presenceObs 不同，本表不分账号，因此只允许 resolvePresence 在
+// 「节点已在调用方可见回包里」的前提下引用，绝不用于判定节点是否存在。
+const presenceObsGlobal = new Map();
+function observeNodesGlobal(nodesByMesh, now) {
+  now = now || Date.now();
+  if (!nodesByMesh || typeof nodesByMesh !== 'object') return;
+  for (const d of flattenMeshNodes(nodesByMesh)) {
+    const e = presenceObsGlobal.get(d.nodeid) || {};
+    if (d.online) e.lastSeenOnlineMs = now;
+    else e.lastSeenOfflineMs = now;
+    presenceObsGlobal.set(d.nodeid, e);
+  }
+  if (presenceObsGlobal.size > 2000) {
+    for (const [k, v] of presenceObsGlobal) { if (!v || !v.lastSeenOnlineMs || now - v.lastSeenOnlineMs > 3600000) presenceObsGlobal.delete(k); }
+  }
+}
+// ---------- §4.2 第二步：持久观测 WS（默认关闭，须服务端显式开启） ----------
+// 目的：把观测间隔从「有人问才观测」变成「一直观测」，使 conn 位翻转能在数秒
+// 内被发现（第一步里翻转要等下一次有人问才知道）。做法与 lock-bridge 的 svc
+// 持久通道同款：用同一份服务账号配置（/opt/qfremote-lock/bridge-config.json
+// 的 svcUser/svcPass，只读，不新增任何凭据）开一条常驻 control.ashx WS，
+// 就绪后立即发一次 nodes、此后每 30 秒轮询一次，收到的 nodes 推送也即时入表。
+// 开启条件（缺一即保持关闭，不影响任何现有接口）：
+//   环境变量 QFEXT_PRESENCE_OBSERVE=1，且桥配置文件存在且能读出 svcUser/svcPass。
+// 诚实边界：持久观测同样只看 conn 位——若 MC 的 conn 位本身不翻转（真假死），
+// 它也判不出 STALE；它只解决「翻转发现延迟」。上游节点字段取证（见 /tmp 下
+// 的一次性脚本与回报）：`nodes` 回包是否带心跳类时间戳字段，须在服务端实测
+// 后才能定论；agct 是连接建立时间不是心跳，不能用来判 stale。
+// 安全：重连退避与 lock-bridge 同款（1s 起、×2、封顶 30s，凭据类封顶 60s）；
+// 日志只写字段名清单与连接状态，绝不打印凭据、节点名、nodeid。
+const PRESENCE_OBSERVE_ENABLED = process.env.QFEXT_PRESENCE_OBSERVE === '1';
+const PRESENCE_OBSERVE_POLL_MS = 30000;
+let presenceObserverLoggedFields = false;
+const presenceObserver = { ws: null, ready: false, connecting: false, failStreak: 0, downSince: 0, nextAttemptAt: 0, timer: null, pollTimer: null, cfg: null };
+function presenceObserverConfig() {
+  if (presenceObserver.cfg !== undefined) return presenceObserver.cfg;
+  presenceObserver.cfg = null;
+  try {
+    const raw = JSON.parse(fs.readFileSync('/opt/qfremote-lock/bridge-config.json', 'utf8'));
+    if (raw && raw.svcUser && raw.svcPass && raw.mcUrl) presenceObserver.cfg = raw;
+  } catch (e) { presenceObserver.cfg = null; }
+  return presenceObserver.cfg;
+}
+function presenceObserverScheduleReconnect(reason) {
+  const auth = /noauth|auth-failed|bad-credential/.test(String(reason || ''));
+  const cap = auth ? 60000 : 30000;
+  presenceObserver.failStreak += 1;
+  const delay = Math.round(Math.min(1000 * Math.pow(2, Math.min(presenceObserver.failStreak - 1, 6)), cap) * (0.8 + Math.random() * 0.4));
+  presenceObserver.nextAttemptAt = Date.now() + delay;
+  if (presenceObserver.failStreak === 1) log({ ev: 'presence-observer-down', reason: String(reason || 'svc-down'), retryInMs: delay });
+  if (!presenceObserver.timer) {
+    presenceObserver.timer = setTimeout(() => { presenceObserver.timer = null; presenceObserverConnect(); }, delay);
+    if (presenceObserver.timer && presenceObserver.timer.unref) presenceObserver.timer.unref();
+  }
+}
+function presenceObserverPoll() {
+  if (!presenceObserver.ws || !presenceObserver.ready) return;
+  try { presenceObserver.ws.send(JSON.stringify({ action: 'nodes', responseid: 'qf-presence-' + Date.now() })); } catch (e) {}
+}
+function presenceObserverConnect() {
+  if (!PRESENCE_OBSERVE_ENABLED) return;
+  if (presenceObserver.ws || presenceObserver.connecting) return;
+  const cfg = presenceObserverConfig();
+  if (!cfg) { if (!presenceObserver.cfgLogged) { presenceObserver.cfgLogged = true; log({ ev: 'presence-observer-off', reason: 'no-service-config' }); } return; }
+  if (Date.now() < presenceObserver.nextAttemptAt) {
+    if (!presenceObserver.timer) {
+      presenceObserver.timer = setTimeout(() => { presenceObserver.timer = null; presenceObserverConnect(); }, Math.max(50, presenceObserver.nextAttemptAt - Date.now()));
+      if (presenceObserver.timer && presenceObserver.timer.unref) presenceObserver.timer.unref();
+    }
+    return;
+  }
+  presenceObserver.connecting = true;
+  const xauth = Buffer.from(cfg.svcUser).toString('base64') + ',' + Buffer.from(cfg.svcPass).toString('base64');
+  let ws;
+  try {
+    const WebSocket = loadWebSocket();
+    ws = new WebSocket(String(cfg.mcUrl).replace(/\/$/, '') + '/control.ashx', { rejectUnauthorized: false, headers: { 'x-meshauth': xauth, Origin: 'https://127.0.0.1:8443' } });
+  } catch (e) {
+    presenceObserver.connecting = false;
+    presenceObserverScheduleReconnect('construct-failed');
+    return;
+  }
+  presenceObserver.ws = ws;
+  const handshakeTimer = setTimeout(() => {
+    if (presenceObserver.ready) return;
+    try { ws.close(); } catch (e) {}
+  }, 8000);
+  if (handshakeTimer && handshakeTimer.unref) handshakeTimer.unref();
+  ws.on('message', (raw) => {
+    let m; try { m = JSON.parse(raw.toString()); } catch (e) { return; }
+    if (m && m.action === 'close') {
+      const cause = String(m.cause || '') + (m.msg ? '/' + String(m.msg) : '');
+      log({ ev: 'presence-observer-rejected', cause });
+      try { ws.close(); } catch (e) {}
+      return;
+    }
+    if (m && m.action === 'userinfo') {
+      const wasDown = presenceObserver.downSince;
+      presenceObserver.ready = true; presenceObserver.connecting = false;
+      presenceObserver.failStreak = 0; presenceObserver.downSince = 0; presenceObserver.nextAttemptAt = 0;
+      clearTimeout(handshakeTimer);
+      log({ ev: 'presence-observer-ready', resumedAfterMs: wasDown ? Date.now() - wasDown : 0 });
+      presenceObserverPoll();
+      if (!presenceObserver.pollTimer) {
+        presenceObserver.pollTimer = setInterval(presenceObserverPoll, PRESENCE_OBSERVE_POLL_MS);
+        if (presenceObserver.pollTimer && presenceObserver.pollTimer.unref) presenceObserver.pollTimer.unref();
+      }
+      return;
+    }
+    if (m && m.action === 'nodes' && m.nodes) {
+      // 取证：第一次收到 nodes 时只记字段名清单（不记任何节点值），供核对
+      // 回包是否带时间戳类字段（agct 除外是否还有 lastSeen/lastConnect 等）。
+      if (!presenceObserverLoggedFields) {
+        presenceObserverLoggedFields = true;
+        try {
+          const first = Object.values(m.nodes).flat().find((n) => n && typeof n === 'object');
+          if (first) log({ ev: 'presence-nodes-fields', fields: Object.keys(first).sort() });
+        } catch (e) {}
+      }
+      observeNodesGlobal(m.nodes, Date.now());
+    }
+  });
+  ws.on('close', () => {
+    clearTimeout(handshakeTimer);
+    if (presenceObserver.downSince === 0) presenceObserver.downSince = Date.now();
+    presenceObserver.ws = null; presenceObserver.connecting = false; presenceObserver.ready = false;
+    presenceObserverScheduleReconnect(presenceObserver.ready ? 'svc-closed' : 'svc-closed-unready');
+  });
+  ws.on('error', () => { try { ws.close(); } catch (e) {} });
+}
+if (PRESENCE_OBSERVE_ENABLED && !process.env.QFEXT_NO_LISTEN) {
+  // 随进程启动（延时 5 秒，避开启动期的建链竞争）；未开启时零开销、零行为变化。
+  const _obsT = setTimeout(presenceObserverConnect, 5000);
+  if (_obsT && _obsT.unref) _obsT.unref();
+}
+// 纯判定（无 IO，供路由与本地自测共用）：nodesByMesh 为 null＝取数失败/超时。
+// code 枚举：ONLINE / STALE / OFFLINE / NOT_FOUND / TIMEOUT / UNKNOWN。
+// NOT_FOUND 与 UNKNOWN 的区分：调用方可见回包里没有该节点，且本账号的观测表
+// 里也没有它最近在线的记录 → NOT_FOUND（不存在或无权看，不泄露存在性）；
+// 观测表里有它最近（≤120 秒）在线的记录、但本次回包里没了 → UNKNOWN（取数
+// 未同步，不得说成离线）；120–300 秒前最后在线、本次回包里没了 → STALE。
+function resolvePresence(nodesByMesh, nodeid, now, user) {
+  now = now || Date.now();
+  const id = normalizeNodeId(nodeid);
+  if (!nodesByMesh) return { ok: true, code: 'TIMEOUT', nodeid: id, name: '', online: false, fresh: false, lastAgentPong: null, lastAgentPongAgeMs: null, agentConnectedAt: null, serverTime: now };
+  const list = flattenMeshNodes(nodesByMesh);
+  const hit = list.find((d) => d.nodeid === id);
+  const obs = presenceObs.get(presenceObsKey(user, id));
+  const last = obs && obs.lastSeenOnlineMs ? obs.lastSeenOnlineMs : null;
+  const age = last != null ? now - last : null;
+  // 全局持久观测（§4.2 第二步，见 presenceObserver；默认关闭）：只在节点确
+  // 在调用方可见回包里、且本账号观测表无记录时，补一个「最后在线」时间窗，
+  // 绝不用来改变 code、绝不用于回包里没有的节点（不泄露存在性）。
+  let globalLast = null;
+  if (hit && last == null) { const g = presenceObsGlobal.get(id); if (g && g.lastSeenOnlineMs) globalLast = g.lastSeenOnlineMs; }
+  const effLast = last != null ? last : globalLast;
+  const effAge = effLast != null ? now - effLast : null;
+  const agct = hit ? (hit.agentConnectedAt || null) : null;
+  if (hit) {
+    if (hit.online) return { ok: true, code: 'ONLINE', nodeid: id, name: hit.name, online: true, fresh: true, lastAgentPong: effLast, lastAgentPongAgeMs: effAge, agentConnectedAt: agct, serverTime: now };
+    return { ok: true, code: 'OFFLINE', nodeid: id, name: hit.name, online: false, fresh: false, lastAgentPong: effLast, lastAgentPongAgeMs: effAge, agentConnectedAt: agct, serverTime: now };
+  }
+  if (last != null && age != null && age > PRESENCE_FRESH_MS && age <= PRESENCE_STALE_MS) {
+    return { ok: true, code: 'STALE', nodeid: id, name: '', online: false, fresh: false, lastAgentPong: last, lastAgentPongAgeMs: age, agentConnectedAt: null, serverTime: now };
+  }
+  if (last != null && age != null && age <= PRESENCE_FRESH_MS) {
+    return { ok: true, code: 'UNKNOWN', nodeid: id, name: '', online: false, fresh: false, lastAgentPong: last, lastAgentPongAgeMs: age, agentConnectedAt: null, serverTime: now };
+  }
+  return { ok: true, code: 'NOT_FOUND', nodeid: id, name: '', online: false, fresh: false, lastAgentPong: last, lastAgentPongAgeMs: age, agentConnectedAt: null, serverTime: now };
+}
+function mcFetchNodesUncached(cookieHeader, clientIpHint) {
   return new Promise(async (resolve) => {
     const jar = {};
     String(cookieHeader || '').split(';').forEach((part) => { const i = part.indexOf('='); if (i > 0) jar[part.slice(0, i).trim()] = part.slice(i + 1).trim(); });
@@ -1450,6 +1687,46 @@ function mcFetchNodes(cookieHeader, clientIpHint) {
     sess.ws.on('close', () => finish(null));
     try { sess.ws.send(JSON.stringify({ action: 'nodes', responseid: rid })); } catch (e) { finish(null); }
   });
+}
+// X-05：nodes 取数 5 秒共享缓存＋单飞（键＝sha256(xid+'.'+xid.sig)，与验真
+// 缓存同构造，不存明文）。设备在线态是秒级事件，5 秒陈旧可接受；写路径与
+// presence 预检共用同一缓存，不得各搞一套。只缓存成功回包，失败（null）
+// 不缓存，下次调用重新取数。
+const NODES_CACHE_TTL_MS = 5000;
+const NODES_CACHE_MAX = 200;
+const nodesCache = new Map(); // key -> {at, nodes, promise}
+function nodesCacheKey(cookieHeader) {
+  const jar = {};
+  String(cookieHeader || '').split(';').forEach((part) => { const i = part.indexOf('='); if (i > 0) jar[part.slice(0, i).trim()] = part.slice(i + 1).trim(); });
+  return crypto.createHash('sha256').update(String(jar.xid || '') + '.' + String(jar['xid.sig'] || '')).digest('hex');
+}
+function mcFetchNodes(cookieHeader, clientIpHint, observerUser) {
+  const key = nodesCacheKey(cookieHeader);
+  const now = Date.now();
+  const hit = nodesCache.get(key);
+  if (hit && hit.nodes && now - hit.at < NODES_CACHE_TTL_MS) return Promise.resolve(hit.nodes);
+  if (hit && hit.promise) return hit.promise;
+  const p = mcFetchNodesUncached(cookieHeader, clientIpHint).then((nodes) => {
+    if (nodes) {
+      if (nodesCache.size >= NODES_CACHE_MAX) { const oldest = nodesCache.keys().next(); if (!oldest.done) nodesCache.delete(oldest.value); }
+      nodesCache.set(key, { at: Date.now(), nodes, promise: null });
+      if (observerUser) observeNodesForPresence(nodes, observerUser, Date.now());
+    } else {
+      nodesCache.delete(key);
+    }
+    return nodes;
+  });
+  nodesCache.set(key, { at: now, nodes: null, promise: p });
+  return p;
+}
+// presence 预检的总预算：mcFetchNodes 内部是 8 秒鉴权＋8 秒 nodes 两段，
+// 预检必须在 8 秒内给答案（B-2 硬指标），超时即回 TIMEOUT 码，不干等 16 秒。
+// 注意：超时的那条底层 WS 仍会在后台跑完并关闭，不泄漏连接。
+function mcFetchNodesBudgeted(cookieHeader, clientIpHint, observerUser, budgetMs) {
+  return Promise.race([
+    mcFetchNodes(cookieHeader, clientIpHint, observerUser),
+    new Promise((resolve) => setTimeout(() => resolve(null), budgetMs || 8000)),
+  ]);
 }
 const MC_FILES_DIR = process.env.QFEXT_MC_FILES_DIR || '/opt/meshcentral/meshcentral-files';
 function userStorageBytes(username) {
@@ -1473,7 +1750,7 @@ async function buildHomeStats(req, auth) {
   const userDoc = findDbUser(docs, auth.user);
   const meshNames = {};
   for (const d of docs.values()) if (d && d.type === 'mesh') meshNames[d._id] = d.name || '';
-  const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req));
+  const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req), auth.user);
   let devices = null, groups = null, onlineCount = null;
   if (nodesByMesh) {
     devices = []; groups = []; let online = 0;
@@ -1483,8 +1760,15 @@ async function buildHomeStats(req, auth) {
       for (const n of (nodesByMesh[meshid] || [])) {
         const on = ((n.conn || 0) & 1) !== 0;
         if (on) online += 1;
+        // W-10：online 位之外同时带新鲜度——lastAgentPong（服务端最后一次亲眼
+        // 见到它在线）与 stale（conn 位仍为 1 但已超 120 秒未见在线；第一步里
+        // 在线节点每次观测都会刷新，故 stale 在此恒为 false，字段先留给第二步
+        // 持久观测用，前端据此不让点进 stale 设备）。
+        const nid = normalizeNodeId(n._id);
+        const obs = presenceObsFor(auth.user, nid);
+        const stale = on && obs.lastAgentPongAgeMs != null && obs.lastAgentPongAgeMs > PRESENCE_FRESH_MS;
         // 只回名称/系统/分组/在线：不回 host/ip 等地址字段（公开面红线）
-        devices.push({ name: n.name || n.rname || '', os: n.osdesc || '', group: gname, online: on });
+        devices.push({ name: n.name || n.rname || '', os: n.osdesc || '', group: gname, online: on, stale: !!stale, lastAgentPong: obs.lastAgentPong, lastAgentPongAgeMs: obs.lastAgentPongAgeMs, agentConnectedAt: (typeof n.agct === 'number' && n.agct > 0) ? n.agct : null });
       }
     }
     onlineCount = online;
@@ -1520,7 +1804,12 @@ function flattenMeshNodes(nodesByMesh) {
       const nodeid = normalizeNodeId(n._id);
       if (!nodeid || seen.has(nodeid)) continue;
       seen.add(nodeid);
-      out.push({ nodeid, name: n.name || n.rname || '', rname: n.rname || '', online: ((n.conn || 0) & 1) !== 0 });
+      out.push({ nodeid, name: n.name || n.rname || '', rname: n.rname || '', online: ((n.conn || 0) & 1) !== 0,
+        // agct（上游 1.1.36 起节点自带字段，毫秒 epoch）：agent 本次连接建立时间，
+        // 不是心跳时间——健康常连设备的 agct 也会很旧，故只作诊断参考，绝不用于
+        // fresh/stale 判定；live 取证（/tmp 下的一次性脚本，见回报）须先确认
+        // `nodes` 回包里是否带该字段。
+        agentConnectedAt: (typeof n.agct === 'number' && n.agct > 0) ? n.agct : null });
     }
   }
   return out;
@@ -2446,8 +2735,26 @@ const server = http.createServer(async (req, res) => {
       if (denyIfBanned(res, auth.user)) return;
       const qname = u.searchParams.get('name');
       if (!qname || !String(qname).trim()) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '请提供要查找的设备名称。' });
-      const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req));
+      const nodesByMesh = await mcFetchNodes(req.headers.cookie, clientIpFromReq(req), auth.user);
       return sendJson(res, 200, resolveDeviceByName(nodesByMesh, String(qname).trim()));   // DS P2-6：校验已 trim、匹配亦须 trim 后统一口径（原传原串致带空格名 NOT_FOUND）
+    }
+    // ===== 设备在线预检（W-11，2.4.5 新增）：GET /api/device/presence?nodeid=<裸 nodeid> =====
+    // 唯一判官口径，三端共用：会话预检（W-01）、重试复查（W-12）、自愈判官都问
+    // 同一个接口。方法 GET（纯读查询）、入参 nodeid（meshid 是设备组 id，定不
+    // 了一台设备，故不用 DS 原提议的 POST /home/api/agent-presence {meshid}）。
+    // 鉴权 resolveAuth＋denyIfBanned（与 /api/device/resolve 同款）；未登录 401；
+    // 封禁 403 ACCOUNT_BANNED。出参 200、ok 恒 true，业务结果由 code 表达。
+    // 越权隔离靠 MC 自身可见范围：只在调用方可见的 nodes 回包里找，找不到即
+    // NOT_FOUND，不区分「不存在」与「无权看」。取数复用 mcFetchNodes 的 5 秒
+    // 共享缓存＋单飞（X-05），不得每次新开 WS；总预算 8 秒，超时回 TIMEOUT。
+    if (req.method === 'GET' && p === '/api/device/presence') {
+      const auth = await resolveAuth(req);
+      if (!auth) return sendJson(res, 401, { ok: false, code: 'UNAUTHORIZED', msg: '登录已过期，请重新登录后再试。' });
+      if (denyIfBanned(res, auth.user)) return;
+      const qid = u.searchParams.get('nodeid');
+      if (!qid || !String(qid).trim()) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '请提供要查询的设备标识。' });
+      const nodesByMesh = await mcFetchNodesBudgeted(req.headers.cookie, clientIpFromReq(req), auth.user, 8000);
+      return sendJson(res, 200, resolvePresence(nodesByMesh, String(qid).trim(), Date.now(), auth.user));
     }
     if (req.method === 'GET' && p === '/home/api/login-devices') {
       const auth = await resolveAuth(req);
@@ -2510,11 +2817,12 @@ const server = http.createServer(async (req, res) => {
       // #23 赚分：服务器在线秒数计分（不做闲置检测，23-补），账号＋设备双封顶
       const devKey = (pointsData.devices && pointsData.devices[auth.user]) || ('acct:' + auth.user);
       const earnOut = pointsCore.earnHeartbeat(rec, devKey, addedSec, now, (pointsData.deviceDays = pointsData.deviceDays || {}));
-      try { savePoints(); } catch (e) { log({ ev: 'points-save-error', err: String(e && e.message) }); }
+      let pointsPersisted = true;
+      try { savePointsSoon(); } catch (e) { pointsPersisted = false; log({ ev: 'points-save-error', err: String(e && e.message) }); }
       // 17:29：软件壳在线期间的强制下线信号走既有心跳通道下发——壳收到
       // forceLogout:true 须立即登出本机会话并回 G1 拦截页（契约 §7.5.7）。
       const fls = lic.forceLogoutState ? lic.forceLogoutState(auth.user, now) : null;
-      return sendJson(res, 200, Object.assign({ ok: true }, pointsCore.computeMe(auth.user, rec, now), { earn: pointsCore.earnView(rec, devKey, now, pointsData.deviceDays), earnedNow: earnOut.grantedNow }, fls ? { forceLogout: true, gateCode: 'G1' } : {}));
+      return sendJson(res, 200, Object.assign({ ok: true }, pointsCore.computeMe(auth.user, rec, now), { earn: pointsCore.earnView(rec, devKey, now, pointsData.deviceDays), earnedNow: earnOut.grantedNow }, pointsPersisted ? {} : { persisted: false }, fls ? { forceLogout: true, gateCode: 'G1' } : {}));
     }
     if (req.method === 'GET' && p === '/points/api/me') {
       const auth = await resolveAuth(req);
@@ -3151,4 +3459,4 @@ if (!process.env.QFEXT_NO_LISTEN) {
 }
 
 // 供本地单测使用（生产路径不依赖）
-module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName };
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName, resolvePresence, observeNodesForPresence, presenceObsFor, PRESENCE_FRESH_MS, PRESENCE_STALE_MS, savePointsSoon };
