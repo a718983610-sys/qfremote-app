@@ -23,7 +23,9 @@ const { execFileSync } = require('child_process');
 const TOKYO_SSH = path.join(process.env.HOME, 'workspace/qfremote/tokyo-ssh.sh');
 const OUTBOX = '/opt/qfremote-bridge/outbox.jsonl';
 const ACKS = '/opt/qfremote-bridge/acks.jsonl';
-const SOCK = '/opt/qfremote-bridge/bridge.sock';
+// The poller runs as the ubuntu SSH user, so it reaches the bridge over the
+// TCP loopback port (127.0.0.1:18081); the UDS socket is 0600 qfbridge and is
+// for local bridge-user processes only.
 
 function sshOut(args, input) {
     return execFileSync(TOKYO_SSH, args, { encoding: 'utf8', timeout: 60000, input });
@@ -55,9 +57,9 @@ function ackEvent(eventId) {
         'import socket, json, sys',
         'body = json.dumps({"eventId": sys.argv[1]}).encode()',
         'req = (b"POST /ack HTTP/1.1\r\nHost: bridge\r\nContent-Type: application/json\r\nAuthorization: Bearer " + sys.argv[2].encode() + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)',
-        's = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)',
+        's = socket.socket(socket.AF_INET, socket.SOCK_STREAM)',
         's.settimeout(15)',
-        's.connect("' + SOCK + '")',
+        "s.connect(('127.0.0.1', 18081))",
         's.sendall(req)',
         'data = b""',
         'while True:',
@@ -67,8 +69,10 @@ function ackEvent(eventId) {
         'print(data.decode("utf-8", "replace"))',
     ].join('\n');
     // Token travels as an argv element to the remote python (in the SSH
-    // channel only); it is never printed by this script.
-    const out = sshOut(['python3', '-c', py, eventId, token]);
+    // channel only); it is never printed by this script. The python code
+    // goes via stdin (python3 -) because the SSH wrapper joins argv into
+    // one remote shell command, where newlines would split the -c program.
+    const out = sshOut(['python3', '-', eventId, token], py);
     return out;
 }
 

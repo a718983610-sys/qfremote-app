@@ -120,3 +120,25 @@ test('kvm feed: cmd 87 input-lock reply parses (viewer-proven 5-byte shape)', ()
     sess._feedBinary(bad);
     assert.equal(sess.inputLocked, false);
 });
+
+test('kvm: parseVisibleNodes flattens mesh -> node arrays (live-probed shape)', () => {
+    const { parseVisibleNodes } = require('../kvm');
+    const LAPTOP = 'node//8tVIMXjJh50uyBWFCvfJzyEWfc7PFcmYgL1wMmMf3xiv2cFYhjnn@7WnygBlCSp7';
+    const msg = {
+        action: 'nodes',
+        nodes: {
+            'mesh//rH2tWuyUp@0hrso1u46NtoMZ': [
+                { type: 'node', mtype: 2, _id: LAPTOP, icon: 2, name: 'DESKTOP-D39ABOL' },
+                { type: 'node', mtype: 2, _id: 'node//other@x', icon: 2, name: 'OTHER' },
+            ],
+            'mesh//second@mesh': [{ type: 'node', _id: 'node//third@x' }],
+        },
+    };
+    assert.deepEqual(parseVisibleNodes(msg), [LAPTOP, 'node//other@x', 'node//third@x']);
+    // Edge cases: missing/empty/non-array shapes return [] (fail-closed).
+    assert.deepEqual(parseVisibleNodes(null), []);
+    assert.deepEqual(parseVisibleNodes({}), []);
+    assert.deepEqual(parseVisibleNodes({ action: 'nodes' }), []);
+    assert.deepEqual(parseVisibleNodes({ nodes: { 'mesh//m': { _id: 'node//notarray' } } }), []);
+    assert.deepEqual(parseVisibleNodes({ nodes: { 'mesh//m': [] } }), []);
+});

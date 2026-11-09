@@ -89,6 +89,23 @@ class InputChannel {
 }
 
 // ---------------- KVM session ----------------
+// Parse a control-channel `nodes` reply into the flat list of visible node
+// ids. Wire shape (probed live 2026-11-09 against qf-assistsvc):
+//   { action: 'nodes', nodes: { <meshId>: [ { _id: 'node//…', type: 'node', … } ] } }
+// The top-level keys are MESH ids, NOT node ids — an earlier version of this
+// check compared the target against the mesh keys and always failed.
+function parseVisibleNodes(nodesMsg) {
+    const out = [];
+    const nodes = nodesMsg && nodesMsg.nodes;
+    if (!nodes || typeof nodes !== 'object') return out;
+    for (const meshId of Object.keys(nodes)) {
+        const arr = nodes[meshId];
+        if (!Array.isArray(arr)) continue;
+        for (const n of arr) { if (n && typeof n._id === 'string') out.push(n._id); }
+    }
+    return out;
+}
+
 class KvmSession {
     constructor({ nodeid, creds, throttleMs = 50, unicodeLE = false, onTile = null, onEvent = null } = {}) {
         if (!nodeid || !/^node\/\//.test(nodeid)) throw new Error('nodeid must be a full node// id');
@@ -135,7 +152,7 @@ class KvmSession {
         // own devices, so an empty/invisible target here is a hard stop).
         this.ctrl.sendText(JSON.stringify({ action: 'nodes' }));
         const nodesMsg = await new Promise((res) => { this.ctrlWaiters.push({ pred: (m) => m.action === 'nodes', res }); setTimeout(() => res(null), 8000); });
-        this.nodesSeen = (nodesMsg && nodesMsg.nodes) ? Object.keys(nodesMsg.nodes) : [];
+        this.nodesSeen = parseVisibleNodes(nodesMsg);
         if (!this.nodesSeen.includes(this.nodeid)) throw new Error('NODE_NOT_VISIBLE: target nodeid not in control-channel visible set');
         // Relay connect (four steps, mc-direct README §3).
         const tunnelid = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
@@ -330,4 +347,4 @@ class KvmSession {
     }
 }
 
-module.exports = { makeEnc, VK, MODIFIER_VKS, InputChannel, KvmSession, hashBuf };
+module.exports = { makeEnc, VK, MODIFIER_VKS, InputChannel, KvmSession, hashBuf, parseVisibleNodes };
