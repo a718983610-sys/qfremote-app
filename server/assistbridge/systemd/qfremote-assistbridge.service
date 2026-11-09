@@ -1,0 +1,26 @@
+[Unit]
+Description=QFRemote assistant control bridge (loopback-only)
+Documentation=file:///opt/qfremote-bridge/app/README.md
+After=network.target meshcentral.service
+Wants=meshcentral.service
+
+[Service]
+Type=simple
+User=qfbridge
+Group=qfbridge
+ExecStart=/opt/node-v24.22.1/bin/node /opt/qfremote-bridge/app/bridge.js
+WorkingDirectory=/opt/qfremote-bridge
+Restart=on-failure
+RestartSec=5
+# No public network access needed: the bridge only talks to MeshCentral on
+# server loopback (127.0.0.1:8443) and listens on a UDS + loopback TCP.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/qfremote-bridge
+ProtectHome=true
+# The service account must be able to read the secret store and write
+# audit/outbox/replay files, all under /opt/qfremote-bridge.
+
+[Install]
+WantedBy=multi-user.target
