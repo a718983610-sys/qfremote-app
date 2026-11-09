@@ -4,12 +4,19 @@
 桥跑在东京服务器上（与 MeshCentral 同机），只监听 UDS + loopback TCP，
 不对外暴露。客户端零改动。
 
-## 状态（2026-11-09 P1–P4 轮）
+## 状态（2026-11-09 延迟优化轮，v1.1.0）
+
+延迟优化（站长 2026-11-09 22:27 亲令）：批量输入端点 + 快照快路径
+（有完整帧时不再全量刷新 + 2 秒静置）+ 单动作变化等待上限 800 ms +
+助手侧 SSH 连接复用。控制面仍关闭（0d 未过，P5 门不动）；安全模型不动。
+实测数见 `~/workspace/qfremote/assistant-control-bridge-20261027/` 下的
+LATENCY-20261109 报告。
 
 | 能力 | 状态 |
 |---|---|
 | 看屏（快照只读） | 已实现，**离线实证**（2026-10-29 实录瓦片回放）；真机实测待笔记本回线 |
 | 鼠标 / 键盘 | 代码已实现，**接口关闭**（409 control-disabled）：P5 门——0d 夹具实证未过 |
+| 批量输入（POST /session/:id/batch） | 已实现，**接口关闭**（同 P5 门 409）；一次调用执行整批动作、一次回结果 |
 | 中文输入（KEYUNICODE cmd 85） | 代码已实现，**接口关闭**；字节序未证（默认大端，夹具实证后才可翻转） |
 | /text（粘贴/长文本） | 403 text-input-disabled，默认禁用 |
 | 通知腿（轮询 ACK） | 已实现（outbox + ACK 端点 + 轮询器）；cron 待建 |
@@ -26,11 +33,19 @@
 - `POST /session/open {nodeId}` — 开会话。白名单校验 → 写 session-request
   通知 → 等 ACK（75s，超时拒绝，迟到的 ACK 不追认）→ 连中继 → 首帧
   完整才算建立。返回 `{sessionId, observeToken, screen, screenState, frameComplete}`
-- `GET /session/:id/snapshot?maxw&q` — 最新全帧 JPEG（agent 原生 q50 帧；
+- `GET /session/:id/snapshot?maxw&q&refresh&hash` — 最新全帧 JPEG（agent 原生 q50 帧；
   maxw/q 只校验，实际宽高/质量见响应头 `X-Bridge-Frame-*`；无 JPEG
-  重编——服务器无解码库）
-- `POST /session/:id/mouse {x,y,button,action}` — 409（控制面关闭）
-- `POST /session/:id/key {kind,vk|modifiers|char}` — 409（控制面关闭）
+  重编——服务器无解码库）。快路径：已有完整帧时直接返回，不再全量
+  刷新（`X-Bridge-Refresh: cached`）；`?refresh=1` 强制刷新；
+  `?hash=<sha256>` 与当前帧一致时回 304（不传帧字节）
+- `POST /session/:id/mouse {x,y,button,action}` — 409（控制面关闭）；
+  开启后变化等待上限 800 ms（`changed` = 800 ms 内有变化）
+- `POST /session/:id/key {kind,vk|modifiers|char}` — 409（控制面关闭）；
+  开启后变化等待上限 800 ms
+- `POST /session/:id/batch {actions:[...], waitMs?}` — 409（控制面关闭，
+  同 P5 门）。开启后一次调用执行整批动作（move/down/up/click/tap/
+  combo/unicode，最多 100 个；先全量校验、坏项整批拒绝不执行），
+  结尾一次有界变化等待（waitMs 默认 500，上限 2000），一次回结果
 - `POST /session/:id/text` — 403（默认禁用）
 - `POST /session/:id/close` — 幂等关闭（C4 记录）
 - `POST /kill` — 关会话 + 写持久 DISABLED + 5 分钟冷却（助手令牌）

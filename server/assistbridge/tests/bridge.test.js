@@ -20,7 +20,15 @@ class FakeKvm {
     constructor(opts) {
         this.opts = opts;
         this.screenW = 1920; this.screenH = 1080;
-        this.input = { move: () => {}, down: () => {}, up: () => {}, click: () => {}, keyTap: () => {}, keyCombo: () => {}, keyUnicodeChar: () => {}, releaseAllModifiers: () => {} };
+        this.calls = []; // recorded input calls, in order
+        this.refreshCalls = 0;
+        this.waitChangeMode = 'resolve-null'; // or 'never' (hangs until its own timeout)
+        const rec = (name) => (...args) => { this.calls.push([name, ...args]); };
+        this.input = {
+            move: rec('move'), down: rec('down'), up: rec('up'), click: rec('click'),
+            keyTap: rec('keyTap'), keyCombo: rec('keyCombo'), keyUnicodeChar: rec('keyUnicodeChar'),
+            releaseAllModifiers: rec('releaseAllModifiers'),
+        };
         this._tileCb = opts.onTile;
     }
     async connect() { return this; }
@@ -29,12 +37,15 @@ class FakeKvm {
         return { jpeg: FAKE_JPEG, hash: 'fakehash', width: 1920, height: 1080, frameComplete: true, capturedAt: Date.now(), lastTileAt: Date.now(), lastFullRefreshAt: Date.now(), tileCount: 1, tileMsgs: 1, tileBytes: FAKE_JPEG.length };
     }
     screenState() { return 'desktop'; }
-    async refresh() {}
-    waitChange() { return Promise.resolve(null); }
+    async refresh() { this.refreshCalls++; }
+    waitChange() {
+        if (this.waitChangeMode === 'never') return new Promise(() => {});
+        return Promise.resolve(null);
+    }
     async close() {}
 }
 
-function setup() {
+function setup(opts = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-int-'));
     const cfg = {
         sockPath: path.join(dir, 'bridge.sock'),
@@ -50,7 +61,7 @@ function setup() {
         coolingPath: path.join(dir, 'COOLING'),
         idleTimeoutMs: 120000, maxSessionMs: 30 * 60 * 1000, coolingMs: 5 * 60 * 1000,
         ackTimeoutMs: 5000, ackPollMs: 100,
-        controlEnabled: false, unicodeLE: false, snapshotRatePerSec: 10,
+        controlEnabled: !!opts.controlEnabled, unicodeLE: false, snapshotRatePerSec: 10,
         textEnabled: false, replayRetentionDays: 7, replayMaxBytesPerSession: 500 * 1024 * 1024,
     };
     fs.writeFileSync(cfg.secretStorePath, JSON.stringify({ user: 'qf-assistsvc', pass: 'test-only-fake-password' }));
@@ -254,4 +265,135 @@ test('bridge: cooling survives a restart (deadline persisted to disk)', async (t
     const reopen = await httpReq(port2, 'POST', '/session/open', assistantTok, { nodeId: LAPTOP });
     assert.equal(reopen.status, 503);
     assert.equal(JSON.parse(reopen.body.toString()).error, 'bridge-disabled');
+});
+
+// ---------- latency fixes (2026-11-09): batch input, snapshot fast path,
+// bounded change waits. ----------
+
+async function openLiveSession(port, token) {
+    const openP = httpReq(port, 'POST', '/session/open', token, { nodeId: LAPTOP });
+    await new Promise((r) => setTimeout(r, 300));
+    await ackPending(port, token);
+    const opened = await openP;
+    assert.equal(opened.status, 200);
+    return JSON.parse(opened.body.toString()).sessionId;
+}
+
+test('bridge: batch executes ordered actions in one call (control on)', async (t) => {
+    const { dir, cfg, bridge, assistantTok } = setup({ controlEnabled: true });
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    const kvm = bridge.session.kvm;
+    const res = await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, {
+        actions: [
+            { kind: 'move', x: 100, y: 100 },
+            { kind: 'click', x: 100, y: 100 },
+            { kind: 'tap', vk: 13 },
+            { kind: 'unicode', char: '中' },
+            { kind: 'combo', modifiers: [17], vk: 65 },
+        ],
+        waitMs: 50,
+    });
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body.toString());
+    assert.equal(body.actions, 5);
+    assert.equal(body.mouse, 2);
+    assert.equal(body.key, 3);
+    assert.deepEqual(kvm.calls, [
+        ['move', 100, 100],
+        ['click', 100, 100, 2, 4],
+        ['keyTap', 13, { extended: false }],
+        ['keyUnicodeChar', '中'],
+        ['keyCombo', [17], 65],
+    ]);
+    const st = JSON.parse((await httpReq(port, 'GET', '/session/' + sessionId + '/status', assistantTok)).body.toString());
+    assert.equal(st.counters.mouse, 2);
+    assert.equal(st.counters.key, 3);
+    // Audit parity: one batch row plus per-action rows.
+    const auditFile = path.join(cfg.auditDir, 'audit-' + new Date().toISOString().slice(0, 10) + '.jsonl');
+    const auditText = fs.readFileSync(auditFile, 'utf8');
+    assert.ok(auditText.includes('"event":"batch"'), 'batch must be audited');
+    assert.ok(auditText.includes('"event":"mouse"') && auditText.includes('"event":"key"'), 'per-action rows must exist');
+});
+
+test('bridge: batch returns 409 when control is disabled (P5 gate)', async (t) => {
+    const { bridge, assistantTok } = setup(); // controlEnabled: false
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    const res = await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, {
+        actions: [{ kind: 'tap', vk: 13 }],
+    });
+    assert.equal(res.status, 409);
+    assert.equal(JSON.parse(res.body.toString()).error, 'control-disabled');
+});
+
+test('bridge: batch rejects a bad action with 400 and emits nothing', async (t) => {
+    const { bridge, assistantTok } = setup({ controlEnabled: true });
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    const kvm = bridge.session.kvm;
+    const res = await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, {
+        actions: [{ kind: 'tap', vk: 13 }, { kind: 'click', x: -5, y: 10 }],
+    });
+    assert.equal(res.status, 400);
+    assert.equal(JSON.parse(res.body.toString()).error, 'bad-batch-action');
+    assert.equal(JSON.parse(res.body.toString()).index, 1);
+    assert.deepEqual(kvm.calls, [], 'no input may be emitted before validation passes');
+    assert.equal((await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, { actions: [] })).status, 400);
+    assert.equal((await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, { actions: new Array(101).fill({ kind: 'tap', vk: 13 }) })).status, 400);
+});
+
+test('bridge: snapshot fast path skips refresh; refresh=1 forces it; hash match gives 304', async (t) => {
+    const { bridge, assistantTok } = setup();
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    const kvm = bridge.session.kvm;
+    const s1 = await httpReq(port, 'GET', '/session/' + sessionId + '/snapshot', assistantTok);
+    assert.equal(s1.status, 200);
+    assert.equal(s1.headers['x-bridge-refresh'], 'cached');
+    assert.equal(kvm.refreshCalls, 0, 'complete frame must not trigger a refresh');
+    const hash = s1.headers['x-bridge-frame-sha256'];
+    assert.ok(hash && hash.length === 64);
+    const s2 = await httpReq(port, 'GET', '/session/' + sessionId + '/snapshot?refresh=1', assistantTok);
+    assert.equal(s2.status, 200);
+    assert.equal(s2.headers['x-bridge-refresh'], 'refreshed');
+    assert.equal(kvm.refreshCalls, 1, 'refresh=1 must force one refresh');
+    const s3 = await httpReq(port, 'GET', '/session/' + sessionId + '/snapshot?hash=' + hash, assistantTok);
+    assert.equal(s3.status, 304);
+    assert.equal(s3.body.length, 0, '304 must carry no frame bytes');
+    assert.equal(kvm.refreshCalls, 1, 'a 304 hit must not refresh either');
+});
+
+test('bridge: single mouse/key change wait is bounded at 800 ms', async (t) => {
+    const { bridge, assistantTok } = setup({ controlEnabled: true });
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    bridge.session.kvm.waitChangeMode = 'never'; // screen never changes
+    const start = Date.now();
+    const res = await httpReq(port, 'POST', '/session/' + sessionId + '/mouse', assistantTok, { x: 100, y: 100, action: 'click' });
+    const elapsed = Date.now() - start;
+    assert.equal(res.status, 200);
+    assert.ok(elapsed >= 700 && elapsed < 1500, 'mouse must return at the ~800 ms cap, not after 3 s (took ' + elapsed + ' ms)');
+    assert.equal(JSON.parse(res.body.toString()).changed, false);
+});
+
+test('bridge: batch change wait is bounded by waitMs', async (t) => {
+    const { bridge, assistantTok } = setup({ controlEnabled: true });
+    t.after(async () => { await bridge.stop(); });
+    const port = await waitPort(bridge);
+    const sessionId = await openLiveSession(port, assistantTok);
+    bridge.session.kvm.waitChangeMode = 'never';
+    const start = Date.now();
+    const res = await httpReq(port, 'POST', '/session/' + sessionId + '/batch', assistantTok, {
+        actions: [{ kind: 'unicode', char: '中' }],
+        waitMs: 100,
+    });
+    const elapsed = Date.now() - start;
+    assert.equal(res.status, 200);
+    assert.ok(elapsed < 1000, 'batch with waitMs=100 must return in well under 1 s (took ' + elapsed + ' ms)');
 });

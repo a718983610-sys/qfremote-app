@@ -24,6 +24,11 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const TOKYO_SSH = path.join(process.env.HOME, 'workspace/qfremote/tokyo-ssh.sh');
+// Latency (2026-11-09): reuse one SSH connection for repeat bridge calls.
+// A fresh ssh through the sandbox proxy costs ~1.9 s per call; multiplexed
+// calls cost ~0.4 s while the master lives. If the proxy kills the master,
+// ssh falls back to a fresh connection automatically (stale socket).
+process.env.QF_SSH_MUX = '1';
 // The poller runs as the ubuntu SSH user, so it reaches the bridge over the
 // TCP loopback port (127.0.0.1:18081); the UDS socket is 0600 qfbridge and is
 // for local bridge-user processes only.

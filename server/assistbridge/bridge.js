@@ -34,7 +34,7 @@ const { KvmSession } = require('./kvm');
 const { zoneOf, snapshotResponse } = require('./frame-assembler');
 const mcSession = require('./mc-session');
 
-const VERSION = '1.0.0-p1';
+const VERSION = '1.1.0';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class Bridge {
@@ -148,13 +148,14 @@ class Bridge {
             if (p === '/observe/kill' && req.method === 'POST') return this._routeOwnerKill(req, res);
             if (p === '/ack' && req.method === 'POST') return this._routeAck(req, res);
             if (p === '/events/pending' && req.method === 'GET') return this._routePending(req, res);
-            const m = p.match(/^\/session\/([^/]+)\/(snapshot|mouse|key|text|close|status)$/);
+            const m = p.match(/^\/session\/([^/]+)\/(snapshot|mouse|key|text|batch|close|status)$/);
             if (m) {
                 const id = decodeURIComponent(m[1]);
                 const action = m[2];
                 if (action === 'snapshot' && req.method === 'GET') return this._routeSnapshot(req, res, id, u);
                 if (action === 'mouse' && req.method === 'POST') return this._routeMouse(req, res, id);
                 if (action === 'key' && req.method === 'POST') return this._routeKey(req, res, id);
+                if (action === 'batch' && req.method === 'POST') return this._routeBatch(req, res, id);
                 if (action === 'text' && req.method === 'POST') return this._routeText(req, res, id);
                 if (action === 'close' && req.method === 'POST') return this._routeClose(req, res, id);
                 if (action === 'status' && req.method === 'GET') return this._routeSessionStatus(req, res, id);
@@ -283,6 +284,13 @@ class Bridge {
             return this._err(res, 400, 'bad-snapshot-params');
         }
         // Global concurrency 1 + per-session rate limit (2/s).
+        // Fast path (latency fix 2026-11-09): when a complete frame is
+        // already in hand, return it WITHOUT a full refresh + 2 s settle.
+        // The old path forced every snapshot through kvm.refresh(), so
+        // every snapshot cost >= 2 s even when nothing had changed.
+        // Force a refresh with ?refresh=1; ask for a 304 with ?hash=<sha256>.
+        const forceRefresh = u.searchParams.get('refresh') === '1';
+        const wantHash = u.searchParams.get('hash') || null;
         const run = this.snapshotChain.then(async () => {
             const now = Date.now();
             const minGap = Math.floor(1000 / (this.cfg.snapshotRatePerSec || 2));
@@ -291,19 +299,31 @@ class Bridge {
             this.lastSnapshotAt = Date.now();
             const kvm = sess.kvm;
             if (!kvm) throw new Error('no-kvm');
-            await kvm.refresh();
-            const snap = kvm.snapshot();
+            let snap = kvm.snapshot();
+            let refreshed = false;
+            if (forceRefresh || !snap.jpeg || !snap.frameComplete) {
+                await kvm.refresh();
+                snap = kvm.snapshot();
+                refreshed = true;
+            }
             this._touch(sess);
             sess.counters.snapshot++;
-            this.audit.append('snapshot', { sessionId: id, ...snapshotDetail(snap.jpeg), frameComplete: snap.frameComplete });
+            this.audit.append('snapshot', { sessionId: id, ...snapshotDetail(snap.jpeg), frameComplete: snap.frameComplete, refreshed });
             if (sess.replay && snap.jpeg) sess.replay.recordFrame(snap.hash, snap.jpeg.length);
             const resp = snapshotResponse(snap, { maxw, q });
+            resp.refreshed = refreshed;
             return resp;
         });
         this.snapshotChain = run.catch(() => {});
         let resp;
         try { resp = await run; } catch (e) { return this._err(res, 502, 'snapshot-failed', { detail: e.message.slice(0, 120) }); }
         if (!resp.jpeg) return this._err(res, 503, 'no-frame-yet');
+        resp.headers['X-Bridge-Refresh'] = resp.refreshed ? 'refreshed' : 'cached';
+        if (wantHash && resp.headers['X-Bridge-Frame-Sha256'] === wantHash) {
+            res.writeHead(304, resp.headers);
+            res.end();
+            return;
+        }
         res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': resp.jpeg.length, ...resp.headers });
         res.end(resp.jpeg);
     }
@@ -335,7 +355,11 @@ class Bridge {
         else if (action === 'down') kvm.input.down(btnDown, x, y);
         else if (action === 'up') kvm.input.up(btnUp, x, y);
         else kvm.input.click(x, y, btnDown, btnUp);
-        const changed = await changeP;
+        // Bounded change wait (latency fix 2026-11-09): the old code
+        // awaited the full 3 s whenever the screen did not change, so
+        // every no-visible-effect action cost 3 s. `changed` now means
+        // "changed within 800 ms of the action" (relay RTT median 230-285 ms).
+        const changed = await Promise.race([changeP, sleep(800)]);
         const after = kvm.snapshot();
         this._touch(sess);
         sess.counters.mouse++;
@@ -370,7 +394,8 @@ class Bridge {
         } else {
             return this._err(res, 400, 'bad-key-params');
         }
-        const changed = await changeP;
+        // Bounded change wait (latency fix 2026-11-09): see _routeMouse.
+        const changed = await Promise.race([changeP, sleep(800)]);
         const after = kvm.snapshot();
         this._touch(sess);
         sess.counters.key++;
@@ -378,6 +403,106 @@ class Bridge {
         this.audit.append('key', { sessionId: id, ...keyDetail(kind === 'tap' ? ('vk:' + body.vk) : kind, { printable }) });
         if (sess.replay) sess.replay.recordAction('key', { kind, changed: !!changed });
         this._json(res, 200, { ok: true, changed: !!changed, frameComplete: after.frameComplete });
+    }
+
+    // Batch input (latency fix 2026-11-09): one bridge call executes a
+    // whole list of actions server-side and returns once. Before this,
+    // typing N characters cost N separate assistant->bridge round trips
+    // (each ~2 s over a fresh SSH exec, plus up to 3 s change-wait) — a
+    // 5-char string could take 12-25 s. A batch costs one round trip.
+    // Guards are identical to the single routes: assistant role, session
+    // ownership, controlEnabled 409 (P5 gate — still locked until 0d
+    // passes), live session, not disabled. Actions are validated up
+    // front: a bad action rejects the whole batch before anything is
+    // emitted. One bounded change-wait at the end (waitMs, default 500,
+    // clamp 0..2000); `changed` means "changed within that wait".
+    async _routeBatch(req, res, id) {
+        const a = this._auth(req, ['assistant']);
+        if (!a.ok) return this._err(res, a.code, a.error);
+        const sess = this._getSession(id);
+        if (!sess) return this._err(res, 404, 'session-not-found');
+        if (sess.tokenId !== a.rec.id) return this._err(res, 403, 'session-owned-by-other-token');
+        if (!this.cfg.controlEnabled) return this._err(res, 409, 'control-disabled', { reason: 'P5 gate: 0d has not passed' });
+        if (sess.state !== 'live') return this._err(res, 409, 'session-not-live', { state: sess.state });
+        if (this._isDisabled()) return this._err(res, 503, 'bridge-disabled');
+        let body;
+        try { body = await this._readBody(req); } catch (e) { return this._err(res, 400, e.message); }
+        const kvm = sess.kvm;
+        if (!kvm || !kvm.input) return this._err(res, 502, 'no-input-channel');
+        const actions = body.actions;
+        if (!Array.isArray(actions) || actions.length < 1 || actions.length > 100) {
+            return this._err(res, 400, 'bad-batch-actions', { detail: 'actions must be an array of 1..100 items' });
+        }
+        const waitMs = body.waitMs == null ? 500 : Math.max(0, Math.min(2000, Math.floor(Number(body.waitMs) || 0)));
+        // Validate everything first: a bad item rejects the batch before
+        // any input is emitted (no partial execution).
+        const plan = [];
+        for (let i = 0; i < actions.length; i++) {
+            const p = this._validateBatchAction(actions[i]);
+            if (!p) return this._err(res, 400, 'bad-batch-action', { index: i });
+            plan.push(p);
+        }
+        const changeP = kvm.waitChange(null, 2000);
+        for (const p of plan) this._emitBatchAction(kvm, p);
+        const changed = await Promise.race([changeP, sleep(waitMs)]);
+        const after = kvm.snapshot();
+        this._touch(sess);
+        let mouseN = 0, keyN = 0;
+        for (const p of plan) {
+            if (p.counter === 'mouse') {
+                sess.counters.mouse++; mouseN++;
+                const zone = zoneOf(p.x, p.y, kvm.screenW, kvm.screenH);
+                this.audit.append('mouse', { sessionId: id, ...mouseDetail(zone, p.kind), changed: !!changed });
+                if (sess.replay) sess.replay.recordAction('mouse', { action: p.kind, zone, changed: !!changed });
+            } else {
+                sess.counters.key++; keyN++;
+                const printable = p.kind === 'unicode';
+                const name = p.kind === 'tap' ? ('vk:' + p.vk) : p.kind;
+                this.audit.append('key', { sessionId: id, ...keyDetail(name, { printable }), changed: !!changed });
+                if (sess.replay) sess.replay.recordAction('key', { kind: p.kind, changed: !!changed });
+            }
+        }
+        this.audit.append('batch', { sessionId: id, actions: plan.length, mouse: mouseN, key: keyN, changed: !!changed });
+        this._json(res, 200, { ok: true, changed: !!changed, frameComplete: after.frameComplete, frameHash: after.hash, actions: plan.length, mouse: mouseN, key: keyN });
+    }
+
+    // Validate one batch action into an executable plan step, or null.
+    // Mirrors the parameter checks of _routeMouse/_routeKey exactly.
+    _validateBatchAction(act) {
+        if (!act || typeof act !== 'object') return null;
+        const kind = String(act.kind || '');
+        if (kind === 'move' || kind === 'down' || kind === 'up' || kind === 'click') {
+            const x = Number(act.x), y = Number(act.y);
+            const button = String(act.button || 'left');
+            if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || (button !== 'left' && button !== 'right')) return null;
+            return { kind, x, y, button, counter: 'mouse' };
+        }
+        if (kind === 'tap') {
+            if (!Number.isInteger(act.vk)) return null;
+            return { kind, vk: act.vk, extended: !!act.extended, counter: 'key' };
+        }
+        if (kind === 'combo') {
+            if (!Array.isArray(act.modifiers) || !Number.isInteger(act.vk)) return null;
+            return { kind, modifiers: act.modifiers, vk: act.vk, counter: 'key' };
+        }
+        if (kind === 'unicode') {
+            if (typeof act.char !== 'string' || act.char.length !== 1) return null;
+            return { kind, char: act.char, counter: 'key' };
+        }
+        return null;
+    }
+
+    // Emit one validated batch step through the KVM input channel.
+    _emitBatchAction(kvm, p) {
+        if (p.kind === 'move') { kvm.input.move(p.x, p.y); return; }
+        const btnDown = p.button === 'right' ? 0x08 : 0x02;
+        const btnUp = p.button === 'right' ? 0x10 : 0x04;
+        if (p.kind === 'down') { kvm.input.down(btnDown, p.x, p.y); return; }
+        if (p.kind === 'up') { kvm.input.up(btnUp, p.x, p.y); return; }
+        if (p.kind === 'click') { kvm.input.click(p.x, p.y, btnDown, btnUp); return; }
+        if (p.kind === 'tap') { kvm.input.keyTap(p.vk, { extended: p.extended }); return; }
+        if (p.kind === 'combo') { kvm.input.keyCombo(p.modifiers, p.vk); return; }
+        if (p.kind === 'unicode') { kvm.input.keyUnicodeChar(p.char); return; }
     }
 
     async _routeText(req, res, id) {
