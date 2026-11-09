@@ -33,10 +33,16 @@ let manifest = {
   size: payload.length
 };
 
+let badJson = false, redirectLoop = false, slowMs = 0;
+let lastManifestUrl = '';
 const server = http.createServer((req, res) => {
-  if (req.url === '/release.json') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(manifest));
+  if (req.url.startsWith('/release.json')) {
+    lastManifestUrl = req.url;
+    if (redirectLoop) { res.writeHead(302, { Location: '/release.json' }); res.end(); return; }
+    if (badJson) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('not json{'); return; }
+    const send = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(manifest)); };
+    if (slowMs) { setTimeout(send, slowMs); return; }
+    send();
   } else if (req.url === '/QFRemote-Setup-v9.9.9.exe') {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length });
     // 分片慢发，让进度回调能多次触发
@@ -120,6 +126,33 @@ const server = http.createServer((req, res) => {
     manifest = h3base;
     const h3 = await updater.fetchManifest();
     result.cases.H_minUsable = { withLine: h1.minUsable, bogus: h2.minUsable, absent: h3.minUsable, pass: h1.minUsable === '2.4.2' && h2.minUsable === null && h3.minUsable === null };
+
+    // I（2.4.5 W-19）：重定向循环 A->A 直接拒绝，不许无限递归
+    redirectLoop = true;
+    let iErr = null;
+    try { await updater.fetchManifest(); } catch (e) { iErr = e.message; }
+    redirectLoop = false;
+    result.cases.I_redirectLoop = { error: iErr, pass: !!iErr && iErr.includes('重定向次数过多') };
+
+    // J（2.4.5 W-26）：清单解析失败时 healReport 保留，下次回带；成功后清掉
+    updater.setHealReport('dns-fail');
+    badJson = true;
+    let jErr = null;
+    try { await updater.fetchManifest(); } catch (e) { jErr = e.message; }
+    badJson = false;
+    const j1 = await updater.fetchManifest();
+    const j1Url = lastManifestUrl;
+    const j2 = await updater.fetchManifest();
+    const j2Url = lastManifestUrl;
+    result.cases.J_healReport_kept = { firstErr: jErr, firstUrl: j1Url, secondUrl: j2Url, pass: !!jErr && j1 && j1Url.includes('?heal=dns-fail') && !j2Url.includes('?heal=') };
+
+    // K（2.4.5 W-26）：checkForUpdate 超时透传，不再吞成默认 8 秒
+    slowMs = 3000;
+    const kT0 = Date.now();
+    const k = await updater.checkForUpdate('1.0.3', 500);
+    const kMs = Date.now() - kT0;
+    slowMs = 0;
+    result.cases.K_checkTimeout_passthrough = { available: k.available, error: k.error, ms: kMs, pass: k.available === false && !!k.error && k.error.includes('连接超时') && kMs < 2500 };
 
     result.pass = Object.values(result.cases).every(c => c.pass);
   } catch (e) {

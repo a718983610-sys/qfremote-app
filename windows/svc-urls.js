@@ -20,6 +20,20 @@ const PRODUCT_JSON_URL = 'https://qfremote.top/product.json';
 // 正式 Web 基座。临时隧道地址不得作为生产兜底。
 const PROD_WEB_BASE = 'https://app.qfremote.top';
 
+// W-20：服务地址主机名白名单——只接受 qfremote.top 及其子域的 https 地址。
+// product.json 被控或 DNS 劫持到仿冒站时，服务地址不得被指到任意 https 源
+// （否则壳内会话 cookie 会被送到攻击者手里）。兜底值本身即白名单内。
+function isAllowedSvcHost(v) {
+  if (typeof v !== 'string' || !v) return false;
+  let host = '';
+  try { host = new URL(v).hostname.toLowerCase(); } catch (e) { return false; }
+  return host === 'qfremote.top' || host.endsWith('.qfremote.top');
+}
+
+function isTrustedSvcUrl(v) {
+  return isHttpsUrl(v) && isAllowedSvcHost(v);
+}
+
 const FALLBACKS = {
   forumUrl: PROD_WEB_BASE + '/forum',
   registerUrl: PROD_WEB_BASE + '/register',
@@ -36,12 +50,20 @@ function isHttpsUrl(v) {
 
 function stripSlash(v) { return String(v).replace(/\/+$/, ''); }
 
-// 从 product.json 原始对象里挑出合规的 web.* 地址（不合规的键直接丢弃）
-function parseProductJson(json) {
+// 从 product.json 原始对象里挑出合规的 web.* 地址（不合规的键直接丢弃）。
+// W-20：只认 https 且主机在白名单内；被拒的地址经 onRejected 回调留痕
+// （main.js 接 bootLog('svc-urls.rejected-host')，绝不写完整地址进日志？
+// 地址本身即服务地址、无凭据，可记主机名；onRejected 只收主机名）。
+function parseProductJson(json, onRejected) {
   const out = {};
   if (!json || typeof json !== 'object' || !json.web || typeof json.web !== 'object') return out;
   for (const k of KEYS) {
-    if (isHttpsUrl(json.web[k])) out[k] = stripSlash(json.web[k]);
+    const v = json.web[k];
+    if (typeof v === 'string' && v && isHttpsUrl(v) && !isAllowedSvcHost(v)) {
+      try { if (onRejected) onRejected(new URL(v).hostname); } catch (e) { /* ignore */ }
+      continue;
+    }
+    if (isTrustedSvcUrl(v)) out[k] = stripSlash(v);
   }
   return out;
 }
@@ -77,22 +99,27 @@ function createSvcUrls(opts) {
   const fetchJson = o.fetchJson || ((url) => defaultFetchJson(url, o.clientVersion));
   const loadCache = o.loadCache || (() => null);
   const saveCache = o.saveCache || (() => {});
+  const onRejected = o.onRejected || null;
   let resolved = Object.assign({}, FALLBACKS);
-  // 先用缓存垫底（进程刚起来、还没拉到新值时也有上次的好地址可用）
+  // 先用缓存垫底（进程刚起来、还没拉到新值时也有上次的好地址可用）。
+  // W-20：缓存里的地址也要过白名单，中毒缓存不得复活。
   try {
     const c = loadCache();
     if (c && typeof c === 'object') {
-      for (const k of KEYS) if (isHttpsUrl(c[k])) resolved[k] = stripSlash(c[k]);
+      for (const k of KEYS) if (isTrustedSvcUrl(c[k])) resolved[k] = stripSlash(c[k]);
     }
   } catch (e) { /* ignore */ }
 
   async function refresh() {
     try {
       const json = await fetchJson(PRODUCT_JSON_URL);
-      const fresh = parseProductJson(json);
+      const fresh = parseProductJson(json, onRejected);
       if (Object.keys(fresh).length) {
         resolved = Object.assign({}, resolved, fresh);
-        try { saveCache(Object.assign({}, resolved)); } catch (e) { /* ignore */ }
+        // W-20：落盘前再校验一次白名单（resolved 含兜底，兜底本身在白名单内）。
+        const safe = {};
+        for (const k of KEYS) if (isTrustedSvcUrl(resolved[k])) safe[k] = resolved[k];
+        try { saveCache(Object.assign({}, safe)); } catch (e) { /* ignore */ }
       }
       return { ok: Object.keys(fresh).length > 0, resolved: Object.assign({}, resolved) };
     } catch (e) {
@@ -136,4 +163,4 @@ function createSvcUrls(opts) {
   return { refresh, get, all, pointsApi, adminApi, adminLoginUrl, forumApi, forumSsoLoginUrl, extOrigin, homeUrl, purchaseUrl, licenseStatusUrl, rebindUrl, appealUrl, supportUrl, licenseApi };
 }
 
-module.exports = { createSvcUrls, parseProductJson, isHttpsUrl, PRODUCT_JSON_URL, FALLBACKS };
+module.exports = { createSvcUrls, parseProductJson, isHttpsUrl, isAllowedSvcHost, isTrustedSvcUrl, PRODUCT_JSON_URL, FALLBACKS };

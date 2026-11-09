@@ -124,12 +124,20 @@
   res.textContent = '点「立即更新」下载新版本' + sizeTxt + '；安装完成后重新打开即为新版本。';
 
   let phase = 'ready';
+  // W-12②：下载中 60 秒无进度即放行——显示「先进入软件」按钮（不再只等失败）。
+  let lastProgressAt = 0;
+  setInterval(() => {
+    if (phase === 'downloading' && lastProgressAt && Date.now() - lastProgressAt > 60000) {
+      document.getElementById('releaseBtn').classList.remove('hidden');
+    }
+  }, 1000);
   function render(s) {
     if (!s) return;
     phase = s.phase;
     if (s.phase === 'downloading') {
       btn.disabled = true; btn.textContent = '正在下载…';
       bar.classList.add('show');
+      lastProgressAt = Date.now();
     } else if (s.phase === 'downloaded') {
       btn.disabled = false; btn.textContent = '安装更新并重启';
       fill.style.width = '100%';
@@ -143,12 +151,13 @@
       res.innerHTML = '<span class="bad">下载失败</span>：' + (s.error || '未知原因') + '请点「重新下载」重试；也可以先进入软件，下次打开时再更新。';
       document.getElementById('releaseBtn').classList.remove('hidden');
     }
-    if (s.phase !== 'failed') document.getElementById('releaseBtn').classList.add('hidden');
+    if (s.phase === 'downloaded' || s.phase === 'installing') document.getElementById('releaseBtn').classList.add('hidden');
   }
   document.getElementById('releaseBtn').addEventListener('click', () => { if (window.qfForce && qfForce.release) qfForce.release(); });
   qfForce.onState(render);
   qfForce.getState().then(render).catch(() => {});
   qfForce.onProgress((p) => {
+    lastProgressAt = Date.now();
     if (p.percent != null) {
       fill.style.width = p.percent + '%';
       res.textContent = '正在下载更新包… ' + p.percent + '%（' + fmtSize(p.received) + (p.total ? ' / ' + fmtSize(p.total) : '') + '）';
@@ -161,6 +170,7 @@
     btn.disabled = true; btn.textContent = '正在下载…';
     bar.classList.add('show'); fill.style.width = '0%';
     res.textContent = '正在下载更新包…';
+    lastProgressAt = Date.now();
     qfForce.download();
   });
   // 这一页没有关闭按钮、正常路径没有跳过：Esc 不关窗；唯一出口是下载失败后的「先进入软件」（站长 2026-10-25 令：异常必须放行）

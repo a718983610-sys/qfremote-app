@@ -161,7 +161,7 @@
         const meta = document.createElement('div'); meta.className = 'meta';
         meta.textContent = d.host || d.desc || '';
         const st = document.createElement('div'); st.className = 'st';
-        st.textContent = d.online ? '在线' : '离线';
+        st.textContent = d.status === 'connecting' ? '连接中' : (d.online ? '在线' : '离线');
         card.appendChild(row1); card.appendChild(meta); card.appendChild(st);
         card.addEventListener('click', () => { selectedId = d.id; render(); });
         grid.appendChild(card);
@@ -175,7 +175,7 @@
       const bits = [];
       if (sel.host) bits.push('主机 ' + sel.host);
       if (sel.desc) bits.push(sel.desc);
-      bits.push(sel.online ? '在线' : '离线');
+      bits.push(sel.status === 'connecting' ? '连接中' : (sel.online ? '在线' : '离线'));
       els.dMeta.textContent = bits.join(' · ');
       els.actConnect.disabled = !sel.online;
       els.actFiles.disabled = !sel.online;

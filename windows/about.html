@@ -138,12 +138,16 @@
     <div class="row"><span class="k">版本</span><span class="v" id="rVer">—</span></div>
     <div class="row"><span class="k">构建日期</span><span class="v" id="rDate">—</span></div>
     <div class="row"><span class="k">服务器地址</span><span class="v" id="rUrl">—</span></div>
+    <div class="row"><span class="k">开机自启</span><span class="v" id="rAutolaunch">—</span></div>
     <div class="row"><span class="k">使用时长</span><span class="v" id="rDuration">—</span></div>
     <div class="row"><span class="k">我的积分</span><span class="v" id="rPoints">—</span></div>
   </div>
 
   <div class="chk"><button class="btn" id="check">检查服务器状态</button></div>
   <div class="res" id="res"></div>
+  <div class="chk"><button class="btn ghost" id="autolaunchBtn" style="display:none;">关闭开机自启</button></div>
+  <div class="chk"><button class="btn ghost" id="healRetryBtn">重新尝试修复本机远程服务</button></div>
+  <div class="res" id="healRes"></div>
 
   <!-- 付费与激活（2.3.1）：数据与 /license/api/me 同源，取不到显示诚实错误态 -->
   <div class="card" id="licTrial" style="display:none;">
@@ -228,6 +232,29 @@
   document.getElementById('close').addEventListener('click', () => qfAbout.close());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') qfAbout.close(); });
   qfAbout.onTheme(applyTheme);
+
+  // W-23：开机自启明示＋一键关闭（口径待站长确认：默认保持开启）。
+  async function refreshAutolaunch() {
+    try {
+      const on = await qfAbout.getAutoLaunch();
+      document.getElementById('rAutolaunch').textContent = on ? '已设为开机自启' : '未设开机自启';
+      document.getElementById('autolaunchBtn').style.display = on ? '' : 'none';
+    } catch (e) { document.getElementById('rAutolaunch').textContent = '—'; }
+  }
+  document.getElementById('autolaunchBtn').addEventListener('click', async () => {
+    await qfAbout.setAutoLaunch(false);
+    refreshAutolaunch();
+  });
+  // W-14：手动重试自愈（不受每日 3 次封顶限）。
+  document.getElementById('healRetryBtn').addEventListener('click', async () => {
+    const r = document.getElementById('healRes');
+    r.textContent = '正在尝试修复…';
+    try {
+      const ret = await qfAbout.retryHeal();
+      r.textContent = (ret && ret.ok) ? ('修复结果：' + (ret.outcome || 'unknown')) : '修复未完成，请稍后再试。';
+    } catch (e) { r.textContent = '修复未完成，请稍后再试。'; }
+  });
+  refreshAutolaunch();
 
   const btn = document.getElementById('check');
   const res = document.getElementById('res');

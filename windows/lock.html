@@ -175,8 +175,13 @@
     stateBox.appendChild(div);
     if (kind === 'login') {
       const b = document.createElement('button');
-      b.className = 'btn'; b.textContent = '关闭面板';
-      b.addEventListener('click', () => qfLock.close());
+      b.className = 'btn'; b.textContent = '去登录';
+      b.addEventListener('click', () => qfLock.goLogin());
+      stateBox.appendChild(b);
+    } else if (kind === 'empty') {
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = '打开设备页';
+      b.addEventListener('click', () => qfLock.openDevices());
       stateBox.appendChild(b);
     } else if (kind === 'retry') {
       const b = document.createElement('button');
@@ -211,7 +216,7 @@
       st.textContent = d.locked ? '已锁定' : '未锁定';
       row.appendChild(nm); row.appendChild(st);
 
-      const manageable = d.owner && d.component;
+      const manageable = d.owner && d.component === true;
       if (manageable) {
         const sw = document.createElement('button');
         sw.className = 'sw' + (d.locked ? ' on' : '');
@@ -308,14 +313,52 @@
         card.appendChild(row);
         const note = document.createElement('div');
         note.className = 'note';
-        note.textContent = !d.component
-          ? '这台电脑尚未安装本机锁组件，暂无法使用隐私锁。'
-          : '仅设备所有者可管理这台电脑的隐私锁。';
-        card.appendChild(note);
+        // W-11：三因拆句，不再把「未安装/离线/未登记/未知」混成一句。
+        if (d.component === false) {
+          note.textContent = '这台电脑尚未安装本机锁组件，暂无法使用隐私锁。';
+          card.appendChild(note);
+          if (d.isLocal) {
+            const b = document.createElement('button');
+            b.className = 'btn'; b.textContent = '立即安装锁组件';
+            b.addEventListener('click', async () => {
+              if (busy) return;
+              busy = true; b.disabled = true;
+              const r = await qfLock.installComponent();
+              busy = false; b.disabled = false;
+              if (r && r.ok) { say('<span class="ok">已开始安装锁组件，请稍后刷新查看。</span>'); load(); }
+              else say('<span class="bad">' + esc((r && r.error) || '安装失败，请稍后再试。') + '</span>', true);
+            });
+            card.appendChild(b);
+          }
+        } else if (d.online === false) {
+          note.textContent = '设备离线，暂无法管理隐私锁。';
+          card.appendChild(note);
+          if (d.isLocal) {
+            const b = document.createElement('button');
+            b.className = 'btn'; b.textContent = '一键修复';
+            b.addEventListener('click', async () => {
+              if (busy) return;
+              busy = true; b.disabled = true;
+              const r = await qfLock.repair();
+              busy = false; b.disabled = false;
+              const okOutcomes = ['fixed', 'already_correct', 'service_started', 'service_restarted', 'restarted_stale_config', 'no_agent'];
+              if (r && r.ok && okOutcomes.indexOf(r.outcome) >= 0) say('<span class="ok">修复完成，请稍后刷新查看设备状态。</span>');
+              else if (r && r.ok) say('<span class="bad">修复未完成（' + esc(r.outcome || 'unknown') + '），请稍后再试。</span>', true);
+              else say('<span class="bad">' + esc((r && r.error) || '修复未完成，请稍后再试。') + '</span>', true);
+            });
+            card.appendChild(b);
+          }
+        } else if (d.component === null || d.component === undefined) {
+          note.textContent = '锁组件状态未知，请稍后重试。';
+          card.appendChild(note);
+        } else {
+          note.textContent = '仅设备所有者可管理这台电脑的隐私锁。';
+          card.appendChild(note);
+        }
       }
       listEl.appendChild(card);
     });
-    if (!devices.length) renderState('retry', '暂无可用设备。当前账号下没有可管理的隐私锁设备；若设备已安装隐私锁组件，请确认它保持在线，或在账号变更过登录名后稍后重试。');
+    if (!devices.length) renderState('empty', '该账号下未登记设备。可以在设备页查看或登记设备。');
   }
 
   async function load() {

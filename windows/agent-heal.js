@@ -1,6 +1,6 @@
 'use strict';
 /*
- * QFRemote 本机 agent 自愈 · 客户端启动兜底（2.4.4）
+ * QFRemote 本机 agent 自愈 · 客户端启动兜底（2.4.5）
  * ================================================================
  * 背景（2.4.3 真机验收失败，2026-11-09）：
  *   2.4.3 只在安装器装后段做自愈。站长笔记本上升 2.4.3 后仍离线，
@@ -8,25 +8,30 @@
  *   安装器预检悄悄跳过（.msh 不在预期路径、或误判已正确），
  *   runas 也没弹过 UAC。失败全程零留痕，事后无从查起。
  *
- * 本模块把自愈搬到 App 启动时（安装器之外第二道防线）：
- *   1. 启动后异步自检本机 .msh（只读，不拦启动）：地址过期、
- *      服务停着、或文件比正在跑的 agent 进程还新（文件被外力改过、
- *      服务没重启）时，提权拉起 qf-agent-heal.ps1（弹一次 UAC）。
- *   2. .msh 定位兜底：Program Files → Program Files (x86) →
- *      服务 ImagePath 指向的目录 → ProgramData，找不到不弹提示。
- *   3. 失败留痕：本地日志（与 PS1 同一份 %TEMP%\qf-agent-heal.log）
- *      ＋ 更新检查回带（下次取清单时 ?heal=<结果>，进 Caddy 访问日志，
- *      服务端可查）＋ 人话提示框（不含报错码）。
- *   4. 每天最多提权尝试 3 次（防反复弹 UAC）；成功或换版本后清零。
+ * 2.4.5 重设计（任务书 D 项＋深查 W-04）：
+ *   自愈判官只认服务端一个接口 GET /api/device/presence?nodeid=，
+ *   出参 {ok, code, nodeid, name, online, fresh, lastAgentPong,
+ *   lastAgentPongAgeMs, serverTime}，code 为 ONLINE/STALE/OFFLINE/
+ *   NOT_FOUND/TIMEOUT/UNKNOWN。already_correct 只有 code:ONLINE 且
+ *   fresh:true 才允许，否则报 unverified，绝不静默退出。
+ *   阶梯：本地四查 → DNS → TCP(:8443) → TLS(8443) → 服务端确认，
+ *   每级失败给分类码；每动一次修复回问服务端，最多 3 轮，轮轮写
+ *   bootLog＋%TEMP%\qf-agent-heal.log。判官触发：年龄>180 秒且
+ *   两次查询结果一致才认定离线/陈旧。
  *
  * 本文件刻意不依赖 Electron：纯逻辑可直接 node 单测；main.js 只负责
- * 在启动后调用 checkAgentState / runHealElevated 并接提示框与设置落盘。
+ * 在启动后调用 checkAgentState / runHealLadder 并接提示框与设置落盘。
  * 提权真路（UAC＋PS1＋服务重启）本机无 Windows/pwsh 跑不了，
  * 与 2.4.3 同口径留站长真机验收，测试只覆盖纯逻辑与命令拼装。
+ * 2.4.5 新增 SYSTEM helper（QFSysHelper 服务，见 syshelper/）后，
+ * 提权优先走 helper 命名管道（零 UAC），helper 不可用时回落 runas。
  */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const dns = require('dns');
+const net = require('net');
+const tls = require('tls');
 const childProcess = require('child_process');
 
 const TARGET = 'wss://app.qfremote.top:8443/agent.ashx';
@@ -34,8 +39,39 @@ const SERVICE_NAME = 'Mesh Agent';
 const HEAL_LOG_NAME = 'qf-agent-heal.log';
 const HEAL_SCRIPT_NAME = 'qf-agent-heal.ps1';
 const MAX_ATTEMPTS_PER_DAY = 3;
-// 上报给服务端的取值（白名单，日志与清单回带只认这些；其余一律记 unknown）
-const REPORTABLE = ['fixed', 'denied', 'service_restart_failed', 'unknown'];
+const PRESENCE_HOST = 'app.qfremote.top';
+const PRESENCE_PORT = 8443;
+// 上报给服务端的取值（白名单，日志与清单回带只认这些；其余一律记 unknown）。
+// 2.4.5：扩到全部阶梯分类码（W-04/W-14），no_agent 也回带。
+const REPORTABLE = [
+  'fixed', 'already_correct', 'service_started', 'service_restarted',
+  'restarted_stale_config', 'no_agent', 'denied', 'service_restart_failed',
+  'unknown', 'unverified', 'msh_write_failed',
+  'dns-fail', 'tcp-fail', 'tls-fail', 'server-unconfirmed',
+  'service-pending', 'stale-config', 'msh-wrong-target',
+  'service-stopped', 'service-missing', 'msh-missing'
+];
+// 本地四查＋阶梯的共享分类码表（三处防线共用：JS / PS1 Detect / 安装器）。
+// PS1 与安装器须与本表逐字一致（见 agent-heal-test.js G 组静态断言）。
+const HEAL_CODES = {
+  LOCAL_OK: 'local-ok',
+  SERVICE_MISSING: 'service-missing',
+  SERVICE_STOPPED: 'service-stopped',
+  SERVICE_PENDING: 'service-pending',
+  MSH_MISSING: 'msh-missing',
+  MSH_WRONG_TARGET: 'msh-wrong-target',
+  STALE_CONFIG: 'stale-config',
+  DNS_FAIL: 'dns-fail',
+  TCP_FAIL: 'tcp-fail',
+  TLS_FAIL: 'tls-fail',
+  SERVER_UNCONFIRMED: 'server-unconfirmed',
+  ONLINE: 'online',
+  NOT_FOUND: 'not-found'
+};
+// 判官触发阈值（任务书定案）：fresh ≤120 秒、STALE 120–300 秒、
+// OFFLINE >300 秒或 conn=0；自愈判官触发 180 秒＋两次查询一致。
+const FRESH_MS = 120000;
+const JUDGE_TRIGGER_MS = 180000;
 
 // ---------- 纯逻辑（可直接单测） ----------
 
@@ -74,6 +110,7 @@ function resolveMshFromImagePath(imagePath) {
 
 // 解析 `sc query "Mesh Agent"` 输出：{ exists, status }。
 // 服务不存在时 sc 以 1060 报错，调用方按错误码处理；此处只解析文本。
+// 中文 Windows 上 STATE 行仍为英文（sc 输出不本地化状态名，真机待核实，见 W-06）。
 function parseScQuery(text) {
   const t = String(text || '');
   const m = t.match(/STATE\s*:\s*\d+\s+(\S+)/i);
@@ -91,15 +128,69 @@ function parseProcessStartTime(text) {
 // 决策：本次启动是否需要拉起提权修复。
 // msh: { found, meshServer }；service: { exists, status }；
 // procStart/mshMtime: Date|null（取不到按 null＝该分支不触发）。
+// W-06：START_PENDING/STOP_PENDING 不再当正常放行，判 service-pending。
 function decideAction(o) {
   const msh = o.msh || {};
   const svc = o.service || {};
   if (!svc.exists) return 'none'; // 无 agent 服务：修文件也无意义，不弹提示
+  if (svc.status === 'START_PENDING' || svc.status === 'STOP_PENDING') return 'service-pending';
   if (!msh.found) return 'fix'; // 服务在、文件不在候选路径：让 PS1 按 ImagePath 找
   if (msh.meshServer !== TARGET) return 'fix';
   if (svc.status === 'STOPPED') return 'start-service';
   if (o.mshMtime && o.procStart && o.mshMtime > o.procStart) return 'restart-stale';
   return 'none';
+}
+
+// 本地四查的共享分类码（JS / PS1 Detect / 安装器三处同一张表）：
+// 由 decideAction 映射；'none' 且服务在、文件对 → local-ok。
+function localCode(state) {
+  const s = state || {};
+  const svc = s.service || {};
+  const msh = s.msh || {};
+  if (!svc.exists) return HEAL_CODES.SERVICE_MISSING;
+  const a = decideAction(s);
+  if (a === 'service-pending') return HEAL_CODES.SERVICE_PENDING;
+  if (a === 'start-service') return HEAL_CODES.SERVICE_STOPPED;
+  if (a === 'restart-stale') return HEAL_CODES.STALE_CONFIG;
+  if (a === 'fix') return msh.found ? HEAL_CODES.MSH_WRONG_TARGET : HEAL_CODES.MSH_MISSING;
+  return HEAL_CODES.LOCAL_OK;
+}
+
+// 服务端 presence 出参解析（唯一判官口径，见文件头）：
+// 输入服务端 JSON（或 null），返回 { code, online, fresh, ageMs, verdict }，
+// verdict ∈ online | stale | offline | not-found | unknown。
+// already_correct 只有 verdict==='online' 才允许。
+function parsePresenceResponse(json) {
+  if (!json || typeof json !== 'object') return null;
+  const code = typeof json.code === 'string' ? json.code.toUpperCase() : 'UNKNOWN';
+  let ageMs = null;
+  if (typeof json.lastAgentPongAgeMs === 'number') ageMs = json.lastAgentPongAgeMs;
+  else if (typeof json.lastAgentPong === 'number' && typeof json.serverTime === 'number') {
+    ageMs = json.serverTime - json.lastAgentPong;
+  }
+  const fresh = json.fresh === true && (ageMs === null || ageMs <= FRESH_MS);
+  const online = json.online === true;
+  let verdict = 'unknown';
+  if (code === 'ONLINE' && fresh && online) verdict = 'online';
+  else if (code === 'STALE') verdict = 'stale';
+  else if (code === 'OFFLINE') verdict = 'offline';
+  else if (code === 'NOT_FOUND') verdict = 'not-found';
+  else verdict = 'unknown';
+  return { code, online, fresh, ageMs, verdict };
+}
+
+// 判官触发判定：年龄超过 180 秒且两次查询 verdict 一致才认定。
+// queries: 最近两次 parsePresenceResponse 的结果（数组，旧→新）。
+function judgeTriggered(queries) {
+  if (!Array.isArray(queries) || queries.length < 2) return false;
+  const a = queries[queries.length - 2];
+  const b = queries[queries.length - 1];
+  if (!a || !b) return false;
+  if (a.verdict === 'online' || b.verdict === 'online') return false;
+  if (a.verdict !== b.verdict) return false;
+  if (a.verdict === 'unknown' || a.verdict === 'not-found') return false;
+  const age = (b.ageMs != null) ? b.ageMs : a.ageMs;
+  return age != null && age > JUDGE_TRIGGER_MS;
 }
 
 // 当天提权尝试守门：state 来自设置落盘 { lastAttemptISO, attemptsToday,
@@ -117,9 +208,14 @@ function shouldAttempt(state, now, version) {
 
 // 提权拉起命令（纯拼装，可单测）：外层 powershell 不提权，
 // 内层 Start-Process -Verb RunAs 弹一次 UAC 拉起 PS1。
-function buildElevatedCommand(ps1Path) {
-  const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','" +
-    String(ps1Path).replace(/'/g, "''") + "' -Verb RunAs -WindowStyle Hidden";
+function buildElevatedCommand(ps1Path, extraArgs) {
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    String(ps1Path).replace(/'/g, "''")];
+  if (Array.isArray(extraArgs)) {
+    for (const a of extraArgs) args.push(String(a).replace(/'/g, "''"));
+  }
+  const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList " +
+    args.map((a) => "'" + a + "'").join(',') + " -Verb RunAs -WindowStyle Hidden";
   return {
     command: 'powershell.exe',
     args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner]
@@ -148,6 +244,7 @@ function readHealLogText() {
 // 用途：安装器刚拉起 PS1、App 启动兜底别跟着再弹一次 UAC；
 // 下次启动时 PS1 已写 RESULT，守卫自动放行。
 // now 注入便于单测；无日志／无启动行／已出结果 → false。
+// W-24：时间戳统一本地时间解析（JS 写日志也用本地时间，见 appendHealLog）。
 function isHealInProgress(logText, now) {
   const n = now instanceof Date ? now : new Date();
   const lines = String(logText || '').split(/\r?\n/);
@@ -168,10 +265,16 @@ function isHealInProgress(logText, now) {
 }
 
 // 人话提示（失败才有文案；成功／无需修复返回 null＝不打扰）。
+// W-13：unknown 不再让用户重启电脑背锅；unverified 给 server 端口径文案。
 function healOutcomeMessage(outcome) {
   if (outcome === 'denied') return '远程服务配置没修好：刚才的确认框点了否。下次打开软件时还会再问一次，点“是”就能修好。';
   if (outcome === 'service_restart_failed') return '本机远程服务配置改好了，但服务没重启起来，设备可能仍显示离线。重启一次电脑试试；如果还是离线，请联系客服。';
-  if (outcome === 'unknown') return '本机远程服务配置没修好，设备可能仍显示离线。重启一次电脑试试；如果还是离线，请联系客服。';
+  if (outcome === 'unknown') return '本机远程服务配置没修好，设备可能仍显示离线。下次打开软件时会再试一次；如果还是离线，请联系客服。';
+  if (outcome === 'unverified') return '本机远程服务看着正常，但服务器那边还没看到这台设备在线。请确认网络正常、稍后再试；如果一直离线，请联系客服。';
+  if (outcome === 'msh_write_failed') return '本机远程服务配置文件写不进去（可能是只读或权限不足），设备可能仍显示离线。请检查后重试，或联系客服。';
+  if (outcome === 'dns-fail') return '连不上服务器：域名解析失败，请检查本机网络或 DNS 后重试。';
+  if (outcome === 'tcp-fail') return '连不上服务器：网络不通（8443 端口），请检查本机网络或防火墙后重试。';
+  if (outcome === 'tls-fail') return '连不上服务器：安全连接失败，可能是证书或时间不对，请检查本机时间后重试。';
   return null;
 }
 
@@ -192,11 +295,85 @@ function healLogPath() {
   return path.join(os.tmpdir(), HEAL_LOG_NAME);
 }
 
+// W-24：日志时间戳统一本地时间（此前 JS 用 toISOString 的 UTC，与 PS1
+// 的本地时间差 8 小时）；行首来源标记 APP: 保留。
+function formatLocalTs(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
 function appendHealLog(line) {
   try {
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const ts = formatLocalTs(new Date());
     fs.appendFileSync(healLogPath(), ts + ' APP: ' + line + '\n');
   } catch (e) { /* ignore */ }
+}
+
+// ---------- 连通性探测（DNS → TCP → TLS，可注入假依赖单测） ----------
+
+function withTimeout(promise, ms, error) {
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(error || new Error('timeout')), ms); })
+  ]).then((v) => { clearTimeout(timer); return v; },
+    (e) => { clearTimeout(timer); throw e; });
+}
+
+function defaultLookup(host) {
+  return new Promise((resolve, reject) => {
+    dns.lookup(host, (err, address) => (err ? reject(err) : resolve(address)));
+  });
+}
+
+function defaultTcp(host, port) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, host);
+    sock.once('connect', () => { try { sock.destroy(); } catch (e) { /* ignore */ } resolve(true); });
+    sock.once('error', reject);
+  });
+}
+
+function defaultTls(host, port) {
+  return new Promise((resolve, reject) => {
+    const sock = tls.connect({ host, port, servername: host });
+    sock.once('secureConnect', () => {
+      const ok = !!sock.authorized;
+      const err = sock.authorizationError || null;
+      try { sock.destroy(); } catch (e) { /* ignore */ }
+      if (ok) resolve({ authorized: true });
+      else reject(new Error('CERT:' + (err && err.code ? err.code : 'NOT_AUTHORIZED')));
+    });
+    sock.once('error', reject);
+  });
+}
+
+// 阶梯探测：DNS → TCP(:8443) → TLS(8443, SNI=app.qfremote.top)。
+// 返回 { ok, stage: 'dns'|'tcp'|'tls'|'ok', code: null|'dns-fail'|
+// 'tcp-fail'|'tls-fail', detail }。deps 可注入 { lookup, tcp, tls, timeoutMs }。
+async function probeConnectivity(deps) {
+  const d = deps || {};
+  const timeoutMs = d.timeoutMs || 5000;
+  const lookup = d.lookup || defaultLookup;
+  const tcp = d.tcp || defaultTcp;
+  const tlsFn = d.tls || defaultTls;
+  try {
+    await withTimeout(Promise.resolve().then(() => lookup(PRESENCE_HOST)), timeoutMs, new Error('dns-timeout'));
+  } catch (e) {
+    return { ok: false, stage: 'dns', code: HEAL_CODES.DNS_FAIL, detail: (e && e.code) || (e && e.message) || 'dns-fail' };
+  }
+  try {
+    await withTimeout(Promise.resolve().then(() => tcp(PRESENCE_HOST, PRESENCE_PORT)), timeoutMs, new Error('tcp-timeout'));
+  } catch (e) {
+    return { ok: false, stage: 'tcp', code: HEAL_CODES.TCP_FAIL, detail: (e && e.code) || (e && e.message) || 'tcp-fail' };
+  }
+  try {
+    await withTimeout(Promise.resolve().then(() => tlsFn(PRESENCE_HOST, PRESENCE_PORT)), timeoutMs, new Error('tls-timeout'));
+  } catch (e) {
+    return { ok: false, stage: 'tls', code: HEAL_CODES.TLS_FAIL, detail: (e && e.code) || (e && e.message) || 'tls-fail' };
+  }
+  return { ok: true, stage: 'ok', code: null, detail: 'ok' };
 }
 
 // ---------- 运行时助手（Electron 侧调用，可注入假依赖单测） ----------
@@ -267,7 +444,9 @@ async function checkAgentState(deps) {
   } catch (e) {
     result.service = { exists: false, status: null };
   }
-  // 4. 只有可能需要动手时，才查 agent 进程启动时间（mtime 对比用）
+  // 4. 只有可能需要动手时，才查 agent 进程启动时间（mtime 对比用）。
+  // W-05：不再 Get-Process -First 1——改取服务 PID（Win32_Service.ProcessId）
+  // 再按 PID 取启动时间；服务未运行（ProcessId 为 0/空）时该分支直接跳过。
   const prelim = decideAction({
     msh: result.msh,
     service: result.service,
@@ -279,7 +458,7 @@ async function checkAgentState(deps) {
     try {
       const ps = await execFn('powershell.exe',
         ['-NoProfile', '-Command',
-         "(Get-Process -Name MeshAgent -ErrorAction SilentlyContinue | Select-Object -First 1).StartTime.ToString('o')"], {});
+         "(Get-Process -Id (Get-CimInstance Win32_Service -Filter \"Name='Mesh Agent'\").ProcessId -ErrorAction SilentlyContinue).StartTime.ToString('o')"], {});
       result.procStart = parseProcessStartTime(ps.stdout || '');
     } catch (e) { /* ignore */ }
   }
@@ -293,7 +472,9 @@ async function checkAgentState(deps) {
 }
 
 // 提权拉起 PS1 并等结果：
-//  - UAC 被拒：拉起器 stderr 含 canceled by the user → outcome 'denied'；
+//  - UAC 被拒：拉起器退出码 1223（ERROR_CANCELLED，最可靠）或 stderr 含
+//    英文 'canceled by the user' 或中文「用户取消/操作被用户取消」
+//    任一命中即 'denied'（W-13，中文系统实测原文待真机核实，1223 为主信号）；
 //  - 拉起成功：轮询日志等 RESULT 行（最长 90 秒），超时记 'unknown'。
 // 绝不抛错；返回 { outcome, denied }。
 async function runHealElevated(ps1Path, opts) {
@@ -304,7 +485,7 @@ async function runHealElevated(ps1Path, opts) {
   const timeoutMs = o.timeoutMs || 90000;
   let logBefore = '';
   try { logBefore = fs.readFileSync(logPath, 'utf8'); } catch (e) { logBefore = ''; }
-  const cmd = buildElevatedCommand(ps1Path);
+  const cmd = buildElevatedCommand(ps1Path, o.extraArgs);
   const outcome = await new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
@@ -318,8 +499,9 @@ async function runHealElevated(ps1Path, opts) {
     let errText = '';
     if (child.stderr) child.stderr.on('data', (d) => { errText += d; });
     child.on('error', () => finish({ outcome: 'unknown', denied: false }));
-    child.on('close', () => {
-      if (/canceled by the user/i.test(errText)) {
+    child.on('close', (code) => {
+      if (code === 1223 || /canceled by the user/i.test(errText) ||
+          /用户取消|操作被用户取消|操作已被用户取消/.test(errText)) {
         finish({ outcome: 'denied', denied: true });
         return;
       }
@@ -344,6 +526,105 @@ async function runHealElevated(ps1Path, opts) {
   return outcome;
 }
 
+// ---------- 自愈阶梯（W-04，deps 全可注入，单测不碰真网络/真提权） ----------
+// deps: {
+//   checkState: async () => checkAgentState() 结果,
+//   probeConnectivity: async () => probeConnectivity() 结果,
+//   queryPresence: async () => parsePresenceResponse() 结果或 null,
+//   runRepair: async (code) => { outcome }（提权拉起 PS1 或走 SYSTEM helper），
+//   log: (line) => void,
+//   maxRounds: number（默认 3）
+// }
+// 返回 { outcome, code, rounds }；outcome ∈ REPORTABLE。
+// already_correct 只有 presence verdict==='online' 才返回。
+async function runHealLadder(deps) {
+  const d = deps || {};
+  const log = d.log || (() => {});
+  const maxRounds = d.maxRounds || 3;
+  const checkState = d.checkState || checkAgentState;
+  const probeFn = d.probeConnectivity || probeConnectivity;
+  const queryPresence = d.queryPresence || (async () => null);
+  const runRepair = d.runRepair || (async () => ({ outcome: 'unknown' }));
+  let rounds = 0;
+
+  let state = await checkState();
+  let code = localCode(state);
+  log('ladder local code=' + code + ' action=' + (state.action || ''));
+  if (code === HEAL_CODES.SERVICE_MISSING) {
+    return { outcome: 'no_agent', code, rounds };
+  }
+  // 本地需修：最多 3 轮，每轮修完重查本地
+  while (code !== HEAL_CODES.LOCAL_OK && rounds < maxRounds) {
+    rounds++;
+    const r = await runRepair(code);
+    log('ladder repair round ' + rounds + ' code=' + code + ' outcome=' + (r && r.outcome));
+    if (r && r.outcome === 'denied') return { outcome: 'denied', code, rounds };
+    if (r && r.skipped) return { outcome: 'unverified', code, rounds };
+    state = await checkState();
+    code = localCode(state);
+    log('ladder local recheck code=' + code);
+  }
+  if (code !== HEAL_CODES.LOCAL_OK) {
+    return { outcome: 'unverified', code, rounds };
+  }
+  // 连通性阶梯：DNS → TCP → TLS
+  const conn = await probeFn();
+  log('ladder connectivity stage=' + conn.stage + ' code=' + (conn.code || 'ok'));
+  if (!conn.ok) {
+    if (conn.code === HEAL_CODES.DNS_FAIL) {
+      return { outcome: 'unverified', code: conn.code, rounds };
+    }
+    // TCP/TLS 失败：服务侧可能假死，重启一次服务再测一轮
+    if (rounds < maxRounds) {
+      rounds++;
+      const r = await runRepair(conn.code);
+      log('ladder repair round ' + rounds + ' code=' + conn.code + ' outcome=' + (r && r.outcome));
+      if (r && r.outcome === 'denied') return { outcome: 'denied', code: conn.code, rounds };
+      if (r && r.skipped) return { outcome: 'unverified', code: conn.code, rounds };
+      const conn2 = await probeFn();
+      log('ladder connectivity recheck stage=' + conn2.stage + ' code=' + (conn2.code || 'ok'));
+      if (!conn2.ok) return { outcome: 'unverified', code: conn2.code, rounds };
+    } else {
+      return { outcome: 'unverified', code: conn.code, rounds };
+    }
+  }
+  // 服务端确认：两次查询一致＋年龄>180 秒才认定离线/陈旧
+  const queries = [];
+  const p1 = await queryPresence();
+  if (!p1 || p1.verdict === 'unknown') {
+    return { outcome: 'unverified', code: HEAL_CODES.SERVER_UNCONFIRMED, rounds };
+  }
+  if (p1.verdict === 'online') return { outcome: 'already_correct', code: HEAL_CODES.ONLINE, rounds };
+  if (p1.verdict === 'not-found') {
+    return { outcome: 'unverified', code: HEAL_CODES.NOT_FOUND, rounds };
+  }
+  queries.push(p1);
+  log('ladder presence verdict=' + p1.verdict + ' code=' + p1.code + ' ageMs=' + p1.ageMs);
+  let lastCode = p1.code;
+  while (rounds < maxRounds) {
+    rounds++;
+    const r = await runRepair('presence-' + p1.verdict);
+    log('ladder repair round ' + rounds + ' presence=' + p1.verdict + ' outcome=' + (r && r.outcome));
+    if (r && r.outcome === 'denied') return { outcome: 'denied', code: lastCode, rounds };
+    if (r && r.skipped) return { outcome: 'unverified', code: lastCode, rounds };
+    const p2 = await queryPresence();
+    if (!p2 || p2.verdict === 'unknown') {
+      return { outcome: 'unverified', code: HEAL_CODES.SERVER_UNCONFIRMED, rounds };
+    }
+    if (p2.verdict === 'online') return { outcome: 'fixed', code: HEAL_CODES.ONLINE, rounds };
+    if (p2.verdict === 'not-found') {
+      return { outcome: 'unverified', code: HEAL_CODES.NOT_FOUND, rounds };
+    }
+    queries.push(p2);
+    log('ladder presence recheck verdict=' + p2.verdict + ' code=' + p2.code + ' ageMs=' + p2.ageMs);
+    lastCode = p2.code;
+    if (judgeTriggered(queries)) {
+      return { outcome: 'unverified', code: lastCode, rounds };
+    }
+  }
+  return { outcome: 'unverified', code: lastCode, rounds };
+}
+
 module.exports = {
   TARGET,
   SERVICE_NAME,
@@ -351,6 +632,9 @@ module.exports = {
   HEAL_SCRIPT_NAME,
   MAX_ATTEMPTS_PER_DAY,
   REPORTABLE,
+  HEAL_CODES,
+  FRESH_MS,
+  JUDGE_TRIGGER_MS,
   stripBom,
   parseMsh,
   candidateMshPaths,
@@ -358,6 +642,9 @@ module.exports = {
   parseScQuery,
   parseProcessStartTime,
   decideAction,
+  localCode,
+  parsePresenceResponse,
+  judgeTriggered,
   shouldAttempt,
   buildElevatedCommand,
   parseHealLog,
@@ -366,7 +653,10 @@ module.exports = {
   healOutcomeMessage,
   resolveHealScriptPath,
   healLogPath,
+  formatLocalTs,
   appendHealLog,
+  probeConnectivity,
   checkAgentState,
-  runHealElevated
+  runHealElevated,
+  runHealLadder
 };

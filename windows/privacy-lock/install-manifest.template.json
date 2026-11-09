@@ -1,0 +1,1 @@
+{"_说明":"这是被控机安装清单 device.json 的模板。正式安装走 install.ps1 传参生成，不要手改模板冒充。本文件仅供核对字段含义。","componentVersion":"2.0.3","installedAt":"安装时间（UTC ISO）","nodeId":"该设备在 QFRemote 里的节点 id（控制台设备页可见，形如 node//...）。信封按它寻址，与本机不一致的信封一律拒绝。","ownerUsername":"登记机主的 QFRemote 账号名。找回链一（登录密码验密重设）验真后必须与此一致才放行；调度工具下令时也按它核对。","serverHost":"QFRemote 服务器地址（找回验密连它）。与 agent 配置里的服务器一致。","serverPort":8443}

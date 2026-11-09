@@ -92,6 +92,38 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   ok('C6_disable', (await bridge.listDevices())[0].locked === false);
   server.close();
 
+  // D（2.4.5 W-29/W-11③）：cookie 按名取、component 缺失为 null、http 回环
+  const http = require('http');
+  const seenNames = [];
+  let seenCookieHeader = '';
+  const httpServer = http.createServer((req, res) => {
+    if (req.url === '/lock/devices') {
+      seenCookieHeader = req.headers.cookie || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ devices: [{ id: 'pc-10', name: '本机', owner: true, locked: false }] }));
+    } else { res.writeHead(404); res.end(); }
+  });
+  await new Promise(r => httpServer.listen(0, '127.0.0.1', r));
+  const httpBase = 'http://127.0.0.1:' + httpServer.address().port + '/lock';
+  const fakeSession = {
+    cookies: {
+      get: async ({ name }) => {
+        seenNames.push(name);
+        if (name === 'xid') return [{ name: 'xid', value: 'X1' }];
+        if (name === 'xid.sig') return [{ name: 'xid.sig', value: 'S1' }];
+        if (name === 'qfr_frd') return [{ name: 'qfr_frd', value: 'F1' }];
+        return [{ name, value: 'SHOULD-NOT-BE-ASKED' }];
+      }
+    }
+  };
+  const httpBridge = createLockBridge(() => fakeSession, { base: httpBase });
+  const httpDevs = await httpBridge.listDevices();
+  ok('D1_cookie_only_named', seenNames.length === 3 && seenNames[0] === 'xid' && seenNames[1] === 'xid.sig' && seenNames[2] === 'qfr_frd', { seenNames });
+  ok('D2_cookie_header_minimal', seenCookieHeader === 'xid=X1; xid.sig=S1; qfr_frd=F1' && !seenCookieHeader.includes('SHOULD-NOT-BE-ASKED'), { seenCookieHeader });
+  ok('D3_component_missing_null', httpDevs.length === 1 && httpDevs[0].component === null, { devs: httpDevs });
+  ok('D4_http_loopback_works', httpDevs.length === 1 && httpDevs[0].id === 'pc-10');
+  httpServer.close();
+
   result.pass = Object.values(result.cases).every(c => c.pass);
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, JSON.stringify(result, null, 2));

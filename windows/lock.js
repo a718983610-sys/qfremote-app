@@ -32,6 +32,7 @@
  * 不假装已联通。
  */
 const https = require('https');
+const http = require('http');
 const clientVersion = require('./client-version');
 
 const LOCK_API_BASE = 'https://app.qfremote.top/lock';
@@ -110,11 +111,19 @@ function createLockBridge(getSession, opts) {
     try {
       const ses = getSession && getSession();
       if (!ses || !ses.cookies) return '';
-      // 取整个分区罐（与主进程 extRequest 同一已实证路径）：各服务面
-      // 的会话 cookie 按 URL 过滤取罐有漏取的风险；整罐取出后由服务端
-      // 按名认人（只要 xid/qfr_frd）。
-      const cookies = await ses.cookies.get({});
-      return cookies.map(c => c.name + '=' + c.value).join('; ');
+      // W-29：按名取会话 cookie，不再发整罐——整罐含控制台 xid 与
+      // 各子服务会话，外泄面不必要地大。取三名：xid + xid.sig（控制台
+      // 会话签名对，缺 sig 服务端可能不认会话；与 transplantSessionToExt
+      // 及安卓端同款三件套 xid/xid.sig/qfrem 中的前两件——qfrem 为
+      // “记住我”凭据，API 调用有 xid 对即够，不取）+ qfr_frd（锁桥优先项）。
+      const picked = [];
+      for (const name of ['xid', 'xid.sig', 'qfr_frd']) {
+        try {
+          const cs = await ses.cookies.get({ name });
+          for (const c of cs || []) if (c.value) picked.push(c.name + '=' + c.value);
+        } catch (e) { /* 单个名取不到不影响其余 */ }
+      }
+      return picked.join('; ');
     } catch (e) { return ''; }
   }
 
@@ -139,9 +148,12 @@ function createLockBridge(getSession, opts) {
       }
       const cookie = await cookieHeader();
       if (cookie) headers['Cookie'] = cookie;
-      const req = https.request({
+      // W-29：按协议分流（http 回环假服务走 http.request，不再对 http
+      // 地址发 TLS）；端口用算出的有效端口，不再写死 443 回退。
+      const lib = u.protocol === 'http:' ? http : https;
+      const req = lib.request({
         hostname: u.hostname,
-        port: u.port || 443,
+        port: effPort,
         path: u.pathname + u.search,
         method,
         headers,
@@ -188,7 +200,9 @@ function createLockBridge(getSession, opts) {
         name: String(d.name || d.id || '未命名电脑'),
         owner: !!d.owner,
         locked: !!d.locked,
-        component: d.component !== false
+        // W-11③：component 字段缺失即未知（null），面板显示「状态未知」，
+        // 不再缺省当已装。
+        component: d.component === false ? false : (d.component === true ? true : null)
       })).filter(d => d.id);
     },
     async enable(id, password) {

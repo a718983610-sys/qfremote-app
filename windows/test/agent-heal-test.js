@@ -16,6 +16,9 @@
  *     不用 IfErrors）、跳过本身留痕；
  *  F. 2.4.4 PS1 v2 断言：启动行（供 App 进行中守卫识别）、RESULT 全集、
  *     已正确仍管服务、服务重启重试、定位兜底、陈旧配置检测。
+ *  G. 2.4.5 断言：安装器 Detect 委托、锁 Section、版本 2.4.5、IfErrors
+ *     紧跟解压、卸载提示、PS1 Mode/Detect/pending/写校验、三处分类码
+ *     表一致（JS HEAL_CODES／PS1 Detect-Code／NSI Detect 分支）。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  * 说明：PS1 本体只能在 Windows 提权环境真跑，本机无 pwsh；C 组验的是
  * 与 PS1 同款规则的改写逻辑，真机提权重写留发布日站长真机验收。
@@ -58,24 +61,27 @@ try {
     NSI.includes('RequestExecutionLevel user') && !NSI.includes('RequestExecutionLevel admin'));
   const healFn = segment(NSI, 'Function QFHealAgentMsh', 'FunctionEnd');
   ok('A7-heal-function-no-abort', !/Abort/.test(healFn));
-  ok('A8-heal-checks-canonical-msh',
-    healFn.includes('"$PROGRAMFILES\\Mesh Agent\\MeshAgent.msh"'));
-  ok('A9-heal-target-in-nsi', healFn.includes('"MeshServer=' + TARGET + '"'));
+  ok('A8-heal-delegates-to-ps1-detect',
+    healFn.includes("-Mode Detect") &&
+    healFn.includes('nsExec::ExecToStack') &&
+    !healFn.includes('sc query "Mesh Agent"'));
+  ok('A9-no-target-hardcoded-in-nsi',
+    !healFn.includes('MeshServer=wss://') && PS1.includes(TARGET));
   ok('A10-directory-page-and-regkey-intact',
     NSI.includes('MUI_PAGE_DIRECTORY') && NSI.includes('InstallDirRegKey HKCU'));
   ok('A11-heal-skips-when-correct',
     healFn.includes('alreadyCorrect:') &&
     healFn.includes('INSTALLER: skip already correct and running'));
   ok('A12-heal-skips-when-no-agent',
-    healFn.includes('resolveFail:') &&
-    healFn.includes('INSTALLER: no agent msh found'));
-  // 发版前深查修复（2026-11-07）：FileRead 读回行带行尾符，预检全行
-  // 比较前必须先剥 CR/LF，否则已正确的机器会被误判、白弹一次 UAC。
-  // 2.4.4：读循环改名 readTrim/readCut，规则不变。
-  ok('A13-heal-strips-line-endings-before-compare',
-    healFn.includes('readTrim:') &&
-    healFn.includes('StrCmp $R3 "$\\r" readCut') &&
-    healFn.includes('StrCmp $R3 "$\\n" readCut'));
+    healFn.includes('noAgent:') && healFn.includes('noMsh:') &&
+    healFn.includes('INSTALLER: skip, no Mesh Agent service') &&
+    healFn.includes('INSTALLER: skip, no agent msh found'));
+  // 2.4.5：行尾剥离是 PS1 的活（Detect-Code 内处理）；NSI 侧断言
+  // 中间态（W-06）等 10 秒再 Detect，最多 2 次，仍 pending 拉起 Repair。
+  ok('A13-heal-pending-waits-and-retries',
+    healFn.includes('pendingWait:') &&
+    healFn.includes('INSTALLER: service pending, wait 10s and re-detect') &&
+    healFn.includes('IntCmp $R3 2 launchHelper'));
 
   // ---- B. qf-agent-heal.ps1 ----
   ok('B1-ps1-target', PS1.includes("'" + TARGET + "'") || PS1.includes(TARGET));
@@ -126,17 +132,19 @@ try {
   const r5 = healTransform('');
   ok('C5-empty-file-appended', r5.changed && r5.out === 'MeshServer=' + TARGET + '\n');
 
-  // ---- D. 双文件目标地址一致 ----
-  ok('D1-target-agrees', NSI.includes(TARGET) && PS1.includes(TARGET));
+  // ---- D. 目标地址唯一来源（2.4.5：NSI 不再自写目标地址，以 PS1 为准） ----
+  ok('D1-target-in-ps1-only', PS1.includes(TARGET) && !NSI.includes('MeshServer=' + TARGET));
 
   // ---- E. 2.4.4 安装器加固 ----
   // 2.4.3 根因：预检跳过或 runas 静默失败时零留痕（%TEMP% 只有脚本、
   // 没有 qf-agent-heal.log）。本组断言两条路都被堵住。
-  ok('E1-msh-pfx86-fallback',
-    healFn.includes('"$PROGRAMFILES32\\Mesh Agent\\MeshAgent.msh"'));
-  ok('E2-msh-imagepath-fallback',
-    healFn.includes('ReadRegStr $R0 HKLM "SYSTEM\\CurrentControlSet\\Services\\Mesh Agent" "ImagePath"') &&
-    healFn.includes('${StrLoc} $R1 $R0 "MeshAgent.exe" ">"'));
+  ok('E1-detect-delegate',
+    healFn.includes("nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File") &&
+    healFn.includes("-Mode Detect"));
+  ok('E2-detect-codes-covered',
+    ['DETECT: local-ok', 'DETECT: service-missing', 'DETECT: msh-missing',
+     'DETECT: service-pending', 'DETECT: msh-wrong-target', 'DETECT: stale-config',
+     'DETECT: service-stopped'].every((s) => healFn.includes(s)));
   ok('E3-runas-fallback-start-process',
     healFn.includes('nsExec::ExecToStack "powershell -NoProfile -Command') &&
     healFn.includes('Start-Process') && healFn.includes('-Verb RunAs'));
@@ -147,33 +155,33 @@ try {
   ok('E5-installer-log-single-write-no-append',
     healFn.includes('FileOpen $R0 "$TEMP\\qf-agent-heal-installer.log" w') &&
     !healFn.includes('qf-agent-heal-installer.log" a'));
-  ok('E6-service-state-via-strstr-result',
-    healFn.includes('nsExec::ExecToStack \'sc query "Mesh Agent"\'') &&
-    healFn.includes('${StrStr} $R2 $R1 "STOPPED"') &&
-    healFn.includes('${StrStr} $R2 $R1 "RUNNING"') &&
-    !healFn.includes('IfErrors 0 svcStopped') &&
-    !healFn.includes('IfErrors 0 svcRunning'));
+  ok('E6-no-self-written-sc-query',
+    !healFn.includes('sc query "Mesh Agent"') &&
+    healFn.includes('${StrStr} $R2 $R1 "DETECT: local-ok"') &&
+    healFn.includes('DETECT: local-ok'));
   ok('E7-skip-itself-logged',
-    healFn.includes('INSTALLER: no agent msh found') &&
-    healFn.includes('INSTALLER: skip already correct') &&
-    healFn.includes('INSTALLER: already correct but service stopped'));
-  ok('E8-quote-strip-uses-plus2',
-    healFn.includes('StrCmp $R3 \'"\' 0 +2') &&
-    !healFn.includes('StrCmp $R3 \'"\' 0 +1'));
+    healFn.includes('INSTALLER: skip, no agent msh found') &&
+    healFn.includes('INSTALLER: skip already correct and running') &&
+    healFn.includes('INSTALLER: skip, no Mesh Agent service'));
+  ok('E8-verify-phase-re-detects',
+    healFn.includes('verifyParse:') &&
+    healFn.includes('verifyOk:') &&
+    healFn.includes('launchVerify:'));
   ok('E9-strfunc-declared',
     NSI.includes('!include "StrFunc.nsh"') &&
     NSI.includes('${Using:StrFunc} StrLoc') &&
     NSI.includes('${Using:StrFunc} StrStr'));
-  ok('E10-correct-but-stopped-still-heals',
-    healFn.includes('svcStopped:') &&
-    healFn.includes('Goto launchHelper'));
+  ok('E10-pending-exhausted-still-heals',
+    healFn.includes('pendingWait:') &&
+    healFn.includes('IntCmp $R3 2 launchHelper'));
 
   // ---- F. 2.4.4 PS1 v2 ----
   ok('F1-ps1-start-line-for-guard',
     PS1.includes("'QFRemote agent heal start'"));
   ok('F2-ps1-result-set-complete',
     ['RESULT: fixed', 'RESULT: already_correct', 'RESULT: service_started',
-     'RESULT: restarted_stale_config', 'RESULT: service_restart_failed',
+     'RESULT: service_restarted', 'RESULT: restarted_stale_config',
+     'RESULT: service_restart_failed', 'RESULT: msh_write_failed',
      'RESULT: no_agent'].every((s) => PS1.includes(s)));
   ok('F3-ps1-correct-still-handles-service',
     PS1.includes('MeshServer already correct, no file change') &&
@@ -184,6 +192,56 @@ try {
     PS1.includes('ImagePath') && PS1.includes('ProgramData'));
   ok('F6-ps1-stale-config-detection',
     PS1.includes('LastWriteTime') && PS1.includes('StartTime'));
+
+  // ---- G. 2.4.5 ----
+  const lockSec = segment(NSI, 'Section "隐私锁组件" SEC_LOCK', 'SectionEnd');
+  ok('G1-lock-section-required',
+    NSI.includes('Section "隐私锁组件" SEC_LOCK') && lockSec.includes('SectionIn RO'));
+  ok('G2-lock-files-shipped',
+    ['privacy-lock\\install.ps1', 'privacy-lock\\uninstall.ps1',
+     'privacy-lock\\app\\QFLockService.exe', 'privacy-lock\\app\\QFLockUI.exe',
+     'privacy-lock\\app\\qf-lockctl.exe', 'privacy-lock\\app\\qf-lockupdater.exe']
+      .every((s) => lockSec.includes('File "' + s + '"')) &&
+    lockSec.includes('DetailPrint "隐私锁组件 v2.0.3'));
+  ok('G3-version-245',
+    NSI.includes('QFRemote-Setup-v2.4.5.exe') &&
+    NSI.includes('VIProductVersion "2.4.5.0"') &&
+    NSI.includes('"DisplayVersion" "2.4.5"') &&
+    NSI.includes('"DisplayName" "QFRemote 2.4.5"'));
+  ok('G4-iferrors-right-after-extract',
+    secMain.indexOf('Nsis7z::Extract') < secMain.indexOf('IfErrors 0 +2') &&
+    secMain.indexOf('IfErrors 0 +2') < secMain.indexOf('Delete "$PLUGINSDIR\\app.7z"'));
+  ok('G5-wait-old-process-before-extract',
+    secMain.includes('waitOldProc:') &&
+    secMain.includes('tasklist /FI "IMAGENAME eq QFRemote.exe"') &&
+    secMain.indexOf('waitOldProcDone:') < secMain.indexOf('Nsis7z::Extract'));
+  ok('G6-uninstall-warns-login-data',
+    NSI.includes('MUI_UNCONFIRMPAGE_TEXT_TOP') &&
+    NSI.includes('将同时清除本机保存的登录信息与设置'));
+  ok('G7-ps1-detect-mode',
+    PS1.includes('param(') && PS1.includes('$Mode') &&
+    PS1.includes("if ($Mode -eq 'Detect')") &&
+    PS1.includes('DETECT: ') &&
+    PS1.includes('Get-CimInstance Win32_Service') &&
+    PS1.includes('StartPending') && PS1.includes('StopPending') &&
+    PS1.includes('msh_write_failed') &&
+    PS1.includes('PS1: '));
+  // 三处分类码表一致：JS HEAL_CODES／PS1 Detect-Code／NSI Detect 分支
+  const healJs = fs.readFileSync(path.join(__dirname, '..', 'agent-heal.js'), 'utf8');
+  const codes = ['local-ok', 'service-missing', 'service-pending', 'msh-missing',
+    'msh-wrong-target', 'stale-config', 'service-stopped'];
+  ok('G8-code-table-consistent',
+    codes.every((c) => healJs.includes("'" + c + "'") && PS1.includes("'" + c + "'") && healFn.includes('DETECT: ' + c)));
+  const uninst = segment(NSI, 'Section "Uninstall"', 'SectionEnd');
+  ok('G9-uninstall-stops-helper-services',
+    uninst.includes("sc stop QFLockSvc") && uninst.includes("sc delete QFLockSvc") &&
+    uninst.includes("sc stop QFSysHelper") && uninst.includes("sc delete QFSysHelper"));
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const buildFiles = (pkg.build && pkg.build.files) || [];
+  ok('G10-helper-and-heal-packaged',
+    ['qf-agent-heal.ps1', 'sys-helper.js', 'install-system-services.ps1',
+     'syshelper/QFSysHelper.exe', 'syshelper/whitelist.json']
+      .every((f) => buildFiles.includes(f)) && pkg.version === '2.4.5');
 
   result.pass = Object.values(result.cases).every((c) => c.pass);
 } catch (e) {

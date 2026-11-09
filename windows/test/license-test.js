@@ -142,16 +142,16 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
 
 // ---------- G. 同源地址 ----------
 {
-  const urls = createSvcUrls({ loadCache: () => ({ pointsUrl: 'https://tun.example.com/points' }) });
-  ok('G1_ext_same_origin', urls.extOrigin() === 'https://tun.example.com' &&
-    urls.homeUrl() === 'https://tun.example.com/home' &&
-    urls.purchaseUrl() === 'https://tun.example.com/purchase' &&
-    urls.licenseStatusUrl() === 'https://tun.example.com/license/status' &&
-    urls.appealUrl() === 'https://tun.example.com/appeal' &&
-    urls.supportUrl() === 'https://tun.example.com/support' &&
-    urls.licenseApi('me') === 'https://tun.example.com/license/api/me' &&
-    urls.licenseApi('transfer/claim') === 'https://tun.example.com/license/api/transfer/claim' &&
-    urls.licenseApi('device-report') === 'https://tun.example.com/license/api/device-report');
+  const urls = createSvcUrls({ loadCache: () => ({ pointsUrl: 'https://tun.qfremote.top/points' }) });
+  ok('G1_ext_same_origin', urls.extOrigin() === 'https://tun.qfremote.top' &&
+    urls.homeUrl() === 'https://tun.qfremote.top/home' &&
+    urls.purchaseUrl() === 'https://tun.qfremote.top/purchase' &&
+    urls.licenseStatusUrl() === 'https://tun.qfremote.top/license/status' &&
+    urls.appealUrl() === 'https://tun.qfremote.top/appeal' &&
+    urls.supportUrl() === 'https://tun.qfremote.top/support' &&
+    urls.licenseApi('me') === 'https://tun.qfremote.top/license/api/me' &&
+    urls.licenseApi('transfer/claim') === 'https://tun.qfremote.top/license/api/transfer/claim' &&
+    urls.licenseApi('device-report') === 'https://tun.qfremote.top/license/api/device-report');
 }
 
 // ---------- H. 登录页许可入口 ----------
