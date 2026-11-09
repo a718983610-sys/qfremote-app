@@ -4,16 +4,16 @@ import 'dart:io';
 import '../core/client_header.dart';
 import '../core/constants.dart';
 
-/// 造一个「只对自家主机放行自签证书」的 HttpClient：
-/// 证书回调逐个核对主机+端口，其余一律拒绝。
-/// 用于探活与更新（清单/安装包）——与 Windows 版同一信任口径；
+/// 原生 HTTP 客户端（2.4.5 B3）：公共 CA 证书走系统默认校验——
+///
+/// 不再设 badCertificateCallback（2.4.4 的回调对自家主机放行一切证书
+/// 错误：自签/过期/错 CN 全 PROCEED，与「公共 CA」口径直接矛盾）。
+/// 系统校验失败时请求直接抛错，调用方按失败处理；证书被拒时 WebView
+/// 侧出证书异常卡（见 main.dart _showCertError）。
 /// 不发送任何凭据，完整性另有 SHA256 兜底（更新）与状态码判定（探活）。
 HttpClient trustedHttpClient({Duration? connectionTimeout, int port = kServerPort}) {
-  final trustedPort = port;
   final client = HttpClient();
   if (connectionTimeout != null) client.connectionTimeout = connectionTimeout;
-  client.badCertificateCallback = (cert, host, cbPort) =>
-      host == kServerHost && cbPort == trustedPort;
   return client;
 }
 
@@ -37,27 +37,36 @@ class ProbeResult {
         '${at.minute.toString().padLeft(2, '0')}:'
         '${at.second.toString().padLeft(2, '0')}';
     if (ok) return '服务器可达（HTTP $statusCode，$t，用时 $elapsedMs 毫秒）';
+    if (statusCode != null && statusCode! >= 500) {
+      return '服务器异常（HTTP $statusCode，$t）';
+    }
     return '服务器不可达（$t${error != null ? '，$error' : ''}）';
   }
 }
 
-/// 服务器探活：向自家服务器发一次不带凭据的 HTTPS GET，
-/// 拿到任何状态码就算可达（与 Windows 版探活同口径：
-/// 探活只量连通性，不参与 WebView 的信任决策）。
-Future<ProbeResult> probeServer({Duration timeout = const Duration(seconds: 6)}) async {
+/// 服务器探活：向自家服务器发一次不带凭据的 HTTPS GET。
+/// 2.4.5 B4：只有 2xx/3xx 才算可达——500 也亮绿灯的「探活假绿」已修；
+/// 非 2xx/3xx 时 ok=false 且带上状态码（调用方连续 2 次失败可进离线）。
+/// B24：版本头取调用方注入的包版本，未注入回落 kAppVersion。
+Future<ProbeResult> probeServer({
+  Duration timeout = const Duration(seconds: 6),
+  String? clientVersion,
+}) async {
   final sw = Stopwatch()..start();
   final client = trustedHttpClient(connectionTimeout: timeout);
   try {
     final req = await client.getUrl(Uri.parse(kServerOrigin)).timeout(timeout);
-    applyClientVersionHeader(req);
+    applyClientVersionHeader(req, version: clientVersion);
     final res = await req.close().timeout(timeout);
     await res.drain<void>().timeout(timeout);
     sw.stop();
+    final ok = res.statusCode >= 200 && res.statusCode < 400;
     return ProbeResult(
-      ok: true,
+      ok: ok,
       at: DateTime.now(),
       elapsedMs: sw.elapsedMilliseconds,
       statusCode: res.statusCode,
+      error: ok ? null : 'HTTP ${res.statusCode}',
     );
   } catch (e) {
     sw.stop();

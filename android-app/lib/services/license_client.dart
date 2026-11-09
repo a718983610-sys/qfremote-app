@@ -17,7 +17,13 @@ class LicenseClient {
   final ConsoleCookieProvider cookieProvider;
   final SvcUrls urls;
 
-  LicenseClient({required this.cookieProvider, SvcUrls? urls})
+  /// 客户端版本头取值（B24）：主页注入 PackageInfo 读到的包版本。
+  final String? clientVersion;
+
+  /// 最近一次 401/403 的时间（B7：许可拉取同样区分登录已死与网络不通）。
+  DateTime? lastAuthFailureAt;
+
+  LicenseClient({required this.cookieProvider, SvcUrls? urls, this.clientVersion})
       : urls = urls ?? SvcUrls.instance;
 
   /// 发一次请求取回 (状态码, 响应体)；[withCookie]=false 时不附会话
@@ -41,7 +47,7 @@ class LicenseClient {
       final req = method == 'POST'
           ? await client.postUrl(uri).timeout(const Duration(seconds: 8))
           : await client.getUrl(uri).timeout(const Duration(seconds: 8));
-      applyClientVersionHeader(req);
+      applyClientVersionHeader(req, version: clientVersion);
       if (cookie != null) req.headers.set(HttpHeaders.cookieHeader, cookie);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (jsonBody != null) {
@@ -53,6 +59,9 @@ class LicenseClient {
           .transform(utf8.decoder)
           .join()
           .timeout(const Duration(seconds: 8));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        lastAuthFailureAt = DateTime.now();
+      }
       return (res.statusCode, body);
     } catch (_) {
       return null;

@@ -14,6 +14,11 @@ class QfSettings {
   static const _kRememberPassword = 'auth_remember_password';
   static const _kCredentialBlocked = 'auth_credential_blocked';
 
+  // 2.4.5 B9：远程控制时屏幕常亮（默认开）；B16：弱网放行后待复核标记
+  // （进控制台后网络恢复时立即重跑更新门）。
+  static const _kKeepScreenOn = 'session_keep_screen_on';
+  static const _kPendingGateRecheck = 'pending_gate_recheck';
+
   final SharedPreferences _prefs;
   QfSettings(this._prefs);
 
@@ -56,6 +61,13 @@ class QfSettings {
   bool get credentialBlocked => _prefs.getBool(_kCredentialBlocked) ?? false;
   Future<void> setCredentialBlocked(bool v) =>
       _prefs.setBool(_kCredentialBlocked, v);
+
+  bool get keepScreenOn => _prefs.getBool(_kKeepScreenOn) ?? true;
+  Future<void> setKeepScreenOn(bool v) => _prefs.setBool(_kKeepScreenOn, v);
+
+  bool get pendingGateRecheck => _prefs.getBool(_kPendingGateRecheck) ?? false;
+  Future<void> setPendingGateRecheck(bool v) =>
+      _prefs.setBool(_kPendingGateRecheck, v);
 
   /// 手动退出账号：登录相关的选择与标记一次清干净（与凭据存储的 clearAll 配套）。
   Future<void> clearAuthPrefs() async {

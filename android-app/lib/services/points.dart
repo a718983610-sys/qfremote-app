@@ -90,6 +90,10 @@ class ProfileInfo {
 /// 取控制台会话 cookie 的函数（由主页注入：从 WebView 的 CookieManager 取值）。
 typedef ConsoleCookieProvider = Future<String?> Function();
 
+/// 心跳鉴权状态（2.4.5 B7）：401/403（登录已死）与网络不通必须分开——
+/// 前者触发探针复核＋清过期快照，后者只安静跳过，绝不误清快照。
+enum AuthStatus { ok, authDead, unreachable }
+
 /// 扩展服务客户端（积分心跳/查询＋站长判定＋管理令牌换发）。
 ///
 /// 鉴权口径：扩展服务认控制台会话 cookie——本端从 WebView 的 CookieManager
@@ -99,8 +103,18 @@ class ExtService {
   final ConsoleCookieProvider cookieProvider;
   final SvcUrls urls;
 
-  ExtService({required this.cookieProvider, SvcUrls? urls})
+  /// 客户端版本头取值（B24）：主页注入 PackageInfo 读到的包版本；
+  /// 未注入时回落 kAppVersion。
+  final String? clientVersion;
+
+  /// 最近一次 401/403 的时间（B7）：调用方据此判定登录已死。
+  DateTime? lastAuthFailureAt;
+
+  ExtService({required this.cookieProvider, SvcUrls? urls, this.clientVersion})
       : urls = urls ?? SvcUrls.instance;
+
+  void _applyVersion(HttpClientRequest req) =>
+      applyClientVersionHeader(req, version: clientVersion);
 
   /// 发一次带 cookie 的请求并取回 (状态码, 响应体)；任何异常返回 null。
   Future<(int, String)?> _send(
@@ -118,7 +132,7 @@ class ExtService {
       final req = method == 'POST'
           ? await client.postUrl(uri).timeout(const Duration(seconds: 8))
           : await client.getUrl(uri).timeout(const Duration(seconds: 8));
-      applyClientVersionHeader(req);
+      _applyVersion(req);
       req.headers.set(HttpHeaders.cookieHeader, cookie);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (jsonBody != null) {
@@ -128,6 +142,9 @@ class ExtService {
       final res = await req.close().timeout(const Duration(seconds: 8));
       final body =
           await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 8));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        lastAuthFailureAt = DateTime.now();
+      }
       return (res.statusCode, body);
     } catch (_) {
       return null;
@@ -145,16 +162,24 @@ class ExtService {
 
   /// 心跳＋强制下线信号（2.3.1 契约 §7.5.7）：心跳响应顶层带
   /// forceLogout:true＋gateCode 时，壳须立即登出本机会话并落拦截态。
-  /// 返回 null＝本拍没打通（安静跳过，不当作任何许可结论）。
-  Future<({bool forceLogout, String? gateCode})?> heartbeatSignal() async {
+  /// 返回 null＝本拍没打通（unreachable，安静跳过，不当作任何许可结论）；
+  /// status==authDead＝服务端明确拒了这组会话（401/403），调用方须立即
+  /// 触发探针复核（见 main.dart _heartbeatTick，B7）。
+  Future<({AuthStatus status, bool forceLogout, String? gateCode})?>
+      heartbeatSignal() async {
     final r = await _send('POST', '${urls.pointsApiBase}/api/heartbeat',
         jsonBody: {'client': 'android'});
-    if (r == null || r.$1 != 200) return null;
+    if (r == null) return null;
+    if (r.$1 == 401 || r.$1 == 403) {
+      return (status: AuthStatus.authDead, forceLogout: false, gateCode: null);
+    }
+    if (r.$1 != 200) return null;
     try {
       final root = jsonDecode(r.$2);
       if (root is Map<String, dynamic>) {
         final gc = root['gateCode'];
         return (
+          status: AuthStatus.ok,
           forceLogout: root['forceLogout'] == true,
           gateCode: gc is String && gc.isNotEmpty ? gc : null,
         );
@@ -162,7 +187,7 @@ class ExtService {
     } catch (_) {
       // 响应不是 JSON：只当心跳成功，不解读信号
     }
-    return (forceLogout: false, gateCode: null);
+    return (status: AuthStatus.ok, forceLogout: false, gateCode: null);
   }
 
   /// 我的积分/使用时长：取不到返回 null（关于页显示「—」）。
@@ -202,7 +227,7 @@ class ExtService {
       final req = await client
           .getUrl(Uri.parse(urls.profileAvatarUrl(info.avatarUpdatedAt)))
           .timeout(const Duration(seconds: 8));
-      applyClientVersionHeader(req);
+      _applyVersion(req);
       req.headers.set(HttpHeaders.cookieHeader, cookie);
       final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;

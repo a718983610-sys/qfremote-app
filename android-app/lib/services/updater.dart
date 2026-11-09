@@ -33,12 +33,17 @@ class UpdateService {
   final String releaseUrl;
   final String trustedOrigin;
 
+  /// 客户端版本头取值（B24）：主页注入 PackageInfo 读到的包版本；
+  /// 未注入时回落 kAppVersion。
+  final String? clientVersion;
+
   UpdateService({
     this.responseTimeout = const Duration(seconds: 30),
     this.stallTimeout = const Duration(seconds: 30),
     this.apkIdentityVerifier,
     String? releaseUrl,
     String? trustedOrigin,
+    this.clientVersion,
   })  : releaseUrl = releaseUrl ?? kReleaseUrl,
         trustedOrigin = trustedOrigin ?? kTrustedOrigin;
 
@@ -50,7 +55,7 @@ class UpdateService {
     final client = trustedHttpClient(connectionTimeout: timeout);
     try {
       final req = await client.getUrl(Uri.parse(releaseUrl));
-      applyClientVersionHeader(req);
+      applyClientVersionHeader(req, version: clientVersion);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(timeout);
       if (res.statusCode != 200) {
@@ -66,6 +71,9 @@ class UpdateService {
   /// 下载 APK 到 destDir：进度回调 onProgress(已收字节, 总字节, 百分比)；
   /// 下完核对大小与 SHA256：对不上删文件并抛中文错误。
   /// 返回校验通过的本地文件。
+  /// 2.4.5 B17：断点续传——失败不删 .part（保留 24 小时内可续传，换
+  /// 版本即失效由大小/哈希校验兜底），下次带 `Range: bytes=<已收>-`；
+  /// 服务器不支持 Range（回 200）时回落全量重下并记日志。
   Future<File> downloadApk(
     ReleaseEntry entry,
     Directory destDir,
@@ -83,19 +91,49 @@ class UpdateService {
     }
     final dest = File('${destDir.path}/${entry.fileName}');
     final part = File('${dest.path}.part');
+    // 残留 .part 比清单还大＝换版本/已损坏，从头下。
+    var resumed = 0;
+    try {
+      if (await part.exists()) {
+        final len = await part.length();
+        if (len > entry.size) {
+          await _quietDelete(part);
+        } else {
+          resumed = len;
+        }
+      }
+    } catch (_) {
+      resumed = 0;
+    }
     final client = trustedHttpClient(connectionTimeout: const Duration(seconds: 15));
     try {
       final req = await client.getUrl(Uri.parse(entry.url));
-      applyClientVersionHeader(req);
+      applyClientVersionHeader(req, version: clientVersion);
+      if (resumed > 0) {
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumed-');
+      }
       final res = await req.close().timeout(responseTimeout);
-      if (res.statusCode != 200) {
+      if (res.statusCode != 200 && res.statusCode != 206) {
         throw HttpException('下载失败：HTTP ${res.statusCode}');
       }
-      final total = entry.size;
-      var received = 0;
-      final sink = part.openWrite();
+      if (resumed > 0 && res.statusCode == 200) {
+        // 服务器不支持 Range：回落全量重下
+        debugPrint('QFUPDATE server ignores Range, restart full download');
+        resumed = 0;
+        await _quietDelete(part);
+      }
+      // 进度 total 优先用 Content-Length（续传时加上已收偏移），与
+      // 清单 size 不一致时记日志、最终仍以清单 size 做大小校验。
+      final contentLen = res.contentLength;
+      final total = contentLen > 0 ? contentLen + resumed : entry.size;
+      if (contentLen > 0 && contentLen + resumed != entry.size) {
+        debugPrint(
+            'QFUPDATE total mismatch: contentLength=$contentLen resumed=$resumed entry.size=${entry.size}');
+      }
+      var received = resumed;
+      final sink = part.openWrite(mode: resumed > 0 ? FileMode.append : FileMode.write);
       try {
-        // 无新数据超过 stallTimeout 视为连接已死：抛错删半截文件，
+        // 无新数据超过 stallTimeout 视为连接已死：抛错、保留 .part 供续传，
         // 不无限挂在「正在下载」
         await for (final chunk in res.timeout(stallTimeout)) {
           received += chunk.length;
@@ -111,10 +149,9 @@ class UpdateService {
         await sink.close();
       }
     } catch (e) {
-      await _quietDelete(part);
-      // VM-03：下载层异常（断流/超时/网络错误）的原文多为英文，调用方会
-      // 把异常文本直接展示到界面；原文只进日志，用户面统一映射为中文。
-      debugPrint('QFUPDATE download error: $e');
+      // 2.4.5 B17：失败保留 .part（不断流重下），只删已校验失败的文件在
+      // 下面的校验分支处理。VM-03：异常原文只进日志，用户面统一中文。
+      debugPrint('QFUPDATE download error: $e (kept .part for resume)');
       if (e is HttpException && e.message.startsWith('下载失败：HTTP')) {
         // 本服务自抛的 HTTP 状态中文提示原样保留，只换异常类型以便展示。
         throw FormatException(e.message);
@@ -123,7 +160,7 @@ class UpdateService {
           e is HttpException ||
           e is TimeoutException ||
           e is FileSystemException) {
-        throw const FormatException('下载中断，网络不稳定，请重新下载。');
+        throw const FormatException('下载中断，网络不稳定，已保留已下载部分，重新下载可续传。');
       }
       throw const FormatException('下载失败，请稍后重试。');
     } finally {

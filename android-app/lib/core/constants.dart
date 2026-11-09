@@ -2,9 +2,11 @@
 ///
 /// 信任口径（与 Windows 版同一条，不许放宽）：
 /// - 控制台与更新清单、安装包，只认 app.qfremote.top 这一个正式域名；
-/// - 2.4.2 起全量迁正式域名（服务器换 IP 后旧 IP 直连源已退役）：域名是
-///   公共 CA 证书，WebView/探活的证书错误放行只发生在逐个校验主机+端口
-///   之后、且只对自家域名这一个源；
+/// - 2.4.2 起全量迁正式域名（服务器换 IP 后旧 IP 直连源已退役）；
+/// - 正式域名是公共 CA 证书（Let's Encrypt）：证书校验走系统默认，
+///   系统校验失败即拒绝（2.4.5 B3：删掉 PROCEED 分支，WebView 的
+///   onReceivedServerTrustAuthRequest 只在系统校验失败时才被调用，
+///   失败一律 CANCEL；不做指纹白名单——WebView 没有合法的自签使用场景）。
 /// - 好友页/聊天/隐私锁与控制台同源（域名聚合路径 /friends、/chat、
 ///   /lock），好友服务认控制台会话 cookie——同一 WebView 打开即 SSO
 ///   直达，不再二次登录。
@@ -54,7 +56,10 @@ const String kWebsiteUrl = 'https://qfremote.top/';
 const int kLockPort = 443;
 const String kLockApiBase = '$kServerOrigin/lock';
 
-/// WebView 证书校验：只认自家域名源（控制台与好友页同源同端口）。
+/// WebView 证书校验（2.4.5 B3）：公共 CA 走系统默认校验——本函数不再
+/// 用于放行任何证书错误（onReceivedServerTrustAuthRequest 只在系统
+/// 校验失败时才被调用，失败一律 CANCEL）。仅保留「是不是自家主机+端口」
+/// 的识别，供证书异常卡的诊断文案区分自家源与外站。
 bool isTrustedWebViewHostPort(String host, int port) =>
     host == kServerHost && (port == kServerPort || port == kFriendsPort);
 

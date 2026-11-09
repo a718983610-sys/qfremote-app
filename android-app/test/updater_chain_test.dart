@@ -34,7 +34,8 @@ class _StubApkVerifier implements ApkIdentityVerifier {
 /// release.json + 假 APK，真走一遍 App 自己的更新服务全流程：
 /// 取清单 → 解析 → 下载（进度单调至 100%）→ 核对 SHA256 → 落盘；
 /// 失败注入：中途断流、校验篡改、清单 500、服务器不回响应头、下载中途假死，
-/// 每种都必须明确报错且不留半截文件（＝有提示、不无声卡死、放行）。
+/// 每种都必须明确报错；校验/验签失败不留文件，断流/假死保留 .part 供续传
+/// （2.4.5 B17），续传成功后文件完整可用。
 /// 运行方式：普通 `flutter test` 即跑（H-8 起默认开启）——清单地址与可信源
 /// 经 UpdateService 的测试注入参指向本机假服务器，不再依赖命令行 define，
 /// 更不会打到生产服务器。
@@ -82,28 +83,44 @@ void main() {
             // 接受请求、永不回响应头（客户端等响应头超时必须判失败）
             return;
           case 'truncated':
-            // 裸套接字手写响应头：声明全长、只发 40% 就掐断连接
+            // 2.4.5 B17 夹具修正：先在 HttpResponse 上写好 Content-Length
+            // 再 detach（新版 Dart 的 detachSocket 会先刷默认头，裸写
+            // 状态行会导致客户端收到双份头、按 chunked 解析失败）；
+            // 只发 40% 就掐断连接，模拟中途断流。
+            req.response.contentLength = apkBytes.length;
+            req.response.headers.contentType = ContentType.binary;
             final raw = await req.response.detachSocket();
-            raw.write('HTTP/1.1 200 OK\r\n'
-                'Content-Length: ${apkBytes.length}\r\n'
-                'Content-Type: application/octet-stream\r\n\r\n');
             raw.add(apkBytes.sublist(0, 80000));
             await raw.flush();
             raw.destroy();
             return;
           case 'stall':
-            // 发一小块就假死（客户端无数据超时必须判失败）
+            // 发一大块就假死（客户端无数据超时必须判失败）。首块须够大
+            // （100KB）：小写入会被服务端响应缓冲扣住不发出，客户端
+            // 永远收不到、测不到「已收部分保留」。
             req.response.contentLength = apkBytes.length;
-            req.response.add(apkBytes.sublist(0, 1000));
+            req.response.add(apkBytes.sublist(0, 100000));
             await req.response.flush();
             return;
           default:
-            // 分 8 块慢发，让进度回调有多档可观察
-            req.response.contentLength = apkBytes.length;
-            final chunk = apkBytes.length ~/ 8;
+            // 2.4.5 B17：支持 Range 续传——带 bytes=N- 时回 206 + 剩余字节。
+            final range = req.headers.value(HttpHeaders.rangeHeader);
+            var start = 0;
+            if (range != null) {
+              final m = RegExp(r'bytes=(\d+)-').firstMatch(range);
+              if (m != null) {
+                start = int.parse(m.group(1)!).clamp(0, apkBytes.length);
+                req.response.statusCode = 206;
+                req.response.headers.set(
+                    'Content-Range', 'bytes $start-${apkBytes.length - 1}/${apkBytes.length}');
+              }
+            }
+            req.response.contentLength = apkBytes.length - start;
+            final chunk = (apkBytes.length - start) ~/ 8;
             for (var i = 0; i < 8; i++) {
-              final end = i == 7 ? apkBytes.length : (i + 1) * chunk;
-              req.response.add(apkBytes.sublist(i * chunk, end));
+              final s = start + i * chunk;
+              final end = i == 7 ? apkBytes.length : start + (i + 1) * chunk;
+              req.response.add(apkBytes.sublist(s, end));
               await req.response.flush();
               await Future<void>.delayed(const Duration(milliseconds: 30));
             }
@@ -164,14 +181,27 @@ void main() {
     );
     await expectDirClean('校验不过的文件（连同 .part）必须删掉');
 
-    // 3) 中途断流：明确失败＋不留半截
+    // 3) 中途断流：明确失败＋保留 .part（2.4.5 B17：续传用），
+    // 再下一次须从断点续传成功、文件完整。
     mode = 'truncated';
     final truncManifest = await svc.fetchManifest();
     await expectLater(
       svc.downloadApk(truncManifest.android!, dir, (_, _, _) {}),
       throwsA(anything),
     );
-    await expectDirClean('断流后不许留 .part 半截文件');
+    final partAfterTrunc =
+        File('${dir.path}/${truncManifest.android!.fileName}.part');
+    expect(await partAfterTrunc.exists(), isTrue,
+        reason: '断流后 .part 须保留供续传');
+    expect(await partAfterTrunc.length(), 80000);
+    mode = 'normal';
+    final resumedFile =
+        await svc.downloadApk(truncManifest.android!, dir, (_, _, _) {});
+    expect(await resumedFile.length(), apkBytes.length);
+    expect(sha256.convert(await resumedFile.readAsBytes()).toString(), apkSha);
+    expect(await partAfterTrunc.exists(), isFalse,
+        reason: '续传成功后 .part 应已改名落盘');
+    await resumedFile.delete();
 
     // 4) 清单 500：取清单即明确报错（A5 文案）
     mode = 'manifest500';
@@ -216,13 +246,17 @@ void main() {
         reason: '等响应头超时应在注入时限附近判失败');
     await expectDirClean('无响应头失败不许留文件');
 
-    // 6) 下载中途假死：无数据超时判失败＋不留半截
+    // 6) 下载中途假死：无数据超时判失败＋保留 .part 供续传（2.4.5 B17）
     mode = 'stall';
     await expectLater(
       impatient.downloadApk(hangManifest.android!, dir, (_, _, _) {}),
       throwsA(anything),
     );
-    await expectDirClean('假死失败不许留 .part');
+    final partAfterStall =
+        File('${dir.path}/${hangManifest.android!.fileName}.part');
+    expect(await partAfterStall.exists(), isTrue,
+        reason: '假死后 .part 须保留供续传');
+    expect(await partAfterStall.length(), 100000);
 
     // 7) 清单自洽但签名指纹不符（VM-02 核心腿）：大小与哈希全过，
     // 必须被装前验签拦下、文案为签名证书口径、且不留文件。

@@ -14,11 +14,13 @@ class SessionSnapshot {
   const SessionSnapshot({required this.cookies, required this.savedAt});
 
   /// 还新鲜：有会话 cookie、没超过 30 天、时间没倒流（改系统时间防误判，
-  /// 留 5 分钟宽限）。
-  bool isFresh(DateTime now) {
+  /// 留 5 分钟宽限）。[serverNow] 为服务端时间（预检回包带 serverTime
+  /// 时以服务端时间为准，B22：本地时钟只作兜底）。
+  bool isFresh(DateTime now, {DateTime? serverNow}) {
+    final ref = serverNow ?? now;
     if (cookies.isEmpty || (cookies['xid'] ?? '').isEmpty) return false;
-    if (savedAt.isAfter(now.add(const Duration(minutes: 5)))) return false;
-    return now.difference(savedAt) < kSessionLifetime;
+    if (savedAt.isAfter(ref.add(const Duration(minutes: 5)))) return false;
+    return ref.difference(savedAt) < kSessionLifetime;
   }
 
   String toJson() => jsonEncode({

@@ -1,7 +1,7 @@
 name: qfremote
 description: QFRemote 远程控制 — 安卓控制端（与 Windows 版同口径的品牌外壳）
 publish_to: 'none'
-version: 2.4.4+24400
+version: 2.4.5+24500
 
 environment:
   sdk: '>=3.8.0 <4.0.0'
@@ -16,6 +16,7 @@ dependencies:
   path_provider: ^2.1.5
   crypto: ^3.0.6
   open_filex: ^5.0.0
+  url_launcher: ^6.3.1
   # 记住账号密码/会话快照的加密落盘：安卓走 Android Keystore 体系
   flutter_secure_storage: ^11.2.0
 

@@ -119,5 +119,37 @@ void main() {
       core.stop();
       expect(ev.clicks, 0);
     });
+
+    test('E. connecting（正在建立会话…）：短时间内不点、不报 stuck', () async {
+      final ev = FakeEvaluator('connecting');
+      final events = <WatchdogStatus>[];
+      var stuck = 0;
+      final core = WatchdogCore(
+        evaluator: ev,
+        pollInterval: const Duration(milliseconds: 30),
+        confirmScans: 2,
+        backoffStart: const Duration(milliseconds: 60),
+        backoffMax: const Duration(milliseconds: 120),
+        onStatus: events.add,
+        onConnectingStuck: () => stuck++,
+      );
+      core.start();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      core.stop();
+      expect(ev.clicks, 0);
+      expect(stuck, 0, reason: 'connecting 持续 25 秒才报 stuck，350ms 内不报');
+      expect(events, isEmpty);
+    });
+
+    test('F. partial 持续 12 秒才升级（短时间不动，旧口径 C 仍成立）', () async {
+      final ev = FakeEvaluator('partial');
+      final events = <WatchdogStatus>[];
+      final core = makeCore(ev, events);
+      core.start();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      core.stop();
+      expect(ev.clicks, 0);
+      expect(events, isEmpty);
+    });
   });
 }
