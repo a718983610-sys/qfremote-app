@@ -1499,6 +1499,13 @@
   transform: translateX(var(--sp-8));
 }
 
+/* X-12：能力桥未接入时开关置灰不可点（aria-disabled，不用 disabled 属性，
+   否则点击收不到、toast 说明弹不出来）。 */
+.sv-opt__k[aria-disabled="true"]{
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 .sv-opt__k svg{
   display: none;
 }

@@ -8,14 +8,19 @@ function t(name, cond) { if (cond) { pass++; console.log('ok  -', name); } else 
 
 const SHA = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
+// 测试用假 IP（TEST-NET-1 段 203.0.113.0/24，RFC 5737 文档专用，绝非生产地址）：
+// 旧生产 IP 54.248.9.192 已退役，测试里的旧地址一律用它代替；
+// 「旧 IP 拒」断言测的是「非域名/IP 直连地址一律拒」，不依赖具体旧 IP 值。
+const TEST_OLD_URL = 'https://203.0.113.1:8443';
+
 // 1) signingBytes 字面量（update）
 const envFixed = {
   v: 1, id: 'env-fixed', op: 'update', nodeId: 'node//x', by: 'owner@example.com',
   issuedAt: '2026-10-26T00:00:00Z', expiresAt: '2026-10-26T00:30:00Z',
-  update: { version: '2.0.3', url: 'https://54.248.9.192:8443/dl/x.zip', sha256: SHA },
+  update: { version: '2.0.3', url: TEST_OLD_URL + '/dl/x.zip', sha256: SHA },
   nonce: 'bm9uY2U=',
 };
-const want = '{"v":1,"id":"env-fixed","op":"update","nodeId":"node//x","by":"owner@example.com","issuedAt":"2026-10-26T00:00:00Z","expiresAt":"2026-10-26T00:30:00Z","update":{"version":"2.0.3","url":"https://54.248.9.192:8443/dl/x.zip","sha256":"' + SHA + '"},"nonce":"bm9uY2U="}';
+const want = '{"v":1,"id":"env-fixed","op":"update","nodeId":"node//x","by":"owner@example.com","issuedAt":"2026-10-26T00:00:00Z","expiresAt":"2026-10-26T00:30:00Z","update":{"version":"2.0.3","url":"' + TEST_OLD_URL + '/dl/x.zip","sha256":"' + SHA + '"},"nonce":"bm9uY2U="}';
 t('update signingBytes 与 Go 侧逐字一致', E.signingBytes(envFixed) === want);
 
 // 2) 旧 arm 布局不变（无 update 段）
@@ -33,18 +38,18 @@ const seedBuf = Buffer.from(seed, 'base64url');
 const keyFileContent = Buffer.concat([seedBuf, Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url')]).toString('base64');
 const keyObj = E.loadDispatcherKey(keyFileContent);
 const now = new Date('2026-10-26T00:00:00Z');
-const env = E.buildEnvelope(keyObj, { op: 'update', nodeId: 'node//x', by: 'owner@example.com', update: { version: '2.0.3', url: 'https://54.248.9.192:8443/QFLock-Component-v2.0.3.zip', sha256: SHA }, now });
+const env = E.buildEnvelope(keyObj, { op: 'update', nodeId: 'node//x', by: 'owner@example.com', update: { version: '2.0.3', url: TEST_OLD_URL + '/QFLock-Component-v2.0.3.zip', sha256: SHA }, now });
 t('update 信封字段齐', env.op === 'update' && env.update.version === '2.0.3' && env.update.sha256 === SHA);
 t('update 信封 TTL 30 分钟', env.expiresAt === '2026-10-26T00:30:00Z');
 const ok = crypto.verify(null, Buffer.from(E.signingBytes(env), 'utf8'), publicKey, Buffer.from(env.sig, 'base64'));
 t('update 信封签名可验', ok);
-const tampered = Object.assign({}, env, { update: { version: '2.0.3', url: 'https://54.248.9.192:8443/evil.zip', sha256: SHA } });
+const tampered = Object.assign({}, env, { update: { version: '2.0.3', url: TEST_OLD_URL + '/evil.zip', sha256: SHA } });
 const ok2 = crypto.verify(null, Buffer.from(E.signingBytes(tampered), 'utf8'), publicKey, Buffer.from(env.sig, 'base64'));
 t('篡改 url 后签名失效', !ok2);
 
 // 4) buildEnvelope(update) 参数不全直接抛错
 let threw = false;
-try { E.buildEnvelope(keyObj, { op: 'update', nodeId: 'n', by: 'b', update: { version: '2.0.3', url: 'https://54.248.9.192:8443/x.zip', sha256: 'zz' } }); } catch (e) { threw = true; }
+try { E.buildEnvelope(keyObj, { op: 'update', nodeId: 'n', by: 'b', update: { version: '2.0.3', url: TEST_OLD_URL + '/x.zip', sha256: 'zz' } }); } catch (e) { threw = true; }
 t('sha256 格式不对抛错', threw);
 
 // 5) 版本比较与 URL 白名单
@@ -56,7 +61,7 @@ t('白名单：自家域名 /dl/', E.allowedUpdateUrl('https://app.qfremote.top/
 t('白名单：显式 443', E.allowedUpdateUrl('https://app.qfremote.top:443/dl/x.zip') === true);
 t('白名单：http 拒', E.allowedUpdateUrl('http://app.qfremote.top/x.zip') === false);
 t('白名单：旧直连端口拒', E.allowedUpdateUrl('https://app.qfremote.top:8443/x.zip') === false);
-t('白名单：旧 IP 拒', E.allowedUpdateUrl('https://54.248.9.192:8443/dl/x.zip') === false);
+t('白名单：旧 IP 拒', E.allowedUpdateUrl(TEST_OLD_URL + '/dl/x.zip') === false);
 t('白名单：外站拒', E.allowedUpdateUrl('https://evil.example.com/x.zip') === false);
 t('白名单：userinfo 拒', E.allowedUpdateUrl('https://u@app.qfremote.top/x.zip') === false);
 

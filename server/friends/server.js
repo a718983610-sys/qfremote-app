@@ -933,6 +933,7 @@ function main() {
     mcConnectCookie,
     bridgeCfgPath: '/opt/qfremote-lock/bridge-config.json',
     isBanLinked,
+    isSiteAdmin: isOwnerAccount, // W-16：/lock/owner-check 只站长可用（站长账号 718983610）
   });
   // 论坛公开基址（直连源同框重定向用）：以官网 product.json 的 web.forumUrl
   // 为唯一准（临时通道轮换由既有巡检同步该文件），内存缓存 10 分钟，

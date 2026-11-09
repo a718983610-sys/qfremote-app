@@ -17,7 +17,9 @@
     /* 直连 IP 控制台下，包装页改走好友服务（8445）托管的那份：控制台
        源受上游 CSP 限制（frame-src/connect-src 只许同源），包装页长在
        控制台源时跨源 iframe 与取令牌请求都会被浏览器拦下；8445 与控制
-       台同主机（会话 cookie 按主机携带）、无此限制（2.3.0 M2 线）。 */
+       台同主机（会话 cookie 按主机携带）、无此限制（2.3.0 M2 线）。
+       X-16（2.4.5）：IP 直连分支仅调试场景回落，域名部署
+       （app.qfremote.top）走同源相对路径，不走此分支；不改行为。 */
     var WRAP_BASE = (/^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname)) ? 'https://' + location.hostname + ':8445/qf-wrap.html' : '/qf-wrap.html';
     var WRAP_FRIENDS = WRAP_BASE + '?t=friends';
     var WRAP_FORUM = WRAP_BASE + '?t=forum';

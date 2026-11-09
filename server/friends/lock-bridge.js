@@ -42,7 +42,8 @@ const ERR = {
 const RECONCILE_MS = 30000;
 const UPDATE_RECONCILE_MS = 240000; // 下载+替换+重启服务+回滚余量
 const STATUS_TTL_MS = 15000;              // 机主设备状态展示缓存（原 10s；只用于 GET /lock/devices 读路径）
-const STATUS_TTL_NONOWNER_MS = 300000;    // 非机主判定缓存：只用于「过滤掉别人的设备」，永不下发
+const STATUS_TTL_NONOWNER_MS = 60000;     // 非机主判定缓存（2.4.5：300s→60s）：只用于「过滤掉别人的设备」，永不下发；
+// 300s 时刚授权/刚改名后 5 分钟内仍判非机主，60s 后变化即生效；过滤仍省读。
 const STATUS_MISS_TTL_MS = 5000;          // 读不到（离线/超时）负缓存：短 TTL，尽快重试，不拖死整表
 
 /* 通道快速失败与读路径调参（perf-lockchain 2026-10-26）
@@ -146,7 +147,19 @@ function createLockBridge(deps) {
   let ownerAliasIndex = new Map(); // fold(登记名) -> fold(现名)
   let ownerAliasMtimeMs = -1;
   let ownerAliasLastCheck = 0;
+  let ownerAliasSignature = '';
+  function ownerAliasSig(idx) { return String(idx.size) + ':' + Array.from(idx.keys()).sort().join(','); }
   function foldName(s) { return typeof s === 'string' ? s.trim().toLowerCase() : ''; }
+  // 登记名哈希（只记前 16 位 hex，不记明文账号）：owner-mismatch 排障日志用。
+  function ownerNameHash(s) { return crypto.createHash('sha256').update(foldName(s)).digest('hex').slice(0, 16); }
+  // 机主登记失配日志：有 status 但登记名不属于请求者时记一条（节流 60 秒/台），
+  // 供站长排障（-Owner 填错时设备直接从列表消失，用户侧无任何可见线索）。
+  function logOwnerMismatch(me, node, status) {
+    if (!status || !status.ownerUsername) return;
+    logThrottled('owner-mismatch-' + node._id,
+      'lock 机主登记失配：node=' + node._id + ' 登记名哈希=' + ownerNameHash(status.ownerUsername)
+      + '（登记的 -Owner 与请求账号不符；用 GET /lock/owner-check?id= 核对原值）', 60000);
+  }
   function loadOwnerAliases(force) {
     const now = Date.now();
     if (!force && (now - ownerAliasLastCheck) < OWNER_ALIAS_RELOAD_MS) return;
@@ -180,6 +193,13 @@ function createLockBridge(deps) {
       }
       ownerAliasIndex = idx;
       ownerAliasMtimeMs = st.mtimeMs;
+      // X-14：别名表内容一变（改名刚登记），立即失效全部机主判定缓存——
+      // 否则非机主条目要等 60 秒 TTL 才重判，刚改名仍看不到设备。
+      const sig = ownerAliasSig(idx);
+      if (sig !== ownerAliasSignature) {
+        ownerAliasSignature = sig;
+        if (statusCache.size) { statusCache.clear(); logThrottled('alias-invalidate', 'lock 机主别名表已更新，机主判定缓存已清空（改名/授权即时生效）。', 60000); }
+      }
     } catch (e) {
       logThrottled('alias-bad', 'lock 机主别名表读取失败（保留上次好表继续服务）：' + (e && e.message), 60000);
     }
@@ -435,10 +455,11 @@ function createLockBridge(deps) {
   }
   // 预算内的并发实读：到预算点先返回「已实读确认」的部分，剩余台数后台读完回填缓存。
   // 安全口径不变：没实读到 status 的节点一律不进结果（未核实归属不下发）。
+  // 返回值＝预算用尽时尚未读完的台数（X-13：供 /lock/devices 报 partial/pending）。
   function readStatusesBounded(nodes, me, budgetMs, found) {
     return new Promise((resolve) => {
       let idx = 0, released = false, done = 0;
-      const release = () => { if (released) return; released = true; clearTimeout(timer); resolve(); };
+      const release = () => { if (released) return; released = true; clearTimeout(timer); resolve(nodes.length - done); };
       const timer = setTimeout(() => {
         logThrottled('read-budget', 'lock/devices 读路径预算 ' + budgetMs + 'ms 用尽，剩余 '
           + (nodes.length - done) + ' 台状态转后台回填，本次按已实读确认的机主设备返回。', 30000);
@@ -453,6 +474,7 @@ function createLockBridge(deps) {
           if (st) devicesMissAt.delete(missKey(me, node._id)); else devicesMissAt.set(missKey(me, node._id), Date.now());
           done++;
           // released 之后只回填 statusCache（readStatus 内已写），不再改动本次响应
+          if (!released && st && !isOwner(me, node, st)) logOwnerMismatch(me, node, st);
           if (!released && isOwner(me, node, st)) found.set(node._id, deviceFromNode(node, st));
           if (done === nodes.length) release();
         }
@@ -545,9 +567,10 @@ function createLockBridge(deps) {
     }
     const status = await readStatus(node._id, true);
     if (!status) {
-      // 通道本身不可用 → 明确报「连不上」，不误报「非机主」；设备离线（通道就绪）仍沿用 403 口径
-      if (!svc.ready) { fail(res, 503, ERR.unreachable); return null; }
-      fail(res, 403, ERR.notOwner); return null;
+      // W-16：status 读不到时离线与无权必须分开——通道未就绪（503）与通道就绪
+      // 但 status 读不到（设备离线/组件未回包，503「暂时无法连接这台电脑」）
+      // 都不再回 403 notOwner；离线被误报成「非机主」会让用户去纠结账号而不是去开电脑。
+      fail(res, 503, ERR.unreachable); return null;
     }
     if (!isOwner(me, node, status)) { fail(res, 403, ERR.notOwner); return null; }
     return { node, status };
@@ -601,38 +624,55 @@ function createLockBridge(deps) {
   const devicesInflight = new Map(); // me -> { at, promise }
   const devicesMissAt = new Map(); // 【门二必修#2】读路径专用失败时刻表：离线台在 STATUS_MISS_TTL_MS 内不重复探活；写路径不经此处
   function missKey(me, id) { return String(me) + '|' + id; } // 【门二增量 N2】失败抑制按账号隔离，共享设备不跨账号串扰
-  async function buildDevicesForUser(me) {
+  async function buildDevicesForUser(me, opts) {
+    const force = !!(opts && opts.force);
     const t0 = Date.now();
     const nodes = await listNodesForRead();
     const cand = nodes.filter((n) => n && n._id);
     const found = new Map(); // _id -> device（保持服务端节点顺序）
     const pending = [];
+    let missSuppressed = 0;
     for (const node of cand) {
       const e = statusCache.get(node._id);
-      if (e && statusFresh(e, me)) {
+      // X-14：?force=1 时跳过非机主缓存与失败抑制，实读一次（前端「重新加载」走这条路）。
+      if (e && statusFresh(e, me) && !force) {
         if (isOwner(me, node, e.status)) found.set(node._id, deviceFromNode(node, e.status));
+        else if (e.status) logOwnerMismatch(me, node, e.status);
       } else {
         const mAt = devicesMissAt.get(missKey(me, node._id));
-        if (mAt && (Date.now() - mAt) < STATUS_MISS_TTL_MS) {
+        if (!force && mAt && (Date.now() - mAt) < STATUS_MISS_TTL_MS) {
           // 【门二必修#2】刚探活失败过：本轮跳过实读（探活成功前该台不下发，与「不猜机主」一致）
+          missSuppressed++;
         } else {
           pending.push(node);
         }
       }
     }
+    let budgetRemaining = 0;
     if (pending.length) {
       const budget = Math.max(400, READ_PATH_BUDGET_MS - (Date.now() - t0));
-      await readStatusesBounded(pending, me, budget, found);
+      budgetRemaining = await readStatusesBounded(pending, me, budget, found);
     }
     const devices = [];
     for (const node of cand) { const d = found.get(node._id); if (d) devices.push(d); }
-    return devices;
+    // X-13：超预算静默漏设备改为明示——partial＋pending，未实读的台数前端据此
+    // 显示「正在确认其余设备状态…」并补拉一次，不得再悄悄少一台。
+    const pendingCount = budgetRemaining + missSuppressed;
+    return { devices, partial: pendingCount > 0, pending: pendingCount };
   }
-  function listDevicesFor(me) {
+  function listDevicesFor(me, opts) {
+    const force = !!(opts && opts.force);
+    if (force) { // force 请求不走同账号合并窗口，实读一次
+      const rec = { at: Date.now(), promise: null };
+      rec.promise = buildDevicesForUser(me, opts);
+      devicesInflight.set(me, rec);
+      rec.promise.then(() => { rec.at = Date.now(); }, () => { if (devicesInflight.get(me) === rec) devicesInflight.delete(me); });
+      return rec.promise;
+    }
     const cur = devicesInflight.get(me);
     if (cur && (Date.now() - cur.at) < DEVICES_DEDUPE_MS) return cur.promise;
     const rec = { at: Date.now(), promise: null };
-    rec.promise = buildDevicesForUser(me);
+    rec.promise = buildDevicesForUser(me, opts);
     devicesInflight.set(me, rec);
     rec.promise.then(() => { rec.at = Date.now(); }, () => { if (devicesInflight.get(me) === rec) devicesInflight.delete(me); });
     return rec.promise;
@@ -652,8 +692,39 @@ function createLockBridge(deps) {
     }
     try {
       if (req.method === 'GET' && p === '/lock/devices') {
-        const devices = await listDevicesFor(me);
-        sendJson(res, 200, { devices });
+        // X-14：?force=1 跳过非机主缓存与失败抑制，实读一次（前端「重新加载」）。
+        const force = u.searchParams.get('force') === '1';
+        const out = await listDevicesFor(me, { force });
+        sendJson(res, 200, { devices: out.devices, partial: !!out.partial, pending: out.pending || 0 });
+        return true;
+      }
+      // W-16：站长侧 Owner 登记核对接口（只站长可用；deps.isSiteAdmin 未提供时一律拒绝）。
+      // 装机后当场核对 -Owner 是否写对：输入 nodeid，返回组件登记的 ownerUsername
+      // 原值与当前请求账号的比对结果。登记错的修复口径：被控机本地改 device.json
+      // 的 OwnerUsername 后重启组件（组件侧文件路径与重启方式由组件线书面确认，
+      // 本桥不猜路径）。离线/读不到 status 时回 503（unreachable），不得回 403。
+      if (req.method === 'GET' && p === '/lock/owner-check') {
+        const isAdmin = typeof deps.isSiteAdmin === 'function' ? deps.isSiteAdmin(me) : false;
+        if (!isAdmin) { fail(res, 403, '仅站长可用。'); return true; }
+        const id = u.searchParams.get('id') || '';
+        if (!id) { fail(res, 400, ERR.badReq); return true; }
+        let nodes = await listNodes();
+        let node = nodes.find((n) => n && n._id === id);
+        if (!node) {
+          try { await refreshNodes(NODES_REFRESH_MS); } catch (e) {}
+          nodes = nodeCache.nodes;
+          node = nodes.find((n) => n && n._id === id);
+        }
+        if (!node) {
+          if (!svc.ready) { fail(res, 503, ERR.unreachable); return true; }
+          fail(res, 404, ERR.noDevice); return true;
+        }
+        const status = await readStatus(node._id, true);
+        if (!status) { fail(res, 503, ERR.unreachable); return true; }
+        const recorded = status.ownerUsername || '';
+        const matches = recorded ? ownerNameMatches(me, recorded) : false;
+        log('lock', 'owner-check：nodeid=' + node._id + ' 登记名哈希=' + ownerNameHash(recorded) + ' matches=' + matches);
+        sendJson(res, 200, { ok: true, nodeId: node._id, name: node.name || '', recordedOwner: recorded || null, recordedOwnerHash: ownerNameHash(recorded), matches, reachable: true });
         return true;
       }
       if (req.method === 'POST' && (p === '/lock/enable' || p === '/lock/disable' || p === '/lock/reset' || p === '/lock/update')) {
@@ -756,4 +827,4 @@ function createLockBridge(deps) {
   return { handle, purgeUser };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS } };

@@ -400,9 +400,14 @@ async function fetchNodeMap(opts) {
   nodeMapInflight = (async () => {
     let lockStatus = 'ok', lockError = '';
     try {
-      const lr = await lockApi('GET', '/devices');
+      // X-14：force 时 /lock/devices 带 ?force=1，跳过服务端非机主缓存与失败抑制实读一次。
+      const lr = await lockApi('GET', force ? '/devices?force=1' : '/devices');
       if (lr.status === 200 && lr.json && Array.isArray(lr.json.devices)) {
         applyLockDevices(lr.json.devices);
+        // X-13：服务端回 partial/pending（读路径预算用尽、部分设备未实读）时
+        // 记在节点图上，锁面板据此明示并补拉，不得静默漏设备。
+        const nm2 = ensureNodeMap();
+        nm2.lockPartial = !!lr.json.partial; nm2.lockPending = lr.json.pending || 0;
       } else if (lr.status === 401) { lockStatus = 'needlogin'; lockError = apiErrText(lr, '登录状态已失效，请重新登录后再管理屏幕锁。'); }
       else if (lr.networkError) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }
       else { lockStatus = 'unavailable'; lockError = apiErrText(lr, '屏幕锁服务暂未开通网页通道，暂时无法在此管理。请通过软件端管理该设备的屏幕锁。'); }
@@ -447,27 +452,52 @@ function xhrSendFile(payload, onProgress) {
     xhr.open('POST', '/license/api/files/send', true);
     xhr.withCredentials = true;
     xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    // X-04：上传 60 秒无进展即 abort（原无任何超时，弱网可无限挂起）。
+    let lastProgressAt = Date.now();
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastProgressAt > 60000) { clearInterval(stallTimer); try { xhr.abort(); } catch (e) {} resolve({ status: 0, ok: false, json: null, text: '', networkError: true, stalled: true }); }
+    }, 5000);
+    xhr.upload.onprogress = (e) => { lastProgressAt = Date.now(); if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
+      clearInterval(stallTimer);
       let json = null; try { json = JSON.parse(xhr.responseText); } catch (e) {}
       resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, json, text: xhr.responseText });
     };
-    xhr.onerror = () => resolve({ status: 0, ok: false, json: null, text: '', networkError: true });
+    xhr.onerror = () => { clearInterval(stallTimer); resolve({ status: 0, ok: false, json: null, text: '', networkError: true }); };
     xhr.send(JSON.stringify(payload));
   });
 }
 async function downloadStagedFile(id, filename, onProgress) {
-  const r = await fetch('/license/api/files/' + encodeURIComponent(id) + '/download', { credentials: 'include' });
+  // X-04：下载加 30 秒无进展超时（原裸 fetch 无超时、无进度、无断点）——
+  // 失败文案带已收字节数，不再只说「下载失败」。
+  const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+  let timer = null;
+  const armStall = () => { if (ctl) { if (timer) clearTimeout(timer); timer = setTimeout(() => { try { ctl.abort(); } catch (e) {} }, 30000); } };
+  const disarm = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  let r;
+  try {
+    armStall();
+    r = await fetch('/license/api/files/' + encodeURIComponent(id) + '/download', { credentials: 'include', signal: ctl ? ctl.signal : undefined });
+  } catch (e) { disarm(); throw new Error('下载中断（已收 0 MB），请重试。'); }
+  disarm();
   if (!r.ok) throw new Error('下载失败（服务返回 ' + r.status + '），请稍后再试。');
   const total = Number(r.headers.get('Content-Length') || 0);
   let blob;
   if (r.body && r.body.getReader) {
     const reader = r.body.getReader(); const chunks = []; let got = 0;
-    for (;;) {
-      const part = await reader.read();
-      if (part.done) break;
-      chunks.push(part.value); got += part.value.length;
-      if (onProgress && total) onProgress(got / total);
+    try {
+      for (;;) {
+        armStall();
+        const part = await reader.read();
+        disarm();
+        if (part.done) break;
+        chunks.push(part.value); got += part.value.length;
+        if (onProgress && total) onProgress(got / total);
+      }
+    } catch (e) {
+      disarm();
+      try { await reader.cancel(); } catch (e2) {}
+      throw new Error('下载中断（已收 ' + (got / 1048576).toFixed(1) + ' MB），请重试。');
     }
     blob = new Blob(chunks);
   } else { blob = await r.blob(); if (onProgress) onProgress(1); }
@@ -532,6 +562,8 @@ const BanLock = {
   },
 
   toExpired(reason) {
+    // X-01：锁屏/会话结束呈现前先拆会话帧（同 sessionDied 的理由）。
+    try { teardownSession(); } catch (e) {}
     this.stopTimer();
     this.state = 'expired';
     this.reason = (reason === 'locked') ? 'locked' : 'died';
@@ -583,7 +615,7 @@ const BanLock = {
         // 解封：退出锁定，按 checkSession 既有口径回填后回主壳
         this.exit();
         const probe = {};
-        const ok = await checkSession(true, { noDied: true, probe });
+        const ok = await checkSession(true, { noDied: true, probe, force: true }); // X-02：解封复查是用户可见的恢复动作，页面不可见也不跳过
         if (this.active()) return;            // 复查期间又被判封禁，保持锁定
         if (probe.gated) return;              // DS-R44：checkSession 已画设备门，禁止 showAuth 覆盖
         if (ok && S.auth === 'in') {
@@ -754,6 +786,9 @@ function noteBanSignal(res, path) {
 
 /* 会话猝死统一落点（R5）：返回是否已接管呈现 */
 function sessionDied(source) {
+  // X-01：登录态死亡时先拆会话帧（帧是 body 级 fixed 节点，藏壳不藏帧；
+  // 不拆则被封/被强制下线的账号的远程中继可能继续跑，下次还可能复用旧框）。
+  try { teardownSession(); } catch (e) {}
   S.sessGen++; // DS-R49：会话结束＝登出等价落点，递增代数使其余在飞旧响应作废
   if (BanLock.suppress) return false;
   if (BanLock.state === 'expired') return true;
@@ -770,13 +805,14 @@ api = async function (path, opts) {
   return res;
 };
 
-async function checkSession(silent, opts) {
+async function checkSessionInner(silent, opts) {
   const o = opts || {};
   const probe = o.probe;
   if (probe) { try { probe.gated = false; } catch (e) {} }
   const gen = S.sessGen; // DS-R49：发起时捕获身份代数，响应回来时代数已变则整单丢弃
   const me = await api('/license/api/me');
-  if (gen !== S.sessGen) return S.auth === 'in'; // DS-R49：旧代数迟到响应，不写状态、不作处置
+  // W-09：丢弃点只记 gen 新旧值（不记任何会话内容），便于排障时区分「丢弃」与「未返回」。
+  if (gen !== S.sessGen) { try { console.debug('[qf-sess] checkSession /me 迟到丢弃：gen ' + gen + ' -> ' + S.sessGen); } catch (e) {} return S.auth === 'in'; } // DS-R49：旧代数迟到响应，不写状态、不作处置
   if (me.status === 200 && me.json && me.json.ok) {
     // 同一响应只走一条路：先 forceLogout（设备门），再 activeBan（封禁锁定）
     if (me.json.forceLogout) {
@@ -796,8 +832,8 @@ async function checkSession(silent, opts) {
       cacheSave();
       return true;
     }
-    const st = await api('/home/api/stats');
-    if (curGen !== S.sessGen) return S.auth === 'in'; // DS-R49：stats 在飞期间身份已变，旧回填不写入
+    const st = await api('/home/api/stats', { timeoutMs: 10000 }); // X-02：stats 只是回填展示数据，10 秒不到即用旧值，不必等 30 秒
+    if (curGen !== S.sessGen) { try { console.debug('[qf-sess] checkSession /stats 迟到丢弃：gen ' + curGen + ' -> ' + S.sessGen); } catch (e) {} return S.auth === 'in'; } // DS-R49：stats 在飞期间身份已变，旧回填不写入
     if (st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || me.json.username; S.isAdmin = !!st.json.isAdmin; }
     else { S.displayName = me.json.username; }
     cacheSave();
@@ -819,6 +855,17 @@ async function checkSession(silent, opts) {
   // 网络异常等：不把用户踢下线（手感规格：失败给正式提示、不崩页）
   if (!silent) toast('暂时无法确认登录状态，请稍后再试。', 'warn');
   return S.auth === 'in';
+}
+/* X-02：checkSession 单飞——240 秒定时器、60 秒心跳、BanLock 复查三路可并发，
+   已在飞时直接复用同一份 promise，不再各开一条服务端 WS 校验；页面不可见时
+   跳过本次校验（切回来由下一轮定时器补上），不在后台空打校验。 */
+let checkFlight = null;
+async function checkSession(silent, opts) {
+  if (checkFlight) return checkFlight;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && !(opts && opts.force)) return S.auth === 'in';
+  checkFlight = checkSessionInner(silent, opts);
+  try { return await checkFlight; }
+  finally { checkFlight = null; }
 }
 /* 登录页偏好与账密保存（#39）：两个勾选框的状态跨登出、跨重启持久；
  * 「记住账号密码」勾选且登录成功才落盘，取消勾选再次登录即彻底清除。 */
@@ -858,7 +905,14 @@ async function doLogin(username, password, remember) {
   try {
     const fields = { username, password };
     if (remember) fields.qfrememberdevice = 'on'; // 垫片按原生勾选框口径认 'on' 值
-    const resp = await fetch('/qf-login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() });
+    // X-03：/qf-login 裸 fetch 加 15 秒 Abort 超时（正常登录 3 秒内回头）——
+    // 弱网下登录按钮不再无限转圈；超时与网络异常统一回同文案，按钮恢复可点。
+    const loginCtl = (typeof AbortController === 'function') ? new AbortController() : null;
+    const loginTimer = loginCtl ? setTimeout(() => { try { loginCtl.abort(); } catch (e) {} }, 15000) : null;
+    let resp;
+    try {
+      resp = await fetch('/qf-login', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString(), signal: loginCtl ? loginCtl.signal : undefined });
+    } finally { if (loginTimer) clearTimeout(loginTimer); }
     const loginResult = resp.headers.get('x-qf-login-result');
     if (resp.body) { try { await resp.body.cancel(); } catch (e) {} }
     // 2026-10-26 热修（冻结误报）：密码正确但账号被冻结（B1 当日冻结）时，
@@ -913,6 +967,7 @@ setInterval(heartbeat, 60000);                    // 在线计时/强制下线�
 setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true); }, 240000); // 凭证静默续期校验
 function forceGate(code) {
   S.sessGen++; // DS-R49：强制下线＝登出等价落点，递增代数使其余在飞旧响应作废
+  try { teardownSession(); } catch (e) {} // X-01：强制下线先拆会话帧
   BanLock.exit();
   S.auth = 'out'; Cache.clear(); clearMyProfile();
   invalidateNodeMap(); // W1-2：强制下线即清设备映射缓存，防换账号残留
@@ -924,6 +979,7 @@ async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
     BanLock.suppress = true;
     S.sessGen++; // DS-R49：登出即身份代数变化，旧在飞响应作废
+    try { teardownSession(); } catch (e) {} // X-01：登出请求发出前先拆会话帧，防旧帧又发心跳类请求
     try {
       BanLock.exit();
       const lo = await api('/logout');
@@ -1436,10 +1492,18 @@ function rowInfoHtml(icon, t, s) {
 }
 function devRowHtml(d) {
   /* 2.4.0 数据携带解析：渲染时能查到节点 id 就直接盖进按钮（data-nodeid），
-     点按零等待；查不到的由 refreshDevRowIds 在节点图落地后补盖，再兜底 resolve 端点。 */
+     点按零等待；查不到的由 refreshDevRowIds 在节点图落地后补盖，再兜底 resolve 端点。
+     X-07：共享设备在线态未知时（onlineUnknown）不再写死「离线」——显示
+     「状态未知」，且不给远程按钮（未确认在线前不让点进会话）。 */
   const nid = d.nodeid ? bareNodeId(d.nodeid) : nodeIdFor(d.name);
   const nidAttr = nid ? ` data-nodeid="${esc(nid)}"` : '';
-  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span><span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span><span class="ops">${d.online ? `<button class="btn sm" data-remote="${esc(d.name)}"${nidAttr}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${nidAttr}>文件管理</button>` : '<span class="pill off">设备离线时不可连接</span>'}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
+  const pill = d.onlineUnknown
+    ? '<span class="pill">状态未知</span>'
+    : `<span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span>`;
+  const ops = d.online
+    ? `<button class="btn sm" data-remote="${esc(d.name)}"${nidAttr}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${nidAttr}>文件管理</button>`
+    : (d.onlineUnknown ? '<span class="pill">状态未知，暂不可连接</span>' : '<span class="pill off">设备离线时不可连接</span>');
+  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span>${pill}<span class="ops">${ops}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
 }
 /* 点按反馈：立即置忙＋一句可见文案（本稿唯一新增可见文案，7 字内）＋6s 兜底恢复。
    跳转类（远程桌面/终端）走 CANON 导航，页面会离开，无需回收；导航类（文件/详情）
@@ -1538,7 +1602,9 @@ function refreshDevRowIds(root) {
   });
 }
 async function resolveDeviceId(name) {
-  const r = await api('/api/device/resolve?name=' + encodeURIComponent(name || ''));
+  // W-03：解析独立超时 8 秒、不重试（服务端冷查标称 ≤3 秒）；Views.session
+  // 另有 10 秒总闸。默认 30 秒＋GET 自动重试一次最坏拖 60 秒以上。
+  const r = await api('/api/device/resolve?name=' + encodeURIComponent(name || ''), { timeoutMs: 8000, retry: false });
   if (r.json && typeof r.json === 'object') return r.json;
   return { ok: false, code: 'TIMEOUT' };
 }
@@ -1547,7 +1613,10 @@ function sessionDeepLink(nodeid, vm) {
 }
 
 /* ---------- 预热（phase-0 E8：Chromium 节流冷启 18–39s，预热是承重项） ---------- */
-const QF_PRE = { frame: null, nodeid: '', vm: 0, ready: false, t0: 0, warmMs: 0 };
+const QF_PRE = { frame: null, nodeid: '', vm: 0, ready: false, t0: 0, warmMs: 0, navGen: 0 };
+/* W-08：预热框导航世代号——每次 frameNavigate/location.replace 前 ++navGen，
+   onload 闭包捕获当时的世代值，回调首行比对，不符即丢弃（晚到回调不得把正在
+   升格的会话框又导航去别的设备）。frameNavigate 本身也 ++navGen（见该函数）。 */
 function startSessionPreheat() {
   if (QF_PRE.frame) return;
   const f = document.createElement('iframe');
@@ -1561,13 +1630,14 @@ function startSessionPreheat() {
 function upgradePreheat(nodeid, vm) {
   const id = bareNodeId(nodeid);
   /* DS P1-1 硬门禁：会话已升格（Sess.active）或框已非预热态时，设备页的晚到
-     回调绝不对活动会话框执行 replace 导航（串设备/断连）。 */
-  if (Sess.active || !QF_PRE.frame || !QF_PRE.frame.classList.contains('qf-preheat')) return;
+     回调绝不对活动会话框执行 replace 导航（串设备/断连）。W-14 再加一道：
+     路由已切会话即不升级——拦住 teardown→active 之间的 await 窗口。 */
+  if (Sess.active || (S && S.route && S.route.name === 'session') || !QF_PRE.frame || !QF_PRE.frame.classList.contains('qf-preheat')) return;
   if (!id) return;
   if (QF_PRE.nodeid === id && QF_PRE.vm === vm) return;
   QF_PRE.nodeid = id; QF_PRE.vm = vm; QF_PRE.ready = false; QF_PRE.t0 = performance.now();
-  QF_PRE.frame.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); };
-  try { QF_PRE.frame.contentWindow.location.replace(sessionDeepLink(id, vm)); } catch (e) { QF_PRE.frame.src = sessionDeepLink(id, vm); }
+  armFrameLoad(null, null); // W-08：预热导航也带世代校验（只置 ready，不触发 onFrameLoad）
+  frameNavigate(sessionDeepLink(id, vm));
 }
 
 /* ---------- 会话运行态 ---------- */
@@ -1576,6 +1646,14 @@ const Sess = {
   name: '', nodeid: '', kind: 'desktop', vm: 11, linkedVm: 0, pendingVm: 0, pendingGen: 0,
   state: 'idle', t0: 0, connectMs: 0, reloaded: false, guardN: 0, guardToastShown: false,
   discN: 0, blankSince: 0, timers: [], listeners: [], kbMode: 'auto', trapArmed: false,
+  /* W-02 阶段态：iframe-attach → webapp-ready → peer-connecting → video-ready
+     （preflight 在 t0 置位前，见 buildSessionFrame；iframe-load 12 秒预算见
+     哨兵：onload 后 12 秒 probe 仍为 blank 即 TIMEOUT_IFRAME_LOAD）。
+     stageAt 以 performance.now() 计；超时码与文案见 failStage/showSessionMask。 */
+  stage: '', stageAt: 0, webappReady: false, preflight: null, maskCode: '', navFallback: '',
+  forcedConnectN: 0, connectingSince: 0, connectAttempts: [],
+  lostSince: 0, lostReloaded: false, reconnectN: 0, lastLostTry: 0,
+  lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, stageTextSec: -1,
 };
 let QF_SESS_CTX = null;
 function sessOn(target, type, fn, opts) { target.addEventListener(type, fn, opts); Sess.listeners.push([target, type, fn, opts]); }
@@ -1593,8 +1671,97 @@ function teardownSession() {
     f.removeAttribute('style'); f.id = 'qfPreheat'; f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
     const bd = document.getElementById('qfSessBackdrop'); if (bd) bd.remove();
   }
+  /* W-04/X-01：失败终态的会话降格时，同步清掉预热框的旧身份——失败过的
+     nodeid/vm 组合不得被下次复用分支原样升格（否则重进同一设备仍踩旧框）。 */
+  if (Sess.state === 'failed' || Sess.lastFailCode) { QF_PRE.nodeid = ''; QF_PRE.vm = 0; QF_PRE.ready = false; }
   Sess.active = false; Sess.trapArmed = false; Sess.root = null; Sess.frame = null; Sess.adopted = false; Sess.state = 'idle';
   Sess.pendingVm = 0;   // DS P2-1：待办形态不跨会话残留
+  Sess.stage = ''; Sess.stageAt = 0; Sess.webappReady = false; Sess.stageTextSec = -1;
+  Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
+  Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
+  Sess.morphTries = 0;
+}
+
+/* ---------- presence 预检与阶段文案（W-01/W-02/W-12 共用） ---------- */
+function fmtAgeMs(ms) {
+  if (ms == null || !(ms >= 0)) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' 秒前';
+  const m = Math.round(s / 60);
+  if (m < 60) return m + ' 分钟前';
+  return Math.round(m / 60) + ' 小时前';
+}
+async function checkPresence(nodeid) {
+  const id = bareNodeId(nodeid || '');
+  if (!id) return { ok: false, code: 'VALIDATION' };
+  try {
+    const r = await api('/api/device/presence?nodeid=' + encodeURIComponent(id), { timeoutMs: 8000, retry: false });
+    if (r && r.json && typeof r.json === 'object') return r.json;
+    if (r && r.status === 401) return { ok: false, code: 'AUTH' };
+    return { ok: false, code: 'TIMEOUT' };
+  } catch (e) { return { ok: false, code: 'TIMEOUT' }; }
+}
+const STAGE_TEXT = {
+  preflight: '正在检查设备在线状态…',
+  resolving: '正在解析设备…',
+  'iframe-attach': '正在加载控制台…',
+  'webapp-ready': '正在启动控制台…',
+  'peer-connecting': '正在连接设备…',
+  'video-ready': '正在建立画面通道…',
+};
+function setStage(view, stage) {
+  Sess.stage = stage; Sess.stageAt = performance.now();
+  const t = STAGE_TEXT[stage] || '正在建立会话…';
+  const b = $('#qfBadgeTxt', view); if (b) b.textContent = t.replace(/…$/, '');
+  const c = $('#qfConnecting', view);
+  if (c) {
+    const tt = c.querySelector('.sv-connecting__t'); if (tt) tt.textContent = t;
+    const dev = $('#qfConnDev', view); if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '');
+  }
+  Sess.stageTextSec = -1;
+  try { console.debug('[qf-sess] stage=' + stage); } catch (e) {}
+}
+/* 每秒刷新一次连接中文案里的已耗时（避免每 250ms 密探都写 DOM）。 */
+function refreshStageClock(view) {
+  if (!Sess.active || Sess.state !== 'connecting' || !Sess.t0) return;
+  const sec = Math.floor((performance.now() - Sess.t0) / 1000);
+  if (sec === Sess.stageTextSec) return;
+  Sess.stageTextSec = sec;
+  const dev = $('#qfConnDev', view);
+  if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '') + ' · 已用 ' + sec + ' 秒';
+}
+/* 框内引擎会话对象是否与本会话同一台设备（W-05：probeFrame 的 connected 判定
+   与 driveConnect 的 stale 判定共用；currentNode 不存在时不作否定，只认有值且不符）。 */
+function frameNodeMatches(w) {
+  try {
+    const cn = w && w.currentNode;
+    if (!cn) return true;
+    const id = bareNodeId(cn._id || cn.id || cn.nodeid || '');
+    return !id || id === Sess.nodeid;
+  } catch (e) { return true; }
+}
+function frameSessionStale(w, doc) {
+  try {
+    if (!frameNodeMatches(w)) return true;
+    const st = doc && doc.querySelector('#deskstatus');
+    const t = st ? String(st.textContent || '') : '';
+    if (/disconnect|not connected|断开|未连接/i.test(t)) return true;
+  } catch (e) {}
+  return false;
+}
+/* W-08：给预热/会话框装一次带世代校验的 onload（导航前调用）。
+   捕获值 g＝下一次导航将产生的 navGen；frameNavigate 里 ++navGen 后两者相等
+   才放行。Sess.gen 快照同理——晚到回调拿旧会话世代即丢弃。 */
+function armFrameLoad(view, onload) {
+  const f = QF_PRE.frame;
+  if (!f) return;
+  const g = QF_PRE.navGen + 1;
+  const sg = Sess.gen;
+  f.onload = () => {
+    if (g !== QF_PRE.navGen || sg !== Sess.gen) return;
+    QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0);
+    if (typeof onload === 'function') onload();
+  };
 }
 
 /* 八入口唯一收敛点：kind ∈ desktop/terminal/files；ctx.name 必备，ctx.nodeid 为数据携带 id（可缺） */
@@ -1627,7 +1794,9 @@ function sessionMarkup(name, kind) {
   const capLive = capBridgeLive();
   const capRows = QF_CAP_DEFS.map(c => {
     const on = sessCapOn(c.key);
-    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${capLive && on ? ' sv-opt__s--ok' : ''}">${capLive ? (on ? '已开启' : '已关闭') : '未接入'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"></button></div></li>`;
+    // X-12：桥未接入时开关整体置 aria-disabled（不用 disabled 属性——被禁用的
+    // 按钮收不到点击，toast 说明就永远弹不出来；样式上同样置灰不可点）。
+    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${capLive && on ? ' sv-opt__s--ok' : ''}">${capLive ? (on ? '已开启' : '已关闭') : '未接入'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"${capLive ? '' : ' aria-disabled="true"'}></button></div></li>`;
   }).join('');
   return `<div class="qf-session-layer"><div class="viewer" id="qfViewer" data-morph="${kind}" data-fs="false">
     <header class="sv-bar"><div class="sv-bar__inner">
@@ -1647,7 +1816,7 @@ function sessionMarkup(name, kind) {
         <p class="sv-connecting__d" id="qfConnDev">目标设备：${esc(name || '')}</p>
         <div class="sv-progress"><div class="sv-progress__bar"></div></div>
       </div>
-      <div class="sv-strip" id="qfStrip" hidden><span class="sv-strip__spin"></span><span class="sv-strip__txt" id="qfStripTxt">连接中断，正在自动重连（第 1 次）</span></div>
+      <div class="sv-strip" id="qfStrip" hidden><span class="sv-strip__spin"></span><span class="sv-strip__txt" id="qfStripTxt">连接中断，正在自动重连…</span></div>
       <div class="sv-mask" id="qfMask" hidden><div class="sv-card">
         <h2 class="sv-card__t" id="qfMaskT">无法建立会话</h2>
         <p class="sv-card__d" id="qfMaskD"></p>
@@ -1763,6 +1932,7 @@ function sessApplyCap(key, on) {
 /* ---------- 会话视图 ---------- */
 Views.session = async function (view, param) {
   teardownSession();
+  Sess.active = true; // W-14：active 在 teardown 之后的第一行置位（任何 await 之前），缩窄升级窗口
   const gen = Sess.gen;
   const ctx = (QF_SESS_CTX && (QF_SESS_CTX.name === param || QF_SESS_CTX.nodeid === param)) ? QF_SESS_CTX : null;
   if (!ctx && param) {
@@ -1782,7 +1952,7 @@ Views.session = async function (view, param) {
   }
   if (!name && param && param !== nodeid) name = param;
   if (!nodeid && name) nodeid = nodeIdFor(name);
-  Sess.active = true; Sess.name = name; Sess.nodeid = nodeid; Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind] || 11;
+  Sess.name = name; Sess.nodeid = nodeid; Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind] || 11;
   try { Sess.kbMode = localStorage.getItem('qfKbMode') || 'auto'; } catch (e) { Sess.kbMode = 'auto'; }
   view.innerHTML = sessionMarkup(name, kind);
   const layerEl = view.querySelector('.qf-session-layer');
@@ -1792,7 +1962,13 @@ Views.session = async function (view, param) {
   history.pushState({ qfSessTrap: 1 }, '', location.href);
   Sess.trapArmed = true;
   if (!nodeid && name) {
-    const r = await resolveDeviceId(name).catch(() => ({ ok: false, code: 'TIMEOUT' }));
+    // W-03：解析是连接中的第一阶段（文案「正在解析设备…」），总闸 10 秒——
+    // 超时即 TIMEOUT 遮罩，不再 await 死等（与 resolve 自身 8 秒叠加最坏 10 秒）。
+    setStage(view, 'resolving');
+    const r = await Promise.race([
+      resolveDeviceId(name).catch(() => ({ ok: false, code: 'TIMEOUT' })),
+      new Promise((res2) => setTimeout(() => res2({ ok: false, code: 'TIMEOUT' }), 10000)),
+    ]);
     if (gen !== Sess.gen || !Sess.active) return;
     if (r && r.ok && r.nodeid) { nodeid = bareNodeId(r.nodeid); Sess.nodeid = nodeid; if (r.name) { Sess.name = r.name; const t = $('#qfTitle', view); if (t) t.textContent = r.name; } }
     else if (r && r.code === 'NOT_FOUND' && !ctx && param && name === param) {
@@ -1814,13 +1990,52 @@ function sessionDeepLinkCurrent() { return sessionDeepLink(Sess.nodeid, Sess.vm)
 function frameNavigate(url) {
   const f = Sess.frame || QF_PRE.frame;
   if (!f) return;
-  try { f.contentWindow.location.replace(url); return; } catch (e) {}
-  try { f.src = url; } catch (e) {}
+  QF_PRE.navGen++; // W-08：每次导航递增世代号（armFrameLoad 的闭包据此校验）
+  try { f.contentWindow.location.replace(url); return; } catch (e) {
+    // X-10：replace 抛错不再无条件回落 src 赋值（src 会在联合历史里新增条目、
+    // 把顶层 URL 回卷）。只在帧未挂载（contentWindow 为 null）时才允许 src；
+    // 否则先记日志、300ms 后重试一次 replace，两次都失败才 src 并打标记，
+    // 供哨兵下一轮 probeFrame 时优先按「可能回卷」处理（即时复位顶层 URL）。
+    Sess.navFallback = 'replace-throw';
+    try { console.debug('[qf-sess] frameNavigate replace 抛错，300ms 后重试一次。'); } catch (e2) {}
+    if (!f.contentWindow) { try { f.src = url; } catch (e2) {} Sess.navFallback = 'src-fallback'; return; }
+    setTimeout(() => {
+      try { f.contentWindow.location.replace(url); }
+      catch (e2) { try { f.src = url; } catch (e3) {} Sess.navFallback = 'src-fallback'; }
+    }, 300);
+  }
 }
 
-function buildSessionFrame(view) {
+async function buildSessionFrame(view, preflightResult) {
   Sess.pendingVm = 0;   // DS P2-1：新一轮构建起算，旧待办形态清零
-  Sess.t0 = performance.now(); Sess.state = 'connecting'; Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
+  Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
+  Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
+  Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
+  Sess.maskCode = ''; Sess.navFallback = ''; Sess.preflight = null; Sess.webappReady = false;
+  /* W-01 会话建立预检（Sess.t0 置位之前）：先问服务端这台设备在线吗——
+     online:false 或 fresh:false（stale）时直接 OFFLINE 遮罩，不挂 iframe；
+     预检本身超时/网络失败时回 TIMEOUT 码进遮罩，不静默进框；预检失败不得
+     降级为「跳过预检继续建会话」，否则等于没修。结果记入 Sess.preflight
+     供哨兵与日志复用。独立总预算 8 秒（checkPresence 内置）。 */
+  const gen0 = Sess.gen;
+  setStage(view, 'preflight');
+  // retryFromMask 已通过的预检可复用（同一 nodeid、刚通过），不重复发请求。
+  const pre = (preflightResult && preflightResult.nodeid === Sess.nodeid && preflightResult.code === 'ONLINE')
+    ? preflightResult
+    : await checkPresence(Sess.nodeid);
+  if (gen0 !== Sess.gen || !Sess.active) return;
+  Sess.preflight = pre;
+  try { console.debug('[qf-sess] preflight node=' + Sess.nodeid + ' code=' + (pre && pre.code)); } catch (e) {}
+  if (pre && pre.code === 'AUTH') { sessionDied('preflight'); return; }
+  if (!pre || !pre.ok || pre.code === 'TIMEOUT') { Sess.state = 'failed'; showSessionMask(view, 'TIMEOUT', { preflight: pre, stage: 'preflight' }); return; }
+  if (pre.code === 'NOT_FOUND') { Sess.state = 'failed'; showSessionMask(view, 'NOT_FOUND', { preflight: pre }); return; }
+  if (pre.code === 'OFFLINE' || pre.code === 'STALE' || pre.fresh === false) {
+    Sess.state = 'failed';
+    showSessionMask(view, 'OFFLINE', { preflight: pre });
+    return;
+  }
+  Sess.t0 = performance.now(); Sess.state = 'connecting';
+  setStage(view, 'iframe-attach');
   /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
   const m0 = view.querySelector('#qfMask'); if (m0) m0.hidden = true; Sess.mask = null;
   /* 会话框恒为 body 级永驻框（预热框原地升格）：iframe 换父节点必被浏览器重载
@@ -1829,14 +2044,26 @@ function buildSessionFrame(view) {
   if (!QF_PRE.frame) startSessionPreheat();
   const f = QF_PRE.frame;
   Sess.linkedVm = Sess.vm;
-  if (QF_PRE.nodeid !== Sess.nodeid || QF_PRE.vm !== Sess.vm) {
+  /* W-04 复用三重门，缺一即走换 src 重建（不得原样升格失败/未 ready 的旧框）：
+     (a) QF_PRE.ready === true；(b) 框内当前文档 href 同时含 node=<id> 与
+     qfm=frame（与 probeFrame 的身份口径同款）；(c) 上次会话非 failed 终态
+     （同一 nodeid/vm 组合失败过不得复用，见 showSessionMask 的 lastFail 记录）。 */
+  let reuseOk = false;
+  if (QF_PRE.nodeid === Sess.nodeid && QF_PRE.vm === Sess.vm && QF_PRE.ready === true
+      && !(Sess.lastFailCode && Sess.lastFailNodeid === Sess.nodeid && Sess.lastFailVm === Sess.vm)) {
+    try {
+      const href = String(f.contentWindow && f.contentWindow.location.href || '');
+      reuseOk = href.indexOf('node=' + Sess.nodeid) >= 0 && href.indexOf('qfm=frame') >= 0;
+    } catch (e) { reuseOk = false; }
+  }
+  if (!reuseOk) {
     QF_PRE.nodeid = Sess.nodeid; QF_PRE.vm = Sess.vm; QF_PRE.ready = false; QF_PRE.t0 = performance.now();
-    f.onload = () => { QF_PRE.ready = true; QF_PRE.warmMs = Math.round(performance.now() - QF_PRE.t0); onFrameLoad(view); };
     Sess.frame = f;
+    armFrameLoad(view, () => onFrameLoad(view, Sess.gen)); // W-08：换 src 导航带世代校验
     frameNavigate(sessionDeepLinkCurrent());
   } else {
-    f.onload = () => onFrameLoad(view);
-    onFrameLoad(view);
+    armFrameLoad(view, () => onFrameLoad(view, Sess.gen));
+    onFrameLoad(view, Sess.gen);
   }
   let bd = document.getElementById('qfSessBackdrop');
   if (!bd) { bd = document.createElement('div'); bd.id = 'qfSessBackdrop'; bd.className = 'qf-session-backdrop'; }
@@ -1861,15 +2088,21 @@ function syncSessionFrameGeometry() {
   try { const br = getComputedStyle(slot).borderRadius; if (br) f.style.borderRadius = br; } catch (e) {}
 }
 
-function onFrameLoad(view) {
+function onFrameLoad(view, gen) {
+  // W-08：onload 首行双重世代校验（armFrameLoad 的闭包已验过一次，此处再验
+  // 直接调用方传的世代——复用分支同步调用时 gen 即当前 Sess.gen）。
+  if (gen != null && gen !== Sess.gen) return;
+  if (!Sess.active) return;
   injectFrameGuard();
+  injectFrameReady(); // §5.1：往框内插 ready 探针脚本（同源才插得进，跨域降级见该函数）
+  if (Sess.stage === 'iframe-attach') setStage(view, 'iframe-load');
   setTimeout(() => driveConnect(), 700);
   if (Sess.pendingVm) {
     const pv = Sess.pendingVm, pg = Sess.pendingGen;
     Sess.pendingVm = 0;
     /* DS P2-1：消费时校验世代——待办形态须为当前会话世代登记者，
        跨会话/跨构建残留一律丢弃，不把下一会话切去旧形态。 */
-    if (pv !== Sess.linkedVm && pg === Sess.gen) { Sess.linkedVm = pv; tryGo(pv); }
+    if (pv !== Sess.linkedVm && pg === Sess.gen) { Sess.linkedVm = pv; if (tryGo(pv)) Sess.morphTries = 0; }
   }
 }
 function injectFrameGuard() {
@@ -1882,6 +2115,41 @@ function injectFrameGuard() {
     doc.head.appendChild(st);
   } catch (e) {}
 }
+/* §5.1 webapp-ready 探针（2.4.5 P1 增强，非必选项的落地）：
+   与 injectFrameGuard 同位置、同源检查——往框内插一段小脚本，等引擎出现
+   currentNode 或 #deskstatus 即向父层 postMessage qf-remote-webapp-ready。
+   父层监听（wireSession 里注册）验 event.source 与 event.origin，防任意页面冒充。
+   插不进去（跨域直连 :8443）或 MC 页升级覆盖导致脚本丢失时，不死等消息：
+   onFrameLoad 后 15 秒仍按 probe 信号推进（哨兵的 webapp-ready 超时分支里，
+   probe 已为 binding 即视为引擎已起、直接进 peer-connecting，不落超时遮罩）。 */
+function injectFrameReady() {
+  try {
+    const f = Sess.frame;
+    const doc = f && f.contentDocument;
+    if (!doc || !doc.head || doc.getElementById('qfReadyScript')) return;
+    const sc = doc.createElement('script');
+    sc.id = 'qfReadyScript';
+    sc.textContent = '(function(){var done=false;function fire(){if(done)return;done=true;try{window.parent.postMessage({type:"qf-remote-webapp-ready"},location.origin);}catch(e){}}'
+      + 'function check(){try{if(window.currentNode||document.getElementById("deskstatus")){fire();return;}}catch(e){}setTimeout(check,300);}'
+      + 'if(document.readyState==="complete")check();else window.addEventListener("load",check);setTimeout(check,300);})();';
+    doc.head.appendChild(sc);
+  } catch (e) { /* 跨域插不进：哨兵按 probe 信号降级，不报错、不卡住 */ }
+}
+function onWebappReadyMessage(ev) {
+  try {
+    if (!ev || !ev.data || ev.data.type !== 'qf-remote-webapp-ready') return;
+    if (!Sess.active || !Sess.frame) return;
+    if (ev.source !== Sess.frame.contentWindow) return;
+    if (ev.origin !== location.origin) return;
+    if (Sess.webappReady) return;
+    Sess.webappReady = true;
+    try { console.debug('[qf-sess] webapp-ready 收到。'); } catch (e) {}
+    if (Sess.state === 'connecting' && Sess.stage === 'webapp-ready') {
+      const view = $('#view');
+      if (view) setStage(view, 'peer-connecting');
+    }
+  } catch (e) {}
+}
 function tryGo(vm) {
   try {
     const w = Sess.frame && Sess.frame.contentWindow;
@@ -1892,34 +2160,77 @@ function tryGo(vm) {
 
 /* 热修 2026-10-30（DS flash 轻审已过，必改项全采纳）：深链直达设备页时引擎不自连
    （自连只在引擎设备列表点击流里），由 SPA 在绑定完成后代为触发引擎连接。
-   守卫：仅 connecting 态、帧已绑定目标设备（与探针同一身份口径）、引擎无对话框、
-   状态非建连中；节流 ≥4s、单轮 ≤6 次。contype 取 1（引擎直建分支，与引擎内部
-   调用及 rig 实证一致）：contype 3 对 agent.id<=4 的设备先走会话查询、框内等不到
-   回执会空转（笔记本实测），故不用；直建分支不经会话选择器，无误点面。 */
+   守卫：仅 connecting/lost 态（W-07：lost 态每 5 秒重连也走本函数）、帧已绑定目标设备
+   （与探针同一身份口径）、引擎无对话框；节流 ≥4s、20 秒滚动窗口内 ≤6 次
+   （W-06：原单轮总额 6 次耗尽后永久静默，改为窗口滚动计数）。
+   contype 取 1（引擎直建分支，与引擎内部调用及 rig 实证一致）：contype 3 对
+   agent.id<=4 的设备先走会话查询、框内等不到回执会空转（笔记本实测），故不用；
+   直建分支不经会话选择器，无误点面。
+   返回值：是否实际调了一次 connect*（哨兵 lost 态据此计真实重连次数）。 */
 function driveConnect() {
   try {
-    if (!Sess.active || Sess.state !== 'connecting' || !Sess.frame) return;
+    if (!Sess.active || (Sess.state !== 'connecting' && Sess.state !== 'lost') || !Sess.frame) return false;
     const w = Sess.frame.contentWindow, doc = Sess.frame.contentDocument;
-    if (!w || !doc) return;
+    if (!w || !doc) return false;
     const href = String(w.location.href || '');
-    if (href.indexOf('node=' + Sess.nodeid) < 0 || href.indexOf('qfm=frame') < 0) return;
-    if (w.xxdialogMode) return;
+    if (href.indexOf('node=' + Sess.nodeid) < 0 || href.indexOf('qfm=frame') < 0) return false;
+    if (w.xxdialogMode) return false;
     const now = performance.now();
-    if (Sess.lastConnectTry && now - Sess.lastConnectTry < 4000) return;
-    if ((Sess.connectN || 0) >= 6) return;
+    if (Sess.lastConnectTry && now - Sess.lastConnectTry < 4000) return false;
+    // W-06：20 秒滚动窗口内 ≤6 次（窗口外的时间戳清掉），不是单轮总额。
+    const attempts = (Sess.connectAttempts || []).filter((t) => now - t < 20000);
+    Sess.connectAttempts = attempts;
+    if (attempts.length >= 6) return false;
     const st = doc.querySelector('#deskstatus');
     const stTxt = st ? String(st.textContent || '') : '';
-    if (/connecting|setup|连接中/i.test(stTxt)) return;
+    // W-06：引擎自称 connecting 不再是永久免干预——先给 8 秒宽限，超 8 秒仍
+    // connecting 且引擎会话对象未建立（或已 stale），SPA 主动补调一次（上限 2 次）。
+    if (/connecting|setup|连接中/i.test(stTxt)) {
+      if (!Sess.connectingSince) Sess.connectingSince = now;
+      if (now - Sess.connectingSince < 8000) return false;
+      if ((Sess.forcedConnectN || 0) >= 2) return false;
+      if (w.desktop && !frameSessionStale(w, doc)) return false;
+      let forced = false;
+      if (Sess.vm === 11 && w.currentNode && typeof w.connectDesktop === 'function') { w.connectDesktop(null, 1); forced = true; }
+      else if (Sess.vm === 12 && w.currentNode && typeof w.connectTerminal === 'function') { w.connectTerminal(null, 1); forced = true; }
+      else if (Sess.vm === 13 && w.currentNode && typeof w.connectFiles === 'function') { w.connectFiles(null); forced = true; }
+      if (forced) {
+        Sess.lastConnectTry = now; Sess.connectN = (Sess.connectN || 0) + 1; Sess.connectAttempts.push(now);
+        Sess.forcedConnectN = (Sess.forcedConnectN || 0) + 1;
+        try { console.debug('[qf-sess] 引擎 connecting 超 8 秒，SPA 补调 connect（第 ' + Sess.forcedConnectN + ' 次）。'); } catch (e) {}
+        return true;
+      }
+      return false;
+    }
+    Sess.connectingSince = 0;
     let acted = false;
-    if (Sess.vm === 11 && !w.desktop && w.currentNode && typeof w.connectDesktop === 'function') { w.connectDesktop(null, 1); acted = true; }
-    else if (Sess.vm === 12 && !w.terminal && w.currentNode && typeof w.connectTerminal === 'function') { w.connectTerminal(null, 1); acted = true; }
-    else if (Sess.vm === 13 && !w.files && w.currentNode && typeof w.connectFiles === 'function') { w.connectFiles(null); acted = true; }
-    if (acted) { Sess.lastConnectTry = now; Sess.connectN = (Sess.connectN || 0) + 1; }
-  } catch (e) {}
+    // W-06：!w.desktop 改为 !w.desktop || stale——旧会话对象残留（currentNode
+    // 已不是本台、或状态文本已是 disconnect）时也重建，不再认 stale 对象。
+    if (Sess.vm === 11 && (!w.desktop || frameSessionStale(w, doc)) && w.currentNode && typeof w.connectDesktop === 'function') { w.connectDesktop(null, 1); acted = true; }
+    else if (Sess.vm === 12 && (!w.terminal || frameSessionStale(w, doc)) && w.currentNode && typeof w.connectTerminal === 'function') { w.connectTerminal(null, 1); acted = true; }
+    else if (Sess.vm === 13 && (!w.files || frameSessionStale(w, doc)) && w.currentNode && typeof w.connectFiles === 'function') { w.connectFiles(null); acted = true; }
+    if (acted) { Sess.lastConnectTry = now; Sess.connectN = (Sess.connectN || 0) + 1; Sess.connectAttempts.push(now); }
+    return acted;
+  } catch (e) { return false; }
 }
 
-/* 哨兵：onload＋8 秒同源尺寸/结构观察＋一次自动重载＋三级错误卡（空白/被拒/无 id），
-   兼容模式顶层打开为用户主动触发的第 3 级（DS-DESIGN 哨兵规格）。 */
+/* W-02 阶段超时落点：专用码＋阶段名＋已耗时间＋connectN/重载信息（文案见
+   showSessionMask 的 TIMEOUT_* 分支）。同时记 lastFail，供 W-04 复用门禁。 */
+function failStage(view, code, stageName) {
+  Sess.state = 'failed';
+  Sess.lastFailCode = code; Sess.lastFailNodeid = Sess.nodeid; Sess.lastFailVm = Sess.vm;
+  showSessionMask(view, code, { stage: stageName, elapsedMs: Math.round(performance.now() - Sess.t0), connectN: Sess.connectN || 0, reloaded: !!Sess.reloaded, preflight: Sess.preflight || null });
+}
+
+/* 哨兵：onload＋8 秒同源尺寸/结构观察＋三级错误卡（空白/被拒/无 id），
+   兼容模式顶层打开为用户主动触发的第 3 级（DS-DESIGN 哨兵规格）。
+   2.4.5（W-02/W-07）：20 秒总闸＋40 秒 FAIL 改为阶段超时阶梯——
+   iframe-attach 8s / iframe-load 12s / webapp-ready 15s /
+   peer-connecting 25s / video-ready 20s，总上限 60 秒；任一阶段超时即按该
+   阶段落专用码遮罩，不再等总闸；自动重载一次的旧语义由阶段超时取代（重载
+   本身治标且会丢阶段诊断，协调人 2.4.5 定案以阶段超时为准）。
+   lost 态（W-07）不再无限挂着：进 lost 记 lostSince，每 5 秒主动重连一次
+   （真实次数进条文），30 秒未恢复自动重建一次，重建后仍 lost 满 20 秒落 FAIL。 */
 function startSentinel(view) {
   let tickN = 0;
   const tick = () => {
@@ -1931,28 +2242,48 @@ function startSentinel(view) {
        链与 exitSession（Sess.active 先置假），不被本守卫打架。 */
     try { const want = '#session/' + encodeURIComponent(Sess.name || Sess.nodeid); if (location.hash !== want) history.replaceState(null, '', want); } catch (e) {}
     injectFrameGuard();
-    /* URL 规范化守卫：框内逃逸（丢 qfm 标记）拉回 hide 形态，上限 3 次防循环 */
+    /* URL 规范化守卫：框内逃逸（丢 qfm 标记）拉回 hide 形态，上限 3 次防循环；
+       X-18：第 4 次逃逸不再放任，直接落 FAIL 遮罩（不再是裸引擎页、无提示）。 */
     try {
       const href = Sess.frame.contentWindow.location.href;
-      if (href && href.indexOf('about:blank') !== 0 && href.indexOf('qfm=') < 0 && Sess.state !== 'failed' && Sess.guardN < 3) {
-        Sess.guardN++;
-        frameNavigate(sessionDeepLinkCurrent());
-        if (!Sess.guardToastShown) { Sess.guardToastShown = true; toast('已回到会话界面。', 'info'); }
-        return;
+      if (href && href.indexOf('about:blank') !== 0 && href.indexOf('qfm=') < 0 && Sess.state !== 'failed') {
+        if (Sess.guardN < 3) {
+          Sess.guardN++;
+          armFrameLoad(view, () => onFrameLoad(view, Sess.gen)); // W-08：拉回导航也重装世代校验
+          frameNavigate(sessionDeepLinkCurrent());
+          if (!Sess.guardToastShown) { Sess.guardToastShown = true; toast('已回到会话界面。', 'info'); }
+          return;
+        }
+        Sess.state = 'failed'; showSessionMask(view, 'FAIL', { reason: 'guard-escape' }); return;
       }
     } catch (e) {}
     const p = probeFrame();
     const now = performance.now();
     if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
     if (Sess.state === 'connecting') {
+      refreshStageClock(view);
       if (p === 'connected') { setConnected(view); return; }
-      driveConnect();
-      if (now - Sess.t0 > 20000) {
-        if (!Sess.reloaded) {
-          Sess.reloaded = true; Sess.t0 = now; Sess.connectN = 0; Sess.lastConnectTry = 0;
-          try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
-        } else { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
+      if (p === 'videopending') {
+        if (Sess.stage !== 'video-ready') setStage(view, 'video-ready');
+        else if (now - Sess.stageAt > 20000) { failStage(view, 'TIMEOUT_VIDEO_READY', 'video-ready'); return; }
+      } else if (p === 'binding') {
+        if (Sess.stage === 'iframe-load') setStage(view, 'webapp-ready');
+        else if (Sess.stage === 'webapp-ready' && Sess.webappReady) setStage(view, 'peer-connecting');
+        else if (Sess.stage === 'webapp-ready' && now - Sess.stageAt > 15000) {
+          // §5.1 fallback：15 秒没收到 ready 消息、但 probe 已是 binding——
+          // 引擎已起（消息丢了或同源注入不可用），按 probe 信号推进，不死等。
+          setStage(view, 'peer-connecting');
+        }
+        driveConnect();
+      } else if (p === 'blank') {
+        driveConnect(); // 帧尚未绑定目标文档时 driveConnect 内部的 href 身份口径会自行拦下
       }
+      // 阶段超时阶梯（每阶段只看本阶段内耗时）＋总上限 60 秒兜底。
+      if (Sess.stage === 'iframe-attach' && now - Sess.stageAt > 8000) { failStage(view, 'TIMEOUT_IFRAME_LOAD', 'iframe-attach'); return; }
+      if (Sess.stage === 'iframe-load' && now - Sess.stageAt > 12000) { failStage(view, 'TIMEOUT_IFRAME_LOAD', 'iframe-load'); return; }
+      if (Sess.stage === 'webapp-ready' && !Sess.webappReady && now - Sess.stageAt > 15000 && p === 'blank') { failStage(view, 'TIMEOUT_WEBAPP_READY', 'webapp-ready'); return; }
+      if (Sess.stage === 'peer-connecting' && now - Sess.stageAt > 25000) { failStage(view, 'TIMEOUT_PEER_CONNECTING', 'peer-connecting'); return; }
+      if (now - Sess.t0 > 60000) { failStage(view, 'TIMEOUT', 'connecting'); return; }
     } else if (Sess.state === 'connected') {
       if (p === 'lost') { setLost(view); return; }
       if (p === 'blank') {
@@ -1961,6 +2292,24 @@ function startSentinel(view) {
       } else Sess.blankSince = 0;
     } else if (Sess.state === 'lost') {
       if (p === 'connected') { setConnected(view); return; }
+      if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
+      // W-07：每 5 秒主动重连一次（driveConnect 在 lost 态放行），真实次数进条文。
+      if (now - Sess.lastLostTry > 5000) {
+        Sess.lastLostTry = now;
+        if (driveConnect()) {
+          Sess.reconnectN++;
+          const t = $('#qfStripTxt', view);
+          if (t) t.textContent = '连接中断，正在重连（第 ' + Sess.reconnectN + ' 次尝试）';
+        }
+      }
+      if (!Sess.lostReloaded && Sess.lostSince && now - Sess.lostSince > 30000) {
+        Sess.lostReloaded = true; Sess.lostSince = now;
+        armFrameLoad(view, () => onFrameLoad(view, Sess.gen)); // W-08：重建导航重装世代校验
+        try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
+        toast('连接中断，正在重建会话…', 'info');
+      } else if (Sess.lostReloaded && Sess.lostSince && now - Sess.lostSince > 20000) {
+        Sess.state = 'failed'; showSessionMask(view, 'FAIL', { reason: 'lost-reconnect' }); return;
+      }
     }
   };
   Sess.timers.push(setTimeout(tick, 250));
@@ -1983,11 +2332,32 @@ function probeFrame() {
   const stTxt = st ? String(st.textContent || '') : '';
   if (/disconnect|not connected|断开|未连接/i.test(stTxt)) return 'lost';
   const desk = doc.querySelector('#Desk');
-  /* 桌面形态的「已连接」须状态文本给出完整 Connected（Connecting 不算）且画布有尺寸：
-     画布元素在文档刚提交时即带属性尺寸，仅凭画布判连会在引擎尚在加载时假绿（rig 实证） */
-  if (Sess.vm === 11 && desk && desk.width > 10 && desk.height > 10 && (/^\s*connected\b/i.test(stTxt) || stTxt.indexOf('已连接') >= 0)) return 'connected';
-  if (Sess.vm === 12) { const p12 = doc.querySelector('#p12'); if (p12 && p12.offsetParent !== null) return 'connected'; }
-  if (Sess.vm === 13) { const p13 = doc.querySelector('#p13'); if (p13 && p13.offsetParent !== null) return 'connected'; }
+  /* W-05：桌面形态的「已连接」须三重成立——状态文本给出完整 Connected（Connecting
+     不算）＋画布有尺寸＋引擎会话对象真实存在且 currentNode 是本台设备（只看
+     文本与画布会在引擎尚在加载/串设备时假绿）。文本已 Connected 但画布仍为 0
+     时回 videopending（引擎已连、画面通道未就绪，走 video-ready 阶段超时）。 */
+  if (Sess.vm === 11 && (/^\s*connected\b/i.test(stTxt) || stTxt.indexOf('已连接') >= 0)) {
+    if (desk && desk.width > 10 && desk.height > 10 && w.desktop && frameNodeMatches(w)) return 'connected';
+    if (desk) return 'videopending'; // 画布元素已在、但尺寸/会话对象未就绪：画面通道未就绪
+    // #Desk 元素尚未出现：仍在绑定中，落到下方的 binding/blank 判定
+  }
+  /* X-19：终端/文件形态不再只看容器 offsetParent（静态容器加载完即存在，与
+     通道连通无关）。终端须引擎终端会话对象存在且 currentNode 是本台；文件须
+     列表容器已渲染出条目或明确的空目录文案。未达标一律判 binding（继续等），
+     宁可晚绿、不假绿。 */
+  if (Sess.vm === 12) {
+    const p12 = doc.querySelector('#p12');
+    if (p12 && p12.offsetParent !== null && (w.terminal || (w.currentNode && frameNodeMatches(w)))) return 'connected';
+  }
+  if (Sess.vm === 13) {
+    const p13 = doc.querySelector('#p13');
+    if (p13 && p13.offsetParent !== null) {
+      const txt = String(p13.textContent || '').trim();
+      const hasEntry = !!p13.querySelector('[data-file], .file, tr, li, a');
+      const emptyNote = /空目录|没有文件|暂无文件|empty/i.test(txt);
+      if (hasEntry || emptyNote) return 'connected';
+    }
+  }
   if (desk || doc.querySelector('#p11')) return 'binding';
   return 'blank';
 }
@@ -1998,17 +2368,27 @@ function setBadge(view, kind, txt) {
 }
 function setConnected(view) {
   Sess.state = 'connected';
+  Sess.stage = 'video-ready';
   Sess.connectMs = Math.round(performance.now() - Sess.t0);
+  // 成功连上即清失败标记（W-04：下次同设备同形态可正常复用预热框）。
+  Sess.lastFailCode = ''; Sess.lastFailNodeid = ''; Sess.lastFailVm = 0;
+  Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
   const c = $('#qfConnecting', view); if (c) c.hidden = true;
   const s = $('#qfStrip', view); if (s) s.hidden = true;
   setBadge(view, '', '已连接');
   if (Sess.name) { try { localStorage.setItem('qfLastSessionDevice', Sess.name); } catch (e) {} }
+  // X-11：连上后若有待办形态切换，重试一次 go()（setMorph 的等待路径）。
+  if (Sess.pendingVm && Sess.pendingGen === Sess.gen) {
+    const pv = Sess.pendingVm; Sess.pendingVm = 0;
+    if (pv !== Sess.linkedVm && tryGo(pv)) { Sess.linkedVm = pv; Sess.morphTries = 0; }
+  }
 }
 function setLost(view) {
+  if (Sess.state !== 'lost') { Sess.lostSince = performance.now(); Sess.reconnectN = 0; Sess.lastLostTry = 0; }
   Sess.state = 'lost';
   Sess.discN++;
   const s = $('#qfStrip', view); if (s) s.hidden = false;
-  const t = $('#qfStripTxt', view); if (t) t.textContent = '连接中断，正在自动重连（第 ' + Sess.discN + ' 次）';
+  const t = $('#qfStripTxt', view); if (t) t.textContent = '连接中断，正在自动重连…';
   setBadge(view, 'retry', '重连中');
 }
 function showSessionMask(view, code, r) {
@@ -2021,6 +2401,10 @@ function showSessionMask(view, code, r) {
   if (retry) retry.className = 'sv-btn sv-btn--primary';
   if (back) back.className = 'sv-btn';
   Sess.maskCode = code;
+  const pre = (r && r.preflight) || Sess.preflight || null;
+  const lastSeenTxt = pre && pre.lastAgentPong ? ('（最后在线：' + fmtAgeMs(pre.lastAgentPongAgeMs) + '）') : '';
+  // W-04：帧级失败（FAIL/TIMEOUT*）记 lastFail——同一 nodeid/vm 组合下次不得复用旧框。
+  if (/^(FAIL|TIMEOUT)/.test(code)) { Sess.lastFailCode = code; Sess.lastFailNodeid = Sess.nodeid; Sess.lastFailVm = Sess.vm; }
   if (code === 'REJECT') {
     T.textContent = '无法建立会话';
     D.textContent = '你没有这台设备的远程控制权限，请联系设备管理员为你开通。';
@@ -2028,7 +2412,10 @@ function showSessionMask(view, code, r) {
     if (retry) retry.className = 'sv-btn';
   } else if (code === 'OFFLINE') {
     T.textContent = '设备当前不在线';
-    D.textContent = '设备离线时无法建立会话，请确认设备已开机并联网后重试。';
+    // W-13：一键修复在手机控笔记本的场景下没有可执行能力（修复脚本是 Windows
+    // 侧的 qf-agent-heal.ps1，手机跑不了），绝不放点了没反应的假按钮；改为
+    // 文字指引＋重试（重试走 W-12 的 presence 预检路径）。
+    D.textContent = '设备离线时无法建立会话' + lastSeenTxt + '。请确认设备已开机联网，或在电脑上重启 Mesh Agent 服务（开始菜单搜索「服务」→找到 Mesh Agent→重新启动），然后点重试。';
     if (back) back.className = 'sv-btn sv-btn--primary';
     if (retry) retry.className = 'sv-btn';
   } else if (code === 'AMBIGUOUS') {
@@ -2047,9 +2434,30 @@ function showSessionMask(view, code, r) {
     T.textContent = '无法定位这台设备';
     D.textContent = '未能取得设备的连接标识，请稍后重试，或使用兼容模式打开。';
     if (compat) compat.hidden = false;
-  } else { /* FAIL / TIMEOUT */
+  } else if (code === 'TIMEOUT_IFRAME_LOAD' || code === 'TIMEOUT_WEBAPP_READY' || code === 'TIMEOUT_PEER_CONNECTING' || code === 'TIMEOUT_VIDEO_READY') {
+    // W-02/W-13：阶段超时专用分支（不再落入通用 else）——阶段名＋已耗秒数＋下一步。
+    const stageName = (r && r.stage) || '';
+    const secs = (r && typeof r.elapsedMs === 'number') ? Math.round(r.elapsedMs / 1000) : null;
+    const stageCn = { 'iframe-attach': '加载会话框', 'iframe-load': '加载控制台页面', 'webapp-ready': '启动控制台', 'peer-connecting': '连接设备', 'video-ready': '建立画面通道', preflight: '检查设备在线状态' }[stageName] || '建立连接';
+    T.textContent = '连接超时';
+    D.textContent = '在「' + stageCn + '」阶段等待' + (secs != null ? '超过 ' + secs + ' 秒' : '') + '仍未完成'
+      + (code === 'TIMEOUT_PEER_CONNECTING' ? '：设备可能离线或 agent 未响应，请确认设备在线后重试。' : '，请检查网络后重试。')
+      + '（诊断码：' + code + '）';
+    if (compat) compat.hidden = false;
+  } else if (code === 'TIMEOUT') {
+    T.textContent = '连接超时';
+    const stageCn = (r && r.stage === 'preflight') ? '检查设备在线状态' : '建立连接';
+    const secs = (r && typeof r.elapsedMs === 'number') ? Math.round(r.elapsedMs / 1000) : null;
+    D.textContent = '在「' + stageCn + '」阶段等待' + (secs != null ? '超过 ' + secs + ' 秒' : '') + '仍未完成，请检查网络后重试。（诊断码：TIMEOUT）';
+    if (compat) compat.hidden = false;
+  } else { /* FAIL */
     T.textContent = '会话组件加载失败';
-    D.textContent = '请检查网络后重试。';
+    const detail = [];
+    if (r && r.reason === 'guard-escape') detail.push('会话页面多次偏离');
+    if (r && r.reason === 'lost-reconnect') detail.push('连接中断且重连失败');
+    if (r && typeof r.connectN === 'number') detail.push('已尝试连接 ' + r.connectN + ' 次');
+    if (r && r.reloaded) detail.push('已自动重载过一次');
+    D.textContent = (detail.length ? detail.join('，') + '。' : '') + '请检查网络与设备状态后重试。（诊断码：FAIL）';
     if (compat) compat.hidden = false;
   }
   m.hidden = false;
@@ -2096,7 +2504,15 @@ function wireSession(view) {
   root.querySelectorAll('[data-cap]').forEach(o => o.onclick = () => {
     const key = o.getAttribute('data-cap');
     const on = o.getAttribute('aria-checked') !== 'true';
+    // X-12：桥未接入时只记偏好、不翻 aria-checked，并 toast 明示暂不生效。
+    if (!capBridgeLive()) {
+      const c0 = sessCaps(); c0[key] = on;
+      try { localStorage.setItem('qfSessCaps', JSON.stringify(c0)); } catch (e) {}
+      toast('该能力尚未接入引擎，开关仅记录偏好，暂不生效。', 'info');
+      return;
+    }
     const applied = sessApplyCap(key, on);
+    if (!applied) return; // sessApplyCap 回 false 时不得翻 aria-checked
     o.setAttribute('aria-checked', on ? 'true' : 'false');
     const c = sessCaps(); c[key] = on;
     try { localStorage.setItem('qfSessCaps', JSON.stringify(c)); } catch (e) {}
@@ -2133,6 +2549,9 @@ function wireSession(view) {
     setTimeout(() => syncSessionFrameGeometry(), 60);
   });
   sessOn(window, 'resize', () => syncSessionFrameGeometry());
+  /* §5.1：webapp-ready 探针消息监听（验 source 与 origin，见 onWebappReadyMessage）；
+     sessOn 登记、teardownSession 时随会话一并注销。 */
+  sessOn(window, 'message', onWebappReadyMessage);
   sessOn(document, 'keydown', (e) => {
     if (!Sess.active || e.key !== 'Escape') return;
     if (anySheetOpen()) { closeAllSheets(); return; }
@@ -2164,21 +2583,39 @@ function sessionBackChain(view) {
   if (c) { c.hidden = false; void c.offsetWidth; c.dataset.open = 'true'; }
   return true;
 }
-function retryFromMask(view) {
+async function retryFromMask(view) {
   const m = $('#qfMask', view); if (m) m.hidden = true;
   const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
   setBadge(view, 'wait', '连接中');
-  if ((Sess.maskCode === 'NOT_FOUND' || Sess.maskCode === 'OFFLINE' || Sess.maskCode === 'TIMEOUT' || Sess.maskCode === 'AMBIGUOUS') && Sess.name && !Sess.nodeid) {
-    const gen = Sess.gen;
+  const gen = Sess.gen;
+  // W-12：重试统一先调 presence 预检（8 秒预算）——在线＋fresh 才重建；
+  // 离线/stale 直接重画 OFFLINE 遮罩（带「最后在线 X 分钟前」）；预检超时落
+  // TIMEOUT 遮罩。重试成功后 Sess.reloaded 复位为 false（恢复完整额度），
+  // 不要像原来那样预先把哨兵的一次重载额度消耗掉。
+  if ((Sess.maskCode === 'NOT_FOUND' || Sess.maskCode === 'OFFLINE' || Sess.maskCode === 'TIMEOUT' || Sess.maskCode === 'AMBIGUOUS' || /^TIMEOUT_/.test(Sess.maskCode || '') || Sess.maskCode === 'FAIL') && Sess.name && !Sess.nodeid) {
     resolveDeviceId(Sess.name).then(r => {
       if (gen !== Sess.gen || !Sess.active) return;
-      if (r && r.ok && r.nodeid) { Sess.nodeid = bareNodeId(r.nodeid); buildSessionFrame(view); }
+      if (r && r.ok && r.nodeid) { Sess.nodeid = bareNodeId(r.nodeid); Sess.reloaded = false; buildSessionFrame(view); }
       else showSessionMask(view, (r && r.code) || 'TIMEOUT', r);
     }).catch(() => { if (gen === Sess.gen) showSessionMask(view, 'TIMEOUT', null); });
     return;
   }
-  if (Sess.frame && Sess.nodeid) { Sess.state = 'connecting'; Sess.t0 = performance.now(); Sess.reloaded = true; Sess.connectN = 0; Sess.lastConnectTry = 0; try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {} }
-  else if (!Sess.frame && Sess.nodeid) buildSessionFrame(view);
+  if (Sess.nodeid) {
+    setStage(view, 'preflight');
+    const pre = await checkPresence(Sess.nodeid);
+    if (gen !== Sess.gen || !Sess.active) return;
+    Sess.preflight = pre;
+    if (pre && pre.code === 'AUTH') { sessionDied('preflight'); return; }
+    if (!pre || !pre.ok || pre.code === 'TIMEOUT') { Sess.state = 'failed'; showSessionMask(view, 'TIMEOUT', { preflight: pre, stage: 'preflight' }); return; }
+    if (pre.code === 'NOT_FOUND') { Sess.state = 'failed'; showSessionMask(view, 'NOT_FOUND', { preflight: pre }); return; }
+    if (pre.code === 'OFFLINE' || pre.code === 'STALE' || pre.fresh === false) { Sess.state = 'failed'; showSessionMask(view, 'OFFLINE', { preflight: pre }); return; }
+    // 预检通过：完整重建（reloaded 复位，阶段与计数清零），不再直接 frameNavigate。
+    Sess.reloaded = false;
+    buildSessionFrame(view, pre);
+    return;
+  }
+  // 无 nodeid 又无 name：无从重试，回设备列表。
+  exitSession();
 }
 function exitSession() {
   const name = Sess.name;
@@ -2215,13 +2652,29 @@ function setMorph(view, kind) {
   applyMorphChrome(view);
   syncSessionFrameGeometry();
   if (Sess.frame && Sess.linkedVm !== Sess.vm) {
-    if (tryGo(Sess.vm)) { Sess.linkedVm = Sess.vm; }
+    if (tryGo(Sess.vm)) { Sess.linkedVm = Sess.vm; Sess.morphTries = 0; }
     else if (Sess.state === 'connected' || Sess.state === 'lost') {
-      /* go() 不可用（引擎未就绪/异版）：退化换链重建（会断连，非常态路径，仅兜底） */
-      Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
-      const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
-      setBadge(view, 'wait', '连接中');
-      frameNavigate(sessionDeepLinkCurrent());
+      /* X-11：go() 不可用时先不重建——记为待办形态并 toast 等待，等 onFrameLoad/
+         setConnected 下一轮再试一次 go()；两次都失败才弹确认框，用户点了才
+         frameNavigate 重建（原来是点一下就直接断连重建，无确认、无回退）。 */
+      Sess.pendingVm = Sess.vm; Sess.pendingGen = Sess.gen;
+      Sess.morphTries = (Sess.morphTries || 0) + 1;
+      const kindCn = kind === 'terminal' ? '终端' : (kind === 'files' ? '文件管理' : '桌面');
+      if (Sess.morphTries >= 2) {
+        Sess.morphTries = 0;
+        confirmModal('切换形态需要重建会话', '切换到' + kindCn + '需要重建会话，当前画面将中断，是否继续？', '重建会话', () => {
+          if (!Sess.active) return;
+          Sess.pendingVm = 0; Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
+          const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
+          const st = $('#qfStrip', view); if (st) st.hidden = true;
+          setBadge(view, 'wait', '连接中');
+          setStage(view, 'iframe-attach');
+          armFrameLoad(view, () => onFrameLoad(view, Sess.gen));
+          frameNavigate(sessionDeepLinkCurrent());
+        });
+      } else {
+        toast('正在切换到' + kindCn + '，请稍候…', 'info');
+      }
     } else { Sess.pendingVm = Sess.vm; Sess.pendingGen = Sess.gen; }
   }
 }
@@ -2296,10 +2749,17 @@ Views.devices = async function (view, param, seq) {
   }).catch(() => {});
   const st = await api('/home/api/stats');
   if (st.status === 200 && st.json && st.json.ok) S.stats = st.json;
+  // X-07：stats 失败（非 200 / ok 假 / 网络失败）且无旧缓存可用时，画网络失败态，
+  // 不得画「暂无设备」（失败与真空必须分开，否则用户会以为设备被删了去重装 agent）。
+  const hasCachedDevs = !!(S.stats && Array.isArray(S.stats.devices) && S.stats.devices.length);
+  if (!(st.status === 200 && st.json && st.json.ok) && !hasCachedDevs) {
+    netFail($('#devList', view), () => render());
+    return;
+  }
   const mine = (S.stats && S.stats.devices) || [];
   let shared = [];
   const fm = await api('/api/friends/me');
-  if (fm.status === 200 && fm.json) shared = (fm.json.sharesIn || []).map(s => ({ name: s.meshName || '共享设备组', os: '好友共享 · ' + ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'), group: s.owner || '', online: false })); // 批A-A2：档位判法对齐好友页与服务端词表 operate/view
+  if (fm.status === 200 && fm.json) shared = (fm.json.sharesIn || []).map(s => ({ name: s.meshName || '共享设备组', os: '好友共享 · ' + ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'), group: s.owner || '', online: false, onlineUnknown: true })); // 批A-A2：档位判法对齐好友页与服务端词表 operate/view；X-07：共享行在线态未知，不得写死离线
   const box = $('#devList', view);
   const paint = (tab) => {
     // 批A-A4：三页签分开渲染——'all' 合并我的与共享；共享行归属读映射字段 group（原误读 d.from 永不显示）
@@ -2324,17 +2784,19 @@ Views.devices = async function (view, param, seq) {
     view.querySelectorAll('[data-tab]').forEach(x => x.classList.remove('on')); el.classList.add('on'); paint(el.getAttribute('data-tab'));
   });
 };
-Views.device = async function (view, name) {
+Views.device = async function (view, name, seq) {
   const devs = (S.stats && S.stats.devices) || [];
   const d = devs.find(x => x.name === name) || { name, os: '', group: '', online: false };
+  // X-08：离线时三行远程入口初始即置灰不可点（原来头部说「不可连接」，下面三行照点不误）。
+  const dis = d.online ? '' : ' disabled';
   view.innerHTML = `<h1 class="pt">设备详情 · ${esc(d.name)}</h1><p class="psub"><a data-back>← 返回我的设备</a></p>
-    <div class="card"><div class="dev" style="border:none;padding:0"><span class="devic">${ic('monitor')}</span><span><b style="font-size:17px">${esc(d.name)}</b><small>${esc(d.os || '')} · ${d.online ? '在线' : '离线'}</small></span><span class="ops">${d.online ? `<button class="btn" data-remote="${esc(d.name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>'}</span></div></div>
-    <div class="grid2"><div class="card"><h3>连接</h3>
-      <button class="row" data-remote="${esc(d.name)}"><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
-      <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}">远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}">文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}">远程终端</button></p></div>
+    <div class="card"><div class="dev" style="border:none;padding:0"><span class="devic">${ic('monitor')}</span><span><b style="font-size:17px">${esc(d.name)}</b><small>${esc(d.os || '')} · ${d.online ? '在线' : '离线'}</small></span><span class="ops" id="devHeadOps">${d.online ? `<button class="btn" data-remote="${esc(d.name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>'}</span></div></div>
+    <div class="grid2"><div class="card" id="devConnCard"><h3>连接</h3>
+      <button class="row" data-remote="${esc(d.name)}"${dis}><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"${dis}><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"${dis}><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
+      <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}"${dis}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${dis}>文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}"${dis}>远程终端</button></p></div>
     <div class="card"><h3>设备信息</h3><div class="tblwrap"><table>
       <tr><th>系统</th><td>${esc(d.os || '—')}</td></tr><tr><th>分组</th><td>${esc(d.group || '默认分组')}</td></tr>
-      <tr><th>状态</th><td>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div></div>
+      <tr><th>状态</th><td data-devstatus>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div></div>
     <div class="card" id="lockCard"><h3>屏幕锁</h3><div id="lockBody"><div class="skel" style="height:52px"></div></div></div>
     <div class="card"><h3>共享与安全</h3>
       ${rowHtml('users', '共享给好友', '在好友页选择好友后共享此设备（只看 / 可操作两档）', 'friends')}
@@ -2346,7 +2808,31 @@ Views.device = async function (view, name) {
   const gl = $('#goLockPanel', view);
   if (gl) gl.onclick = () => { const c = $('#lockCard', view); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
   initLockPanel(view, d.name);
+  // X-08：详情页进页时调一次 presence 预检刷新在线态（8 秒预算），不得只信
+  // 60 秒前的 stats 快照；超时则保持旧值并标「状态未知」。
+  const pid = nodeIdFor(name);
+  if (pid) {
+    checkPresence(pid).then((pre) => {
+      if (seq !== renderSeq || !view.isConnected) return;
+      const on = pre && pre.code === 'ONLINE';
+      const off = pre && (pre.code === 'OFFLINE' || pre.code === 'STALE');
+      if (!on && !off) { const stCell = view.querySelector('[data-devstatus]'); if (stCell) stCell.textContent = '状态未知'; return; }
+      const sd = ((S.stats && S.stats.devices) || []).find(x => x.name === name);
+      if (sd) sd.online = on;
+      setDevConnState(view, d.name, on);
+    }).catch(() => {});
+  }
 };
+/* X-08：详情页连接区在线态原地刷新（行禁用/头部按钮/状态字三处同改）。 */
+function setDevConnState(view, name, online) {
+  const card = $('#devConnCard', view);
+  if (card) card.querySelectorAll('[data-remote],[data-files],[data-terminal]').forEach(b => { b.disabled = !online; });
+  const stCell = view.querySelector('[data-devstatus]');
+  if (stCell) stCell.textContent = online ? '在线' : '离线';
+  const ops = $('#devHeadOps', view);
+  if (ops) ops.innerHTML = online ? `<button class="btn" data-remote="${esc(name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>';
+  if (ops) bindDevRows(view);
+}
 /* 屏幕锁面板（四态：未锁/已锁/未装组件/他人设备；三操作：arm/reset/disarm）。
    形态照安卓 LockPage 与电脑端 lock.html：未锁时点开关先在卡内展开设密码
    表单、提交成功才真正上锁；已锁时可关锁（二次确认）或用登录密码重设。 */
@@ -2361,8 +2847,31 @@ async function initLockPanel(view, deviceName) {
   }
   if (nm.lockStatus !== 'ok') {
     body.innerHTML = `<div class="statebox"><b>屏幕锁暂时不可用</b><p>${esc(nm.lockError)}</p><button class="btn sm" id="lk-retry">重新加载</button></div>`;
-    const rb = $('#lk-retry', body); if (rb) rb.onclick = () => { invalidateNodeMap(); initLockPanel(view, deviceName); };
+    const rb = $('#lk-retry', body); if (rb) rb.onclick = () => { invalidateNodeMap(); fetchNodeMap({ force: true }).catch(() => {}).then(() => initLockPanel(view, deviceName)); };
     return;
+  }
+  // X-13：/lock/devices 回 partial 时面板顶部明示「正在确认其余设备状态…」
+  // （不得把 partial 画成「暂无设备」），5 秒后自动再拉一次（每台设备只补拉一次）。
+  const card = $('#lockCard', view);
+  if (view.dataset.lockPartialDevice !== deviceName) { view.dataset.lockPartialDevice = deviceName; view.dataset.lockPartialRefetched = ''; }
+  let partialNote = card ? $('#lk-partial-note', card) : null;
+  if (nm.lockPartial) {
+    if (!partialNote && card) {
+      partialNote = document.createElement('p');
+      partialNote.id = 'lk-partial-note';
+      partialNote.className = 'note blue';
+      partialNote.style.margin = '0 0 10px';
+      partialNote.textContent = '正在确认其余设备状态…';
+      const lb = $('#lockBody', view);
+      if (lb) card.insertBefore(partialNote, lb);
+    }
+    if (!view.dataset.lockPartialRefetched) {
+      view.dataset.lockPartialRefetched = '1';
+      setTimeout(() => { if (view.isConnected) { invalidateNodeMap(); initLockPanel(view, deviceName); } }, 5000);
+    }
+  } else {
+    if (partialNote) partialNote.remove();
+    if (view.dataset.lockPartialRefetched) view.dataset.lockPartialRefetched = '';
   }
   const dev = nm.lockDevices.find(x => x.name === deviceName);
   if (!dev) {
@@ -2549,18 +3058,23 @@ function mountFileSend(container, opts) {
 /* DS P2-5：邀请载荷校验未通过的文件 id——本页生命周期内按普通文件
    展示，不再凭文件名当邀请渲染。 */
 const QF_INVITE_REJECTED = new Set();
-async function loadInboxList(root) {
+async function loadInboxList(root, seq) {
   const box = $('#inboxList', root); if (!box) return;
+  // X-09：多步异步加载器的世代守卫——晚到回包不得写已离场的 DOM。
+  const stale = () => (seq != null && seq !== renderSeq) || !box.isConnected;
   const nm = await fetchNodeMap();
+  if (stale()) return;
   const devs = (S.stats && S.stats.devices) || [];
   const targets = devs.filter(d => nm.byName.has(d.name));
   let all = [];
   for (const d of targets) {
     const r = await api('/license/api/files/inbox?node=' + encodeURIComponent(nm.byName.get(d.name)));
+    if (stale()) return;
     if (r.json && r.json.ok && Array.isArray(r.json.files)) all = all.concat(r.json.files.map(f => Object.assign({}, f, { _toName: d.name })));
   }
   /* 2.4.0 发送到手机：ctrl 账号邮箱一并汇总（会话邀请＋发到本机的文件，#25 通道） */
   const ctrlR = await api('/license/api/files/inbox?node=' + encodeURIComponent(QF_CTRL_MAILBOX));
+  if (stale()) return;
   if (ctrlR.json && ctrlR.json.ok && Array.isArray(ctrlR.json.files)) all = all.concat(ctrlR.json.files.map(f => Object.assign({}, f, { _toName: '这台手机', _ctrl: true })));
   if (!targets.length && !all.length) { box.innerHTML = '<div class="statebox"><b>暂无可查询的设备</b><p>设备上线并取得节点标识后，待接收文件将显示在这里。</p></div>'; return; }
   if (!all.length) { box.innerHTML = '<div class="statebox"><b>暂无待接收文件</b><p>其他设备发送给您的文件将显示在这里（暂存 24 小时）。</p></div>'; return; }
@@ -2587,7 +3101,7 @@ async function loadInboxList(root) {
     if (!valid) {
       QF_INVITE_REJECTED.add(id);
       toast('这条会话邀请的内容校验未通过，已按普通文件处理。', 'warn');
-      loadInboxList(root);
+      loadInboxList(root, seq);
       return;
     }
     btn.textContent = '打开中…';
@@ -2609,14 +3123,18 @@ async function loadInboxList(root) {
       btn.disabled = false; btn.textContent = '下载';
       return;
     }
-    loadInboxList(root);
-    const sentBox = $('#sentList', root); if (sentBox) loadSentList(root);
+    loadInboxList(root, seq);
+    const sentBox = $('#sentList', root); if (sentBox) loadSentList(root, seq);
   });
 }
-async function loadSentList(root) {
+async function loadSentList(root, seq) {
   const box = $('#sentList', root); if (!box) return;
+  // X-09：世代守卫同 loadInboxList。
+  const stale = () => (seq != null && seq !== renderSeq) || !box.isConnected;
   const nm = await fetchNodeMap();
+  if (stale()) return;
   const r = await api('/license/api/files/sent');
+  if (stale()) return;
   if (!(r.json && r.json.ok && Array.isArray(r.json.files))) { box.innerHTML = '<div class="statebox"><b>发出记录暂时不可用</b><p>请稍后重新加载。</p></div>'; return; }
   const files = r.json.files;
   if (!files.length) { box.innerHTML = '<div class="statebox"><b>暂无发出记录</b><p>您发送到其他设备的文件及送达状态将显示在这里。</p></div>'; return; }
@@ -2627,7 +3145,7 @@ async function loadSentList(root) {
     return `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(f.filename)}</b><small>${esc(fmtSize(f.size))} · 发送到 ${esc(toName)} · ${esc(fmtDate(f.createdAt))}${f.status === 'delivered' && f.deliveredAt ? ' · 送达于 ' + esc(fmtDate(f.deliveredAt)) : ''}</small></span><span class="ops"><span class="pill ${f.status === 'delivered' ? 'ok' : (f.status === 'expired' ? 'err' : 'warn')}">${esc(st)}</span></span></div>`;
   }).join('');
 }
-Views.files = async function (view, name) {
+Views.files = async function (view, name, seq) {
   const devs = (S.stats && S.stats.devices) || [];
   view.innerHTML = `<h1 class="pt">我的文件</h1><p class="psub">浏览单台设备的文件请进入设备详情或远程桌面；把文件发到同账号的另一台设备，可直接在本页发送与接收。</p>
     <div class="card"><h3>选择设备进入文件管理</h3><div id="fileDevs">${devs.length ? devs.map(devRowHtml).join('') : '<div class="statebox"><b>暂无设备</b><p>设备上线后可进入文件管理。</p></div>'}</div></div>
@@ -2636,8 +3154,8 @@ Views.files = async function (view, name) {
     <div class="card"><h3>我发出的</h3><div id="sentList"><div class="skel" style="height:52px"></div></div></div>`;
   bindDevRows(view);
   mountFileSend($('#fileSendBox', view));
-  loadInboxList(view);
-  loadSentList(view);
+  loadInboxList(view, seq);
+  loadSentList(view, seq);
   if (name) toast('已定位设备：' + name + '，点「文件管理」进入。', 'info');
 };
 /* ================= 远程桌面（旧跳板路由，2.4.0 起改道会话融合视图） =================
@@ -2648,7 +3166,7 @@ Views.remote = async function (view, name) {
 
 /* ================= 好友 ================= */
 let frPaintSeq = 0;   // 好友页 paint 代次，防止旧回包覆盖新渲染
-Views.friends = async function (view) {
+Views.friends = async function (view, param, seq) {
   view.innerHTML = `<h1 class="pt">好友</h1><p class="psub">添加好友后，可将自己的设备组共享给对方协助处理。官方客服为系统联系人，不可删除、不参与设备共享。</p>
     <div class="card"><h3>好友申请 <span class="fr-cnt" id="frReqCnt" hidden></span></h3><div id="frReqs"><div class="skel" style="height:52px"></div></div></div>
     <div class="grid2"><div class="card chatlist"><h3>好友列表</h3><div id="frList"><div class="skel" style="height:52px"></div></div>
@@ -2672,6 +3190,7 @@ Views.friends = async function (view) {
     try {
       const r = await api('/api/friends/me');
       if (myPaint !== frPaintSeq) return;                                // 过期回包直接丢弃
+      if (seq != null && seq !== renderSeq) return;                     // X-09：已离开好友页/已重渲，晚到回包整段丢弃
       if (r.status !== 200 || !r.json || !Array.isArray(r.json.requestsIn)) { failRender(); return; }
       const j = r.json;
       const reqN = j.requestsIn.length;

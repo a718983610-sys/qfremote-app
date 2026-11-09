@@ -24,18 +24,19 @@
 
 # 以下为历史版本说明
 
-给 QFRemote 服务端（MeshCentral，https://54.248.9.192:8443 ）配的 Windows 桌面控制端：
+给 QFRemote 服务端（MeshCentral，https://app.qfremote.top ）配的 Windows 桌面控制端：
+（2026-11-10 2.4.5：旧 IP 54.248.9.192 已退役，统一走域名 app.qfremote.top；端口映射：旧 :8443/:8444/:8445 直连端口改为域名 :443 同源反代，/friends、/register、/release.json、/dl/ 均同源。）
 Electron 外壳，双击打开就是控制台，免开浏览器、免点证书警告；登录状态会记住，下次免登。
 
 ## v1.0.5 内容（在 v1.0.4 基础上）
 - **好友入口（双端同发）**：工具栏新增「好友」按钮（人形＋加号，更新徽标左侧），点击在现有
-  WebView 里打开好友页 `https://54.248.9.192:8445/friends`（独立小服务 qfremote-friends），
+  WebView 里打开好友页 `https://app.qfremote.top/friends`（独立小服务 qfremote-friends），
   不新开窗口。好友页与控制台同账号体系、会话独立，需再登一次（更新说明已写明）。
   好友能力：按账号搜索、申请/同意加好友；把自己的设备组共享给好友（默认只看档，
   可选操作档），删好友自动收回共享。
 - **证书/导航白名单扩一个端口**：main.js 的 `ALLOWED_PORTS` 由 `['8443']` 改为
   `['8443', '8445']`，证书校验（certificate-error）与导航判定（isTargetUrl）两处共用——
-  仍只认自家主机 54.248.9.192 的自签证书，其余站点照旧拒绝。更新信任口径不变
+  仍只认自家主机 app.qfremote.top 的证书，其余站点照旧拒绝。更新信任口径不变
   （清单与安装包仍只认 8443 origin）。
 - 安卓版同版 1.0.5（仓库 qfremote-app，工具栏加好友按钮、WebView 证书放行同主机 8445、
   清单 `android` 条目同批发布；签名与 1.0.4 同一把专属钥）。
@@ -59,7 +60,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
   在后台再改（留痕、不消耗用户次数）。站长管理员账号永不纳入此流程。
   站长管理员账号永不纳入此流程。
 - **注册入口（同轮服务端新增，见 `~/workspace/qfremote/register-svc/`）**：关于页加
-  「注册新账号」按钮，系统浏览器打开注册页 `https://54.248.9.192:8444/register`
+  「注册新账号」按钮，系统浏览器打开注册页 `https://app.qfremote.top/register`
   （独立注册小服务：开放注册、无注册码，填账号＋密码＋确认密码即可；账号须至少 8 位、
   字母和数字都要有，重名提示「该账户已被注册」；注册失败超 5 次封设备到次日 0 点；
   校验过了后台建号；MeshCentral 自带公开注册保持关闭）。
@@ -68,7 +69,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
 
 ## v1.0.3 内容（在 v1.0.2 基础上）
 - **软件内更新（真机制，update.js）**：应用启动后自动查一次更新，关于面板也有「检查更新」手动按钮；
-  查的是服务器上的版本清单 `https://54.248.9.192:8443/release.json`（挂在服务器 meshcentral-web/public
+  查的是服务器上的版本清单 `https://app.qfremote.top/release.json`（挂在服务器 meshcentral-web/public
   官方覆盖目录，与 favicon 同机制）。清单格式（JSON）：
   `version`（如 "1.0.4"）、`notes`（大白话中文更新说明）、`url`（安装包下载地址）、
   `sha256`（安装包完整 SHA256，**每版必须写全**）、`size`（字节数）。
@@ -76,7 +77,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
   点「下载更新」把新包下载到下载文件夹（带真实进度条），下完**自动核对大小与 SHA256**，
   对得上才提示可安装并出现「打开安装包」按钮；对不上立刻删文件并如实提示；
   取不到清单/网络失败 → 安静无提示，绝不弹错误框。
-  信任口径：清单与下载地址只认自家主机 54.248.9.192:8443 这一个 origin，清单里 url 指向
+  信任口径：清单与下载地址只认自家主机 app.qfremote.top 这一个 origin，清单里 url 指向
   别处直接拒绝；自签证书的 Node 侧放行只对该 origin（同探活口径、不带任何凭据），
   完整性最终兜底是 SHA256 核对。
 - **诊断一键复制**：关于面板「复制诊断信息」按钮，把一段中文文本复制到剪贴板：
@@ -91,7 +92,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
 ## 发版步骤（写死，三步缺一不可）
 以后发新版只走这三步，用户在软件里点更新即可；通知用户只报「从 X 到 Y」：
 1. **传新包到服务器更新源**：把新版安装包（如 QFRemote-Setup-v1.0.4.exe）传到服务器
-   meshcentral-web/public 覆盖目录（对外地址 https://54.248.9.192:8443/QFRemote-Setup-v1.0.4.exe ）。
+   meshcentral-web/public 覆盖目录（对外地址 https://app.qfremote.top/dl/QFRemote-Setup-v1.0.4.exe ）。
 2. **改 release.json 清单**：同目录的 release.json 改四项——版本号、更新说明（大白话中文）、
    完整 SHA256、大小（字节数），url 指向上一步的新包。清单一改，老版本软件下次启动就能查到。
 3. **同步官网**：官网仓库 qfremote-website 的产品数据文件逐项对齐新版实况——版本号、下载链接、
@@ -125,7 +126,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
 - 启动衔接：内容视图预垫品牌深蓝、启动画面最短停留 850ms，不露白屏。
 
 ## 安全口径
-- 证书放行只对 54.248.9.192:8443 这一个主机生效（主进程 certificate-error 里校验主机+端口，见 main.js），
+- 证书放行只对 app.qfremote.top 这一个主机生效（主进程 certificate-error 里校验主机+端口，见 main.js），
   其他站点一律不放行。
 - 代码里没有任何账号密码，登录由用户自己在软件里输入。
 - 软件内更新的下载与校验只走上面同一信任口径，不另放宽（见 v1.0.3 节）。
@@ -154,7 +155,7 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
    pendingUpdate 与 QFREMOTE_RELEASE_URL 假清单：被门拦住会截强更页→自动点「立即更新」走真下载→
    核对后截图，结果写 _pv_force_result.json（含「下载完待更仍在」的断言）；门放行时结果里 gated=false。
    **QFREMOTE_RELEASE_URL 是仅测试用的清单地址覆盖开关**：设置后应用改认该地址的 origin 为唯一可信源；
-   生产环境绝不要设这个环境变量，正式清单恒为 https://54.248.9.192:8443/release.json 。
+   生产环境绝不要设这个环境变量，正式清单恒为 https://app.qfremote.top/release.json 。
 
 ## 在 Windows 上手工出包
 装 Node.js 20+，本目录 `npm install`，先 `node tools/gen_build_info.js`，再 `npm run dist`（electron-builder 官方 NSIS 路线），
