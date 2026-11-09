@@ -34,11 +34,11 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   ok('A6_fallback_friends_domain', FALLBACKS.friendsUrl === 'https://app.qfremote.top/friends');
   // A3 product.json 新鲜值推导
   const svc2 = createSvcUrls({
-    fetchJson: async () => ({ web: { forumUrl: 'https://tun.example.com/forum' } }),
+    fetchJson: async () => ({ web: { forumUrl: 'https://tun.qfremote.top/forum' } }),
     loadCache: () => null, saveCache: () => {}
   });
   await svc2.refresh();
-  ok('A3_forum_api_fresh', svc2.forumApi('sso') === 'https://tun.example.com/api/forum/sso', { got: svc2.forumApi('sso') });
+  ok('A3_forum_api_fresh', svc2.forumApi('sso') === 'https://tun.qfremote.top/api/forum/sso', { got: svc2.forumApi('sso') });
 
   // B 决策矩阵
   const base = { hasCreds: true, manualLogout: false, hasToken: true, locked: true, unlocked: false };
@@ -72,13 +72,14 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
     });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const base2 = 'https://127.0.0.1:' + server.address().port + '/lock';
-  let getArg = null;
-  const fakeSession = { cookies: { get: async (arg) => { getArg = arg; return [{ name: 'xid', value: 'abc123' }, { name: 'xid.sig', value: 'sig456' }, { name: 'qfr_frd', value: 'frd789' }]; } } };
+  const getArgs = [];
+  const allCookies = [{ name: 'xid', value: 'abc123' }, { name: 'xid.sig', value: 'sig456' }, { name: 'qfr_frd', value: 'frd789' }, { name: 'other-svc', value: 'nope' }];
+  const fakeSession = { cookies: { get: async (arg) => { getArgs.push(arg); return allCookies.filter((c) => !arg.name || c.name === arg.name); } } };
   const bridge = createLockBridge(() => fakeSession, { base: base2 });
   const devs = await bridge.listDevices();
   ok('D1_devices_ok', devs.length === 1 && devs[0].id === 'pc-1');
-  ok('D2_cookie_whole_jar', getArg && Object.keys(getArg).length === 0, { getArg: JSON.stringify(getArg) });
-  ok('D3_cookie_sends_xid', seenCookie.includes('xid=abc123') && seenCookie.includes('xid.sig=sig456'), { seenCookie });
+  ok('D2_cookie_named_only', JSON.stringify(getArgs) === JSON.stringify([{ name: 'xid' }, { name: 'xid.sig' }, { name: 'qfr_frd' }]), { getArgs });
+  ok('D3_cookie_sends_xid', seenCookie.includes('xid=abc123') && seenCookie.includes('xid.sig=sig456') && !seenCookie.includes('other-svc'), { seenCookie });
   deny = true;
   let msg = '';
   try { await bridge.listDevices(); } catch (e) { msg = e.message; }

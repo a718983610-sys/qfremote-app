@@ -46,11 +46,14 @@ function isTrustedUrl(raw) {
 }
 
 // 带超时的 GET（证书走 Node 默认校验，见文件头信任口径）
-function getBuffer(rawUrl, timeoutMs) {
+// W-19：重定向最多 5 跳，循环重定向直接拒绝（此前无限递归可致永不返回）。
+function getBuffer(rawUrl, timeoutMs, redirects) {
+  const hops = redirects || 0;
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(rawUrl); } catch (e) { reject(new Error('更新清单地址不正确')); return; }
     if (!isTrustedUrl(rawUrl)) { reject(new Error('地址不在信任范围内')); return; }
+    if (hops > 5) { reject(new Error('重定向次数过多')); return; }
     const lib = u.protocol === 'https:' ? https : http;
     // 2.3.2：清单 GET 带统一版本头（互联窗观察，见 client-version.js）
     const opts = { timeout: timeoutMs || 8000, headers: clientVersion.clientVersionHeaders() };
@@ -58,7 +61,7 @@ function getBuffer(rawUrl, timeoutMs) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         // 重定向也只许去可信 origin
-        getBuffer(new URL(res.headers.location, u).toString(), timeoutMs).then(resolve, reject);
+        getBuffer(new URL(res.headers.location, u).toString(), timeoutMs, hops + 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) { res.resume(); reject(new Error('HTTP ' + res.statusCode)); return; }
@@ -78,16 +81,18 @@ function getBuffer(rawUrl, timeoutMs) {
 // 不影响更新。成功取到后清掉（一次结果只带一次）。
 let healReport = null;
 function setHealReport(outcome) {
-  healReport = (typeof outcome === 'string' && /^[a-z_]+$/.test(outcome)) ? outcome : null;
+  // 2.4.5：分类码含连字符（如 dns-fail），字符集放宽到 [a-z0-9_-]。
+  healReport = (typeof outcome === 'string' && /^[a-z0-9_-]+$/.test(outcome)) ? outcome : null;
 }
 
 // 取清单并校验。返回 {version, notes, url(绝对地址), sha256, size} 或抛错（调用方安静处理）。
+// W-26：healReport 只在清单解析成功后清掉；解析失败保留待下次回带。
 async function fetchManifest(timeoutMs) {
   const fetchUrl = healReport ? RELEASE_URL + '?heal=' + encodeURIComponent(healReport) : RELEASE_URL;
   const buf = await getBuffer(fetchUrl, timeoutMs || 8000);
-  healReport = null;
   let m;
   try { m = JSON.parse(buf.toString('utf8')); } catch (e) { throw new Error('更新清单格式不正确'); }
+  healReport = null;
   if (!m || typeof m.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(m.version)) throw new Error('更新清单缺少版本号');
   if (typeof m.url !== 'string' || !m.url) throw new Error('更新清单缺少下载地址');
   const absUrl = new URL(m.url, RELEASE_URL).toString();
@@ -108,9 +113,10 @@ async function fetchManifest(timeoutMs) {
 }
 
 // 检查更新：{available, manifest|null, error|null}
-async function checkForUpdate(currentVersion) {
+// W-26：timeoutMs 可透传（启动后自动检查用 5s、关于面板手动检查用 8s）。
+async function checkForUpdate(currentVersion, timeoutMs) {
   try {
-    const manifest = await fetchManifest();
+    const manifest = await fetchManifest(timeoutMs);
     return { available: compareVersions(manifest.version, currentVersion) > 0, manifest, error: null };
   } catch (e) {
     return { available: false, manifest: null, error: e.message };
@@ -128,31 +134,46 @@ function sha256File(file) {
 }
 
 // 流式下载到 part 文件，边下边回调进度；任何失败由调用方删 part。
-// 防卡死两道闸（M2 线追加修复）：
+// 防卡死三道闸（M2 线追加修复，2.4.5 W-18 改为「无进度超时」）：
 //  ① 连接不活跃超时 15 秒（req timeout，现行）；
-//  ② 总时长上限：按文件大小以约 25KB/s 的极慢网速兜底估算（最短 5 分钟、最长 30 分钟），
-//     到点强制中断并抛明确错误——此前只有不活跃超时，对方慢速滴流时下载会无限期
-//     停在「正在下载」且按钮禁用，用户无路可退（站长 2026-10-25 报的卡住感根源）。
-//  ③ 响应中途 aborted 也明确失败，不让 pipe 悬空等 finish。
+//  ② 无进度超时 60 秒：收到数据就重置计时器——下载一直在推进时不再被掐；
+//  ③ 总时长上限 90 分钟（122MB 在 25KB/s 下约 83 分钟可完成；此前 30 分钟
+//     上限让慢网用户永远下不完）。deadline 在请求发出时即设，不等响应头。
+//  ④ 响应中途 aborted 也明确失败，不让 pipe 悬空等 finish。
 function downloadToFile(u, part, manifest, onProgress, opts2) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let deadline = null;
+    let idleTimer = null;
     let out = null;
-    const done = (fn, v) => { if (settled) return; settled = true; if (deadline) clearTimeout(deadline); fn(v); };
+    const done = (fn, v) => { if (settled) return; settled = true; if (deadline) clearTimeout(deadline); if (idleTimer) clearTimeout(idleTimer); fn(v); };
     const ok = () => done(resolve);
     const fail = (e) => { try { if (out) out.destroy(); } catch (err) { /* ignore */ } done(reject, e instanceof Error ? e : new Error(String(e))); };
     const lib = u.protocol === 'https:' ? https : http;
     const opts = { timeout: 15000, headers: clientVersion.clientVersionHeaders() };
+    const totalMs = (opts2 && opts2.totalTimeoutMs) || 5400000; // 90 分钟
+    const idleMs = (opts2 && opts2.idleTimeoutMs) || 60000; // 60 秒无进度
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        try { req.destroy(); } catch (e) { /* ignore */ }
+        fail(new Error('下载停滞（60 秒无进度），已自动取消。请检查网络后重试。'));
+      }, idleMs);
+    };
+    // 总时长 deadline 在请求发出时即设（此前只在收到响应头后才设）。
+    deadline = setTimeout(() => {
+      try { req.destroy(); } catch (e) { /* ignore */ }
+      fail(new Error('下载时间过长，已自动取消（网速太慢或连接异常）。请检查网络后重试。'));
+    }, totalMs);
     const req = lib.get(u, opts, (res) => {
       if (res.statusCode !== 200) { res.resume(); fail(new Error('下载失败：HTTP ' + res.statusCode)); return; }
       const total = manifest.size || parseInt(res.headers['content-length'] || '0', 10) || null;
-      const totalMs = (opts2 && opts2.totalTimeoutMs) || Math.min(1800000, Math.max(300000, total ? Math.round(total / (25 * 1024) * 1000) : 600000));
-      deadline = setTimeout(() => { try { req.destroy(new Error('下载时间过长，已自动取消（网速太慢或连接异常）。请检查网络后重试。')); } catch (e) { fail(e); } }, totalMs);
       let received = 0;
       out = fs.createWriteStream(part);
+      armIdle();
       res.on('data', (chunk) => {
         received += chunk.length;
+        armIdle();
         if (onProgress) onProgress({ received, total, percent: total ? Math.min(100, Math.floor(received / total * 100)) : null });
       });
       res.pipe(out);

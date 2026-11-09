@@ -46,7 +46,7 @@ const grouped = {
 const meshes = { 'mesh//g1': { name: '我的设备' } };
 const m = D.normalizeNodes(grouped, meshes);
 ok('B1_total', m.total === 3, { total: m.total });
-ok('B2_online', m.onlineCount === 2, { onlineCount: m.onlineCount });
+ok('B2_online', m.onlineCount === 1, { onlineCount: m.onlineCount });
 ok('B3_group_name', m.groups[0].name === '我的设备' && m.groups[1].name === '');
 ok('B4_bare_ids', m.groups[0].devices.every(d => !/^node\/\//.test(d.id)));
 ok('B5_rname_fallback', m.groups[1].devices[0].name === 'Charlie');
@@ -90,7 +90,7 @@ function libCase() {
   ok('D1_lib_exists', !!lib && typeof lib.normalizeNodes === 'function' && typeof lib.probeNodes === 'function');
   if (lib) {
     const mm = lib.normalizeNodes(grouped, meshes);
-    ok('D2_lib_same_behavior', mm.total === 3 && mm.onlineCount === 2 && mm.groups[0].devices[0].name === 'Alpha');
+    ok('D2_lib_same_behavior', mm.total === 3 && mm.onlineCount === 1 && mm.groups[0].devices[0].name === 'Alpha');
   }
 }
 
@@ -116,6 +116,30 @@ function contractCase() {
   const files = (pkg.build && pkg.build.files) || [];
   ok('E10_packaged', ['devices.js', 'devices.html', 'devices-preload.js', 'session-bar.html', 'session-bar-preload.js'].every(f => files.includes(f)));
 }
+
+// ---------- H 在线态（2.4.5 W-30：online === conn===1） ----------
+const five = D.normalizeNodes({ 'mesh//gx': [
+  { _id: 'node//a', name: 'A', conn: 0 },
+  { _id: 'node//b', name: 'B', conn: 1 },
+  { _id: 'node//c', name: 'C', conn: 2 },
+  { _id: 'node//d', name: 'D', conn: '1' },
+  { _id: 'node//e', name: 'E' }
+] }, {});
+const byName = {};
+five.groups[0].devices.forEach((d) => { byName[d.name] = d; });
+ok('H1_conn1_online', byName.B.online === true && byName.B.status === 'online');
+ok('H2_conn0_offline', byName.A.online === false && byName.A.status === 'offline');
+ok('H3_conn2_connecting', byName.C.online === false && byName.C.status === 'connecting');
+ok('H4_conn_string_not_online', byName.D.online === false && byName.D.status === 'connecting');
+ok('H5_conn_missing_offline', byName.E.online === false && byName.E.status === 'offline');
+ok('H6_online_count', five.onlineCount === 1, { onlineCount: five.onlineCount });
+const sortGroups = D.normalizeNodes({
+  'mesh//zb': [{ _id: 'node//z1', name: 'Z1', conn: 1 }],
+  'mesh//ab': [{ _id: 'node//a1', name: 'A1', conn: 1 }, { _id: 'node//a2', name: 'A2', conn: 0 }],
+  'mesh//mb': [{ _id: 'node//m1', name: 'M1', conn: 1 }]
+}, { 'mesh//zb': { name: 'B组' }, 'mesh//ab': { name: 'Z组' }, 'mesh//mb': { name: 'A组' } });
+ok('H7_sort_count_then_name', sortGroups.groups[0].name === 'Z组' && sortGroups.groups[1].name === 'A组' && sortGroups.groups[2].name === 'B组',
+  { names: sortGroups.groups.map((g) => g.name) });
 
 // ---------- F 主链计量 ----------
 ok('F1_chain_le3', D.mainChainClicks() <= 3, { clicks: D.mainChainClicks(), chain: D.mainChain() });

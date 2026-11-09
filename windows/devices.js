@@ -55,7 +55,8 @@ function sessionUrl(base, nodeId, mode) {
  * 控制通道 nodes 应答归一（页面与主进程共用同一份实现，见 buildPageLib）。
  * 入参 grouped：{ <分组id>: [节点, ...] }；meshes：{ <分组id>: {name} }（可缺）。
  * 节点字段按 MeshCentral 实际下发取：_id / name / rname / host / conn / pwr / desc。
- * conn 非 0 即在线（原生页同口径）；字段缺失不猜、不冒充。
+ * W-30：conn 严格 ===1 才是在线；conn 为真但非 1（如 2=连接中）记 connecting，
+ * 在线计数只算 ===1；字段缺失不猜、不冒充。status ∈ online | connecting | offline。
  * 本函数必须自包含（不引用模块作用域），因为要被序列化进页面执行。
  */
 function normalizeNodes(grouped, meshes) {
@@ -76,7 +77,8 @@ function normalizeNodes(grouped, meshes) {
         name: String(n.name || n.rname || ''),
         host: String(n.host || ''),
         desc: String(n.desc || ''),
-        online: !!n.conn,
+        online: n.conn === 1,
+        status: n.conn === 1 ? 'online' : (n.conn ? 'connecting' : 'offline'),
         power: (typeof n.pwr === 'number') ? n.pwr : null
       };
       devices.push(dev);
@@ -87,7 +89,10 @@ function normalizeNodes(grouped, meshes) {
     const gname = (m[gid] && m[gid].name) ? String(m[gid].name) : '';
     groups.push({ id: String(gid), name: gname, devices });
   }
-  groups.sort((a, b) => (a.devices.length ? 0 : 1) - (b.devices.length ? 0 : 1));
+  groups.sort((a, b) => {
+    if (a.devices.length !== b.devices.length) return b.devices.length - a.devices.length;
+    return String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN');
+  });
   return { groups, total, onlineCount };
 }
 

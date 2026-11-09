@@ -1,6 +1,6 @@
 {
   "name": "qfremote",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "description": "QFRemote 远程控制 — Windows 控制端",
   "main": "main.js",
   "author": "QFRemote",
@@ -56,7 +56,12 @@
       "loading.html",
       "offline.html",
       "build/icon.png",
-      "package.json"
+      "package.json",
+      "qf-agent-heal.ps1",
+      "sys-helper.js",
+      "install-system-services.ps1",
+      "syshelper/QFSysHelper.exe",
+      "syshelper/whitelist.json"
     ],
     "nsis": {
       "allowToChangeInstallationDirectory": true,

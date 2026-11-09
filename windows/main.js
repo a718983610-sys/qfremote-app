@@ -9,6 +9,7 @@ const viewsMod = require('./views');
 const { createWatchdog } = require('./watchdog');
 const updater = require('./update');
 const agentHeal = require('./agent-heal');
+const sysHelper = require('./sys-helper');
 const installerLaunch = require('./installer-launch');
 const lockBridgeMod = require('./lock');
 const credsMod = require('./creds');
@@ -20,6 +21,40 @@ const devicesMod = require('./devices');
 const clientVersion = require('./client-version');
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
+
+// ---------- 启动日志 bootLog（W-08，2.4.5） ----------
+// 启动全程留痕：%TEMP%\qfremote-boot.log，本地时间戳＋节点＋分类码，
+// 只写时间戳与节点，绝不写账号、密码、令牌、cookie。写盘失败静默，
+// 绝不因日志影响启动。诊断信息里会给出本文件路径。
+function bootLog(tag, detail) {
+  try {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const ts = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    fs.appendFileSync(path.join(os.tmpdir(), 'qfremote-boot.log'),
+      ts + ' ' + tag + (detail ? ' ' + String(detail).replace(/[\r\n]+/g, ' ') : '') + '\n');
+  } catch (e) { /* ignore */ }
+}
+function bootLogPath() { try { return path.join(os.tmpdir(), 'qfremote-boot.log'); } catch (e) { return ''; } }
+
+// ---------- 全局异常处理（W-16，2.4.5） ----------
+// 主进程任意未捕获异常/未处理拒绝：记 bootLog、弹原生人话提示、干净退出，
+// 绝不静默常驻成僵尸进程。dialog 在 app 未就绪时可能失败，包 try/catch。
+process.on('uncaughtException', (e) => {
+  try { bootLog('uncaughtException', e && e.stack || String(e)); } catch (err) { /* ignore */ }
+  try {
+    if (app.isReady()) dialog.showMessageBoxSync({ type: 'error', title: 'QFRemote', message: 'QFRemote 遇到未处理错误，请重启软件。如果反复出现，请联系客服。', buttons: ['确定'], defaultId: 0, noLink: true });
+  } catch (err) { /* ignore */ }
+  try { app.exit(1); } catch (err) { /* ignore */ }
+});
+process.on('unhandledRejection', (reason) => {
+  try { bootLog('unhandledRejection', reason && reason.stack || String(reason)); } catch (err) { /* ignore */ }
+  try {
+    if (app.isReady()) dialog.showMessageBoxSync({ type: 'error', title: 'QFRemote', message: 'QFRemote 遇到未处理错误，请重启软件。如果反复出现，请联系客服。', buttons: ['确定'], defaultId: 0, noLink: true });
+  } catch (err) { /* ignore */ }
+  try { app.exit(1); } catch (err) { /* ignore */ }
+});
 
 // 2.4.2 紧急修复：服务器换 IP 后，写死旧 IP 的直连源全灭（旧 IP 已被
 // 云厂商收回）。控制台与好友/聊天一律改走正式域名 app.qfremote.top 的
@@ -86,13 +121,31 @@ if (!PREVIEW) {
     app.quit();
   } else {
     app.on('second-instance', () => {
-      if (forceWin && !forceWin.isDestroyed()) { forceWin.focus(); return; }
-      if (splash && !splash.isDestroyed()) { splash.focus(); return; }
-      if (win) {
-        if (win.isMinimized()) win.restore();
-        if (!win.isVisible()) win.show();
-        win.focus();
-      }
+      // W-01：三窗全不存在时必须重建主窗，绝不静默吞掉；每个分支统一
+      // restore（若最小化）→ show（若不可见）→ focus；win 加 isDestroyed 守卫。
+      const hasForce = !!(forceWin && !forceWin.isDestroyed());
+      const hasSplash = !!(splash && !splash.isDestroyed());
+      const hasWin = !!(win && !win.isDestroyed());
+      bootLog('second-instance', 'forceWin=' + hasForce + ' splash=' + hasSplash + ' win=' + hasWin);
+      try {
+        if (hasForce) { if (forceWin.isMinimized()) forceWin.restore(); if (!forceWin.isVisible()) forceWin.show(); forceWin.focus(); return; }
+        if (hasSplash) { if (splash.isMinimized()) splash.restore(); if (!splash.isVisible()) splash.show(); splash.focus(); return; }
+        if (hasWin) {
+          if (win.isMinimized()) win.restore();
+          if (!win.isVisible()) win.show();
+          win.focus();
+          return;
+        }
+      } catch (e) { bootLog('second-instance.wake.throw', e && e.stack || String(e)); }
+      // 兜底：主进程活着就必须重建一个可见窗口。
+      setImmediate(() => {
+        try {
+          if (!win || win.isDestroyed()) {
+            bootLog('second-instance.no-window.reopen');
+            createWindow();
+          }
+        } catch (e) { bootLog('second-instance.reopen.throw', e && e.stack || String(e)); }
+      });
     });
   }
 }
@@ -107,7 +160,8 @@ let settings = loadSettings();
 const svcUrls = svcUrlsMod.createSvcUrls({
   loadCache: () => settings.svcUrls || null,
   saveCache: (obj) => { settings.svcUrls = obj; saveSettings(); },
-  clientVersion: () => clientVersion.getClientVersion()
+  clientVersion: () => clientVersion.getClientVersion(),
+  onRejected: (host) => bootLog('svc-urls.rejected-host', host)
 });
 function applySvcUrls() {
   const a = svcUrls.all();
@@ -428,6 +482,8 @@ async function processAuthPage() {
       }
 
       runLicenseGateCheck().catch(() => {});
+      // W-11：登录成功后触发锁组件＋SYSTEM helper 首装（每版本一次 UAC）。
+      maybeInstallSystemServices().catch(() => {});
       flushConsoleCookies();
       try { await wc.executeJavaScript(autologinMod.GUARD_JS, true); } catch (e) { /* ignore */ }
     } else if (det.state === 'login') {
@@ -577,7 +633,8 @@ function saveSettings() {
 function applyAutoLaunchDefault() {
   if (!app.isPackaged || PREVIEW) return;
   if (settings.autoLaunchConfigured !== true) {
-    try { app.setLoginItemSettings({ openAtLogin: true }); } catch (e) { /* ignore */ }
+    // W-23：setLoginItemSettings 失败记 bootLog，不再静默吞掉。
+    try { app.setLoginItemSettings({ openAtLogin: true }); } catch (e) { bootLog('autolaunch.set-failed', e && e.message || String(e)); }
     settings.autoLaunchConfigured = true;
     saveSettings();
   }
@@ -698,6 +755,27 @@ function applyViewVisibility() {
   if (gateView) { try { gateView.setVisible(showGate); } catch (e) { /* ignore */ } }
 }
 
+// 渲染进程崩溃看护（W-03③）：挂在控制台视图 view.webContents 上
+// （BaseWindow 本身无 webContents，绝不能挂 win.webContents）。
+// 同一会话内最多重建 2 次，第 3 次弹原生提示并干净退出，防重建循环。
+let rendererCrashRebuilds = 0;
+function handleRenderProcessGone(event, details) {
+  bootLog('mainWindow.render-process-gone', 'reason=' + (details && details.reason) + ' exitCode=' + (details && details.exitCode));
+  if (rendererCrashRebuilds >= 2) {
+    try {
+      if (app.isReady()) dialog.showMessageBoxSync({ type: 'error', title: 'QFRemote', message: '页面多次崩溃，软件将退出，请重新打开。如果反复出现，请联系客服。', buttons: ['确定'], defaultId: 0, noLink: true });
+    } catch (e) { /* ignore */ }
+    try { app.exit(1); } catch (e) { /* ignore */ }
+    return;
+  }
+  rendererCrashRebuilds++;
+  try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+  win = null; view = null; toolbarView = null;
+  setImmediate(() => {
+    try { createWindow(); } catch (e) { bootLog('createWindow.rebuild.throw', e && e.stack || String(e)); }
+  });
+}
+
 function showMain() {
   if (mainShown || !win) return;
   mainShown = true;
@@ -783,11 +861,19 @@ function bumpStat(key) {
   saveSettings();
 }
 
+let offlineDelay = { delay: 0, at: 0 };
 function showOfflinePage(rethemeOnly) {
   offlineActive = true;
   if (!rethemeOnly) { failStreak++; bumpStat('offlineCount'); }
   // 退避：5s -> 10s -> 20s -> 30s 封顶，由断线页倒计时自动再试，用户也可立即重试
-  const delay = Math.min(5 * Math.pow(2, Math.max(0, failStreak - 1)), 30);
+  let delay = Math.min(5 * Math.pow(2, Math.max(0, failStreak - 1)), 30);
+  if (rethemeOnly && offlineDelay.at) {
+    // W-32：主题切换重画断线页时把剩余秒数传回，不重置倒计时。
+    const elapsed = Math.floor((Date.now() - offlineDelay.at) / 1000);
+    delay = Math.max(1, offlineDelay.delay - elapsed);
+  } else {
+    offlineDelay = { delay, at: Date.now() };
+  }
   view.webContents.loadFile(path.join(__dirname, 'offline.html'), {
     query: { u: CONSOLE_URL, d: String(delay), try: String(failStreak), t: currentTheme() }
   });
@@ -947,6 +1033,17 @@ function attachShortcuts(wc) {
 }
 
 function createWindow() {
+  // W-03①：幂等——已有未销毁主窗时直接唤起并返回，不建第二个窗口。
+  if (win && !win.isDestroyed()) {
+    try {
+      if (win.isMinimized()) win.restore();
+      if (!win.isVisible()) win.show();
+      win.focus();
+    } catch (e) { bootLog('createWindow.wake.throw', e && e.stack || String(e)); }
+    return true;
+  }
+  bootLog('createWindow.begin');
+  try {
   const saved = PREVIEW ? null : validBounds(settings.windowBounds);
   let bw = saved ? saved.width : 1280;
   let bh = saved ? saved.height : 820;
@@ -1042,6 +1139,7 @@ function createWindow() {
   view.setBackgroundColor(contentBg()); // 内容还没画出来时先垫主题底色，杜绝白屏闪烁
   win.contentView.addChildView(view);
 
+  view.webContents.on('render-process-gone', handleRenderProcessGone);
   attachViewEvents();
   attachShortcuts(view.webContents);
   attachShortcuts(toolbarView.webContents);
@@ -1060,7 +1158,15 @@ function createWindow() {
       saveSettings();
     }
   });
-  win.on('closed', () => { win = null; view = null; toolbarView = null; socialViews.friends = null; socialViews.chat = null; socialViews.forum = null; homeView = null; gateView = null; extBarView = null; });
+  win.on('closed', () => {
+    bootLog('mainWindow.closed');
+    win = null; view = null; toolbarView = null; socialViews.friends = null; socialViews.chat = null; socialViews.forum = null; homeView = null; gateView = null; extBarView = null;
+    // W-22：主窗关闭后停掉看护/探活/积分心跳定时器，不空转；变量置空以便重建窗时重起。
+    try { if (watchdog) { watchdog.stop(); watchdog = null; } } catch (e) { /* ignore */ }
+    if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (preloadTimer) { clearTimeout(preloadTimer); preloadTimer = null; }
+  });
 
   if (PREVIEW === 'main' || PREVIEW === 'update') {
     view.webContents.loadFile(path.join(__dirname, 'loading.html'), { query: { t: currentTheme() } });
@@ -1097,12 +1203,20 @@ function createWindow() {
   startWatchdog();
   startProbeLoop();
   startPointsHeartbeat();
+  bootLog('createWindow.done');
+  return true;
+  } catch (e) {
+    bootLog('createWindow.throw', e && e.stack || String(e));
+    win = null; view = null; toolbarView = null;
+    return false;
+  }
 }
 
 function startWatchdog() {
   if (PREVIEW || watchdog) return;
-  watchdog = createWatchdog(() => (view ? view.webContents : null), {
-    enabled: () => !!view && !offlineActive,
+  // W-17：看护盯「当前活动视图」（控制台/会话），会话视图断线同样自动重连。
+  watchdog = createWatchdog(() => activeWc(), {
+    enabled: () => !!activeWc() && !offlineActive && (activeKey() === 'session' || activeKey() === 'console'),
     onStatus: (state) => {
       if (toolbarView) toolbarView.webContents.send('qf-conn-status', state);
     },
@@ -1145,12 +1259,27 @@ function runProbe() {
       resolve(lastProbe);
     };
     try {
-      const req = https.get(PROBE_URL, { timeout: 6000, headers: clientVersion.clientVersionHeaders() }, (res) => {
-        res.resume();
-        finish(res.statusCode < 500, '服务器响应正常（HTTP ' + res.statusCode + '）');
-      });
-      req.on('timeout', () => req.destroy(new Error('连接超时')));
-      req.on('error', (e) => finish(false, '无法连接：' + (e.code || e.message)));
+      const probeOrigin = new URL(PROBE_URL).origin;
+      const doGet = (url, followed) => {
+        const req = https.get(url, { timeout: 6000, headers: clientVersion.clientVersionHeaders() }, (res) => {
+          // W-25：只有 200 才算正常；3xx 跟随一次（限可信 origin）后再判；
+          // 4xx/5xx 均算 bad 并把状态码写进 detail。
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && !followed) {
+            let next = null;
+            try { next = new URL(res.headers.location, url); } catch (e) { next = null; }
+            res.resume();
+            if (next && next.origin === probeOrigin) { doGet(next.toString(), true); return; }
+            finish(false, '服务器异常（HTTP ' + res.statusCode + '）');
+            return;
+          }
+          res.resume();
+          if (res.statusCode === 200) finish(true, '服务器响应正常（HTTP 200）');
+          else finish(false, '服务器异常（HTTP ' + res.statusCode + '）');
+        });
+        req.on('timeout', () => req.destroy(new Error('连接超时')));
+        req.on('error', (e) => finish(false, '无法连接：' + (e.code || e.message)));
+      };
+      doGet(PROBE_URL, false);
     } catch (e) { finish(false, '无法连接：' + e.message); }
   });
 }
@@ -1180,6 +1309,12 @@ async function extRequest(method, urlStr, bodyObj, opts) {
     // 2026-10-29 审计 J-2 定案：本通道承载会话 Cookie 与密钥领取核验，只许
     // https 且走 Node 默认证书校验，不再关闭校验、不接受 http 目标。
     if (u.protocol !== 'https:') { resolve({ status: 0, json: null, text: '' }); return; }
+    // W-20：发 cookie 前校验目标主机在白名单内（与 svc-urls 同源表共用）。
+    if (!svcUrlsMod.isAllowedSvcHost(urlStr)) {
+      bootLog('extRequest.rejected-host', u.hostname);
+      resolve({ status: 0, json: null, text: '' });
+      return;
+    }
     const lib = u.protocol === 'https:' ? https : http;
     const body = bodyObj ? JSON.stringify(bodyObj) : null;
     // 2.3.2：自家服务统一版本头（许可/积分/站长/论坛 SSO/子服务登出全走此出口）
@@ -1862,6 +1997,14 @@ function createSessionView() {
   wc.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) return;
     viewMgr.markUnloaded('session');
+    // W-21：会话视图整页失败时载入本地断线友好页（带「立即重试」，
+    // 顶栏仍可点返回回设备列表），不再留空白死页。
+    try {
+      const back = (sessionCtx && sessionCtx.url) ? sessionCtx.url : CONSOLE_URL;
+      wc.loadFile(path.join(__dirname, 'offline.html'), {
+        query: { u: back, d: '10', try: '1', t: currentTheme() }
+      });
+    } catch (e) { /* ignore */ }
   });
   attachShortcuts(wc);
   try { wc.setZoomFactor(currentZoom()); } catch (e) { /* ignore */ }
@@ -1900,7 +2043,7 @@ function openSession(nodeId, name, mode) {
   const url = devicesMod.sessionUrl(SESSION_BASE_URL, nodeId, mode);
   if (!url) return;
   if (browsingExt) { browsingExt = false; extReturnGate = false; extReturnRecheck = false; }
-  sessionCtx = { nodeId: devicesMod.bareNodeId(nodeId), name: String(name || ''), mode };
+  sessionCtx = { nodeId: devicesMod.bareNodeId(nodeId), name: String(name || ''), mode, url };
   createSessionView();
   ensureSessionBarView(sessionCtx.name || '远程会话', devicesMod.MODE_LABELS[mode] || '');
   viewMgr.switchTo('session');
@@ -2188,7 +2331,7 @@ ipcMain.handle('qf-autolaunch-get', () => {
   try { return app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
 });
 ipcMain.on('qf-autolaunch-set', (event, on) => {
-  try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { /* ignore */ }
+  try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { bootLog('autolaunch.set-failed', e && e.message || String(e)); }
 });
 
 ipcMain.handle('qf-version', () => app.getVersion());
@@ -2209,19 +2352,23 @@ ipcMain.on('qf-theme-toggle', () => {
   settings.theme = next;
   saveSettings();
   if (win && !win.isDestroyed()) win.setBackgroundColor(themeBg());
-  if (view) view.setBackgroundColor(contentBg());
-  for (const k of Object.keys(socialViews)) {
-    if (socialViews[k]) { try { socialViews[k].setBackgroundColor(contentBg()); } catch (e) { /* ignore */ } }
+  // W-32：全部 WebContentsView 统一改底色＋发状态，不只发状态等各页自己换肤。
+  const allViews = [];
+  if (view) allViews.push(view);
+  for (const k of Object.keys(socialViews)) if (socialViews[k]) allViews.push(socialViews[k]);
+  if (homeView) allViews.push(homeView);
+  if (devicesView) allViews.push(devicesView);
+  if (sessionView) allViews.push(sessionView);
+  if (gateView) allViews.push(gateView);
+  if (sessionBarView) allViews.push(sessionBarView);
+  if (extBarView) allViews.push(extBarView);
+  for (const v of allViews) {
+    try { v.setBackgroundColor(contentBg()); } catch (e) { /* ignore */ }
+    try { if (!v.webContents.isDestroyed()) v.webContents.send('qf-theme-state', next); } catch (e) { /* ignore */ }
   }
   if (toolbarView) toolbarView.webContents.send('qf-theme-state', next);
   if (aboutWin && !aboutWin.isDestroyed()) aboutWin.webContents.send('qf-theme-state', next);
   if (lockWin && !lockWin.isDestroyed()) lockWin.webContents.send('qf-theme-state', next);
-  if (homeView && !homeView.webContents.isDestroyed()) { try { homeView.setBackgroundColor(contentBg()); } catch (e) { /* ignore */ } }
-  if (gateView && !gateView.webContents.isDestroyed()) gateView.webContents.send('qf-theme-state', next);
-  if (devicesView && !devicesView.webContents.isDestroyed()) devicesView.webContents.send('qf-theme-state', next);
-  if (sessionBarView && !sessionBarView.webContents.isDestroyed()) sessionBarView.webContents.send('qf-theme-state', next);
-  if (sessionView) { try { sessionView.setBackgroundColor(contentBg()); } catch (e) { /* ignore */ } }
-  if (extBarView && !extBarView.webContents.isDestroyed()) extBarView.webContents.send('qf-theme-state', next);
   // 正停在断线页的话，立刻按新主题重画（不增加失败计数）
   if (offlineActive && view) showOfflinePage(true);
 });
@@ -2305,12 +2452,14 @@ function broadcastUpdate() {
     aboutWin.webContents.send('qf-update-state', updateState);
   }
 }
-async function runUpdateCheck() {
+let forceSnoozed = false; // W-12③：强更放行后，本会话内不再重复弹强更提醒
+async function runUpdateCheck(timeoutMs) {
   if (updateChecking) return updateState;
+  if (forceSnoozed) return updateState;
   updateChecking = true;
   updateState = Object.assign({}, updateState, { phase: 'checking', error: null });
   broadcastUpdate();
-  const r = await updater.checkForUpdate(app.getVersion());
+  const r = await updater.checkForUpdate(app.getVersion(), timeoutMs);
   updateChecking = false;
   updateState = {
     phase: r.error ? 'error' : (r.available ? 'available' : 'latest'),
@@ -2328,7 +2477,7 @@ async function runUpdateCheck() {
   return updateState;
 }
 ipcMain.handle('qf-update-get', () => updateState);
-ipcMain.handle('qf-update-check', async () => runUpdateCheck());
+ipcMain.handle('qf-update-check', async () => runUpdateCheck(8000));
 ipcMain.on('qf-update-download', async () => {
   if (updateDownloading || !updateState.manifest) return;
   updateDownloading = true;
@@ -2358,6 +2507,13 @@ ipcMain.on('qf-update-download', async () => {
 function launchDownloadedInstaller(file) {
   return installerLaunch.launchInstallerSilent(file, { execPath: process.execPath });
 }
+// W-27：更新交接退出——先销毁窗口再立即 app.exit(0)，不再用 800ms 拍脑袋
+// 的定时退出；安装器侧在解压前循环等 QFRemote.exe 退出（最多 10 秒）。
+function quitForInstaller() {
+  try { if (forceWin && !forceWin.isDestroyed()) forceWin.destroy(); } catch (e) { /* ignore */ }
+  try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+  try { app.exit(0); } catch (e) { try { app.quit(); } catch (e2) { /* ignore */ } }
+}
 ipcMain.on('qf-update-open', () => {
   if (!updateState.download || !updateState.download.file) return;
   let launched = null;
@@ -2366,7 +2522,7 @@ ipcMain.on('qf-update-open', () => {
   // 静默安装要替换本应用文件，应用不退会锁文件：先给用户一句话，再同强更口径退出交接。
   updateState = Object.assign({}, updateState, { phase: 'installing' });
   broadcastUpdate();
-  setTimeout(() => app.quit(), 800);
+  quitForInstaller();
 });
 
 // ---------- v1.0.4 启动强制更新门 ----------
@@ -2384,36 +2540,69 @@ let forceDownloading = false;
 function sendForceState() {
   if (forceWin && !forceWin.isDestroyed()) forceWin.webContents.send('qf-force-state', forceState);
 }
+let forceReleasing = false; // qf-force-release 主动关闭时不触发 close→release 二次处理
+// W-02：openForceWindow 返回 boolean——建窗与 loadFile 成功才 true，
+// 失败返回 false 并记 bootLog，调用方放行进主窗，绝不以无窗口为代价强更。
 function openForceWindow(manifest) {
-  forceState = { manifest, phase: 'ready', percent: null, error: null, download: null };
-  const forceSize = clampSizeToWorkArea(560, 660);
-  forceWin = new BrowserWindow({
-    width: forceSize.width,
-    height: forceSize.height,
-    frame: false,
-    resizable: false,
-    center: true,
-    title: 'QFRemote 更新',
-    backgroundColor: themeBg(),
-    icon: path.join(__dirname, 'build', 'icon.png'),
-    webPreferences: {
-      preload: path.join(__dirname, 'force-preload.js'),
-      contextIsolation: true,
-      sandbox: true,
-      backgroundThrottling: false
+  bootLog('openForceWindow.begin', 'to=' + (manifest && manifest.version));
+  try {
+    forceState = { manifest, phase: 'ready', percent: null, error: null, download: null };
+    const forceSize = clampSizeToWorkArea(560, 660);
+    forceWin = new BrowserWindow({
+      width: forceSize.width,
+      height: forceSize.height,
+      frame: false,
+      resizable: false,
+      center: true,
+      title: 'QFRemote 更新',
+      backgroundColor: themeBg(),
+      icon: path.join(__dirname, 'build', 'icon.png'),
+      webPreferences: {
+        preload: path.join(__dirname, 'force-preload.js'),
+        contextIsolation: true,
+        sandbox: true,
+        backgroundThrottling: false
+      }
+    });
+    forceWin.loadFile(path.join(__dirname, 'force-update.html'), {
+      query: {
+        from: app.getVersion(), to: manifest.version,
+        notes: manifest.notes || '', size: manifest.size ? String(manifest.size) : '',
+        t: currentTheme()
+      }
+    });
+    forceWin.on('closed', () => { forceWin = null; });
+    // W-12④：强更窗 Alt+F4/任务栏关闭视为放行（phase 未到 downloaded/
+    // installing 时），绝不直接 app.quit() 把人锁在窗外。
+    forceWin.on('close', () => {
+      if (forceReleasing) return;
+      if (forceState.phase !== 'downloaded' && forceState.phase !== 'installing') {
+        bootLog('forceWindow.close-as-release', 'phase=' + forceState.phase);
+        setImmediate(() => releaseForceWindow());
+      }
+    });
+    if (PREVIEW === 'force') {
+      forceWin.webContents.once('did-finish-load', () => setTimeout(runForcePreviewFlow, 600));
     }
-  });
-  forceWin.loadFile(path.join(__dirname, 'force-update.html'), {
-    query: {
-      from: app.getVersion(), to: manifest.version,
-      notes: manifest.notes || '', size: manifest.size ? String(manifest.size) : '',
-      t: currentTheme()
-    }
-  });
-  forceWin.on('closed', () => { forceWin = null; });
-  if (PREVIEW === 'force') {
-    forceWin.webContents.once('did-finish-load', () => setTimeout(runForcePreviewFlow, 600));
+    return true;
+  } catch (e) {
+    bootLog('openForceWindow.throw', e && e.stack || String(e));
+    try { if (forceWin && !forceWin.isDestroyed()) forceWin.destroy(); } catch (err) { /* ignore */ }
+    forceWin = null;
+    return false;
   }
+}
+// 强更放行共用逻辑（按钮放行与关窗放行同一条路）
+function releaseForceWindow() {
+  if (forceDownloading) return;
+  forceReleasing = true;
+  const w = forceWin;
+  forceState = { manifest: null, phase: 'ready', percent: null, error: null, download: null };
+  forceSnoozed = true; // 本会话不再重复拦截，只保留工具栏徽标（待更仍落盘）
+  if (w && !w.isDestroyed()) w.close();
+  forceReleasing = false;
+  if (!win || win.isDestroyed()) createWindow();
+  else { try { if (win.isMinimized()) win.restore(); if (!win.isVisible()) win.show(); win.focus(); } catch (e) { /* ignore */ } }
 }
 ipcMain.handle('qf-force-get', () => forceState);
 ipcMain.on('qf-force-download', async () => {
@@ -2444,28 +2633,30 @@ ipcMain.on('qf-force-open', () => {
     forceState = Object.assign({}, forceState, { phase: 'installing' });
     sendForceState();
     // 安装程序接手后本应用退出，为的是让安装顺利替换文件——交接，不是闪退
-    setTimeout(() => app.quit(), 800);
+    quitForInstaller();
   }
 });
 // 强更失败放行（M2 线追加，站长 2026-10-25 13:06 令）：强更下载失败时用户可点
 // 「先进入软件」——关掉强更窗、按正常流程建主窗口，不许把人锁死在更新窗里。
 // pendingUpdate 不清（下次启动仍走启动门再提醒），本会话不再重复拦截。
-ipcMain.on('qf-force-release', () => {
-  if (forceDownloading) return;
-  const w = forceWin;
-  forceState = { manifest: null, phase: 'ready', percent: null, error: null, download: null };
-  if (w && !w.isDestroyed()) w.close();
-  if (!win) createWindow();
-});
+ipcMain.on('qf-force-release', () => { releaseForceWindow(); });
 // 启动门：返回 true 表示强更页已接管（不要再建主窗口）
 async function startupUpdateGate() {
+  bootLog('startupUpdateGate.begin');
   dropStalePending(); // 新版装好后首启：待更版本已 <= 本机版本，自动清除
   let manifest = null;
   try {
-    // 有落盘待更：按原口径给足 8 秒取清单裁决；无待更时只为核强更线短探 2.5 秒，
-    // 断网启动不被长等拖住（取不到照样放行，符合「启动离线先放行」）。
-    manifest = await updater.fetchManifest(settings.pendingUpdate ? 8000 : 2500);
-  } catch (e) { return false; } // 连不上：放行
+    // W-02③：fetchManifest 外再包一层 Promise.race 硬超时——内部 Promise
+    // 永不 settle（如代理黑洞）时也不卡住启动。有待更 10s、无待更 4s。
+    const hardMs = settings.pendingUpdate ? 10000 : 4000;
+    manifest = await Promise.race([
+      updater.fetchManifest(settings.pendingUpdate ? 8000 : 2500),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('startup gate timeout')), hardMs))
+    ]);
+  } catch (e) {
+    bootLog('startupUpdateGate.fetchManifest.fail', e && e.message || String(e));
+    return false; // 连不上/超时：放行
+  }
   if (updater.compareVersions(manifest.version, app.getVersion()) <= 0) {
     clearPendingUpdate();
     return false;
@@ -2476,7 +2667,14 @@ async function startupUpdateGate() {
     updater.compareVersions(app.getVersion(), manifest.minUsable) < 0);
   if (!settings.pendingUpdate && !belowMinUsable) return false;
   persistPendingUpdate(manifest); // 以服务器最新清单刷新待更（说明/地址/校验以清单为准）
-  openForceWindow(manifest);
+  // W-02②：强更窗建失败即清待更、放行进主窗，绝不以无窗口为代价强更。
+  let opened = false;
+  try { opened = openForceWindow(manifest); } catch (e) { bootLog('startupUpdateGate.openForceWindow.throw', e && e.stack || String(e)); opened = false; }
+  if (!opened) {
+    bootLog('startupUpdateGate.openForceWindow.false');
+    clearPendingUpdate();
+    return false;
+  }
   return true;
 }
 // ---------- 本机 agent 自愈 · 启动兜底（2.4.4） ----------
@@ -2485,61 +2683,137 @@ async function startupUpdateGate() {
 // 安装器预检悄悄跳过。启动兜底是第二道防线：每次启动异步自检，
 // 发现地址过期／服务停着／文件比进程新时提权修复（弹一次 UAC），
 // 失败留痕（本地日志＋更新检查回带）＋人话提示，不拦启动、不报错码。
-async function runStartupAgentHeal() {
-  if (process.platform !== 'win32') return;
+// ---------- 本机 agent 自愈 · 启动兜底（2.4.5，阶梯判官） ----------
+// 2.4.4 只在安装器装后段做自愈；2.4.5 改走 agent-heal.js 的 runHealLadder：
+// 本地四查 → DNS → TCP(:8443) → TLS(8443) → 服务端 presence 确认，
+// 每动一次修复回问服务端，最多 3 轮。already_correct 只有服务端确认
+// 在线（code:ONLINE 且 fresh:true）才允许，否则报 unverified。
+// 提权优先走 SYSTEM helper（QFSysHelper 命名管道，零 UAC），helper
+// 不可用时回落 runas UAC。opts.manual=true 时绕过每日 3 次封顶
+// （关于面板/锁面板的手动「重新尝试修复」，W-14）。
+async function runStartupAgentHeal(opts) {
+  if (process.platform !== 'win32') return { outcome: 'skipped', code: 'non-windows', rounds: 0 };
+  const manual = !!(opts && opts.manual);
   try {
-    const state = await agentHeal.checkAgentState();
-    if (state.action === 'none') return;
-    const now = new Date();
+    bootLog('agentHeal.begin', manual ? 'manual' : 'startup');
     // 进行中守卫：安装器刚拉起 PS1（120 秒内有启动行且无 RESULT）时，
     // 别跟着再弹一次 UAC；等下次启动再看结果。
-    if (agentHeal.isHealInProgress(agentHeal.readHealLogText(), now)) {
+    if (agentHeal.isHealInProgress(agentHeal.readHealLogText(), new Date())) {
       agentHeal.appendHealLog('startup check: heal already in progress, skip');
-      return;
+      bootLog('agentHeal.skip', 'in-progress');
+      return { outcome: 'skipped', code: 'in-progress', rounds: 0 };
     }
-    const st = (settings.agentHeal && typeof settings.agentHeal === 'object') ? settings.agentHeal : {};
-    if (!agentHeal.shouldAttempt(st, now, app.getVersion())) return;
-    // 记一次尝试（同日计数；换版本或隔天清零）
-    const today = now.toDateString();
-    const lastDay = st.lastAttemptISO ? new Date(st.lastAttemptISO).toDateString() : null;
-    const attemptsToday = (lastDay === today) ? (st.attemptsToday || 0) + 1 : 1;
-    settings.agentHeal = {
-      lastAttemptISO: now.toISOString(),
-      attemptsToday,
-      lastOutcome: st.lastOutcome || null,
-      lastVersion: app.getVersion(),
-      consecutiveFailures: st.consecutiveFailures || 0
-    };
-    saveSettings();
-    agentHeal.appendHealLog('startup check: action=' + state.action + ' msh=' + (state.msh.path || 'not-found') + ' service=' + (state.service.status || 'missing'));
     const ps1 = agentHeal.resolveHealScriptPath({
       resourcesPath: (process.resourcesPath || ''),
       dirname: __dirname,
       tempDir: os.tmpdir()
     });
     if (!ps1) {
+      // W-15：包内脚本优先；三处都找不到时记 bootLog 静默跳过——
+      // 缺脚本不是用户能修的故障，不弹框吓人。
+      bootLog('agentHeal.heal-script-missing');
       agentHeal.appendHealLog('heal script not found, outcome=unknown');
-      recordHealOutcome('unknown');
-      return;
+      return { outcome: 'unknown', code: 'script-missing', rounds: 0 };
     }
-    const res = await agentHeal.runHealElevated(ps1, {});
-    const outcome = (res && res.outcome) || 'unknown';
+    // 提权修复（含每日封顶记账）：helper 优先，失败回落 runas。
+    const runRepair = async (code) => {
+      const now = new Date();
+      const st = (settings.agentHeal && typeof settings.agentHeal === 'object') ? settings.agentHeal : {};
+      if (!manual && !agentHeal.shouldAttempt(st, now, app.getVersion())) {
+        agentHeal.appendHealLog('startup check: skip attempts-exhausted code=' + code);
+        bootLog('agentHeal.skip', 'attempts-exhausted');
+        return { outcome: 'unknown', denied: false, skipped: true };
+      }
+      const today = now.toDateString();
+      const lastDay = st.lastAttemptISO ? new Date(st.lastAttemptISO).toDateString() : null;
+      const attemptsToday = (lastDay === today) ? (st.attemptsToday || 0) + 1 : 1;
+      settings.agentHeal = {
+        lastAttemptISO: now.toISOString(),
+        attemptsToday,
+        lastOutcome: st.lastOutcome || null,
+        lastVersion: app.getVersion(),
+        consecutiveFailures: st.consecutiveFailures || 0
+      };
+      saveSettings();
+      agentHeal.appendHealLog('repair attempt code=' + code);
+      // 1) SYSTEM helper（零 UAC）：命名管道固定命令 heal-agent，
+      //    path 只是定位符，服务端执行前必验 SHA-256 白名单。
+      try {
+        const hr = await sysHelper.callHelper('heal-agent', null, { path: ps1 });
+        if (hr && hr.ok) {
+          const tail = agentHeal.readHealLogText();
+          const r = agentHeal.parseHealLog(tail);
+          if (r) return { outcome: r, denied: false };
+          return { outcome: 'unknown', denied: false };
+        }
+        bootLog('agentHeal.helper-unavailable', (hr && hr.code) || 'unknown');
+      } catch (e) { bootLog('agentHeal.helper-throw', e && e.message || String(e)); }
+      // 2) 回落 runas UAC。
+      const res = await agentHeal.runHealElevated(ps1, {});
+      return res;
+    };
+    const result = await agentHeal.runHealLadder({
+      checkState: () => agentHeal.checkAgentState(),
+      probeConnectivity: () => agentHeal.probeConnectivity(),
+      queryPresence: () => queryOwnPresence(),
+      runRepair,
+      log: (line) => { agentHeal.appendHealLog(line); bootLog('agentHeal.' + line.split(' ')[0], line); },
+      maxRounds: 3
+    });
+    const outcome = (result && result.outcome) || 'unknown';
     const prev = settings.agentHeal || {};
-    const okOutcomes = ['fixed', 'already_correct', 'service_started', 'restarted_stale_config', 'no_agent'];
+    const okOutcomes = ['fixed', 'already_correct', 'service_started', 'service_restarted', 'restarted_stale_config', 'no_agent'];
     settings.agentHeal = Object.assign({}, prev, {
       lastOutcome: outcome,
+      lastHealCode: result.code || null,
       consecutiveFailures: okOutcomes.includes(outcome) ? 0 : (prev.consecutiveFailures || 0) + 1
     });
     saveSettings();
-    agentHeal.appendHealLog('outcome=' + outcome);
-    recordHealOutcome(outcome);
-  } catch (e) { /* 安静失败：自愈绝不影响启动 */ }
+    agentHeal.appendHealLog('outcome=' + outcome + ' code=' + (result.code || '') + ' rounds=' + (result.rounds || 0));
+    bootLog('agentHeal.done', 'outcome=' + outcome + ' code=' + (result.code || '') + ' rounds=' + (result.rounds || 0));
+    recordHealOutcome(outcome, result);
+    return result;
+  } catch (e) {
+    bootLog('agentHeal.throw', e && e.stack || String(e));
+    return { outcome: 'unknown', code: 'throw', rounds: 0 };
+  }
+}
+
+// 本机 nodeid 解析：设备清单里按主机名唯一匹配（host/name === os.hostname()）。
+// 找不到/多台同名时返回 null（presence 问不了，不冒充本机）。
+async function resolveOwnNodeId() {
+  try {
+    const m = await fetchDevicesModel();
+    if (!m.ok || !m.model) return null;
+    const host = os.hostname().toLowerCase();
+    const hits = [];
+    for (const g of (m.model.groups || [])) {
+      for (const d of (g.devices || [])) {
+        if ((d.host && String(d.host).toLowerCase() === host) ||
+            (d.name && String(d.name).toLowerCase() === host)) hits.push(d.id);
+      }
+    }
+    return hits.length === 1 ? hits[0] : null;
+  } catch (e) { return null; }
+}
+
+// 服务端 presence 查询（唯一判官口径）：GET /api/device/presence?nodeid=。
+// 未登录/无本机 nodeid/请求失败时返回 null（ladder 判 server-unconfirmed）。
+async function queryOwnPresence() {
+  try {
+    const nodeId = await resolveOwnNodeId();
+    if (!nodeId) return null;
+    const url = 'https://app.qfremote.top/api/device/presence?nodeid=' + encodeURIComponent(nodeId);
+    const r = await extRequest('GET', url, null);
+    if (!r || r.status !== 200 || !r.json) return null;
+    return agentHeal.parsePresenceResponse(r.json);
+  } catch (e) { return null; }
 }
 
 // 自愈结果处理：白名单内的结果走更新检查回带（下次取清单时 ?heal=，
 // 进 Caddy 访问日志，服务端可查）；失败时人话提示（成功／无需修复
-// 不打扰；UAC 被拒第 2 次连续失败起才提示，避免一次被拒就反复弹窗）。
-function recordHealOutcome(outcome) {
+// 不打扰；UAC 被拒第 2 次连续失败起才提示；没动手修过就不打扰）。
+function recordHealOutcome(outcome, detail) {
   try {
     if (agentHeal.REPORTABLE.includes(outcome)) {
       updater.setHealReport(outcome);
@@ -2550,7 +2824,80 @@ function recordHealOutcome(outcome) {
   if (!msg) return;
   const st = settings.agentHeal || {};
   if (outcome === 'denied' && (st.consecutiveFailures || 0) < 2) return;
+  if (outcome === 'unverified' && detail && (detail.rounds || 0) === 0 &&
+      (detail.code === 'server-unconfirmed' || detail.code === 'not-found')) return;
   showHealFailure(msg);
+}
+
+// ---------- 锁组件与 SYSTEM helper 首装（W-11，2.4.5） ----------
+// 首次运行一次 UAC：以提权安装两件系统级活——
+//   ① QFLockSvc 锁服务（调锁组件 install.ps1，-Owner 必填，从登录账号自动填）；
+//   ② QFSysHelper 服务（SYSTEM helper，最小安全版，见 syshelper/）。
+// 两件都由 install-system-services.ps1 一次完成；脚本 SHA-256 先按
+// whitelist.json 校验，校验不过绝不拉起。每版本只尝试一次，失败留痕
+// 不反复弹 UAC；后续缺失改走 helper 管道（零 UAC）或手动重试。
+let systemServicesInstallTried = false;
+function lockComponentSourceDir() {
+  if (app.isPackaged) {
+    try { return path.join(path.dirname(process.execPath), 'Lock'); } catch (e) { /* fallthrough */ }
+  }
+  return path.join(__dirname, 'privacy-lock');
+}
+function lockServiceInstalled() {
+  try {
+    const pf = process.env.ProgramFiles || '';
+    if (pf && fs.existsSync(path.join(pf, 'QFRemote', 'Lock', 'device.json'))) return true;
+  } catch (e) { /* ignore */ }
+  try {
+    if (fs.existsSync(path.join(lockComponentSourceDir(), 'device.json'))) return true;
+  } catch (e) { /* ignore */ }
+  return false;
+}
+async function maybeInstallSystemServices(force) {
+  if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
+  if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
+  systemServicesInstallTried = true;
+  const triedVersion = settings.systemServicesTriedVersion;
+  if (!force && triedVersion === app.getVersion()) return { ok: false, reason: 'tried-this-version' };
+  settings.systemServicesTriedVersion = app.getVersion();
+  saveSettings();
+  const owner = currentGateUsername();
+  if (!owner) { bootLog('system-services.no-owner'); return { ok: false, reason: 'no-owner' }; }
+  const srcDir = lockComponentSourceDir();
+  const installPs1 = path.join(srcDir, 'install.ps1');
+  const sysPs1 = path.join(__dirname, 'install-system-services.ps1');
+  // helper 二进制：打包后在 resources/，开发态在 syshelper/。
+  const helperExe = (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'QFSysHelper.exe')))
+    ? path.join(process.resourcesPath, 'QFSysHelper.exe')
+    : path.join(__dirname, 'syshelper', 'QFSysHelper.exe');
+  if (!fs.existsSync(installPs1) && !fs.existsSync(sysPs1)) {
+    bootLog('system-services.no-component');
+    return { ok: false, reason: 'no-component' };
+  }
+  if (lockServiceInstalled()) { bootLog('system-services.already-installed'); return { ok: true, reason: 'already-installed' }; }
+  // SHA-256 白名单校验（sys-helper.js）：脚本/二进制被改过就绝不提权拉起。
+  try {
+    const wl = sysHelper.loadWhitelist({ resourcesPath: process.resourcesPath || '', dirname: path.join(__dirname, 'syshelper') });
+    const bad = [];
+    for (const f of [sysPs1, helperExe, installPs1]) {
+      if (fs.existsSync(f) && !sysHelper.verifyFileHash(f, wl)) bad.push(path.basename(f));
+    }
+    if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); return { ok: false, reason: 'hash-mismatch' }; }
+  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); }
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
+    q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) + " -Verb RunAs -WindowStyle Hidden";
+  try {
+    const childProcess = require('child_process');
+    const child = childProcess.spawn('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner], { windowsHide: true });
+    if (child && typeof child.on === 'function') child.on('error', () => {});
+    bootLog('system-services.launched', 'owner-set');
+    return { ok: true, reason: 'launched' };
+  } catch (e) {
+    bootLog('system-services.launch-throw', e && e.message || String(e));
+    return { ok: false, reason: 'launch-failed' };
+  }
 }
 
 async function showHealFailure(msg) {
@@ -2623,7 +2970,8 @@ function buildDiagnostics() {
     '服务器连通性检测：' + probeText,
     '整页断线次数：' + (st.offlineCount || 0) + ' 次',
     '自动重连次数：' + (st.watchdogReconnectCount || 0) + ' 次',
-    '记住账号密码：' + (credStore.has() ? '已开启（本机加密保存）' : '未开启')
+    '记住账号密码：' + (credStore.has() ? '已开启（本机加密保存）' : '未开启'),
+    '启动日志：' + bootLogPath()
   ];
   return lines.join('\n');
 }
@@ -2684,10 +3032,57 @@ async function lockCall(fn) {
 ipcMain.handle('qf-lock-devices', async () => {
   try {
     const devices = await lockBridge.listDevices();
-    return { ok: true, devices };
+    // W-11：每台设备附 presence 在线态（online true/false/null=未知）与
+    // 是否本机（isLocal），面板据此拆三句文案＋离线一键修复。
+    const ownId = await resolveOwnNodeId().catch(() => null);
+    const enriched = await Promise.all(devices.map(async (d) => {
+      let online = null;
+      try {
+        const bare = devicesMod.bareNodeId(d.id);
+        if (bare) {
+          const r = await extRequest('GET', 'https://app.qfremote.top/api/device/presence?nodeid=' + encodeURIComponent(bare), null);
+          if (r && r.status === 200 && r.json) {
+            const p = agentHeal.parsePresenceResponse(r.json);
+            if (p) online = p.verdict === 'online';
+          }
+        }
+      } catch (e) { /* 在线态取不到即未知，不挡面板 */ }
+      return Object.assign({}, d, { online, isLocal: !!(ownId && devicesMod.bareNodeId(d.id) === ownId) });
+    }));
+    return { ok: true, devices: enriched };
   } catch (e) {
     return { ok: false, code: (e && e.code) || null, error: (e && e.message) || '暂时无法连接隐私锁服务，请检查网络后重试。' };
   }
+});
+// W-11：锁面板离线「一键修复」——走统一自愈阶梯（手动，不受每日封顶限）。
+ipcMain.handle('qf-lock-repair', async () => {
+  try {
+    const r = await runStartupAgentHeal({ manual: true });
+    return { ok: true, outcome: (r && r.outcome) || 'unknown', code: (r && r.code) || null };
+  } catch (e) { return { ok: false, outcome: 'unknown' }; }
+});
+// W-11：锁面板「立即安装锁组件」——再试一次系统服务首装。
+ipcMain.handle('qf-lock-install-component', async () => {
+  try { return await maybeInstallSystemServices(true); } catch (e) { return { ok: false, reason: 'throw' }; }
+});
+// W-11：NEED_LOGIN 时「去登录」——关面板、切控制台登录页。
+ipcMain.on('qf-lock-go-login', () => {
+  try { if (lockWin && !lockWin.isDestroyed()) lockWin.close(); } catch (e) { /* ignore */ }
+  try { showView('console'); } catch (e) { /* ignore */ }
+  try { if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); } } catch (e) { /* ignore */ }
+});
+// W-11：未登记时「打开设备页」——关面板、回设备列表。
+ipcMain.on('qf-lock-open-devices', () => {
+  try { if (lockWin && !lockWin.isDestroyed()) lockWin.close(); } catch (e) { /* ignore */ }
+  try { showView('devices'); } catch (e) { /* ignore */ }
+  try { if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); } } catch (e) { /* ignore */ }
+});
+// W-14：关于面板「重新尝试修复」——手动触发自愈，不受每日 3 次封顶限。
+ipcMain.handle('qf-heal-retry', async () => {
+  try {
+    const r = await runStartupAgentHeal({ manual: true });
+    return { ok: true, outcome: (r && r.outcome) || 'unknown', code: (r && r.code) || null };
+  } catch (e) { return { ok: false, outcome: 'unknown' }; }
 });
 ipcMain.handle('qf-lock-enable', (e, id, password) => lockCall(() => lockBridge.enable(id, password)));
 ipcMain.handle('qf-lock-disable', (e, id) => lockCall(() => lockBridge.disable(id)));
@@ -2740,6 +3135,8 @@ ipcMain.handle('qf-logout-request', async () => {
 });
 
 app.whenReady().then(async () => {
+  bootLog('whenReady.begin', 'version=' + app.getVersion());
+  try {
   if (!gotSingleLock) return;
   try {
     app.setAboutPanelOptions({
@@ -2749,6 +3146,8 @@ app.whenReady().then(async () => {
       copyright: 'QFRemote'
     });
   } catch (e) { /* ignore */ }
+  // W-31：版本回落链取空时记一行（不阻塞启动）。
+  try { if (!clientVersion.getClientVersion()) bootLog('client-version-fallback-empty'); } catch (e) { /* ignore */ }
   applyAutoLaunchDefault();
   if (PREVIEW === 'splash') { createSplash(); return; }
   seedUpdateStateFromPending();
@@ -2778,16 +3177,39 @@ app.whenReady().then(async () => {
   if (!PREVIEW) {
     // 正常启动：先过启动更新门，被强更页接管就不建主窗口
     const gated = await startupUpdateGate();
-    if (gated) return;
+    if (gated) {
+      // W-02④：gated=true 后复核——强更窗没出来就建主窗，绝不留无窗口僵尸。
+      if (!forceWin || forceWin.isDestroyed()) {
+        bootLog('whenReady.gated-no-forceWin.fallback');
+        createWindow();
+      }
+      return;
+    }
   }
-  createWindow();
-  // 软件内更新：启动后自动查一次（失败安静无提示，见 update.js 文件头）
-  setTimeout(() => { runUpdateCheck().catch(() => {}); }, 2000);
+  if (!createWindow()) {
+    bootLog('whenReady.createWindow.failed');
+    try { app.exit(1); } catch (e) { /* ignore */ }
+    return;
+  }
+  // 软件内更新：启动后自动查一次（失败安静无提示，见 update.js 文件头；
+  // W-26：自动检查用 5s 超时）
+  setTimeout(() => { runUpdateCheck(5000).catch(() => {}); }, 2000);
   // 本机 agent 自愈兜底（2.4.4）：启动后异步自检 .msh，发现地址过期
   // 即提权修复（弹一次 UAC），不拦启动、不影响更新检查。
   // 延迟 5 秒（原 3 秒）：给安装器刚拉完的自愈留出写入日志的时间，
   // 让进行中守卫（120 秒）能看到启动行，避免双弹 UAC。
   setTimeout(() => { runStartupAgentHeal().catch(() => {}); }, 5000);
+  } catch (e) {
+    // W-02④：whenReady 任何一步抛错都记日志后兜底建主窗；建不出则干净退出，
+    // 宁可退出让用户能再双击，也不留僵尸进程占单实例锁。
+    bootLog('whenReady.crash', e && e.stack || String(e));
+    try {
+      if (!createWindow()) { bootLog('whenReady.fallback.failed'); try { app.exit(1); } catch (err) { /* ignore */ } }
+    } catch (e2) {
+      bootLog('whenReady.fallback.throw', e2 && e2.stack || String(e2));
+      try { app.exit(1); } catch (err) { /* ignore */ }
+    }
+  }
 });
 
 app.on('before-quit', () => flushConsoleCookies());

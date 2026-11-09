@@ -83,6 +83,13 @@ ok('E2_logout_blocks_preload', vm2.nextPreload() === null);
 vm2.noteLogin();
 ok('E3_relogin_resumes_preload', vm2.nextPreload() === 'chat'); // 已建的好友不重建，从未建处续上
 
+// F 事件上限（2.4.5 W-22：events 最多 500 条，防长期运行内存膨胀）
+const vm3 = createViewManager({ now: () => t });
+vm3.noteLogin();
+for (let i = 0; i < 1000; i++) { vm3.switchTo(i % 2 ? 'friends' : 'console'); vm3.noteNavigate(i % 2 ? 'friends' : 'console', URLS.friends); }
+ok('F1_events_capped', vm3.events().length <= 500, { len: vm3.events().length });
+ok('F2_events_still_logged', vm3.events().length > 0 && vm3.events().some((e) => e.type === 'switch'));
+
 // W 包装页归类（壳内拦截用）
 ok('W1_wrap_friends', wrapperTarget('https://app.qfremote.top/qf-wrap.html?t=friends') === 'friends');
 ok('W2_wrap_forum', wrapperTarget('https://app.qfremote.top/qf-wrap.html?t=forum') === 'forum');

@@ -91,6 +91,12 @@ function createViewManager(opts) {
   views.console.created = true; // 控制台视图随主窗创建即存在
   let active = 'console';
   const events = []; // {type:'switch'|'navigate', key, at}
+  // W-22：events 只保留最近 500 条，长会话不再无限增长。
+  const MAX_EVENTS = 500;
+  function pushEvent(e) {
+    events.push(e);
+    if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+  }
   let preloadStage = 0; // 0 未开始 1 好友 2 聊天 3 论坛 4 全部完成
   let loggedIn = false;
 
@@ -149,7 +155,7 @@ function createViewManager(opts) {
     const from = active;
     active = key;
     views[key].lastShownAt = now();
-    events.push({ type: 'switch', from, to: key, at: now() });
+    pushEvent({ type: 'switch', from, to: key, at: now() });
     return { from, to: key };
   }
 
@@ -157,7 +163,7 @@ function createViewManager(opts) {
   function noteNavigate(key, url) {
     if (!views[key]) return;
     views[key].navCount++;
-    events.push({ type: 'navigate', key, url: String(url || ''), at: now() });
+    pushEvent({ type: 'navigate', key, url: String(url || ''), at: now() });
   }
   function markLoaded(key) { if (views[key]) views[key].loaded = true; }
   function markUnloaded(key) { if (views[key]) views[key].loaded = false; }

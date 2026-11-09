@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld('qfAbout', {
   onUpdateProgress: (cb) => ipcRenderer.on('qf-update-progress', (e, p) => cb(p)),
   openInstaller: () => ipcRenderer.send('qf-update-open'),
   copyDiagnostics: () => ipcRenderer.invoke('qf-diagnostics-copy'),
+  // W-23：开机自启明示＋一键关闭；W-14：手动重试自愈
+  getAutoLaunch: () => ipcRenderer.invoke('qf-autolaunch-get'),
+  setAutoLaunch: (on) => ipcRenderer.send('qf-autolaunch-set', on),
+  retryHeal: () => ipcRenderer.invoke('qf-heal-retry'),
   openRegister: () => ipcRenderer.send('qf-open-register'),
   requestLogout: () => ipcRenderer.invoke('qf-logout-request'),
   // v2.2.0：积分与使用时长（取不到返回 null，页面显示「—」）

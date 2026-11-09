@@ -81,10 +81,10 @@ function segment(src, startMarker, endMarker) {
       .includes('process.execPath'));
     const softSeg = segment(mainSrc, "ipcMain.on('qf-update-open'", '// ---------- v1.0.4');
     ok('E3_soft_uses_shared', softSeg.includes('launchDownloadedInstaller(updateState.download.file)'), {});
-    ok('E4_soft_installing_then_quit', softSeg.includes("phase: 'installing'") && softSeg.includes('broadcastUpdate()') && softSeg.includes('app.quit()'), {});
+    ok('E4_soft_installing_then_quit', softSeg.includes("phase: 'installing'") && softSeg.includes('broadcastUpdate()') && (softSeg.includes('quitForInstaller()') || softSeg.includes('app.exit(0)')), {});
     const forceSeg = segment(mainSrc, "ipcMain.on('qf-force-open'", '// 启动门');
     ok('E5_force_uses_shared', forceSeg.includes('launchDownloadedInstaller(forceState.download.file)'), {});
-    ok('E6_force_installing_then_quit', forceSeg.includes("phase: 'installing'") && forceSeg.includes('sendForceState()') && forceSeg.includes('app.quit()'), {});
+    ok('E6_force_installing_then_quit', forceSeg.includes("phase: 'installing'") && forceSeg.includes('sendForceState()') && (forceSeg.includes('quitForInstaller()') || forceSeg.includes('app.exit(0)')), {});
     ok('E7_no_openpath_anywhere', !mainSrc.includes('openPath'));
     ok('E8_both_entries_only', (mainSrc.match(/launchDownloadedInstaller\(/g) || []).length === 3,
       { count: (mainSrc.match(/launchDownloadedInstaller\(/g) || []).length });
