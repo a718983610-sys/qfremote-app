@@ -190,11 +190,24 @@ static int set_sys_admin_acl(const char *path_utf8) {
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             "D:(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL))
         return 0;
+    /* 2026-11-11 启动即退出根因：ConvertStringSecurityDescriptor*
+     * 返回的是自相对（self-relative）描述符，其 Dacl 字段是偏移量而
+     * 非指针；直接取 ((SECURITY_DESCRIPTOR *)sd)->Dacl 会把 SID/ACL
+     * 数据误读为指针（实测野指针 0x00000101001F0201），
+     * SetNamedSecurityInfoW 解引用即访问违例，进程在 ensure_dirs 首个
+     * ACL 处崩溃（START_PENDING 后退出、事件 7031、无日志）。
+     * 必须用 GetSecurityDescriptorDacl 取 DACL。 */
+    PACL dacl = NULL;
+    BOOL present = FALSE, defaulted = FALSE;
+    if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) || !present || !dacl) {
+        LocalFree(sd);
+        return 0;
+    }
     WCHAR w[MAX_PATH];
     utf8_to_utf16(path_utf8, w, MAX_PATH);
     DWORD rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                          NULL, NULL, ((SECURITY_DESCRIPTOR *)sd)->Dacl, NULL);
+                          NULL, NULL, dacl, NULL);
     LocalFree(sd);
     return rc == ERROR_SUCCESS;
 }
@@ -220,11 +233,20 @@ static void set_ushtokens_acl(const char *path_utf8) {
         svc_log("ush-tokens acl: ConvertStringSecurityDescriptor failed %lu", GetLastError());
         return;
     }
+    /* 同 set_sys_admin_acl：自相对描述符须用 GetSecurityDescriptorDacl
+     * 取 DACL，直接取 ->Dacl 是野指针，会使 SetNamedSecurityInfoW 崩溃。 */
+    PACL dacl = NULL;
+    BOOL present = FALSE, defaulted = FALSE;
+    if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) || !present || !dacl) {
+        svc_log("ush-tokens acl: GetSecurityDescriptorDacl failed");
+        LocalFree(sd);
+        return;
+    }
     WCHAR w[MAX_PATH];
     utf8_to_utf16(path_utf8, w, MAX_PATH);
     DWORD rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                          NULL, NULL, ((SECURITY_DESCRIPTOR *)sd)->Dacl, NULL);
+                          NULL, NULL, dacl, NULL);
     if (rc != ERROR_SUCCESS)
         svc_log("ush-tokens acl: SetNamedSecurityInfo failed %lu", rc);
     LocalFree(sd);
