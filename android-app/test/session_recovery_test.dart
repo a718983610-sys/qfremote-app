@@ -150,6 +150,31 @@ void main() {
       expect(await store.loadCredentials(), isNull);
     });
 
+    test('QF-01：崩溃窗口残留的旧 key 在下次读时被扫尾清掉', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      // 模拟崩溃窗口：新 key 已写、旧 key 没来得及删。
+      await kv.write('qf_saved_creds',
+          '{"username":"alice","password":"secret-1"}');
+      await kv.write('qf_saved_username', 'alice');
+      await kv.write('qf_saved_password', 'old-pass');
+      final creds = await store.loadCredentials();
+      expect(creds?.username, 'alice');
+      expect(creds?.password, 'secret-1');
+      expect(kv.map.containsKey('qf_saved_username'), isFalse);
+      expect(kv.map.containsKey('qf_saved_password'), isFalse);
+    });
+
+    test('QF-01：删旧 key 失败不反噬保存（新凭据已落盘即成功）', () async {
+      final kv = _DeleteFailingKv();
+      final store = CredentialStore(kv);
+      await kv.write('qf_saved_username', 'bob');
+      await kv.write('qf_saved_password', 'old-pass');
+      // 删旧 key 全抛错，saveCredentials 也不应抛错。
+      await store.saveCredentials('carol', 'secret-2');
+      expect((await store.loadCredentials())?.username, 'carol');
+    });
+
     test('B22：凭据一次写——单 key JSON，旧分开 key 不残留', () async {
       final kv = MemorySecureKvStore();
       final store = CredentialStore(kv);
@@ -212,4 +237,20 @@ void main() {
       expect(js, contains(kHandlerLoginSubmit));
     });
   });
+}
+
+/// QF-01 测试替身：读/写正常，删一律抛错（模拟删旧 key 时的安全存储故障）。
+class _DeleteFailingKv implements SecureKvStore {
+  final MemorySecureKvStore _inner = MemorySecureKvStore();
+
+  @override
+  Future<String?> read(String key) => _inner.read(key);
+
+  @override
+  Future<void> write(String key, String value) => _inner.write(key, value);
+
+  @override
+  Future<void> delete(String key) async {
+    throw StateError('delete failed (test double)');
+  }
 }

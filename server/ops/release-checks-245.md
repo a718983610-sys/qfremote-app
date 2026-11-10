@@ -38,6 +38,21 @@ echo | openssl s_client -connect 127.0.0.1:443 -servername app.qfremote.top 2>/d
 - [ ] 两处 CN/SAN 均为 `app.qfremote.top`，无旧 IP
 - [ ] 有效期覆盖发版日（2.4.5 发版日 2026-11-10 之后至少 30 天）；
       共享证书下次自动续期为 2026-11-09，已过期的旧 cert 立即换
+- [ ] 证书链完整（QF-18）：两处（8443 控制台与 443 入口）`openssl
+      s_client` 加 `-showcerts` 均须见到叶证书＋中级证书（两段以上），
+      且 `Verify return code: 0 (ok)`；只验叶证书日期不够——缺中级时
+      严格校验的客户端会报链断裂，即使叶证书本身未过期也不过
+
+```bash
+for port in 8443 443; do echo | openssl s_client -connect 127.0.0.1:$port -servername app.qfremote.top -showcerts 2>/dev/null | grep -E 's:|i:|Verify return code'; done
+```
+
+- [ ] 自动续期健康（QF-18）：服务端实际续期机制（以现状为准，不假设
+      工具名——先 `systemctl list-timers --all | grep -iE 'cert|acme|renew'`
+      或查对应定时任务确认机制）须有一项对得上：续期任务存在且上次
+      成功；且 notAfter 距发版日 ≥30 天。到期日在 30 天内、又无成功
+      续期记录时即不过——先等续期成功、notAfter 延后，再发版，
+      不许带着“快到期且续期没跑过”的证书发版
 
 ## 3. nginx（W-17）
 

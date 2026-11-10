@@ -94,3 +94,10 @@ const String kExpectedApkPackageName = 'com.qfremote.android';
 /// 期望值，VM-02；与现售包 apksigner 实测一致）。
 const String kExpectedApkCertSha256 =
     'a3fde275f46b4e470648c8e3fbc0594ce496eb17b8fa52f4da9bf2af7bbf141f';
+
+/// QF-10（3.0.0 低组）：官方签名证书指纹白名单（轮换窗口）。
+/// 现行只有一枚；未来新旧证书双签过渡期，在此追加新指纹、待旧包
+/// 下线后再移除旧指纹。isExpectedApkIdentity 要求“每位签名者都
+/// 落在白名单内”——不是“任一命中”：攻击者附加自签证书时，附加
+/// 的那位不在名单内，整包仍拒绝（U-3 口径不变）。
+const List<String> kExpectedApkCertSha256s = [kExpectedApkCertSha256];

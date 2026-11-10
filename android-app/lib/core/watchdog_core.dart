@@ -4,13 +4,18 @@ import 'dart:async';
 /// 判定逻辑与重试策略与 Windows 版 watchdog.js 逐条对齐：
 ///
 ///   1. 登录页豁免：页面上有可见的密码输入框 → 判定 'login'，看护不介入。
-///   2. 双标记同现才算断开：文本恰好等于「已断线/已断开/未连接/Disconnected/
-///      Not connected」的可见叶子元素，与可见的断线恢复按钮，必须同时出现；
+///   2. 双标记同现才算断开：文本含「已断线/已断开/未连接/Disconnected/
+///      Not connected」子串（QF-06：文案带后缀如“已断线，请重试”时全等
+///      判不到，改归一化后子串匹配；按钮标签不用子串——“连接”是“断开
+///      连接”的子串，子串会误点断开按钮，按钮仍用归一化后全等）的可见
+///      叶子元素，与可见的断线恢复按钮，必须同时出现；
 ///      只出现一个判定 'partial'，持续 12 秒升级为 disconnected（2.4.5 B10）。
 ///      QF-05（3.0.0 中组）：恢复按钮的认定与点击脚本 kClickJs 用同一集合——
 ///      「连接／重新连接／Connect／Reconnect」文本，或 data-act="retry"，
 ///      或文本「重试」。旧版检测只认前一组、点击只认后一组，掩码里只有
 ///      「重试」时检测能报 disconnected、点击却找不到目标，自愈不闭环。
+///      QF-06（3.0.0 低组）：visible() 除自身尺寸外沿祖先链查 display/
+///      visibility 与 overflow 裁剪，父级裁掉的元素不再误判可见。
 ///   2b. 会话 iframe 分支：同源时读 #qfFrame 内 #deskstatus/#Desk；
 ///      跨域/读不到返回 'unknown'；顶层含「正在建立会话…」且无画布时
 ///      判定 'connecting'，持续 25 秒回调 onConnectingStuck（2.4.5 A1）。
@@ -42,7 +47,42 @@ const String kDetectJs = r'''(function () {
     var r = el.getBoundingClientRect();
     if (!r || r.width === 0 || r.height === 0) return false;
     var s = window.getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+    // QF-06：只看自身尺寸会误判——父级 overflow:hidden 裁剪、或祖先
+    // display:none/visibility:hidden 时元素本身仍有布局尺寸。沿祖先链
+    // 查：任一祖先藏起来即不可见；overflow 裁剪且元素矩形与祖先矩形
+    // 完全不交叠即被裁掉（fixed 定位元素不受祖先 overflow 约束，跳过
+    // 裁剪判定）。近似判定，只用于“断线标记是否真能被用户看见”。
+    var fixed = s.position === 'fixed';
+    var n = el.parentElement;
+    while (n) {
+      var ns = window.getComputedStyle(n);
+      if (ns.display === 'none' || ns.visibility === 'hidden' || ns.visibility === 'collapse') return false;
+      if (!fixed) {
+        var ov = ns.overflow + ' ' + ns.overflowX + ' ' + ns.overflowY;
+        if (ov.indexOf('hidden') >= 0 || ov.indexOf('clip') >= 0 || ov.indexOf('scroll') >= 0 || ov.indexOf('auto') >= 0) {
+          var ar = n.getBoundingClientRect();
+          if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return false;
+        }
+      }
+      n = n.parentElement;
+    }
+    return true;
+  }
+  // QF-06：文本归一化（去全部空白）——状态文案带后缀/换行时全等判不到。
+  function norm(t) { return (t || '').replace(/\s+/g, ''); }
+  // 状态文本用子串匹配：含任一 STATUS 即命中（如“已断线，请重试”）。
+  function statusText(t) {
+    var nt = norm(t);
+    for (var i = 0; i < STATUS.length; i++) { if (nt.indexOf(norm(STATUS[i])) >= 0) return true; }
+    return false;
+  }
+  // 按钮标签用归一化后全等：不用子串——“连接”是“断开连接”的子串，
+  // 子串匹配会把“断开连接”按钮误认成恢复按钮。
+  function btnText(t, list) {
+    var nt = norm(t);
+    for (var i = 0; i < list.length; i++) { if (norm(list[i]) === nt) return true; }
+    return false;
   }
   var isRoot = location.pathname === '/' || location.pathname === '';
   var loginPanel = document.getElementById('loginpanel');
@@ -56,7 +96,7 @@ const String kDetectJs = r'''(function () {
       var el = texts[i];
       if (el.children.length !== 0) continue;
       var t = (el.textContent || '').trim();
-      if (STATUS.indexOf(t) >= 0 && visible(el)) { statusHit = true; break; }
+      if (statusText(t) && visible(el)) { statusHit = true; break; }
     }
     var btns = doc.querySelectorAll('button, a, input[type="button"], input[type="submit"]');
     for (var j = 0; j < btns.length; j++) {
@@ -66,7 +106,7 @@ const String kDetectJs = r'''(function () {
       // data-act="retry"，或文本「重试」。只认前一组时掩码「重试」在
       // 检测侧不可见，断线自愈不闭环。
       var da = (b.getAttribute ? b.getAttribute('data-act') : null) || '';
-      if ((BTNS.indexOf(bt) >= 0 || bt === '重试' || da === 'retry') && visible(b)) { btnHit = true; break; }
+      if ((btnText(bt, BTNS) || norm(bt) === '重试' || da === 'retry') && visible(b)) { btnHit = true; break; }
     }
     return {statusHit: statusHit, btnHit: btnHit};
   }
@@ -84,7 +124,7 @@ const String kDetectJs = r'''(function () {
     var fDeskText = fds ? (fds.textContent || '').trim() : '';
     var fHasCanvas = false;
     if (fDesk) { var r = fDesk.getBoundingClientRect(); fHasCanvas = r.width > 0 && r.height > 0; }
-    if (STATUS.indexOf(fDeskText) >= 0) fs.statusHit = true;
+    if (statusText(fDeskText)) fs.statusHit = true;
     if (fs.statusHit && fs.btnHit) return 'disconnected';
     if (fs.statusHit || fs.btnHit) return 'partial';
     if (fDeskText === 'Connected' && fHasCanvas) return 'ok';
@@ -135,7 +175,24 @@ const String kClickJs = r'''(function () {
     var r = el.getBoundingClientRect();
     if (!r || r.width === 0 || r.height === 0) return false;
     var s = window.getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+    // QF-06：与 kDetectJs 同口径——沿祖先链查 display/visibility 与
+    // overflow 裁剪（fixed 定位跳过裁剪判定），被父级裁掉的按钮不点。
+    var fixed = s.position === 'fixed';
+    var n = el.parentElement;
+    while (n) {
+      var ns = window.getComputedStyle(n);
+      if (ns.display === 'none' || ns.visibility === 'hidden' || ns.visibility === 'collapse') return false;
+      if (!fixed) {
+        var ov = ns.overflow + ' ' + ns.overflowX + ' ' + ns.overflowY;
+        if (ov.indexOf('hidden') >= 0 || ov.indexOf('clip') >= 0 || ov.indexOf('scroll') >= 0 || ov.indexOf('auto') >= 0) {
+          var ar = n.getBoundingClientRect();
+          if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return false;
+        }
+      }
+      n = n.parentElement;
+    }
+    return true;
   }
   function inSessionLayer(el) {
     var n = el;
@@ -157,7 +214,7 @@ const String kClickJs = r'''(function () {
   for (var j = 0; j < btns.length; j++) {
     var b = btns[j];
     var bt = ((b.textContent || b.value || '') + '').trim();
-    if (bt === '重试' && visible(b) && inSessionLayer(b)) { b.click(); return true; }
+    if (bt.replace(/\s+/g, '') === '重试' && visible(b) && inSessionLayer(b)) { b.click(); return true; }
   }
   // 掩码里没有可点的「重试」：明确回 no-retry-button，不静默吞掉。
   return 'no-retry-button';

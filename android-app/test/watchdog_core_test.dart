@@ -153,6 +153,35 @@ void main() {
     });
   });
 
+  group('kDetectJs（QF-06：状态子串匹配＋visible 祖先校验）', () {
+    test('状态文本用子串匹配：“已断线，请重试”不再漏报', () {
+      expect(kDetectJs, contains('statusText'));
+      expect(kDetectJs, contains('indexOf(norm(STATUS'));
+      expect(kDetectJs, isNot(contains('STATUS.indexOf(t)')));
+      expect(kDetectJs, isNot(contains('STATUS.indexOf(fDeskText)')));
+    });
+
+    test('按钮标签不用子串（“断开连接”含“连接”，子串会误认恢复按钮）', () {
+      expect(kDetectJs, contains('btnText'));
+      expect(kDetectJs, contains('断开连接'));
+      expect(kDetectJs, contains("norm(list[i]) === nt"));
+    });
+
+    test('visible 沿祖先链查 display/visibility 与 overflow 裁剪', () {
+      expect(kDetectJs, contains('parentElement'));
+      expect(kDetectJs, contains("visibility === 'collapse'"));
+      expect(kDetectJs, contains("ov.indexOf('hidden')"));
+      expect(kDetectJs, contains('ar.left'));
+    });
+  });
+
+  group('kClickJs（QF-06：visible 与检测侧同口径）', () {
+    test('点击侧 visible 同样沿祖先链查裁剪', () {
+      expect(kClickJs, contains('parentElement'));
+      expect(kClickJs, contains("ov.indexOf('hidden')"));
+    });
+  });
+
   group('kDetectJs（QF-05：检测与点击用同一恢复按钮集合）', () {
     test('检测认 data-act="retry" 与文本「重试」，与 kClickJs 闭环', () {
       expect(kDetectJs, contains('data-act'));

@@ -187,6 +187,15 @@ const server = http.createServer((req, res) => {
     serveMode = 'signed';
     result.cases.M_badSigRejected = { error: mErr, pass: !!mErr && mErr.includes('签名') };
 
+    // N（QF-11，3.0.0 低组）：清单缺 size -> downloadUpdate 拒绝下载、
+    // 不留文件，不再“只凭 SHA-256”放行。
+    const nManifest = Object.assign({}, manifest);
+    delete nManifest.size;
+    let nErr = null;
+    try { await updater.downloadUpdate(nManifest, destDir, () => {}); } catch (e) { nErr = e.message; }
+    const nLeft = fs.existsSync(path.join(destDir, 'QFRemote-Setup-v9.9.9.exe')) || fs.existsSync(path.join(destDir, 'QFRemote-Setup-v9.9.9.exe.part'));
+    result.cases.N_sizeRequired = { error: nErr, fileLeft: nLeft, pass: !!nErr && nErr.includes('缺少文件大小') && !nLeft };
+
     result.pass = Object.values(result.cases).every(c => c.pass);
   } catch (e) {
     result.fatal = e.message;

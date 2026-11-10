@@ -46,7 +46,7 @@ void main() {
   test('更新全流程＋失败注入', () async {
     final apkBytes = List<int>.generate(200000, (i) => (i * 7 + 13) % 251);
     final apkSha = sha256.convert(apkBytes).toString();
-    var mode = 'normal'; // normal|tampered|truncated|hang|stall|manifest500
+    var mode = 'normal'; // normal|tampered|truncated|hang|stall|manifest500|manifestHtml
 
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, _port);
     addTearDown(() => server.close(force: true));
@@ -54,6 +54,14 @@ void main() {
       if (req.uri.path == '/release.json') {
         if (mode == 'manifest500') {
           req.response.statusCode = 500;
+          await req.response.close();
+          return;
+        }
+        if (mode == 'manifestHtml') {
+          // QF-09：200 + text/html 的假清单（中间页／错误页冒充清单）。
+          req.response
+            ..headers.contentType = ContentType.html
+            ..write('<html><body>not a manifest</body></html>');
           await req.response.close();
           return;
         }
@@ -295,5 +303,18 @@ void main() {
           (e) => e.message, 'message', contains('签名核验未通过'))),
     );
     await expectDirClean('验签通道不可用时不许留文件');
+
+    // 9) QF-09：清单以 text/html 回来（200＋错误页冒充清单）时，
+    // fetchManifest 须在解析前按 Content-Type 拒绝，不进 JSON 解析。
+    mode = 'manifestHtml';
+    await expectLater(
+      svc.fetchManifest(),
+      throwsA(isA<HttpException>().having(
+          (e) => e.message, 'message', contains('更新清单类型不正确'))),
+    );
+    // 恢复正常模式后清单仍可取（上一腿只拒了这一次响应）。
+    mode = 'normal';
+    final afterHtml = await svc.fetchManifest();
+    expect(afterHtml.android?.version, '9.9.9');
   }, timeout: const Timeout(Duration(seconds: 90)));
 }

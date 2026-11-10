@@ -15,6 +15,9 @@
  *   - 完整性的最终兜底是安装包 SHA256 必须与清单一致（并核对大小）；
  *   - 测试覆盖开关 QFREMOTE_RELEASE_URL 存在时改认那个 origin（仅测试用，
  *     生产环境不要设置这个环境变量），见 README。
+ *     QF-12（3.0.0 低组）：覆盖只许指向本机回环地址（127.0.0.1 /
+ *     localhost / ::1，测试假服务器用）；非回环地址一律忽略、回落
+ *     正式 origin——本机进程环境被控时更新链不再能被劫持到任意 origin。
  *   （2026-10-29 发版前审计 J-2 定案：更新链自直连自签源收口至正式域名源。）
  * H26（QF-13）：清单离线签名——release.json 带 Ed25519 签名
  *   signature={alg:'ed25519',key_id,sig}，sig 为规范串的签名（base64url）；
@@ -37,9 +40,23 @@ const clientVersion = require('./client-version');
 const PROD_ORIGIN = 'https://app.qfremote.top';
 const PROD_RELEASE_URL = PROD_ORIGIN + '/release.json';
 // 仅测试用：覆盖清单地址（同时该地址的 origin 成为本次运行唯一可信 origin）
+// QF-12（3.0.0 低组）：只许指向本机回环地址（127.0.0.1 / localhost /
+// ::1，测试假服务器用）；非回环地址一律忽略、回落正式 origin。旧版
+// 任意 origin 都认：本机进程环境被控时更新链可被劫持到任意 origin。
+// 生产环境不要设置这个环境变量。
+function isLoopbackOrigin(raw) {
+  try {
+    const u = new URL(raw);
+    // DS R1 观察：FQDN 尾点（localhost.）也是回环写法，先 strip 尾点再比。
+    const h = u.hostname.toLowerCase().replace(/\.$/, '');
+    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1' || h.endsWith('.localhost');
+  } catch (e) { return false; }
+}
 const OVERRIDE_URL = process.env.QFREMOTE_RELEASE_URL || '';
-const RELEASE_URL = OVERRIDE_URL || PROD_RELEASE_URL;
-const TRUSTED_ORIGIN = OVERRIDE_URL ? new URL(OVERRIDE_URL).origin : PROD_ORIGIN;
+const OVERRIDE_OK = OVERRIDE_URL ? isLoopbackOrigin(OVERRIDE_URL) : false;
+if (OVERRIDE_URL && !OVERRIDE_OK) console.error('QFREMOTE_RELEASE_URL 指向非回环地址，已忽略（仅测试可用回环地址覆盖）');
+const RELEASE_URL = OVERRIDE_OK ? OVERRIDE_URL : PROD_RELEASE_URL;
+const TRUSTED_ORIGIN = OVERRIDE_OK ? new URL(OVERRIDE_URL).origin : PROD_ORIGIN;
 // H26：发版签名公钥（release-1，Ed25519 SPKI DER base64）。与
 // server/ext/make-release-json.js 的 RELEASE_SIGN_PUBLIC_KEY_B64 同值；
 // 轮换时两处同改。仅测试用环境变量可覆盖（见文件头）。
@@ -257,7 +274,13 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   }
   try {
     const st = fs.statSync(part);
-    if (manifest.size && st.size !== manifest.size) throw new Error('文件大小与清单不一致');
+    // QF-11（3.0.0 低组）：清单 size 必填——缺失／非正数即拒绝，不再
+    // “给了才核、缺了只凭 SHA-256”。SHA-256 本可兜底内容完整性，但缺
+    // size 时“文件多大才算下完”无锚点，且与安卓口径（清单 size 必填，
+    // 见 manifest.dart H-3）不一致；发版口径 release.json 必带 size，
+    // 缺失即清单不完整。核对失败一律删文件（见下 catch）。
+    if (typeof manifest.size !== 'number' || !Number.isFinite(manifest.size) || manifest.size <= 0) throw new Error('更新清单缺少有效的文件大小（size 必填）');
+    if (st.size !== manifest.size) throw new Error('文件大小与清单不一致');
     const digest = await sha256File(part);
     if (digest.toLowerCase() !== manifest.sha256.toLowerCase()) throw new Error('SHA256 校验码不一致');
     fs.renameSync(part, dest);
@@ -265,6 +288,7 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   } catch (e) {
     try { fs.unlinkSync(part); } catch (err) { /* ignore */ }
     try { if (fs.existsSync(dest)) fs.unlinkSync(dest); } catch (err) { /* ignore */ }
+    if (e.message === '更新清单缺少有效的文件大小（size 必填）') throw new Error('更新清单不完整（缺少文件大小），已删除，请重新下载。');
     if (e.message === '文件大小与清单不一致') throw new Error('下载不完整（文件大小与清单不一致），已删除，请重新下载。');
     if (e.message === 'SHA256 校验码不一致') throw new Error('完整性核对未通过（SHA256 校验码不一致），已删除该文件，请重新下载。');
     throw e;

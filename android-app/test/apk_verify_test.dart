@@ -59,6 +59,71 @@ void main() {
       );
     });
 
+    test('QF-10：双签轮换窗口——新旧双签包通过，旧单签仍通过', () {
+      const newFingerprint =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const allowed = [kExpectedApkCertSha256, newFingerprint];
+      // 新旧双签过渡期的包：两位签名者都在白名单内。
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [kExpectedApkCertSha256, newFingerprint],
+          expectedCertSha256s: allowed,
+        ),
+        true,
+      );
+      // 只剩新证书单签的包：同样通过（轮换完成）。
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [newFingerprint],
+          expectedCertSha256s: allowed,
+        ),
+        true,
+      );
+      // 旧单签包：仍通过（过渡期内旧证书未下线）。
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [kExpectedApkCertSha256],
+          expectedCertSha256s: allowed,
+        ),
+        true,
+      );
+    });
+
+    test('QF-10：附加自签证书仍拒绝（U-3 口径不变），白名单异常也拒绝', () {
+      const newFingerprint =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const allowed = [kExpectedApkCertSha256, newFingerprint];
+      // 攻击者给合法包附加一张自签证书：附加的那位不在名单内。
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [kExpectedApkCertSha256, wrongFingerprint],
+          expectedCertSha256s: allowed,
+        ),
+        false,
+      );
+      // 白名单为空或含非法指纹：一律拒绝，不放行。
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [kExpectedApkCertSha256],
+          expectedCertSha256s: const [],
+        ),
+        false,
+      );
+      expect(
+        isExpectedApkIdentity(
+          packageName: kExpectedApkPackageName,
+          signerCertSha256s: const [kExpectedApkCertSha256],
+          expectedCertSha256s: const ['not-a-sha256'],
+        ),
+        false,
+      );
+    });
+
     test('签名者为空拒绝', () {
       expect(
         isExpectedApkIdentity(

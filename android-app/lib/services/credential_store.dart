@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -85,12 +86,31 @@ class CredentialStore {
 
   CredentialStore([SecureKvStore? kv]) : _kv = kv ?? FlutterSecureKvStore();
 
+  /// QF-01（3.0.0 低组）：凭据写改成“新 key 先落盘＋旧 key 尽力清＋
+  /// 下次读时扫尾”。旧版三次独立写（写新 key、删旧账号、删旧密码）：
+  /// 写新 key 后、删旧 key 前崩溃会留新旧两份凭据同时残留。
+  /// 现：① 新 key 写成功即本次保存已生效，删旧 key 各自 try/catch，
+  /// 单个删除失败不再把已生效的保存报成失败；② loadCredentials 读到
+  /// 有效新 key 时顺手清掉残留旧 key（崩溃窗口的自愈扫尾，同样尽力
+  /// 而为、失败不影响本次读凭据）。旧 key 从此只剩“读兼容”，不再
+  /// 是第二份有效凭据。
   Future<void> saveCredentials(String username, String password) async {
     await _kv.write(
         _kCreds, jsonEncode({'username': username, 'password': password}));
     // 旧版分开的 key 不再写新值，残留的旧值清掉，免得新旧两份打架。
-    await _kv.delete(_kUsername);
-    await _kv.delete(_kPassword);
+    // 尽力清：新凭据已落盘，删旧失败不能反噬本次保存。
+    await _quietDelete(_kUsername);
+    await _quietDelete(_kPassword);
+  }
+
+  /// 尽力删一个 key：失败只吞掉（调用方已保证主写已完成，或读侧
+  /// 已拿到有效值），不许删除失败反噬主流程。
+  Future<void> _quietDelete(String key) async {
+    try {
+      await _kv.delete(key);
+    } catch (_) {
+      // 残留旧 key 由下次 loadCredentials 扫尾再清，不在这里报错。
+    }
   }
 
   /// 取已存凭据：账号密码缺任一项（或为空）都按没存处理，绝不回半截。
@@ -106,6 +126,10 @@ class CredentialStore {
               u.isNotEmpty &&
               p is String &&
               p.isNotEmpty) {
+            // QF-01 扫尾：新 key 有效即本次读凭据已定，顺手清掉崩溃窗口
+            // 可能残留的旧 key（尽力清，不等它、不因它失败）。
+            unawaited(_quietDelete(_kUsername));
+            unawaited(_quietDelete(_kPassword));
             return SavedCredentials(username: u, password: p);
           }
         }

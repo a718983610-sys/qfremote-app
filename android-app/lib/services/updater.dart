@@ -61,6 +61,21 @@ class UpdateService {
       if (res.statusCode != 200) {
         throw HttpException('获取更新清单失败：HTTP ${res.statusCode}');
       }
+      // QF-09（3.0.0 低组，部分属实）：校验清单响应的 Content-Type。
+      // 未校验时，中间页／错误页以 200 + text/html 回来也会进 JSON 解析
+      // （解析失败本就会抛，但显式校验把“非清单响应”在解析前挡掉，
+      // 并给出可诊断的报错）。允许 application/json、text/json 与
+      // text/plain（部分静态托管以 text/plain 发 .json）；text/html 等
+      // 一律拒绝。downloadApk 本身无法绕过：入口只认 ReleaseManifest
+      // 解析出的条目（url 已验可信 origin、size 必填、sha256 必填），
+      // 且下完还要核大小＋SHA256＋包名＋签名指纹四道关。
+      final mime = res.headers.contentType?.mimeType.toLowerCase();
+      if (mime != 'application/json' &&
+          mime != 'text/json' &&
+          mime != 'text/plain') {
+        throw HttpException(
+            '更新清单类型不正确（Content-Type：${res.headers.contentType}），请稍后重试。');
+      }
       final body = await utf8.decodeStream(res).timeout(timeout);
       return ReleaseManifest.parse(body, trustedOrigin: trustedOrigin);
     } finally {

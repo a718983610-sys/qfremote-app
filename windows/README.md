@@ -154,7 +154,9 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
    强更页自测：QFREMOTE_PREVIEW=force 启动（只跑启动门），配合 QFREMOTE_PREVIEW_USERDATA 里预置的
    pendingUpdate 与 QFREMOTE_RELEASE_URL 假清单：被门拦住会截强更页→自动点「立即更新」走真下载→
    核对后截图，结果写 _pv_force_result.json（含「下载完待更仍在」的断言）；门放行时结果里 gated=false。
-   **QFREMOTE_RELEASE_URL 是仅测试用的清单地址覆盖开关**：设置后应用改认该地址的 origin 为唯一可信源；
+   **QFREMOTE_RELEASE_URL 是仅测试用的清单地址覆盖开关**：只许指向本机回环
+   地址（127.0.0.1 / localhost / ::1，测试假清单服务器用），设置后应用改认
+   该地址的 origin 为唯一可信源；非回环地址一律忽略、回落正式 origin；
    生产环境绝不要设这个环境变量，正式清单恒为 https://app.qfremote.top/release.json 。
 
 ## 在 Windows 上手工出包

@@ -23,8 +23,11 @@
  *           --check server/meshcentral/public/release.json \
  *           [--require-signature] [--verify-key <base64 SPKI>] \
  *           QFRemote-Setup-v2.4.5.exe QFRemote-v2.4.5.apk
- *         逐项比对 size/sha256/url 文件名/version/minUsable，
+ *         逐项比对 size/sha256/url 文件名/version/minUsable/
+ *         android.minUsable（QF-14）/interop.minVersion（QF-15），
  *         全部一致 exit 0，任一不一致 exit 1 并逐项报错。
+ *         （DS R1 注：--check 面向 2.4.5 起生成的清单；校 2.4.4 及更早
+ *         的旧清单会因缺 interop 段失败，那不是误伤——旧清单须先重生成。）
  *         带签名时验签（验签不过即失败）；无签名时警告，
  *         传 --require-signature 时无签名也失败（发版门禁应传）。
  *         minUsable 有意不抬（§5.3 条件不满足、发版时 minUsable 仍为旧版）
@@ -96,7 +99,23 @@ function verifyReleaseSignature(doc, verifyKeyB64) {
 function fail(msg) { console.error('make-release-json: ' + msg); process.exit(1); }
 
 function sha256File(p) {
-  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+  // QF-16（3.0.0 低组）：流式读（1MB 分块），不再整文件读入内存。
+  // 安装包约 144MB，旧版 fs.readFileSync 一次吃满；同时校验 exe+apk
+  // 时内存压力更大。保持同步签名（buildDoc/checkMode/verifySelf 均
+  // 同步调用），分块读 + 读完必关 fd。
+  const fd = fs.openSync(p, 'r');
+  try {
+    const h = crypto.createHash('sha256');
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let n;
+    do {
+      n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n > 0) h.update(buf.subarray(0, n));
+    } while (n > 0);
+    return h.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function parseArgs(argv) {
@@ -229,6 +248,21 @@ function checkMode(a) {
       else problems.push('android minUsable(' + doc.android.minUsable + ')与 android version(' + doc.android.version + ')不一致——翻牌前请确认是有意为之（有意不抬时传 --allow-min-usable）');
     }
   }
+  // QF-15（3.0.0 低组）：--check 补 interop.minVersion 比较。对照
+  // QF-14（android.minUsable）同款写法：生成器 buildDoc 恒置
+  // interop.minVersion = version，手工改过的 release.json 若只漂移
+  // 这一项，旧版 --check 发现不了。缺 interop 段／缺字段即报明确
+  // 原因；与 version 不一致不适用 --allow-min-usable：该标志只豁免
+  // 「minUsable 有意不抬」（minUsable 与 version 的关系），interop
+  // 的 minVersion 由生成器按 version 写死，不一致是文档自相矛盾，
+  // 不是「不抬」的决定，必须修文档。
+  if (!doc.interop || typeof doc.interop !== 'object') {
+    problems.push('缺少 interop 段：无法校验 interop.minVersion');
+  } else if (doc.interop.minVersion === undefined) {
+    problems.push('interop minVersion 缺失（字段未填）');
+  } else if (doc.interop.minVersion !== doc.version) {
+    problems.push('interop minVersion(' + doc.interop.minVersion + ')与 version(' + doc.version + ')不一致——生成器恒置 interop.minVersion = version，不一致即文档被手工改坏，请重新生成');
+  }
   // §5.3 条件不满足、minUsable 有意不抬时：须显式传 --allow-min-usable，
   // 该项不记失败（其余项仍逐项比对）；不传标志保持原行为（报失败）。
   if (doc.minUsable !== doc.version) {
@@ -252,7 +286,7 @@ function checkMode(a) {
   } else {
     console.log('警告：release.json 无签名——生产发布须用 --sign-key 签名，否则 Windows 客户端拒绝更新。');
   }
-  console.log('校验通过：' + a.check + ' 与两个包的 size/sha256/url/version 全部一致（version ' + doc.version + '，minUsable ' + doc.minUsable + '）。');
+  console.log('校验通过：' + a.check + ' 与两个包的 size/sha256/url/version 全部一致（version ' + doc.version + '，minUsable ' + doc.minUsable + '，android.minUsable ' + (doc.android && doc.android.minUsable) + '，interop.minVersion ' + (doc.interop && doc.interop.minVersion) + '）。');
 }
 
 function main() {

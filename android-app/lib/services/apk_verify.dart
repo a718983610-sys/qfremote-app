@@ -97,12 +97,16 @@ String normalizeApkCertSha256(String fingerprint) {
 
 /// 包名 + 当前签名者指纹比对的纯函数。
 ///
-/// 多签名者口径：任一签名者指纹不同于期望值，即整体不符。
+/// 多签名者口径（QF-10，3.0.0 低组）：每位签名者归一化后都必须落在
+/// 期望指纹白名单内（[expectedCertSha256s]，默认 [kExpectedApkCertSha256s]
+/// 现行一枚）。未来官方新旧证书双签过渡期，白名单追加新指纹后，新旧
+/// 任一单签包、新旧双签包都通过；攻击者附加自签证书时，附加的那位不
+/// 在名单内，整包仍拒绝（U-3 口径不变）。
 bool isExpectedApkIdentity({
   required String packageName,
   required List<String> signerCertSha256s,
   String expectedPackageName = kExpectedApkPackageName,
-  String expectedCertSha256 = kExpectedApkCertSha256,
+  List<String> expectedCertSha256s = kExpectedApkCertSha256s,
 }) {
   if (packageName != expectedPackageName) {
     return false;
@@ -112,14 +116,14 @@ bool isExpectedApkIdentity({
     return false;
   }
 
-  final normalizedExpected = normalizeApkCertSha256(expectedCertSha256);
-  if (!_isSha256Hex(normalizedExpected)) {
-    debugPrint('期望签名指纹配置异常，不是 64 位 SHA-256 hex：$expectedCertSha256');
+  final allowed = expectedCertSha256s.map(normalizeApkCertSha256).toSet();
+  if (allowed.isEmpty || allowed.any((f) => !_isSha256Hex(f))) {
+    debugPrint('期望签名指纹白名单异常（为空或不是 64 位 SHA-256 hex）。');
     return false;
   }
 
   return signerCertSha256s.every(
-    (fingerprint) => normalizeApkCertSha256(fingerprint) == normalizedExpected,
+    (fingerprint) => allowed.contains(normalizeApkCertSha256(fingerprint)),
   );
 }
 
