@@ -442,6 +442,194 @@ int main(void) {
         CHECK(lea_queue_dequeue(&q2) == NULL, "queue-drain-empty");
     }
 
+    /* ---------- H08：内部命令分流只认顶层 "cmd" ---------- */
+    {
+        char cmd[64] = { 0 };
+        CHECK(lea_json_top_level_string("{\"cmd\":\"session.logout\"}", "cmd", cmd, sizeof(cmd)) &&
+              strcmp(cmd, "session.logout") == 0, "h08-top-cmd-hit");
+        /* params 内嵌套 "cmd" 不得命中（原全文查找会误判进 handle_internal） */
+        CHECK(!lea_json_top_level_string(
+                  "{\"version\":1,\"command\":\"ui.click\",\"params\":{\"cmd\":\"session.logout\"}}",
+                  "cmd", cmd, sizeof(cmd)), "h08-nested-cmd-no-hit");
+        CHECK(!lea_json_top_level_string(
+                  "{\"request_id\":\"req-1\",\"params\":{\"cmd\":\"session.logout\"}}",
+                  "cmd", cmd, sizeof(cmd)), "h08-envelope-nested-cmd-no-hit");
+        /* 带空白的顶层 cmd 仍命中 */
+        memset(cmd, 0, sizeof(cmd));
+        CHECK(lea_json_top_level_string("{ \"cmd\" : \"session.logout\" }", "cmd", cmd, sizeof(cmd)) &&
+              strcmp(cmd, "session.logout") == 0, "h08-top-cmd-ws");
+        /* 重复顶层 cmd 拒绝（fail-closed） */
+        CHECK(!lea_json_top_level_string("{\"cmd\":\"a\",\"cmd\":\"b\"}", "cmd", cmd, sizeof(cmd)),
+              "h08-dup-top-cmd-reject");
+        /* 顶层 cmd 非字符串拒绝 */
+        CHECK(!lea_json_top_level_string("{\"cmd\":123}", "cmd", cmd, sizeof(cmd)),
+              "h08-nonstring-cmd-reject");
+        /* 转义的顶层 cmd 值正确解码 */
+        memset(cmd, 0, sizeof(cmd));
+        CHECK(lea_json_top_level_string("{\"cmd\":\"a\\\"b\"}", "cmd", cmd, sizeof(cmd)) &&
+              strcmp(cmd, "a\"b") == 0, "h08-top-cmd-escaped");
+        /* 顶层 account_id 不被嵌套遮蔽 */
+        char acc[128] = { 0 };
+        CHECK(lea_json_top_level_string(
+                  "{\"x\":{\"account_id\":\"bob\"},\"cmd\":\"session.login_changed\",\"account_id\":\"alice\"}",
+                  "account_id", acc, sizeof(acc)) && strcmp(acc, "alice") == 0,
+              "h08-top-account-not-shadowed");
+    }
+
+    /* ---------- H09：幂等结果截断投毒 ---------- */
+    {
+        /* 超长结果不得截断成非法 JSON：占位行保留 ok/code/request_id 且合法 */
+        static lea_idem_t th;
+        lea_idem_init(&th);
+        lea_idem_entry_t *e = lea_idem_get_or_create(&th, "node-1", "alice", "k-big", 0, now);
+        static char big_resp[20000];
+        int bl = snprintf(big_resp, sizeof(big_resp),
+                          "{\"ok\":true,\"code\":\"done\",\"request_id\":\"req-big-1\","
+                          "\"retryable\":false,\"detail\":\"\",\"result\":{\"output\":\"");
+        memset(big_resp + bl, 'x', 12000);
+        strcpy(big_resp + bl + 12000, "\"}}");
+        lea_idem_set_status(&th, e, LEA_IDEM_SUCCEEDED, big_resp, now);
+        CHECK(strstr(e->result, "\"detail\":\"result-truncated\"") != NULL,
+              "h09-truncated-placeholder");
+        CHECK(strstr(e->result, "\"ok\":true") != NULL, "h09-truncated-keeps-ok");
+        CHECK(strstr(e->result, "\"code\":\"done\"") != NULL, "h09-truncated-keeps-code");
+        CHECK(strstr(e->result, "\"request_id\":\"req-big-1\"") != NULL,
+              "h09-truncated-keeps-request-id");
+        CHECK(lea_json_is_valid(e->result), "h09-truncated-placeholder-valid-json");
+        /* 占位行可正常 save/load 往返 */
+        static char saved_big[65536];
+        CHECK(lea_idem_save_text(&th, saved_big, sizeof(saved_big)), "h09-truncated-save");
+        static lea_idem_t th_big;
+        CHECK(lea_idem_load_text(&th_big, saved_big), "h09-truncated-load");
+        lea_idem_entry_t *e_big = lea_idem_lookup(&th_big, "node-1", "alice", "k-big");
+        CHECK(e_big && e_big->status == LEA_IDEM_SUCCEEDED &&
+              strstr(e_big->result, "result-truncated") != NULL,
+              "h09-truncated-roundtrip");
+        /* 坏行隔离：坏行跳过，好行保留，不清空整表 */
+        static lea_idem_t th2;
+        const char *poisoned =
+            "{\"device_id\":\"node-1\",\"account_id\":\"alice\",\"key\":\"k-good\",\"status\":\"SUCCEEDED\",\"dangerous\":0,\"created_at\":100,\"updated_at\":100,\"result\":{\"ok\":true}}\n"
+            "{\"device_id\":\"node-1\",\"account_id\":\"alice\",\"key\":\"k-bad\",\"status\":\"SUCCEEDED\",\"dangerous\":0,\"created_at\":100,\"updated_at\":100,\"result\":{\"ok\":true,\"output\":\"abc}\n"
+            "{\"device_id\":\"node-1\",\"account_id\":\"alice\",\"key\":\"k-good2\",\"status\":\"FAILED\",\"dangerous\":0,\"created_at\":100,\"updated_at\":100,\"result\":null}\n";
+        CHECK(lea_idem_load_text(&th2, poisoned), "h09-load-poisoned-ok");
+        CHECK(lea_idem_lookup(&th2, "node-1", "alice", "k-good") != NULL,
+              "h09-load-keeps-good-before");
+        CHECK(lea_idem_lookup(&th2, "node-1", "alice", "k-bad") == NULL,
+              "h09-load-skips-bad-line");
+        CHECK(lea_idem_lookup(&th2, "node-1", "alice", "k-good2") != NULL,
+              "h09-load-keeps-good-after");
+        /* save 跳过非法行：手工写一条坏 result 的条目，save 不写毒行 */
+        static lea_idem_t th3;
+        lea_idem_init(&th3);
+        lea_idem_entry_t *eb = lea_idem_get_or_create(&th3, "node-1", "alice", "k-poison", 0, now);
+        snprintf(eb->result, sizeof(eb->result), "%s", "{\"ok\":true,\"cut\":");
+        eb->status = LEA_IDEM_SUCCEEDED;
+        lea_idem_entry_t *eg = lea_idem_get_or_create(&th3, "node-1", "alice", "k-ok", 0, now);
+        lea_idem_set_status(&th3, eg, LEA_IDEM_SUCCEEDED, "{\"ok\":true,\"code\":\"done\"}", now);
+        static char saved[65536];
+        int skipped = -1;
+        CHECK(lea_idem_save_text_ex(&th3, saved, sizeof(saved), &skipped), "h09-save-skips-bad");
+        CHECK(skipped == 1, "h09-save-skipped-count");
+        CHECK(strstr(saved, "k-poison") == NULL, "h09-save-no-poison-line");
+        CHECK(strstr(saved, "k-ok") != NULL, "h09-save-keeps-good");
+        static lea_idem_t th4;
+        CHECK(lea_idem_load_text(&th4, saved), "h09-save-load-roundtrip");
+        CHECK(lea_idem_lookup(&th4, "node-1", "alice", "k-ok") != NULL,
+              "h09-save-roundtrip-keeps-good");
+        CHECK(lea_idem_lookup(&th4, "node-1", "alice", "k-poison") == NULL,
+              "h09-save-roundtrip-no-poison");
+    }
+
+    /* ---------- H10：队列语义 ---------- */
+    {
+        char err[64] = { 0 };
+        /* 危险 lane 配额：连续 4 条危险后轮转 1 条普通 */
+        static lea_queue_t q3;
+        lea_queue_init(&q3);
+        static lea_queue_item_t d[6], n1;
+        memset(d, 0, sizeof(d));
+        memset(&n1, 0, sizeof(n1));
+        for (int i = 0; i < 6; i++) d[i].dangerous = 1;
+        n1.dangerous = 0;
+        for (int i = 0; i < 5; i++) lea_queue_enqueue(&q3, &d[i], err, sizeof(err));
+        lea_queue_enqueue(&q3, &n1, err, sizeof(err));
+        lea_queue_enqueue(&q3, &d[5], err, sizeof(err));
+        CHECK(lea_queue_dequeue(&q3) == &d[0], "h10-danger-1");
+        CHECK(lea_queue_dequeue(&q3) == &d[1], "h10-danger-2");
+        CHECK(lea_queue_dequeue(&q3) == &d[2], "h10-danger-3");
+        CHECK(lea_queue_dequeue(&q3) == &d[3], "h10-danger-4");
+        CHECK(lea_queue_dequeue(&q3) == &n1, "h10-normal-rotated-after-quota");
+        CHECK(lea_queue_dequeue(&q3) == &d[4], "h10-danger-after-rotation");
+        CHECK(lea_queue_dequeue(&q3) == &d[5], "h10-danger-last");
+        /* 只有危险 lane 时配额不限流 */
+        static lea_queue_t q4;
+        lea_queue_init(&q4);
+        static lea_queue_item_t d2[6];
+        memset(d2, 0, sizeof(d2));
+        for (int i = 0; i < 6; i++) { d2[i].dangerous = 1; lea_queue_enqueue(&q4, &d2[i], err, sizeof(err)); }
+        int got = 0;
+        while (lea_queue_dequeue(&q4)) got++;
+        CHECK(got == 6, "h10-danger-only-no-starve");
+        /* batch seq 单调 */
+        static lea_batch_seq_t bs;
+        lea_batch_seq_init(&bs);
+        long long prev = -99;
+        CHECK(lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 1, now, &prev) && prev == -1,
+              "h10-seq-first");
+        CHECK(lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 2, now, &prev) && prev == 1,
+              "h10-seq-incr");
+        CHECK(!lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 2, now, NULL),
+              "h10-seq-dup-reject");
+        CHECK(!lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 1, now, NULL),
+              "h10-seq-reorder-reject");
+        CHECK(lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 3, now, NULL),
+              "h10-seq-resume");
+        CHECK(lea_batch_seq_check(&bs, "node-1", "alice", "batch-2", 1, now, NULL),
+              "h10-seq-other-batch");
+        CHECK(!lea_batch_seq_check(&bs, "node-1", "alice", "batch-2", 1, now, NULL),
+              "h10-seq-other-batch-dup");
+        CHECK(lea_batch_seq_check(&bs, "node-1", "bob", "batch-1", 1, now, NULL),
+              "h10-seq-other-account");
+        /* 单条 seq 必须为 1 */
+        CHECK(lea_batch_seq_check(&bs, "node-1", "alice", "", 1, now, NULL),
+              "h10-single-seq-1");
+        CHECK(!lea_batch_seq_check(&bs, "node-1", "alice", "", 2, now, NULL),
+              "h10-single-seq-2-reject");
+        CHECK(!lea_batch_seq_check(&bs, "node-1", "alice", "batch-1", 0, now, NULL),
+              "h10-seq-zero-reject");
+        /* DS 复查阻塞项：检查通过、入队失败时回滚，否则重试同 seq 被判重复 */
+        static lea_batch_seq_t br;
+        lea_batch_seq_init(&br);
+        long long p1 = -99, p2 = -99;
+        CHECK(lea_batch_seq_check(&br, "node-1", "alice", "batch-r", 1, now, &p1) && p1 == -1,
+              "h10-rollback-first-prev");
+        CHECK(lea_batch_seq_check(&br, "node-1", "alice", "batch-r", 2, now, &p2) && p2 == 1,
+              "h10-rollback-second-prev");
+        lea_batch_seq_rollback(&br, "node-1", "alice", "batch-r", 2, p2);
+        CHECK(lea_batch_seq_check(&br, "node-1", "alice", "batch-r", 2, now, NULL),
+              "h10-rollback-retry-same-seq-accepted");
+        CHECK(!lea_batch_seq_check(&br, "node-1", "alice", "batch-r", 2, now, NULL),
+              "h10-rollback-retry-then-dup-reject");
+        /* 回滚新建 batch 删除条目：重试首步仍按新 batch 接受 */
+        static lea_batch_seq_t br2;
+        lea_batch_seq_init(&br2);
+        long long p3 = -99;
+        CHECK(lea_batch_seq_check(&br2, "node-1", "alice", "batch-n", 5, now, &p3) && p3 == -1,
+              "h10-rollback-newbatch-prev");
+        lea_batch_seq_rollback(&br2, "node-1", "alice", "batch-n", 5, p3);
+        CHECK(lea_batch_seq_check(&br2, "node-1", "alice", "batch-n", 5, now, NULL),
+              "h10-rollback-newbatch-retry-accepted");
+        /* 回滚已被更大 seq 推进时不动（不误删后续记录） */
+        lea_batch_seq_check(&br2, "node-1", "alice", "batch-n", 6, now, NULL);
+        lea_batch_seq_rollback(&br2, "node-1", "alice", "batch-n", 5, -1);
+        CHECK(!lea_batch_seq_check(&br2, "node-1", "alice", "batch-n", 6, now, NULL),
+              "h10-rollback-superseded-noop");
+        /* 单条无记录，回滚是空操作 */
+        lea_batch_seq_rollback(&br2, "node-1", "alice", "", 1, -1);
+        CHECK(lea_batch_seq_check(&br2, "node-1", "alice", "", 1, now, NULL),
+              "h10-rollback-single-noop");
+    }
+
     /* ---------- 审计脱敏 ---------- */
     {
         char red[64];

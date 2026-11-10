@@ -206,25 +206,71 @@ function createLeaRoutes(core, channel, deps) {
       }
     }
     const key = auth.key;
+    // H13（DS 复查）：steps 指纹——UNKNOWN 重试时若 steps 内容变了，步级
+    // 缓存按位置复用会误用旧结果。指纹随批量级幂等记录；重试时指纹不一致
+    // 即不复用步级缓存，全部步重跑。
+    const stepsFp = crypto.createHash('sha256').update(JSON.stringify(steps)).digest('hex');
+    // H13：批量级幂等——重复提交去重（此前批量级键只要求不记录，步级键
+    // 也不写入 idemSeen，重复提交重跑全部步骤）。UNKNOWN 不拦重放
+    //（H14 推进器已把失联 RUNNING 转 UNKNOWN），继续执行并覆盖记录。
+    const prevBatch = core.idemLookup(key.account_id, key.key_id, idemKey);
+    if (prevBatch && prevBatch.status === 'RUNNING') return fail(res, 409, ERR.DUPLICATE, '同一幂等键的批量任务正在执行中。');
+    if (prevBatch && prevBatch.status === 'SUCCEEDED') {
+      return sendJson(res, 200, Object.assign({ ok: true, duplicate: true, request_id: requestId }, prevBatch.result || {}));
+    }
+    if (prevBatch && prevBatch.status === 'FAILED') {
+      return sendJson(res, 200, Object.assign({ ok: false, duplicate: true, request_id: requestId }, prevBatch.result || {}));
+    }
+    // UNKNOWN 重试：只有 steps 指纹一致才复用已成功步的缓存。
+    const reuseSteps = !prevBatch || !prevBatch.steps_fp || prevBatch.steps_fp === stepsFp;
+    // H12：批量接口查设备在线（handleExecute 查了，handleBatches 没查）。
+    // 离线／通道不可达即拒，不建 job、不记幂等 RUNNING。
+    let online = null;
+    try { online = channel ? await channel.nodeOnline(deviceId) : null; } catch (e) { online = null; }
+    if (online === false) {
+      auditCall({ request_id: requestId, account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id, command: 'batches', idempotency_key: idemKey, result: 'denied', error_code: ERR.NOT_INSTALLED, ip: clientIp(req) });
+      return fail(res, 503, ERR.NOT_INSTALLED, '设备未安装 LEA 或不在线。');
+    }
+    if (online === null) {
+      auditCall({ request_id: requestId, account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id, command: 'batches', idempotency_key: idemKey, result: 'denied', error_code: ERR.NOT_INSTALLED, ip: clientIp(req) });
+      return fail(res, 503, ERR.NOT_INSTALLED, '下发通道暂时不可达，无法确认设备在线。');
+    }
     const batchId = 'batch_' + crypto.randomBytes(8).toString('hex');
     const job = core.createJob({
       account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id,
       batch_id: batchId, request_id: requestId, idempotency_key: idemKey,
       status: 'RUNNING', steps_total: steps.length, steps_done: 0, results: [],
     });
+    // H13：批量级幂等键写入 idemSeen（RUNNING）；任一步危险则按 30 天保留。
+    const batchDangerous = steps.some((st) => {
+      const s = core.COMMANDS[String((st && st.command) || '')];
+      return !!(s && s.dangerous);
+    });
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp });
     // 后台顺序执行；同步等待 5s，超时即 202 + job_id（继续后台跑完）。
     const startedAt = Date.now();
     const run = (async () => {
       const results = [];
+      let failed = false;
+      const stepKey = (i) => idemKey + '-' + (i + 1);
       for (let i = 0; i < steps.length; i++) {
         const cur = core.getJob(job.job_id);
         if (cur && cur.status === 'CANCELLED') { results.push({ seq: i + 1, cancelled: true }); break; }
         const st = steps[i] || {};
         const command = String(st.command || '');
         const spec = core.COMMANDS[command];
-        if (!spec) { results.push({ seq: i + 1, command, ok: false, code: ERR.VALIDATION }); break; }
+        if (!spec) { results.push({ seq: i + 1, command, ok: false, code: ERR.VALIDATION }); failed = true; break; }
         const adm = core.admit({ key, deviceId, command, requestId, ip: clientIp(req) });
-        if (!adm.ok) { results.push({ seq: i + 1, command, ok: false, code: adm.code }); break; }
+        if (!adm.ok) { results.push({ seq: i + 1, command, ok: false, code: adm.code }); failed = true; break; }
+        // H13：步级幂等——已成功的步不再重跑，复用缓存结果（仅当 steps
+        // 指纹一致；UNKNOWN 重试改了 steps 时不复用，见 reuseSteps）。
+        const prevStep = core.idemLookup(key.account_id, key.key_id, stepKey(i));
+        if (reuseSteps && prevStep && prevStep.status === 'SUCCEEDED') {
+          results.push({ seq: i + 1, command, ok: true, result: prevStep.result || null, duplicate: true });
+          core.updateJob(job.job_id, { results, steps_done: i + 1 });
+          continue;
+        }
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous });
         const env = core.buildEnvelope({
           // 步级 request_id／幂等键用 '-' 连接步号：':' 不合 token 规则
           //（C 端解析层拒绝），旧 ':' 形态的批量信封到 LEA 即被拒。
@@ -239,24 +285,34 @@ function createLeaRoutes(core, channel, deps) {
         if (disp.timeout) {
           results.push({ seq: i + 1, command, ok: false, code: ERR.UNKNOWN });
           core.updateJob(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous });
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } });
           return;
         }
         if (!disp.ok) {
           results.push({ seq: i + 1, command, ok: false, code: 'QFR_LEA_DISPATCH_FAILED' });
           core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED', results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } });
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } });
           return;
         }
         results.push({ seq: i + 1, command, ok: true, result: disp.result });
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: disp.result });
         core.updateJob(job.job_id, { results, steps_done: i + 1 });
         // 撤销检查：批内每步开始前核 grant_epoch（§6.2）——admit 已每步重查。
       }
       const cur = core.getJob(job.job_id);
       if (cur && cur.status === 'RUNNING') {
-        core.updateJob(job.job_id, { status: 'SUCCEEDED', results });
+        // 有步失败（未知命令／准入拒绝）时终态为 FAILED，不得把含失败步的
+        // 批次谎称为 SUCCEEDED（此前 break 后仍置 SUCCEEDED）。
+        const status = failed ? 'FAILED' : 'SUCCEEDED';
+        core.updateJob(job.job_id, { status, results });
+        core.idemRecord(key.account_id, key.key_id, idemKey, { status, job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status, results, steps_done: results.length } });
       }
     })();
     run.catch((e) => {
       try { core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' }); } catch (e2) {}
+      try { core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED' } }); } catch (e2) {}
       log({ ev: 'lea-batch-error', job_id: job.job_id, err: String(e && e.message) });
     });
     // 同步等 5s：跑完直接回 200，否则 202 + job_id。

@@ -46,6 +46,13 @@ const TIMESTAMP_SKEW_S = 60;          // HTTP 头时间戳允许偏差（LEA 端
 const DISPATCH_TIMEOUT_MS = 5000;     // 下发 5s（DESIGN §3）
 const SYNC_WAIT_MS = 5000;            // HTTP 同步等待默认 5s，超时 202 + job_id
 const JOB_RETENTION_MS = 24 * 3600 * 1000; // 长任务结果保留 24h
+const JOB_STALE_MS = 15 * 60 * 1000; // H14：job 失联阈值——RUNNING/UNKNOWN/PENDING
+// 超 15 分钟无更新即视为失联。边界论证（DS 复查要求硬核证明）：服务端每步
+// 只等 dispatchEnvelope（timeoutMs 固定 5000），普通命令最多 2 次尝试、
+// 危险命令 1 次，故单批最坏 wall time ≈ 50 步 × 2 × 5s = 500s＋每步
+// admit/组包毫秒级开销 < 600s，严格 < 900s（15 分钟），边距约 300s。
+// 注意命令表的 timeout_ms（如 app.open 60s）是 LEA 设备侧执行上限，
+// 服务端不等它——5s 下发超时即转 UNKNOWN，不计入本阈值。
 const IDEMPOTENT_RETENTION_MS = 7 * 24 * 3600 * 1000; // 幂等结果保留 ≥7 天
 const AUDIT_RETENTION_DAYS = 180;     // 服务端审计保留 ≥180 天（§11.2）
 const NONCE_RETENTION_MS = REPLAY_WINDOW_MS;
@@ -116,6 +123,10 @@ function createLeaCore(opts) {
   const GRANTS_FILE = path.join(dir, 'grants.json');
   const BINDINGS_FILE = path.join(dir, 'bindings.json');
   const JOBS_FILE = path.join(dir, 'jobs.json');
+  // H11：防重放 nonce 与幂等去重表落盘（重启不丢；此前纯内存 Map，
+  // 重启后危险命令可重复执行）。
+  const NONCE_FILE = path.join(dir, 'nonce-seen.json');
+  const IDEM_FILE = path.join(dir, 'idem-seen.json');
   const REVOCATIONS_FILE = path.join(dir, 'revocations.json');
 
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
@@ -175,10 +186,12 @@ function createLeaCore(opts) {
   }
   let sweepTimer = null;
   if (opts.enableSweeps !== false) {
-    sweepTimer = setInterval(() => { pruneAudit(); pruneJobs(); }, 3600 * 1000);
+    sweepTimer = setInterval(() => { pruneAudit(); pruneJobs(); sweepStaleJobs(); }, 3600 * 1000);
     if (sweepTimer && sweepTimer.unref) sweepTimer.unref();
     pruneAudit();
   }
+  // 启动即推进一次：上轮进程崩溃／重启残留的失联 job 不等下一小时整点。
+  sweepStaleJobs();
 
   // ---------- Ed25519 签名（DESIGN §4.1） ----------
   // PLACEHOLDER（占位实现，明确标注）：未配真实私钥时用进程内临时密钥对
@@ -469,14 +482,68 @@ function createLeaCore(opts) {
   // ---------- 防重放 / 幂等（内存去重表，DESIGN §4.1/§4.2） ----------
   // nonce：按 key_id 分桶，保留 10 分钟；idempotency：按 (account,key,键)
   // 记结果，保留 7 天（危险命令 30 天——本版统一 30 天，宁严勿松）。
+  // H11：两表落盘持久化（nonce-seen.json / idem-seen.json，原子写），
+  // 启动时加载未过期的条目，重启后防重放与幂等去重不丢。
   const nonceSeen = new Map(); // key_id -> Map(nonce -> atMs)
   const idemSeen = new Map(); // `${account_id}|${key_id}|${idempotency_key}` -> {at, status, result}
+  // DS 复查建议（H11 写放大）：nonce 与 idem 分开落盘——nonceCheck 只写
+  // nonce 文件、idemRecord 只写 idem 文件，不再每次变更全量重写两份。
+  // 仍是每次变更即持久化（重启不丢）；更大规模下可再改追加写＋定期压实。
+  function persistNonce() {
+    try {
+      const n = {};
+      for (const [keyId, bucket] of nonceSeen) {
+        const b = {};
+        for (const [nonce, at] of bucket) if (now() - at <= NONCE_RETENTION_MS) b[nonce] = at;
+        if (Object.keys(b).length) n[keyId] = b;
+      }
+      writeJsonAtomic(NONCE_FILE, n);
+    } catch (e) { log({ ev: 'lea-nonce-persist-failed', err: String(e && e.message) }); }
+  }
+  function persistIdem() {
+    try {
+      const d = {};
+      for (const [k, e] of idemSeen) {
+        const ttl = e.dangerous ? 30 * 24 * 3600 * 1000 : IDEMPOTENT_RETENTION_MS;
+        if (typeof e.at === 'number' && now() - e.at <= ttl) d[k] = e;
+      }
+      writeJsonAtomic(IDEM_FILE, d);
+    } catch (e) { log({ ev: 'lea-idem-persist-failed', err: String(e && e.message) }); }
+  }
+  function persistReplay() { persistNonce(); persistIdem(); }
+  function loadPersistedReplay() {
+    try {
+      const n = readJson(NONCE_FILE, null);
+      if (n && typeof n === 'object') {
+        for (const [keyId, bucket] of Object.entries(n)) {
+          if (!bucket || typeof bucket !== 'object') continue;
+          const m = new Map();
+          for (const [nonce, at] of Object.entries(bucket)) {
+            if (typeof at === 'number' && now() - at <= NONCE_RETENTION_MS) m.set(nonce, at);
+          }
+          if (m.size) nonceSeen.set(keyId, m);
+        }
+      }
+    } catch (e) {}
+    try {
+      const d = readJson(IDEM_FILE, null);
+      if (d && typeof d === 'object') {
+        for (const [k, e] of Object.entries(d)) {
+          if (!e || typeof e !== 'object') continue;
+          const ttl = e.dangerous ? 30 * 24 * 3600 * 1000 : IDEMPOTENT_RETENTION_MS;
+          if (typeof e.at === 'number' && now() - e.at <= ttl) idemSeen.set(k, e);
+        }
+      }
+    } catch (e) {}
+  }
+  loadPersistedReplay();
   function nonceCheck(keyId, nonce) {
     let bucket = nonceSeen.get(keyId);
     if (!bucket) { bucket = new Map(); nonceSeen.set(keyId, bucket); }
     for (const [n, at] of bucket) if (now() - at > NONCE_RETENTION_MS) bucket.delete(n);
     if (bucket.has(nonce)) return false;
     bucket.set(nonce, now());
+    persistNonce();
     return true;
   }
   function idemLookup(accountId, keyId, idemKey) {
@@ -484,11 +551,12 @@ function createLeaCore(opts) {
     const e = idemSeen.get(k);
     if (!e) return null;
     const ttl = e.dangerous ? 30 * 24 * 3600 * 1000 : IDEMPOTENT_RETENTION_MS;
-    if (now() - e.at > ttl) { idemSeen.delete(k); return null; }
+    if (now() - e.at > ttl) { idemSeen.delete(k); persistIdem(); return null; }
     return e;
   }
   function idemRecord(accountId, keyId, idemKey, entry) {
     idemSeen.set(accountId + '|' + keyId + '|' + idemKey, Object.assign({ at: now() }, entry));
+    persistIdem();
   }
 
   // ---------- API Key（DESIGN §7） ----------
@@ -959,6 +1027,37 @@ function createLeaCore(opts) {
     } catch (e) {}
   }
 
+  // H14：job 推进器——下发超时后 job 置 UNKNOWN、幂等记 RUNNING，此前无
+  // 任何推进路径，同幂等键重试会被 DUPLICATE_IN_PROGRESS 卡 7 天（危险
+  // 30 天）。失联 job（RUNNING/UNKNOWN/PENDING 超 JOB_STALE_MS 无更新，
+  // 含上轮进程崩溃／重启残留）推进为 UNKNOWN（结果未知，不得谎称成功／
+  // 失败），幂等键同步转 UNKNOWN：重试不再被长期卡住（UNKNOWN 不拦重放，
+  // 路由层只拦 RUNNING），同时保留“结果未知、须快照确认”的语义。
+  function sweepStaleJobs() {
+    try {
+      const st = loadJobs();
+      let dirty = false;
+      for (const [id, j] of Object.entries(st.jobs)) {
+        if (!j || (j.status !== 'RUNNING' && j.status !== 'UNKNOWN' && j.status !== 'PENDING')) continue;
+        if (now() - (j.updated_at || j.created_at || 0) <= JOB_STALE_MS) continue;
+        j.status = 'UNKNOWN'; j.error_code = ERR.UNKNOWN; j.updated_at = now(); dirty = true;
+        if (j.idempotency_key && j.account_id && j.api_key_id) {
+          const prev = idemLookup(j.account_id, j.api_key_id, j.idempotency_key);
+          if (prev && prev.status === 'RUNNING') {
+            idemRecord(j.account_id, j.api_key_id, j.idempotency_key,
+              Object.assign({}, prev, { status: 'UNKNOWN' }));
+          }
+        }
+        audit('lea-job-stale', {
+          job_id: id, account_id: j.account_id || null, device_id: j.device_id || null,
+          api_key_id: j.api_key_id || null, idempotency_key: j.idempotency_key || null,
+        });
+      }
+      if (dirty) saveJobs(st);
+      return true;
+    } catch (e) { return false; }
+  }
+
   // ---------- 下发（经注入的 channel.runCommand；DESIGN §3） ----------
   // channel 契约：{ runCommand(nodeId, cmd, timeoutMs) -> stdout string,
   //   listNodes() -> [{id/nodeid, online}] }。缺 channel 时返回 NOT_INSTALLED。
@@ -1033,11 +1132,13 @@ function createLeaCore(opts) {
     const line = out.trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || '';
     try {
       const v = JSON.parse(line);
-      if (v && typeof v === 'object') return { ok: true, result: v };
+      // H15：严格判成功——只认顶层 ok===true 的 JSON 对象。{ok:false}、
+      // 非对象、非 JSON 文本一律判失败：此前任意 JSON 对象（含 {ok:false}）
+      // 都当成功，handleExecute 随之把 job 记 SUCCEEDED 且顶层回 ok:true。
+      if (v && typeof v === 'object' && !Array.isArray(v) && v.ok === true) {
+        return { ok: true, result: v };
+      }
     } catch (e) {}
-    // 非 JSON 回传：把原文当结果透传（LEA 客户端未就绪时 runcommands
-    // 可能回空串/错误文本，调用方按 error_code 判定）。
-    if (line) return { ok: true, result: { ok: false, code: ERR.UNKNOWN, raw: line.slice(0, 2000) } };
     return { ok: false };
   }
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1052,7 +1153,7 @@ function createLeaCore(opts) {
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
-    createJob, getJob, updateJob,
+    createJob, getJob, updateJob, sweepStaleJobs,
     getRevocations, syncRevocations, leaRevocationsWriteCmd,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
     _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },

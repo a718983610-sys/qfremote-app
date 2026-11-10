@@ -252,7 +252,29 @@ void lea_idem_set_status(lea_idem_t *t, lea_idem_entry_t *e,
          * 断行、加载时解析失败。 */
         size_t n = strlen(result);
         while (n > 0 && (result[n - 1] == '\n' || result[n - 1] == '\r')) n--;
-        if (n >= sizeof(e->result)) n = sizeof(e->result) - 1;
+        if (n >= sizeof(e->result)) {
+            /* H09：超长响应不得截断成非法 JSON 片段写入（截断点可能落在
+             * 字符串／转义中间，一次 file.read 32KB→约 43KB Base64 即可
+             * 写出毒化行）。改为保留终态要义的短占位行：ok／code／
+             * request_id 原样取自响应首部字段（响应由 lea_build_response
+             * 构造，ok／code 在前，首次命中即顶层值），result 置 null。
+             * 占位行恒为合法 JSON，可正常持久化与重放。 */
+            int okv = 0;
+            char code[64] = { 0 }, rid[128] = { 0 };
+            char code_esc[128] = { 0 }, rid_esc[256] = { 0 };
+            size_t off = 0;
+            lea_json_bool(result, "ok", &okv);
+            lea_json_string(result, "code", code, sizeof(code));
+            lea_json_string(result, "request_id", rid, sizeof(rid));
+            lea_json_escape_into(code_esc, sizeof(code_esc), &off, code);
+            off = 0;
+            lea_json_escape_into(rid_esc, sizeof(rid_esc), &off, rid);
+            snprintf(e->result, sizeof(e->result),
+                     "{\"ok\":%s,\"code\":\"%s\",\"request_id\":\"%s\","
+                     "\"retryable\":false,\"detail\":\"result-truncated\",\"result\":null}",
+                     okv ? "true" : "false", code_esc, rid_esc);
+            return;
+        }
         memcpy(e->result, result, n);
         e->result[n] = '\0';
     }
@@ -291,23 +313,45 @@ int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix) {
     return n;
 }
 
-/* 序列化：每行一条 JSON。result 内不含换行（响应构造保证一行）。 */
-int lea_idem_save_text(const lea_idem_t *t, char *out, size_t out_size) {
+/* 序列化：每行一条 JSON。result 内不含换行（响应构造保证一行）。
+ * H09：逐行组装后做严格 JSON 校验再写入输出；非法行跳过不写（skipped
+ * 计数），绝不把毒化行写进快照。device_id／account_id／key 经 JSON 转义
+ * 后拼接（id 字段可含 '"'，直拼会断行结构）。 */
+int lea_idem_save_text_ex(const lea_idem_t *t, char *out, size_t out_size, int *skipped) {
     size_t off = 0;
+    int nskipped = 0;
+    char line[LEA_IDEM_RESULT_MAX + 1024];
     for (int i = 0; i < t->count; i++) {
         const lea_idem_entry_t *e = &t->entries[i];
-        int n = snprintf(out + off, out_size - off,
+        /* 三个 id 字段逐一转义后拼接（lea_json_escape_into 不含外层引号）。 */
+        char dev_esc[256] = { 0 }, acc_esc[256] = { 0 }, key_esc[256] = { 0 };
+        size_t eoff = 0;
+        if (!lea_json_escape_into(dev_esc, sizeof(dev_esc), &eoff, e->device_id)) { nskipped++; continue; }
+        eoff = 0;
+        if (!lea_json_escape_into(acc_esc, sizeof(acc_esc), &eoff, e->account_id)) { nskipped++; continue; }
+        eoff = 0;
+        if (!lea_json_escape_into(key_esc, sizeof(key_esc), &eoff, e->key)) { nskipped++; continue; }
+        int n = snprintf(line, sizeof(line),
                          "{\"device_id\":\"%s\",\"account_id\":\"%s\",\"key\":\"%s\","
                          "\"status\":\"%s\",\"dangerous\":%d,\"created_at\":%lld,"
                          "\"updated_at\":%lld,\"result\":%s}\n",
-                         e->device_id, e->account_id, e->key,
+                         dev_esc, acc_esc, key_esc,
                          lea_idem_status_name(e->status), e->dangerous,
                          e->created_at, e->updated_at,
                          e->result[0] ? e->result : "null");
-        if (n < 0 || (size_t)n >= out_size - off) return 0;
+        if (n < 0 || (size_t)n >= sizeof(line)) { nskipped++; continue; }
+        if (!lea_json_is_valid(line)) { nskipped++; continue; }
+        if ((size_t)n >= out_size - off) return 0;
+        memcpy(out + off, line, (size_t)n);
         off += (size_t)n;
     }
+    if (off < out_size) out[off] = '\0';
+    if (skipped) *skipped = nskipped;
     return 1;
+}
+
+int lea_idem_save_text(const lea_idem_t *t, char *out, size_t out_size) {
+    return lea_idem_save_text_ex(t, out, out_size, NULL);
 }
 
 int lea_idem_load_text(lea_idem_t *t, const char *text) {
@@ -319,7 +363,8 @@ int lea_idem_load_text(lea_idem_t *t, const char *text) {
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (len == 0) { p = nl ? nl + 1 : p + len; continue; }
-        if (len >= sizeof(line)) return 0;
+        /* H09：坏行隔离跳过，不清空整表。超长行（单行超过缓冲）直接跳过。 */
+        if (len >= sizeof(line)) { p = nl ? nl + 1 : p + len; continue; }
         memcpy(line, p, len);
         line[len] = '\0';
         p = nl ? nl + 1 : p + len;
@@ -328,28 +373,29 @@ int lea_idem_load_text(lea_idem_t *t, const char *text) {
         char status[32] = { 0 };
         long long created = 0, updated = 0;
         long long dang = 0;
-        if (!lea_json_string(line, "device_id", e.device_id, sizeof(e.device_id))) return 0;
-        if (!lea_json_string(line, "account_id", e.account_id, sizeof(e.account_id))) return 0;
-        if (!lea_json_string(line, "key", e.key, sizeof(e.key))) return 0;
-        if (!lea_json_string(line, "status", status, sizeof(status))) return 0;
-        if (!lea_json_long(line, "dangerous", &dang)) return 0;
-        if (!lea_json_long(line, "created_at", &created)) return 0;
-        if (!lea_json_long(line, "updated_at", &updated)) return 0;
+        if (!lea_json_string(line, "device_id", e.device_id, sizeof(e.device_id))) continue;
+        if (!lea_json_string(line, "account_id", e.account_id, sizeof(e.account_id))) continue;
+        if (!lea_json_string(line, "key", e.key, sizeof(e.key))) continue;
+        if (!lea_json_string(line, "status", status, sizeof(status))) continue;
+        if (!lea_json_long(line, "dangerous", &dang)) continue;
+        if (!lea_json_long(line, "created_at", &created)) continue;
+        if (!lea_json_long(line, "updated_at", &updated)) continue;
         /* result：取 "result": 后的原始 JSON 值（对象或 null）。
          * 注意行尾还有外层 idem 行的 }，必须用花括号配对提取，不能
-         * 直接取到行尾。 */
+         * 直接取到行尾。取出的值须过严格 JSON 校验，否则整行跳过。 */
         if (lea_json_object_raw(line, "result", e.result, sizeof(e.result))) {
-            /* 已取到配对的对象 */
+            if (!lea_json_is_valid(e.result)) continue;
         } else {
             const char *rp = strstr(line, "\"result\":null");
             if (rp) snprintf(e.result, sizeof(e.result), "%s", "null");
-            else return 0;
+            else continue;
         }
         e.status = lea_idem_status_from_name(status);
         e.dangerous = (int)dang;
         e.created_at = created;
         e.updated_at = updated;
-        if (t->count >= LEA_IDEM_MAX) return 0;
+        /* 表满时停止继续加载，但保留已加载的条目（返回 1，不清空）。 */
+        if (t->count >= LEA_IDEM_MAX) break;
         t->entries[t->count++] = e;
     }
     return 1;
@@ -389,17 +435,26 @@ int lea_queue_enqueue(lea_queue_t *q, lea_queue_item_t *item,
 lea_queue_item_t *lea_queue_dequeue(lea_queue_t *q) {
     if (!q) return NULL;
     lea_queue_item_t *it = NULL;
-    /* 危险 lane 优先出队（单独串行 lane）；worker 单线程，全局仍串行。 */
+    /* H10 防饿死：危险 lane 优先，但连续取满 LEA_DANGER_QUOTA 条后，
+     * 若普通 lane 有等待项则必须取一条普通命令（轮转），再继续危险 lane；
+     * 普通 lane 为空时危险 lane 不受配额限制。 */
+    int take_danger = 0;
     if (q->danger_head) {
+        if (!q->normal_head) take_danger = 1;
+        else if (q->danger_streak < LEA_DANGER_QUOTA) take_danger = 1;
+    }
+    if (take_danger) {
         it = q->danger_head;
         q->danger_head = it->next;
         if (!q->danger_head) q->danger_tail = NULL;
         q->danger_count--;
+        q->danger_streak++;
     } else if (q->normal_head) {
         it = q->normal_head;
         q->normal_head = it->next;
         if (!q->normal_head) q->normal_tail = NULL;
         q->normal_count--;
+        q->danger_streak = 0;
     }
     if (it) it->next = NULL;
     return it;
@@ -407,4 +462,71 @@ lea_queue_item_t *lea_queue_dequeue(lea_queue_t *q) {
 
 void lea_queue_item_free(lea_queue_item_t *item) {
     free(item);
+}
+
+/* ---------------- 批量序号单调表（H10） ---------------- */
+void lea_batch_seq_init(lea_batch_seq_t *t) {
+    memset(t, 0, sizeof(*t));
+}
+
+int lea_batch_seq_check(lea_batch_seq_t *t, const char *device_id,
+                        const char *account_id, const char *batch_id,
+                        long long seq, long long now_unix, long long *prev_seq_out) {
+    if (!t || !device_id || !account_id || seq < 1) return 0;
+    /* 单条（无 batch_id）：seq 必须为 1（服务端单条固定 seq=1）。 */
+    if (!batch_id || batch_id[0] == '\0') return seq == 1;
+    for (int i = 0; i < t->count; i++) {
+        lea_batch_seq_entry_t *e = &t->entries[i];
+        if (strcmp(e->device_id, device_id) == 0 &&
+            strcmp(e->account_id, account_id) == 0 &&
+            strcmp(e->batch_id, batch_id) == 0) {
+            if (seq <= e->last_seq) return 0; /* 乱序／重放步 */
+            if (prev_seq_out) *prev_seq_out = e->last_seq;
+            e->last_seq = seq;
+            e->updated_at = now_unix;
+            return 1;
+        }
+    }
+    /* 首次见到的 batch：接受任意 seq>=1 并记录（不要求首步 seq==1：
+     * 服务重启会清空内存表，重启后中途批次的首步 seq 可能 >1，拒掉会
+     * 把合法续跑的批次整个打断；单调性仍由后续步保证）。 */
+    if (t->count >= LEA_BATCH_SEQ_MAX) {
+        /* 表满：淘汰最久未更新的一项（fail-open 于旧批，单调性仍由
+         * 重放表＋签名兜底；不得因表满拒绝合法新批）。 */
+        int oldest = 0;
+        for (int i = 1; i < t->count; i++)
+            if (t->entries[i].updated_at < t->entries[oldest].updated_at) oldest = i;
+        t->entries[oldest] = t->entries[--t->count];
+    }
+    if (prev_seq_out) *prev_seq_out = -1; /* 新 batch，无前值 */
+    lea_batch_seq_entry_t *e = &t->entries[t->count++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->device_id, sizeof(e->device_id), "%s", device_id);
+    snprintf(e->account_id, sizeof(e->account_id), "%s", account_id);
+    snprintf(e->batch_id, sizeof(e->batch_id), "%s", batch_id);
+    e->last_seq = seq;
+    e->updated_at = now_unix;
+    return 1;
+}
+
+void lea_batch_seq_rollback(lea_batch_seq_t *t, const char *device_id,
+                            const char *account_id, const char *batch_id,
+                            long long seq, long long prev_seq) {
+    if (!t || !device_id || !account_id || !batch_id || batch_id[0] == '\0') return;
+    for (int i = 0; i < t->count; i++) {
+        lea_batch_seq_entry_t *e = &t->entries[i];
+        if (strcmp(e->device_id, device_id) == 0 &&
+            strcmp(e->account_id, account_id) == 0 &&
+            strcmp(e->batch_id, batch_id) == 0) {
+            /* 只有本次检查仍是最后一次写入时才回滚；已被更大 seq 推进
+             * 时不动（该步已被后续步超越，重试本就是乱序）。 */
+            if (e->last_seq != seq) return;
+            if (prev_seq < 0) {
+                t->entries[i] = t->entries[--t->count];
+            } else {
+                e->last_seq = prev_seq;
+            }
+            return;
+        }
+    }
 }

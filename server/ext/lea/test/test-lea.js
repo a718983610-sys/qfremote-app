@@ -533,6 +533,54 @@ const mockChannel = {
   const d4 = await core.dispatchEnvelope(errChannel, normalEnv, { timeoutMs: 5000 });
   t('普通命令失败重试 1 次（共 2 次）', d4.ok === false && calls.filter((c) => c.cmd.includes(' dispatch ')).length === 2);
 
+  // ---------- H15：parseClientOutput 严格判成功 ----------
+  t('H15 {ok:false} 判失败', core.parseClientOutput(JSON.stringify({ ok: false, code: 'QFR_LEA_EXEC_FAILED' })).ok === false);
+  t('H15 {ok:true} 判成功', core.parseClientOutput(JSON.stringify({ ok: true, code: 'done' })).ok === true);
+  t('H15 非 JSON 文本判失败', core.parseClientOutput('some error text').ok === false);
+  t('H15 空串判失败', core.parseClientOutput('').ok === false);
+  t('H15 JSON 数组判失败', core.parseClientOutput('[1,2]').ok === false);
+  t('H15 无 ok 字段的对象判失败', core.parseClientOutput(JSON.stringify({ code: 'done' })).ok === false);
+  t('H15 ok 非布尔 true 判失败', core.parseClientOutput(JSON.stringify({ ok: 'true' })).ok === false);
+  // dispatch 经 H15：客户端回 {ok:false} 不得记成功
+  const failChannel = { async runCommand() { return JSON.stringify({ ok: false, code: 'QFR_LEA_EXEC_FAILED' }); }, async nodeOnline() { return true; } };
+  const envF = core.buildEnvelope({
+    requestId: 'req-h15-1', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-h15-1',
+    command: 'sys.info', params: {}, timeoutMs: 5000,
+  });
+  const dF = await core.dispatchEnvelope(failChannel, envF, { timeoutMs: 5000 });
+  t('H15 dispatch 回 {ok:false} → 不成功', dF.ok === false);
+
+  // ---------- H11：nonce／幂等落盘持久化（重启不丢） ----------
+  core.idemRecord(USER, g5.record.key_id, 'idem-persist-1', { status: 'SUCCEEDED', result: { job_id: 'job_p1' } });
+  core.nonceCheck(g5.record.key_id, 'persist-nonce-001');
+  const core2 = createLeaCore({ dir: tmpDir, enableSweeps: false });
+  t('H11 重启后幂等去重不丢', core2.idemLookup(USER, g5.record.key_id, 'idem-persist-1') !== null
+    && core2.idemLookup(USER, g5.record.key_id, 'idem-persist-1').status === 'SUCCEEDED');
+  t('H11 重启后 nonce 防重放不丢', core2.nonceCheck(g5.record.key_id, 'persist-nonce-001') === false);
+  t('H11 落盘文件存在', fs.existsSync(path.join(tmpDir, 'idem-seen.json')) && fs.existsSync(path.join(tmpDir, 'nonce-seen.json')));
+
+  // ---------- H14：job 推进器（失联 job 不再长期卡住重试） ----------
+  const staleJob = core.createJob({
+    account_id: USER, device_id: DEV, api_key_id: g5.record.key_id,
+    command: 'sys.info', request_id: 'req-stale-1', idempotency_key: 'idem-stale-1', status: 'RUNNING',
+  });
+  core.idemRecord(USER, g5.record.key_id, 'idem-stale-1', { status: 'RUNNING', job_id: staleJob.job_id });
+  // 把 job 更新时间拨回 16 分钟前，模拟失联（超 JOB_STALE_MS=15 分钟）
+  const jobsSt = core._test.loadJobs();
+  jobsSt.jobs[staleJob.job_id].updated_at = Date.now() - 16 * 60 * 1000;
+  fs.writeFileSync(path.join(tmpDir, 'jobs.json'), JSON.stringify(jobsSt, null, 2));
+  core.sweepStaleJobs();
+  t('H14 失联 RUNNING job 推进为 UNKNOWN', core.getJob(staleJob.job_id).status === 'UNKNOWN');
+  t('H14 失联 job 的幂等键转 UNKNOWN（重试不再卡 409）', core.idemLookup(USER, g5.record.key_id, 'idem-stale-1').status === 'UNKNOWN');
+  // 新鲜 RUNNING job 不动
+  const freshJob = core.createJob({
+    account_id: USER, device_id: DEV, api_key_id: g5.record.key_id,
+    command: 'sys.info', request_id: 'req-fresh-1', idempotency_key: 'idem-fresh-1', status: 'RUNNING',
+  });
+  core.sweepStaleJobs();
+  t('H14 新鲜 RUNNING job 不推进', core.getJob(freshJob.job_id).status === 'RUNNING');
+
   // ---------- 10) 通道模块：无配置时 fail-closed ----------
   const ch = createLeaChannel({ log: () => {}, configPath: path.join(tmpDir, 'no-such-config.json') });
   t('通道无服务账号配置时 status.configured=false', ch.status().configured === false);
@@ -596,6 +644,58 @@ const mockChannel = {
   const batchEnv = JSON.parse(Buffer.from(batchB64, 'base64').toString('utf8'));
   t('批量步 request_id 用 - 连接且合 token 规则', /^[A-Za-z0-9_-]{8,128}$/.test(batchEnv.request_id) && batchEnv.request_id.endsWith('-2'));
   t('批量步幂等键用 - 连接且合 token 规则', batchEnv.idempotency_key === 'route-batch-1-2');
+  let rh;
+  // H13：批量级幂等——重复提交返回缓存，不重跑步骤
+  const callsBeforeDup = calls.length;
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-1' }),
+    { device_id: DEV, steps: [{ command: 'sys.info', params: {} }, { command: 'ui.snapshot', params: {} }] });
+  t('H13 路由 batches 重复提交返回缓存 duplicate', rh.code === 200 && rh.obj.duplicate === true && rh.obj.status === 'SUCCEEDED');
+  t('H13 路由 batches 重复提交不重跑步骤', calls.length === callsBeforeDup);
+  // H13：步级幂等键已写入 idemSeen
+  t('H13 步级幂等键已写入 idemSeen', core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1') !== null
+    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1').status === 'SUCCEEDED'
+    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-2').status === 'SUCCEEDED');
+  // H13：含失败步的批次终态 FAILED（不谎称 SUCCEEDED）
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-badstep' }),
+    { device_id: DEV, steps: [{ command: 'sys.info', params: {} }, { command: 'no.such', params: {} }] });
+  t('H13 含失败步的批次终态 FAILED', rh.code === 200 && rh.obj.status === 'FAILED');
+  // H13（DS 复查）：UNKNOWN 重试时 steps 指纹不一致 → 步级缓存不复用
+  const fpSteps = [{ command: 'sys.info', params: {} }, { command: 'ui.snapshot', params: {} }];
+  const fpMatch = crypto.createHash('sha256').update(JSON.stringify(fpSteps)).digest('hex');
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp', { status: 'UNKNOWN', job_id: 'job_fp', steps_fp: 'different-fingerprint' });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-1', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-2', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } });
+  const callsBeforeFp = calls.length;
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-fp' }),
+    { device_id: DEV, steps: fpSteps });
+  t('H13 指纹不一致时不复用步级缓存（全部重跑）', rh.code === 200 && rh.obj.status === 'SUCCEEDED'
+    && calls.length === callsBeforeFp + 2 && !(rh.obj.results || []).some((x) => x.duplicate));
+  // 指纹一致 → 复用已成功步
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2', { status: 'UNKNOWN', job_id: 'job_fp2', steps_fp: fpMatch });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-1', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-2', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } });
+  const callsBeforeFp2 = calls.length;
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-fp2' }),
+    { device_id: DEV, steps: fpSteps });
+  t('H13 指纹一致时复用步级缓存（不重跑）', rh.code === 200 && rh.obj.status === 'SUCCEEDED'
+    && calls.length === callsBeforeFp2 && (rh.obj.results || []).every((x) => x.duplicate === true));
+  // H12：batches 设备离线 → 503（handleExecute 查了，handleBatches 原来没查）
+  const nodeOnlineOrig = mockChannel.nodeOnline;
+  mockChannel.nodeOnline = async () => false;
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-offline' }),
+    { device_id: DEV, steps: [{ command: 'sys.info', params: {} }] });
+  t('H12 路由 batches 设备离线 → 503', rh.code === 503 && rh.obj.code === 'QFR_LEA_NOT_INSTALLED');
+  mockChannel.nodeOnline = async () => null;
+  rh = await callRoute('POST', '/api/lea/v1/batches',
+    Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-unknown' }),
+    { device_id: DEV, steps: [{ command: 'sys.info', params: {} }] });
+  t('H12 路由 batches 通道不可达 → 503', rh.code === 503);
+  mockChannel.nodeOnline = nodeOnlineOrig;
   // 非 token 幂等键 → 400（不签名、不下发）
   const rBadIdem = await callRoute('POST', '/api/lea/v1/execute',
     Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'bad:key' }),

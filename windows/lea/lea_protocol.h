@@ -54,6 +54,7 @@ extern "C" {
 #define LEA_ERR_SCRIPT_NOT_ALLOWED "QFR_LEA_SCRIPT_NOT_ALLOWED" /* * 白名单外脚本 */
 #define LEA_ERR_PATH_NOT_ALLOWED "QFR_LEA_PATH_NOT_ALLOWED"     /* * 目录越界 */
 #define LEA_ERR_TIMEOUT "QFR_LEA_TIMEOUT"                       /* * 执行超时 */
+#define LEA_ERR_EXPIRED "QFR_LEA_EXPIRED"                       /* * 入队后执行前已过期（H10） */
 #define LEA_ERR_NOT_INSTALLED "QFR_LEA_NOT_INSTALLED"
 #define LEA_ERR_EXEC_FAILED "QFR_LEA_EXEC_FAILED"               /* * 执行失败通用码 */
 #define LEA_ERR_INTERNAL "QFR_LEA_INTERNAL"                     /* * 服务内部错误 */
@@ -119,6 +120,13 @@ long lea_effective_timeout_ms(const lea_envelope_t *env);
 int lea_json_string(const char *text, const char *key, char *out, size_t out_size);
 int lea_json_long(const char *text, const char *key, long long *out);
 int lea_json_bool(const char *text, const char *key, int *out);
+/* 只认顶层对象成员的字符串值（H08）：全文查找会命中 params 内嵌套的
+ * 同名键（如 params {"cmd":...}），导致信封被误判进内部命令处理、绕过
+ * 信封验签。顶层须为单个 JSON 对象且成员恰好出现一次；值须为 JSON
+ * 字符串（按 JSON 转义解码）。 */
+int lea_json_top_level_string(const char *text, const char *key, char *out, size_t out_size);
+/* 严格 JSON 值校验（H09：幂等快照写盘前校验行合法性）。 */
+int lea_json_is_valid(const char *text);
 int lea_json_object_raw(const char *text, const char *key, char *out, size_t out_size);
 /* params_raw 内的字符串数组：args[0..n)，返回个数，-1=不是数组/溢出。 */
 int lea_params_string_array(const char *params_raw, const char *key,

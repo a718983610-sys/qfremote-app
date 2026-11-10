@@ -10,7 +10,8 @@
  *   3. 重放表：nonce / request_id 去重，保留 ≥10 分钟（内存态）。
  *   4. 队列（DESIGN §5.3）：同一设备串行 FIFO，上限 100 条；危险命令单独
  *      串行 lane（独立 FIFO，执行顺序上优先于普通 lane，但同一 worker
- *      串行执行，全局仍串行）。
+ *      串行执行，全局仍串行；H10：危险 lane 连续出队配额 4，满额后轮转
+ *      一条普通命令，防饿死）。
  *
  * 持久化文件格式（idempotency.jsonl，每行一条 JSON，服务负责文件 IO，
  * 本层只负责内存表与序列化）：
@@ -140,8 +141,12 @@ int lea_idem_prune(lea_idem_t *t, long long now_unix);
 /* 启动恢复：崩溃残留的 RUNNING/RECEIVED 标记为 UNKNOWN（不自动重试）。 */
 int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix);
 
-/* 序列化／反序列化（JSONL 文本；调用方负责文件读写）。 */
+/* 序列化／反序列化（JSONL 文本；调用方负责文件读写）。
+ * H09：save 时逐行校验，非法行跳过不写（不得写出毒化整表的非法行）；
+ * load 时坏行隔离跳过，不清空整表。 */
 int lea_idem_save_text(const lea_idem_t *t, char *out, size_t out_size);
+/* 同 save_text，另经 skipped 回跳过的非法行数（可为 NULL）。 */
+int lea_idem_save_text_ex(const lea_idem_t *t, char *out, size_t out_size, int *skipped);
 int lea_idem_load_text(lea_idem_t *t, const char *text);
 
 /* ---------------- 队列 ---------------- */
@@ -159,7 +164,50 @@ typedef struct {
     lea_queue_item_t *danger_head, *danger_tail;
     int normal_count;
     int danger_count;
+    /* H10 防饿死：连续取危险 lane 的次数；取普通 lane 时清零。 */
+    int danger_streak;
 } lea_queue_t;
+
+/* H10：危险 lane 连续出队配额——连续取满此数后，若普通 lane 有等待项
+ * 则必须取一条普通命令（轮转），再继续取危险 lane。 */
+#define LEA_DANGER_QUOTA 4
+
+/* H10：批量序号单调表（内存态，随服务重启清空；重放表已先拦重复
+ * request_id／nonce）。键 (device_id, account_id, batch_id)，记每批
+ * 已见的最大 seq；同批 seq 必须严格递增，否则拒绝（乱序／重放步）。 */
+#define LEA_BATCH_SEQ_MAX 128
+typedef struct {
+    char device_id[128];
+    char account_id[128];
+    char batch_id[64];
+    long long last_seq;
+    long long updated_at;
+} lea_batch_seq_entry_t;
+
+typedef struct {
+    lea_batch_seq_entry_t entries[LEA_BATCH_SEQ_MAX];
+    int count;
+} lea_batch_seq_t;
+
+void lea_batch_seq_init(lea_batch_seq_t *t);
+/* 返回 1=接受并记录；0=拒绝。batch_id 为空（单条）时要求 seq==1；
+ * 首次见到的 batch 接受任意 seq>=1 并记录；已见 batch 要求 seq 严格大于
+ * 已记的最大值。seq<1 一律拒绝。
+ * prev_seq_out（可为 NULL）：接受时回填本次记录前的 last_seq（新 batch
+ * 为 -1）。调用方在“检查通过、但后续入队失败”时须用它调
+ * lea_batch_seq_rollback 回滚，否则该 seq 会被记为“已消费”，重试同
+ * 步会被判重复拒绝（DS 复查 H10 阻塞项：队列满可重试不得退化为永久卡死）。 */
+int lea_batch_seq_check(lea_batch_seq_t *t, const char *device_id,
+                        const char *account_id, const char *batch_id,
+                        long long seq, long long now_unix, long long *prev_seq_out);
+/* 回滚一次已记录的 seq：仅当该 batch 当前 last_seq 恰好等于 seq（即本次
+ * 检查是最后一次写入）时恢复为 prev_seq（-1 表示该 batch 是本次新建的，
+ * 直接删除条目）；last_seq 已被更大 seq 推进时不做任何事（该步已被后续
+ * 步超越，重试本就是乱序，拒绝是正确的 fail-closed）。batch_id 为空时
+ * 无记录可回滚，直接返回。 */
+void lea_batch_seq_rollback(lea_batch_seq_t *t, const char *device_id,
+                            const char *account_id, const char *batch_id,
+                            long long seq, long long prev_seq);
 
 void lea_queue_init(lea_queue_t *q);
 int lea_queue_total(const lea_queue_t *q);

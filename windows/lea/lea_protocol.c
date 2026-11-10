@@ -8,6 +8,12 @@
 #include <ctype.h>
 #include <errno.h>
 
+/* 顶层成员查找／字符串解码（定义见本文件后部：json_decode_string 在
+ * 票据解析段、json_find_member 在其后；供 lea_json_top_level_string
+ * 使用，H08）。 */
+static int json_find_member(const char *text, const char *key, const char **val, size_t *val_len);
+static const char *json_decode_string(const char *p, char *out, size_t out_size, size_t *out_len);
+
 /* ---------------- 命令表（DESIGN §4.4；超时见 §4.3） ---------------- */
 static const lea_command_spec_t k_commands[] = {
     { "app.open",    LEA_EXEC_LEA,    15000,  60000, 0, NULL },
@@ -119,6 +125,21 @@ int lea_json_bool(const char *text, const char *key, int *out) {
     if (strncmp(p, "true", 4) == 0) { *out = 1; return 1; }
     if (strncmp(p, "false", 5) == 0) { *out = 0; return 1; }
     return 0;
+}
+
+/* 只认顶层对象成员的字符串值（H08）。json_find_member 做完整顶层对象
+ * 遍历：跳过全部 JSON 空白、重复键即失败、尾部多余内容即失败；值须为
+ * JSON 字符串并按转义解码。嵌套对象内的同名键（如 params {"cmd":...}）
+ * 绝不会命中。 */
+int lea_json_top_level_string(const char *text, const char *key, char *out, size_t out_size) {
+    if (!text || !key || !out || out_size < 2) return 0;
+    const char *val = NULL;
+    size_t vlen = 0;
+    int r = json_find_member(text, key, &val, &vlen);
+    if (r != 1) return 0;
+    if (vlen < 2 || val[0] != '"') return 0;
+    if (!json_decode_string(val, out, out_size, NULL)) return 0;
+    return 1;
 }
 
 /* 取 params 对象原文（含花括号），做花括号配对。 */
@@ -692,6 +713,15 @@ static const char *json_parse_value(const char *p, int depth) {
 static int params_raw_wellformed(const char *s) {
     if (!s) return 0;
     const char *p = json_parse_object(json_skip_ws(s), 0);
+    if (!p) return 0;
+    p = json_skip_ws(p);
+    return *p == '\0';
+}
+
+/* 严格 JSON 值校验（H09：幂等快照写盘前校验行合法性）。 */
+int lea_json_is_valid(const char *s) {
+    if (!s) return 0;
+    const char *p = json_parse_value(json_skip_ws(s), 0);
     if (!p) return 0;
     p = json_skip_ws(p);
     return *p == '\0';

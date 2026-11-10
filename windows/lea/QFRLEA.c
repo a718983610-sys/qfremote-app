@@ -76,6 +76,7 @@ static lea_binding_t g_binding;
 static lea_replay_t g_replay;
 static lea_idem_t g_idem;
 static lea_queue_t g_queue;
+static lea_batch_seq_t g_batch_seq; /* H10：批量 batch_id/seq 单调表 */
 static HANDLE g_queue_event = NULL;
 static int g_inflight = 0; /* 已入队未完成数 */
 static long long g_last_prune_hour = -1;
@@ -739,6 +740,28 @@ static void execute_item(lea_queue_item_t *item) {
     lea_envelope_t *env = &item->env;
     lea_item_ctx_t *ctx = (lea_item_ctx_t *)item->ctx;
     long long t0 = now_unix();
+    /* H10：执行前复查 expires_at——入队后已过期（已过 30s 时钟偏差容限，
+     * 与 lea_check_time_window 的容限一致）的命令不得执行：幂等记
+     * EXPIRED（同键重试可重跑，未执行过不算重复），管道调用方收到过期
+     * 响应；已超时的管道线程可能已返回，本处仍按正常尾巴收尾（填
+     * result_json＋SetEvent＋释放 worker 侧引用）。 */
+    if (t0 > env->expires_at + LEA_MAX_CLOCK_SKEW_SEC) {
+        char resp[LEA_MAX_RESPONSE] = { 0 };
+        lea_build_response(resp, sizeof(resp), 0, LEA_ERR_EXPIRED, env->request_id, 0,
+                           "expired-before-execution", NULL);
+        EnterCriticalSection(&g_lock);
+        if (item->idem) {
+            lea_idem_set_status(&g_idem, item->idem, LEA_IDEM_EXPIRED, NULL, t0);
+            idem_persist_locked();
+        }
+        LeaveCriticalSection(&g_lock);
+        audit_for_envelope(env, "execute", "expired", LEA_ERR_EXPIRED, 0,
+                           "expired-before-execution");
+        snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
+        SetEvent(ctx->done);
+        lea_ctx_release(ctx);
+        return;
+    }
     const lea_command_spec_t *spec = lea_command_spec(env->command);
     long timeout_ms = lea_effective_timeout_ms(env);
     char resp[LEA_MAX_RESPONSE] = { 0 };
@@ -1109,17 +1132,18 @@ static void handle_sys_info(const lea_envelope_t *env, char *resp, size_t resp_s
 /* ---------- 内部命令（登录事件／绑定票据／登出） ---------- */
 static void handle_internal(const char *text, char *resp, size_t resp_size) {
     char cmd[64] = { 0 };
-    if (!lea_json_string(text, "cmd", cmd, sizeof(cmd))) {
+    /* H08：内部命令各字段同样只认顶层成员（嵌套同名键不得遮蔽顶层值）。 */
+    if (!lea_json_top_level_string(text, "cmd", cmd, sizeof(cmd))) {
         lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "cmd-missing", NULL);
         return;
     }
     if (strcmp(cmd, "session.login_changed") == 0) {
         char account[128] = { 0 }, device[128] = { 0 };
-        if (!lea_json_string(text, "account_id", account, sizeof(account)) || !account[0]) {
+        if (!lea_json_top_level_string(text, "account_id", account, sizeof(account)) || !account[0]) {
             lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "account_id-missing", NULL);
             return;
         }
-        lea_json_string(text, "device_id", device, sizeof(device));
+        lea_json_top_level_string(text, "device_id", device, sizeof(device));
         EnterCriticalSection(&g_lock);
         long long epoch = lea_binding_on_login(&g_binding, account,
                                                device[0] ? device : g_binding.device_id,
@@ -1304,6 +1328,27 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         svc_log("REJECT admit request=%s code=%s", env.request_id, err);
         return;
     }
+    /* 4.5 H10：batch_id／seq 单调性——同批 seq 必须严格递增（乱序／重放步
+     * 拒绝）；单条（无 batch_id）seq 必须为 1。验签后才查，拒绝不入队。
+     * DS 复查阻塞项：检查通过即写表，但后续入队可能失败（队列满／分配
+     * 失败）——失败路径必须用 prev_seq 回滚，否则该 seq 被记为“已消费”，
+     * 客户端重试同步会被判重复拒绝（队列满可重试退化为永久卡死）。 */
+    long long batch_prev_seq = -1;
+    {
+        EnterCriticalSection(&g_lock);
+        int seq_ok = lea_batch_seq_check(&g_batch_seq, env.device_id, env.account_id,
+                                         env.batch_id, env.seq, t0, &batch_prev_seq);
+        LeaveCriticalSection(&g_lock);
+        if (!seq_ok) {
+            lea_build_response(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
+                               "batch-seq-not-monotonic", NULL);
+            audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_REPLAY, 0,
+                               "batch-seq-not-monotonic");
+            svc_log("REJECT batch-seq request=%s batch=%s seq=%lld",
+                    env.request_id, env.batch_id, env.seq);
+            return;
+        }
+    }
     /* 5. 幂等：终态直接回缓存；执行中回 DUPLICATE。 */
     int dangerous = lea_command_is_dangerous(&env);
     EnterCriticalSection(&g_lock);
@@ -1347,6 +1392,9 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     if (!item || !ctx) {
         free(item);
         free(ctx);
+        /* 未入队：回滚 4.5 步已记的 seq（同队列满路径），否则重试被判重复。 */
+        lea_batch_seq_rollback(&g_batch_seq, env.device_id, env.account_id,
+                               env.batch_id, env.seq, batch_prev_seq);
         lea_idem_set_status(&g_idem, idem, LEA_IDEM_UNKNOWN, NULL, t0);
         idem_persist_locked();
         LeaveCriticalSection(&g_lock);
@@ -1365,6 +1413,9 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         free(item);
         CloseHandle(ctx->done);
         free(ctx);
+        /* 未入队：回滚 4.5 步已记的 seq，否则重试同 seq 会被判重复拒绝。 */
+        lea_batch_seq_rollback(&g_batch_seq, env.device_id, env.account_id,
+                               env.batch_id, env.seq, batch_prev_seq);
         lea_idem_set_status(&g_idem, idem, LEA_IDEM_RECEIVED, NULL, t0);
         idem_persist_locked();
         LeaveCriticalSection(&g_lock);
@@ -1417,9 +1468,11 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
         size_t l = strlen(buf);
         if (l > 0 && buf[l - 1] == '\r') buf[l - 1] = '\0';
         char resp[LEA_MAX_RESPONSE] = { 0 };
-        /* 内部命令（{"cmd":...}）与信封分流。 */
+        /* 内部命令（{"cmd":...}）与信封分流。H08：只认顶层 "cmd" 成员——
+         * 全文查找会命中 params 内嵌套的 "cmd" 键，使已签信封被误判进
+         * handle_internal、绕过信封验签；无顶层 "cmd" 即走信封处理。 */
         char cmd[64] = { 0 };
-        if (lea_json_string(buf, "cmd", cmd, sizeof(cmd)) && cmd[0]) {
+        if (lea_json_top_level_string(buf, "cmd", cmd, sizeof(cmd)) && cmd[0]) {
             handle_internal(buf, resp, sizeof(resp));
         } else {
             handle_envelope(buf, resp, sizeof(resp));
@@ -1512,6 +1565,7 @@ static int lea_service_init(void) {
     lea_replay_init(&g_replay);
     lea_idem_init(&g_idem);
     lea_queue_init(&g_queue);
+    lea_batch_seq_init(&g_batch_seq);
     g_queue_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     ensure_dirs();
     binding_load();
