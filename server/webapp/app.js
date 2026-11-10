@@ -1441,7 +1441,7 @@ Views.register = function (root) {
     if (p1 !== p2) return fail('两次输入的密码不一致。');
     if (!$('#rg-agree', root).checked) return fail('请先阅读并同意《用户协议》与《隐私说明》。');
     const btn = $('#rg-btn', root); btn.disabled = true; btn.textContent = '注册中…';
-    const r = await api('/api/register', { method: 'POST', json: { username: u, password: p1 } });
+    const r = await api('/api/register', { method: 'POST', json: { username: u, password: p1, password2: p1 } });
     btn.disabled = false; btn.textContent = '注册并开通试用';
     if (r.json && r.json.ok) { toast('注册成功，已开通 3 天免费试用，请登录。', 'ok'); showAuth('login', { notice: '注册成功，请使用新账号登录。' }); }
     else fail((r.json && r.json.msg) || '注册未成功，请稍后再试。');
