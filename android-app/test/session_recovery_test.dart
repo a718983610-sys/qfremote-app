@@ -25,11 +25,16 @@ void main() {
     });
 
     test('新鲜度：29 天内新鲜、31 天过期、没 xid 不算数', () {
+      // QF-02 严格档后 isFresh 要求快照带账号且与 expectedAccount 一致，
+      // 否则一律不新鲜；本测试只验“时间新鲜度”，故补账号以通过账号门。
       SessionSnapshot at(Duration age) => SessionSnapshot(
           cookies: {'xid': 'abc', 'xid.sig': 'sig'},
-          savedAt: now.subtract(age));
-      expect(at(const Duration(days: 29)).isFresh(now), isTrue);
-      expect(at(const Duration(days: 31)).isFresh(now), isFalse);
+          savedAt: now.subtract(age),
+          accountId: 'alice');
+      expect(at(const Duration(days: 29)).isFresh(now, expectedAccount: 'alice'),
+          isTrue);
+      expect(at(const Duration(days: 31)).isFresh(now, expectedAccount: 'alice'),
+          isFalse);
       expect(
         SessionSnapshot(cookies: {'qfrem': '1'}, savedAt: now).isFresh(now),
         isFalse,
