@@ -108,6 +108,8 @@ function randId(n, alphabet) {
 }
 function maskKey(prefix) {
   // 日志脱敏：只记 key_id 与前缀前 8 位/后 4 位（DESIGN §7.3），不记明文。
+  // T04：此处入参恒为前缀指纹（16 位 hex，见 generateKey／loadKeys 迁移），
+  // 8+4 位指纹只用于识别，无 Key 明文可逆；旧版 12 位明文前缀已不再落盘。
   if (typeof prefix !== 'string' || !prefix) return '';
   return prefix.slice(0, 8) + '…' + prefix.slice(-4);
 }
@@ -145,7 +147,25 @@ function createLeaCore(opts) {
     fs.renameSync(tmp, file);
     try { fs.chmodSync(file, 0o600); } catch (e) {}
   }
-  function loadKeys() { return readJson(KEYS_FILE, { keys: [] }); }
+  // T13（非问题）：全部台账读写均为同步 fs 调用，单 Node 进程内不可能交错；
+  // 生产只在 server/ext/server.js 起一个实例，无 cluster／worker 多进程
+  // 共享同一目录，故不引入文件锁。见 group-lb-pkg2-low-CHANGELOG.md。
+  function loadKeys() {
+    const st = readJson(KEYS_FILE, { keys: [] });
+    // T04 一次迁移：旧记录的 prefix 若仍是 12 位明文前缀（'qfr_lea_' +
+    // 4 位随机字符），读到即改写为 SHA-256 指纹（16 位 hex）并落盘；之后
+    // prefix 恒为指纹，不再有明文前缀落盘。指纹为 hex 字符，不可能以
+    // 'qfr_lea_' 开头，故迁移只发生一次，不会误判已迁移的记录。
+    let migrated = false;
+    for (const k of st.keys || []) {
+      if (k && typeof k.prefix === 'string' && k.prefix.startsWith(KEY_PREFIX)) {
+        k.prefix = sha256Hex(k.prefix).slice(0, 16);
+        migrated = true;
+      }
+    }
+    if (migrated) { try { saveKeys(st); } catch (e) { log({ ev: 'lea-keys-migration-failed', err: String(e && e.message) }); } }
+    return st;
+  }
   function saveKeys(s) { writeJsonAtomic(KEYS_FILE, s); }
   function loadGrants() { return readJson(GRANTS_FILE, { grants: {} }); }
   function saveGrants(s) { writeJsonAtomic(GRANTS_FILE, s); }
@@ -630,10 +650,16 @@ function createLeaCore(opts) {
     }
     const plain = KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
     const salt = crypto.randomBytes(16).toString('hex');
-    const keyId = 'k_' + randId(10);
+    const st = loadKeys();
+    // T10：key_id 碰撞时重新生成再入库（randId(10) 约 51.7 bit 熵，碰撞
+    // 几乎不可能，但无检查时一旦碰撞，查找/吊销会命中首条记录）。
+    let keyId = 'k_' + randId(10);
+    while (st.keys.some((k) => k && k.key_id === keyId)) keyId = 'k_' + randId(10);
     const rec = {
       key_id: keyId,
-      prefix: plain.slice(0, 12), // 仅前缀前 12 位用于识别/脱敏日志；明文不存
+      // T04：prefix 不再存 12 位明文前缀，只存其 SHA-256 指纹前 16 位 hex
+      // （识别／脱敏显示用，见 maskKey；明文只在生成时返回一次，不落盘）。
+      prefix: sha256Hex(plain.slice(0, 12)).slice(0, 16),
       salt, hash: hashKey(plain, salt),
       account_id: String(accountId),
       device_scope: optsGen.device_scope || null, // null = 该账号已绑定设备（由绑定态定）
@@ -648,7 +674,6 @@ function createLeaCore(opts) {
       revoked_at: null, revoked_by: null, revoked_by_rebind: false, revoke_reason: null,
     };
     if (optsGen.expires_in_days) rec.expires_at = now() + Math.floor(optsGen.expires_in_days) * 24 * 3600 * 1000;
-    const st = loadKeys();
     st.keys.push(rec);
     saveKeys(st);
     audit('lea-key-generated', {
@@ -1208,7 +1233,7 @@ function createLeaCore(opts) {
     COMMANDS, ERR, KEY_PREFIX,
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
-    generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus,
+    generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,
     grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted,
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,

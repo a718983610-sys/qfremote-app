@@ -52,6 +52,10 @@ const keysFile = fs.readFileSync(path.join(tmpDir, 'keys.json'), 'utf8');
 t('台账不存 Key 明文', !keysFile.includes(gen.key));
 t('台账存 salt+hash（无明文可逆字段）', /"salt":\s*"[0-9a-f]{32}"/.test(keysFile) && /"hash":\s*"[0-9a-f]{64}"/.test(keysFile));
 t('列表不显明文，只显前缀脱敏', gen.record.prefix.includes('…') && !gen.record.prefix.includes(gen.key.slice(12)));
+// T04：新 Key 的 prefix 存的是 12 位明文前缀的 SHA-256 指纹（16 位 hex），
+// 不是明文；台账里不得出现 12 位明文前缀本身。
+t('T04 新 Key prefix 为 16 位 hex 指纹（非明文）', /^[0-9a-f]{8}…[0-9a-f]{4}$/.test(gen.record.prefix));
+t('T04 台账不含 12 位明文前缀', !keysFile.includes(gen.key.slice(0, 12)));
 t('列表不含明文 Key 字段', !('key' in gen.record));
 
 // ---------- 2) 认证拒绝各码 ----------
@@ -879,7 +883,7 @@ const mockChannel = {
     && r.obj.keys.every((k) => !('key' in k) && !('hash' in k)));
   // 吊销单个 + 吊销全部
   const victim = core.generateKey(USER, { device_scope: DEV });
-  r = await callRoute('POST', '/api/lea/v1/keys/' + victim.record.key_id + '/revoke', {}, {});
+  r = await callRoute('POST', '/api/lea/v1/keys/' + victim.record.key_id + '/revoke', {}, { password: 'correct-password' });
   t('路由吊销单个 Key 200', r.code === 200 && r.obj.record.status === 'revoked');
   r = await callRoute('POST', '/api/lea/v1/keys/revoke-all', {}, { password: 'correct-password' });
   t('路由一键吊销全部 200', r.code === 200 && r.obj.revoked_count >= 1);
@@ -889,7 +893,7 @@ const mockChannel = {
     Object.assign(bearerHeaders(doomed.key), { 'idempotency-key': 'route-revoked-before' }),
     { device_id: DEV, command: 'sys.info', params: {} });
   t('吊销前 Key 可调用 execute', r.code === 200);
-  r = await callRoute('POST', '/api/lea/v1/keys/' + doomed.record.key_id + '/revoke', {}, {});
+  r = await callRoute('POST', '/api/lea/v1/keys/' + doomed.record.key_id + '/revoke', {}, { password: 'correct-password' });
   t('路由吊销待验 Key 200', r.code === 200 && r.obj.record.status === 'revoked');
   r = await callRoute('POST', '/api/lea/v1/execute',
     Object.assign(bearerHeaders(doomed.key), { 'idempotency-key': 'route-revoked-after' }),
@@ -1045,6 +1049,55 @@ const mockChannel = {
   t('H06 路由站长授 dangerous → 200 且带 dangerous', r.code === 200 && r.obj.dangerous === true);
   r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', scopes: ['muse.execute', 'muse.execute.dangerous'] });
   t('H06 路由生成 dangerous scope Key（已审批）→ 200', r.code === 200 && !!r.obj.key && r.obj.record.scopes.includes('muse.execute.dangerous'));
+
+  // ---------- 15) L-B 低组：T04 旧前缀迁移／T10 key_id 唯一／T30 单 Key
+  // 吊销二次确认／T21 调用方读 LEA_DEGRADED（静态接线守卫） ----------
+  // T04：旧记录的 12 位明文前缀在读到时一次迁移为指纹并落盘。
+  {
+    const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-legacy-'));
+    const legacyCore = createLeaCore({ dir: legacyDir, enableSweeps: false });
+    legacyCore.grantMuse(USER, 'owner');
+    const legacyKey = legacyCore.generateKey(USER, { device_scope: DEV });
+    const legacyKeysPath = path.join(legacyDir, 'keys.json');
+    const legacyPlainPrefix = legacyKey.key.slice(0, 12);
+    const legacySt = JSON.parse(fs.readFileSync(legacyKeysPath, 'utf8'));
+    legacySt.keys[0].prefix = legacyPlainPrefix; // 模拟旧版落盘的明文前缀
+    fs.writeFileSync(legacyKeysPath, JSON.stringify(legacySt, null, 2));
+    const legacyList = legacyCore.listKeys(USER); // 读即触发迁移
+    const legacyAfter = fs.readFileSync(legacyKeysPath, 'utf8');
+    t('T04 旧明文前缀读到即迁移为 16 位 hex 指纹', /^[0-9a-f]{16}$/.test(JSON.parse(legacyAfter).keys[0].prefix));
+    t('T04 迁移后台账不再含旧明文前缀', !legacyAfter.includes(legacyPlainPrefix));
+    t('T04 迁移后列表仍只显指纹脱敏', /^[0-9a-f]{8}…[0-9a-f]{4}$/.test(legacyList[0].prefix));
+  }
+  // T10：连续生成 20 个 Key，key_id 全部唯一（碰撞即重新生成）。
+  core.grantMuse(USER, 'owner');
+  {
+    const ids = new Set();
+    for (let i = 0; i < 20; i++) ids.add(core.generateKey(USER, { device_scope: DEV }).record.key_id);
+    t('T10 连续生成 20 个 Key 的 key_id 全部唯一', ids.size === 20);
+  }
+  // T30：单 Key 吊销须密码二次确认（与吊销全部同口径）。
+  {
+    const t30 = core.generateKey(USER, { device_scope: DEV });
+    r = await callRoute('POST', '/api/lea/v1/keys/' + t30.record.key_id + '/revoke', {}, {});
+    t('T30 路由吊销单个 Key 无密码 → 400', r.code === 400);
+    r = await callRoute('POST', '/api/lea/v1/keys/' + t30.record.key_id + '/revoke', {}, { password: 'wrong' });
+    t('T30 路由吊销单个 Key 密码错误 → 401', r.code === 401);
+    r = await callRoute('POST', '/api/lea/v1/keys/' + t30.record.key_id + '/revoke', {}, { password: 'correct-password' });
+    t('T30 路由吊销单个 Key 密码正确 → 200', r.code === 200 && r.obj.record.status === 'revoked');
+  }
+  // T21：调用方显式读 LEA_DEGRADED／报告。Windows 提权脚本在沙箱跑不了
+  // 真机，此处作静态接线守卫（接线被删即失败）；真机行为见阿里冒烟。
+  {
+    const repoRoot = path.join(__dirname, '..', '..', '..', '..');
+    const sysSvcPs1 = fs.readFileSync(path.join(repoRoot, 'windows', 'install-system-services.ps1'), 'utf8');
+    t('T21 wrapper 读 LEA_DEGRADED 标记并记明确失败行', sysSvcPs1.includes('LEA_DEGRADED') && sysSvcPs1.includes('LEA install FAILED (degraded marker/report'));
+    t('T21 wrapper 读 install-report.json', sysSvcPs1.includes('install-report.json'));
+    const leaPs1 = fs.readFileSync(path.join(repoRoot, 'windows', 'install-lea.ps1'), 'utf8');
+    t('T21 install-lea.ps1 失败仍 exit 0（DESIGN §9.2 口径不变）', leaPs1.includes('exit 0 # 失败不阻塞主程序'));
+    const mainJs = fs.readFileSync(path.join(repoRoot, 'windows', 'main.js'), 'utf8');
+    t('T21 main.js 补装后复核 LEA_DEGRADED（lea-degraded／lea-installed 日志）', mainJs.includes('system-services.lea-degraded') && mainJs.includes('system-services.lea-installed'));
+  }
 
   console.log('\n通过 ' + pass + ' / ' + (pass + fail) + '；失败 ' + fail + (failures.length ? '：' + failures.join('；') : ''));
   process.exit(fail ? 1 : 0);

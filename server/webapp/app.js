@@ -5104,7 +5104,11 @@ Views.apikeys = async function (view) {
       b.onclick = () => {
         const keyId = b.getAttribute('data-revoke');
         confirmModal('撤销密钥', '确定吊销该密钥吗？吊销后它立即失效，Muse 再用它调用会被拒绝。', '撤销', async () => {
-          const rr = await api('/api/lea/v1/keys/' + encodeURIComponent(keyId) + '/revoke', { method: 'POST', json: {} });
+          // T30：单 Key 吊销与吊销全部同口径，须密码二次确认（复用上方
+          // #ak-pw 密码框，与吊销全部同一写法；服务端无密码即 400）。
+          const pw = pwEl ? pwEl.value : '';
+          if (!pw) { toast('撤销密钥须先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
+          const rr = await api('/api/lea/v1/keys/' + encodeURIComponent(keyId) + '/revoke', { method: 'POST', json: { password: pw } });
           if (rr.json && rr.json.ok) { toast('密钥已吊销，立即失效。', 'ok'); Views.apikeys(view); }
           else toast(apiErrText(rr, '吊销失败，请稍后再试。'), 'err');
         });

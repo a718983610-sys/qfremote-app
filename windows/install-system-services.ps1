@@ -120,7 +120,27 @@ try {
     if ($leaHashOk) {
       Write-InstallLog 'installing QFRLEA'
       & $leaScript -LeaDir $LeaDir
-      Write-InstallLog ('LEA install script exit=' + $LASTEXITCODE + ' (non-blocking)')
+      $leaExit = $LASTEXITCODE
+      # T21/D2：install-lea.ps1 失败仍 exit 0（DESIGN §9.2，失败不阻塞主程序），
+      # 退出码 0 不代表装成了；调用方须显式读 LEA_DEGRADED 标记与
+      # install-report.json：有标记或报告 status 非 ok 即在安装日志里留一条
+      # 明确的失败行（不只记 "exit=0 (non-blocking)"），仍不改本段非阻塞口径。
+      $leaDataDir = Join-Path $env:ProgramData 'QFR\LEA'
+      $leaFailed = Test-Path -LiteralPath (Join-Path $leaDataDir 'LEA_DEGRADED')
+      $leaDetail = ''
+      try {
+        $leaReportFile = Join-Path $leaDataDir 'install-report.json'
+        if (Test-Path -LiteralPath $leaReportFile) {
+          $leaReport = Get-Content -LiteralPath $leaReportFile -Raw -ErrorAction Stop | ConvertFrom-Json
+          if ($leaReport.status -and $leaReport.status -ne 'ok') { $leaFailed = $true }
+          if ($leaReport.detail) { $leaDetail = [string]$leaReport.detail }
+        }
+      } catch { }
+      if ($leaFailed) {
+        Write-InstallLog ('LEA install FAILED (degraded marker/report; install-lea exit=' + $leaExit + ($leaDetail ? ' detail=' + $leaDetail : '') + ')')
+      } else {
+        Write-InstallLog ('LEA install script exit=' + $leaExit + ' (non-blocking; no LEA_DEGRADED marker, report ok)')
+      }
     }
   }
 } catch {

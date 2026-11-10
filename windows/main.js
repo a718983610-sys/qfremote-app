@@ -3188,6 +3188,12 @@ async function maybeInstallSystemServices(force) {
     if (r.error) { bootLog('system-services.launch-failed', String((r.error && r.error.message) || r.error)); return { ok: false, reason: 'launch-failed' }; }
     if (r.code !== 0) { bootLog('system-services.install-failed', 'code=' + r.code + (r.stderr ? ' ' + r.stderr : '')); return { ok: false, reason: 'install-failed' }; }
     bootLog('system-services.launched', 'owner-set');
+    if (leaBackfill) {
+      // T21/D2：wrapper 与 install-lea.ps1 失败仍 exit 0（DESIGN §9.2）——
+      // 退出码 0 不代表 LEA 已装好；以 leaServiceInstalled()（含
+      // LEA_DEGRADED 标记）复核并留一条明确日志，仍非阻塞（返回值不变）。
+      bootLog(leaServiceInstalled() ? 'system-services.lea-installed' : 'system-services.lea-degraded', '');
+    }
     return { ok: true, reason: 'launched' };
   } catch (e) {
     bootLog('system-services.launch-throw', e && e.message || String(e));

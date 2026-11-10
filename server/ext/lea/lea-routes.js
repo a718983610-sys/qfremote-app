@@ -97,7 +97,7 @@ function createLeaRoutes(core, channel, deps) {
     const key = auth.key;
     const baseAudit = {
       trace_id: requestId, request_id: requestId, account_id: key.account_id,
-      device_id: deviceId, api_key_id: key.key_id, key_prefix: key.prefix ? key.prefix.slice(0, 8) + '…' + key.prefix.slice(-4) : '',
+      device_id: deviceId, api_key_id: key.key_id, key_prefix: core.maskKey(key.prefix),
       binding_epoch: key.binding_epoch, command, idempotency_key: idemKey, ip: clientIp(req),
     };
     // 幂等：已完成返回缓存结果不重复执行；执行中返回 DUPLICATE_IN_PROGRESS。
@@ -447,6 +447,11 @@ function createLeaRoutes(core, channel, deps) {
   async function handleRevokeKey(req, res, keyId) {
     const a = await consoleAuth(req, res);
     if (!a) return;
+    // T30：单 Key 吊销与一键吊销全部同口径，须密码二次确认（此前只凭
+    // 控制台登录态；与 handleRevokeAllKeys 一致，走 passwordConfirm，
+    // 含 MFA 注入时的 MFA 校验）。
+    const body = await passwordConfirm(req, res, a.user);
+    if (!body) return;
     const rec = core.findKeyById(keyId);
     if (!rec || rec.account_id !== a.user) return fail(res, 404, 'NOT_FOUND', 'Key 不存在。');
     const out = core.revokeKey(keyId, a.user, 'user-revoke');
