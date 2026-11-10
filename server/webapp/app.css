@@ -31,7 +31,7 @@ svg.ic{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;str
 .top{display:flex;align-items:center;gap:var(--sp-4);padding:calc(var(--sp-4) + var(--safe-t)) 0 var(--sp-4);position:sticky;top:0;background:var(--bg);z-index:var(--z-top)}
 .burger{display:none;width:44px;height:44px;place-items:center;border:1px solid var(--line);border-radius:var(--r);background:#fff;color:var(--navy)}
 .search{flex:0 1 420px;min-width:0;background:#fff;border:1px solid var(--line);border-radius:var(--r-pill);padding:var(--sp-3) var(--sp-4);color:var(--sub);display:flex;gap:var(--sp-2);align-items:center}
-.search input{border:0;outline:0;font:inherit;color:var(--tx);width:100%;background:none;min-width:0}
+.search input{border:0;outline:0;font:inherit;color:var(--tx);width:100%;background:none;min-width:0;font-size:var(--fs-16)/* iOS Safari 对 <16px 输入框聚焦自动放大跳版，搜索框此前继承 14px */}
 .top .grow{flex:1}
 .online{color:var(--ok);font-weight:600;font-size:var(--fs-13);white-space:nowrap;line-height:var(--lh-btn)}.online i{display:inline-block;width:9px;height:9px;border-radius:var(--r-round);background:var(--ok);margin-right:var(--sp-2)}
 .online.bad{color:var(--err)}.online.bad i{background:var(--err)}
@@ -54,12 +54,17 @@ h1.pt{font-size:var(--fs-22);color:var(--navy);line-height:var(--lh-title);margi
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-5) var(--sp-6);margin-bottom:var(--sp-4)}
 .card h3{font-size:var(--fs-16);color:var(--navy);line-height:var(--lh-title);margin-bottom:var(--sp-3)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);align-items:start}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-4);align-items:start}
-/* 网格项须 min-width:0：否则子项 min-content（如 .tblwrap 内 min-width:560px 的表）会把轨道撑出容器，手机端整页横向溢出＋Safari 收缩缩放（2026-11-10 站长报「我的」页卡片只占约 2/3 宽）；.tblwrap 自带 overflow-x:auto，表在卡片内横滚。 */
+/* 网格项须 min-width:0：否则子项 min-content（如 .tblwrap 内 min-width:560px 的表）会把轨道撑出容器，手机端整页横向溢出＋Safari 收缩缩放（2026-11-10 站长报「我的」页卡片只占约 2/3 宽；排版线实测手机布局视口被撑到 627px、820px 宽溢出 196px）；.tblwrap 自带 overflow-x:auto，表在卡片内横滚。 */
 .grid2>*,.grid3>*{min-width:0}
 .row{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-2);border-bottom:1px solid var(--line);width:100%;background:none;border-top:0;border-left:0;border-right:0;text-align:left;font:inherit;color:inherit;min-height:calc(var(--sp-9) + var(--sp-1))}
 .row:last-child{border-bottom:none}
 .tile{width:42px;height:42px;border-radius:var(--r);background:var(--tint);color:var(--brand);display:grid;place-items:center;flex:0 0 42px}.tile svg{width:21px;height:21px}
-.row b{display:block;font-size:var(--fs-15);line-height:var(--lh-tight)}.row small{color:var(--sub);font-size:var(--fs-12);display:block;line-height:var(--lh-title)}.row .chev{margin-left:auto;color:#B7C3D6}.row.red b{color:var(--err)}
+.row b{display:block;font-size:var(--fs-15);line-height:var(--lh-tight)}.row small{color:var(--sub);font-size:var(--fs-12);display:block;line-height:var(--lh-title)}
+/* 行标题/副文案遇超长不断词（如 26 字以上连续账号/标题）允许在任意处断词：只影响断不开的长串，正常文案仍按词与 CJK 边界换行；否则长串把行撑出卡片、手机端触发视口扩展示缩。 */
+.row b,.row small{overflow-wrap:anywhere;word-break:break-word}
+/* 论坛帖行文本列任何宽度下都可收缩（桌面端亦然，防长标题在 1280px 下仍撑行） */
+#foPosts .row>span:nth-child(2){min-width:0}
+.row .chev{margin-left:auto;color:#B7C3D6}.row.red b{color:var(--err)}
 .btn{display:inline-block;background:var(--brand);color:#fff;border:0;border-radius:var(--r);padding:var(--sp-3) var(--sp-5);font-size:var(--fs-14);font-weight:600;text-align:center;line-height:var(--lh-btn);min-height:44px}
 .btn.ghost{background:#fff;color:var(--brand);border:1.5px solid var(--brand)}.btn.grey{background:#fff;color:var(--tx);border:1px solid var(--line)}.btn.danger{background:#fff;color:var(--err);border:1.5px solid #E5484D}.btn.black{background:#111;color:#fff}
 .btn.sm{padding:var(--sp-2) var(--sp-4);font-size:var(--fs-13);border-radius:var(--r);line-height:var(--lh-btn);min-height:40px}.btn.block{width:100%;padding:var(--sp-3)}.btn:disabled{opacity:.55;cursor:default}
@@ -210,6 +215,11 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 .cht-comp textarea:focus{outline:none;border-color:var(--brand)}
 .cht-unavail{margin:var(--sp-3) 0}
 
+/* ===== 智能客服输入行（2026-11-10 排版深查）：手机 390px 下输入框须 min-width:0 才能收缩、按钮须 nowrap＋不收缩，否则两按钮被压成单字竖排、行体溢出卡片 21px；输入框 16px 防 iOS 聚焦放大跳版 ===== */
+#sup-in{min-width:0;font-size:var(--fs-16)}
+#sup-send,#sup-human{flex:0 0 auto;white-space:nowrap}
+#sv-u,#sv-p{font-size:var(--fs-16)}
+
 /* ===== P7-016 好友申请角标 ===== */
 .fr-bdg{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#D92D20;color:#fff;font-size:11px;font-weight:700;margin-left:6px;vertical-align:middle}
 .fr-bdg[hidden]{display:none}
@@ -218,10 +228,13 @@ table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:n
 .fr-cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#D92D20;color:#fff;font-size:11px;font-weight:700;margin-left:8px;vertical-align:middle}
 .fr-cnt[hidden]{display:none}
 
-/* ===== 回归修复 好友页左卡行挤窄 ===== */
+/* ===== 回归修复 好友页左卡行挤窄（2026-10-31 原规则）；2026-11-10 扩展：好友申请行与论坛帖行同病——窄屏下文本列不收缩会把行撑出卡片、手机端触发视口扩展示缩（好友申请行实测 433px、论坛帖行 410px，布局视口分别被撑到 474px/451px） ===== */
 @media (max-width:900px){
 .chatlist .row{flex-wrap:wrap}
 .chatlist .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+#frReqs .row,#frOutReq .row{flex-wrap:wrap}
+#frReqs .row>span:nth-child(2),#frOutReq .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+#foPosts .row>span:nth-child(2){flex:1 1 88px;min-width:0}
 }
 /* ===== 个人资料（2.3.2：头像圆图＋品牌占位＋审核记录；令牌同首行：深蓝 #0B2B5B / 品牌蓝 #2470E0 / 橙 #FF8A1E / 圆角 14 / 无阴影无渐变） ===== */
 .qf-avatar{border-radius:50%;object-fit:cover;display:block;background:var(--navy)}
