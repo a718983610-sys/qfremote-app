@@ -202,9 +202,13 @@ void main() {
           cookies: {'xid': 'x1', 'xid.sig': 's1'},
           savedAt: DateTime(2026, 11, 10)));
       await store.clearAll();
-      expect(await store.loadCredentials(), isNull);
+      // 删 qf_saved_creds 抛错被 _quietDelete 吞掉，该 key 合法残留
+      // （设计如此：清不掉的下次读/写时再扫尾）；此处只钉“后续清除
+      // 未被中断”——会话快照必须已清（否则下次冷启会拿它自动恢复），
+      // 且除失败 key 外无残留。
+      expect((await store.loadCredentials())?.username, 'alice');
       expect(await store.loadSession(), isNull);
-      expect(kv.map, isEmpty);
+      expect(kv.map.keys, ['qf_saved_creds']);
     });
   });
 
@@ -274,6 +278,8 @@ class _DeleteFailingKv implements SecureKvStore {
 /// ——模拟退出清库中途一次 Keystore 瞬时失败，验证后续清除不中断。
 class _DeleteFirstKeyFailingKv implements SecureKvStore {
   final MemorySecureKvStore _inner = MemorySecureKvStore();
+
+  Map<String, String> get map => _inner.map;
 
   @override
   Future<String?> read(String key) => _inner.read(key);
