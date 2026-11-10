@@ -313,13 +313,21 @@ String buildLoginBridgeJs({
 
 /// 生成聊天页登录兜底桥脚本。[username]/[password] 为已存凭据（未存时传
 /// null）：仅当聊天页登录视图可见时回填提交一次，其余情况不动页面。
-String buildChatBridgeJs({String? username, String? password}) {
+/// QF-04（3.0.0 中组）：[rememberDevice] 为真时才勾选 lgRemember——只有
+/// 用户在控制台登录处勾过「记住此设备」才建 30 天持久会话；默认不勾，
+/// 也不替用户改复选框状态（不强制勾选、也不强制取消，由页面默认值决定）。
+String buildChatBridgeJs(
+    {String? username, String? password, bool rememberDevice = false}) {
   final hasCreds = username != null &&
       username.isNotEmpty &&
       password != null &&
       password.isNotEmpty;
   final userJs = hasCreds ? jsonEncode(username) : 'null';
   final passJs = hasCreds ? jsonEncode(password) : 'null';
+  // 只有用户已同意记住设备才勾选；未同意时整句不出现，不动复选框。
+  final rememberJs = rememberDevice
+      ? 'var r=document.getElementById("lgRemember");if(r)r.checked=true;'
+      : '';
   return '(function(){'
       'function vis(id){var e=document.getElementById(id);if(!e)return false;'
       'if(e.classList.contains("hidden"))return false;'
@@ -331,7 +339,7 @@ String buildChatBridgeJs({String? username, String? password}) {
       'if(vis("loginView")){'
       'if(user&&pass&&!window.__qfChatLoginTried){window.__qfChatLoginTried=1;'
       'fill("lgUser",user);fill("lgPass",pass);'
-      'var r=document.getElementById("lgRemember");if(r)r.checked=true;'
+      '$rememberJs'
       'var lb=document.getElementById("lgBtn");if(lb)lb.click();'
       'return "login-submitted";}'
       'return "login-visible";'

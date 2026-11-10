@@ -6,13 +6,14 @@
  * 对齐，出错即客户端误判更新或下错包。本脚本把对齐机械化：
  *   size  = 实测文件字节数（不手写），sha256 = 实算（不手写），
  *   url   = https://app.qfremote.top/dl/<文件名> 固定模板，
- *   minUsable 默认等于 version（翻牌时由协调人显式传入，不得默抬）。
+ *   minUsable 无默认值：须显式传 --min-usable（QF-17：漏传即失败，
+ *   不得默认等于 version、不默抬）。
  *
  * 用法（在工作树根目录或任意目录运行）：
  *   生成：node server/ext/make-release-json.js \
  *           --exe  QFRemote-Setup-v2.4.5.exe \
  *           --apk  QFRemote-v2.4.5.apk \
- *           --version 2.4.5 [--min-usable 2.4.5] \
+ *           --version 2.4.5 --min-usable 2.4.5 \
  *           [--notes "……"] [--notes-android "……"] \
  *           [--sign-key 发版私钥.pem] [--key-id release-1] \
  *           [--out server/meshcentral/public/release.json]
@@ -131,7 +132,10 @@ function parseArgs(argv) {
 function buildDoc(a) {
   if (!a.version) fail('生成模式须传 --version');
   if (!/^\d+\.\d+\.\d+$/.test(a.version)) fail('version 须为 x.y.z 形，如 2.4.5，实测：' + a.version);
-  const minUsable = a.minUsable || a.version;
+  // QF-17：minUsable 无默认值。漏传 --min-usable 即失败，不默认等于
+  // version——漏传即无声强更是旧口径与“不得默抬”注释自相矛盾的根因。
+  if (!a.minUsable) fail('生成模式须显式传 --min-usable（强更线版本，不得默认等于 version；不抬时传旧版本号并见 §5.3 条件）');
+  const minUsable = a.minUsable;
   if (!/^\d+\.\d+\.\d+$/.test(minUsable)) fail('minUsable 须为 x.y.z 形，实测：' + minUsable);
   if (!a.exe || !a.apk) fail('生成模式须同时传 --exe 与 --apk');
   const exeName = path.basename(a.exe), apkName = path.basename(a.apk);
@@ -202,6 +206,29 @@ function checkMode(a) {
   expect('exe url 文件名', doc.url && path.basename(doc.url), path.basename(exeP));
   expect('apk url 文件名', doc.android && doc.android.url && path.basename(doc.android.url), path.basename(apkP));
   expect('version', doc.version, doc.android && doc.android.version);
+  // QF-14：--check 补 android.minUsable 比较。旧版只比顶层 minUsable，
+  // 手工改过的 release.json 若仅 android.minUsable 漂移也能通过。
+  // 注：缺 android 段时下方的 expect()（apk size/sha256/url/version）
+  // 本就会报失败（旧行为，非本条新增收紧），这里只补一条明确原因。
+  // 顶层 vs android 不一致不适用 --allow-min-usable：该标志只豁免
+  // 「minUsable 有意不抬」（minUsable 与 version 的关系），顶层与
+  // android 两处 minUsable 不一致是文档自相矛盾（两端强更线不同），
+  // 不是「不抬」的决定，必须修文档。
+  if (!doc.android || typeof doc.android !== 'object') {
+    problems.push('缺少 android 段：无法校验 android.minUsable/version');
+  } else if (doc.android.minUsable === undefined) {
+    problems.push('android minUsable 缺失（字段未填）');
+  } else {
+    if (doc.android.minUsable !== doc.minUsable) {
+      problems.push('android minUsable(' + doc.android.minUsable + ')与顶层 minUsable(' + doc.minUsable + ')不一致');
+    }
+    if (doc.android.version === undefined) {
+      problems.push('android version 缺失（字段未填，无法与 android minUsable 比较）');
+    } else if (doc.android.minUsable !== doc.android.version) {
+      if (a.allowMinUsable) console.log('提示：android minUsable(' + doc.android.minUsable + ')与 android version(' + doc.android.version + ')不一致，已按 --allow-min-usable 视为有意不抬，不记失败。');
+      else problems.push('android minUsable(' + doc.android.minUsable + ')与 android version(' + doc.android.version + ')不一致——翻牌前请确认是有意为之（有意不抬时传 --allow-min-usable）');
+    }
+  }
   // §5.3 条件不满足、minUsable 有意不抬时：须显式传 --allow-min-usable，
   // 该项不记失败（其余项仍逐项比对）；不传标志保持原行为（报失败）。
   if (doc.minUsable !== doc.version) {

@@ -5,9 +5,12 @@ import 'dart:async';
 ///
 ///   1. 登录页豁免：页面上有可见的密码输入框 → 判定 'login'，看护不介入。
 ///   2. 双标记同现才算断开：文本恰好等于「已断线/已断开/未连接/Disconnected/
-///      Not connected」的可见叶子元素，与文本恰好等于「连接/重新连接/Connect/
-///      Reconnect」的可见按钮，必须同时出现；只出现一个判定 'partial'，
-///      持续 12 秒升级为 disconnected（2.4.5 B10）。
+///      Not connected」的可见叶子元素，与可见的断线恢复按钮，必须同时出现；
+///      只出现一个判定 'partial'，持续 12 秒升级为 disconnected（2.4.5 B10）。
+///      QF-05（3.0.0 中组）：恢复按钮的认定与点击脚本 kClickJs 用同一集合——
+///      「连接／重新连接／Connect／Reconnect」文本，或 data-act="retry"，
+///      或文本「重试」。旧版检测只认前一组、点击只认后一组，掩码里只有
+///      「重试」时检测能报 disconnected、点击却找不到目标，自愈不闭环。
 ///   2b. 会话 iframe 分支：同源时读 #qfFrame 内 #deskstatus/#Desk；
 ///      跨域/读不到返回 'unknown'；顶层含「正在建立会话…」且无画布时
 ///      判定 'connecting'，持续 25 秒回调 onConnectingStuck（2.4.5 A1）。
@@ -59,7 +62,11 @@ const String kDetectJs = r'''(function () {
     for (var j = 0; j < btns.length; j++) {
       var b = btns[j];
       var bt = ((b.textContent || b.value || '') + '').trim();
-      if (BTNS.indexOf(bt) >= 0 && visible(b)) { btnHit = true; break; }
+      // QF-05：与 kClickJs 同一目标集合——「连接／重新连接」文本，或
+      // data-act="retry"，或文本「重试」。只认前一组时掩码「重试」在
+      // 检测侧不可见，断线自愈不闭环。
+      var da = (b.getAttribute ? b.getAttribute('data-act') : null) || '';
+      if ((BTNS.indexOf(bt) >= 0 || bt === '重试' || da === 'retry') && visible(b)) { btnHit = true; break; }
     }
     return {statusHit: statusHit, btnHit: btnHit};
   }

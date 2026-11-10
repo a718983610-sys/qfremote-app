@@ -153,6 +153,13 @@ void main() {
     });
   });
 
+  group('kDetectJs（QF-05：检测与点击用同一恢复按钮集合）', () {
+    test('检测认 data-act="retry" 与文本「重试」，与 kClickJs 闭环', () {
+      expect(kDetectJs, contains('data-act'));
+      expect(kDetectJs, contains("'重试'"));
+    });
+  });
+
   group('kClickJs（B10 返修：点掩码「重试」）', () {
     test('优先按 data-act="retry" 定位掩码重试按钮', () {
       expect(kClickJs, contains('data-act="retry"'));

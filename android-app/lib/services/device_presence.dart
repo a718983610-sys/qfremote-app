@@ -16,6 +16,15 @@ import 'probe.dart' show trustedHttpClient;
 /// 出参 {ok, code, nodeid, name, online, fresh, lastAgentPong,
 /// lastAgentPongAgeMs, serverTime}，code 为 ONLINE/STALE/OFFLINE/
 /// NOT_FOUND/TIMEOUT/UNKNOWN。
+/// QF-07（3.0.0 中组）：服务端明确说登录已过期（401/403），与网络不通
+/// 不是一回事——调用方须弹「登录已过期」而不是「设备离线」。
+class AuthExpiredException implements Exception {
+  final int statusCode;
+  const AuthExpiredException(this.statusCode);
+  @override
+  String toString() => 'AuthExpiredException(HTTP $statusCode)';
+}
+
 class DevicePresenceClient {
   final ConsoleCookieProvider cookieProvider;
   final Duration timeout;
@@ -28,6 +37,8 @@ class DevicePresenceClient {
   /// 打开会话前预检：失败（offline/timeout）时调用方不挂 iframe，
   /// 直接弹原生卡（见 session_stage.classifyPreflight）。
   /// 返回 null＝接口本身没在 8 秒内给可信结论（按 PREFLIGHT_TIMEOUT 计）。
+  /// QF-07：401/403 不再吞成 null，改抛 [AuthExpiredException]，调用方
+  /// 按「登录已过期」出卡；其他非 200 与异常仍返回 null（网络不通）。
   Future<DevicePresence?> fetchPresence(String nodeid) async {
     final cookie = await cookieProvider();
     final client = trustedHttpClient(connectionTimeout: timeout);
@@ -41,10 +52,14 @@ class DevicePresenceClient {
       }
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(timeout);
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        throw AuthExpiredException(res.statusCode);
+      }
       if (res.statusCode != 200) return null;
       final body = await res.transform(utf8.decoder).join().timeout(timeout);
       return DevicePresence.parse(body);
-    } catch (_) {
+    } catch (e) {
+      if (e is AuthExpiredException) rethrow;
       return null;
     } finally {
       client.close(force: true);

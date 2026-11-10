@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -570,7 +571,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final canRecover = (_savedCreds != null ||
             (_savedSession?.isFresh(DateTime.now(),
-                    serverNow: _serverNow()) ??
+                    serverNow: _serverNow(),
+                    expectedAccount: _snapshotExpectedAccount()) ??
                 false)) &&
         (settings.rememberDevice || settings.rememberPassword);
     if (canRecover) {
@@ -676,12 +678,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// QF-02：快照恢复时期的当前账号（许可门认到的用户名优先，已存凭据
+  /// 用户名其次，上次登录名兜底）；三路都不知道时返回 null，isFresh
+  /// 严格档下快照不新鲜、退回凭据登录。
+  String? _snapshotExpectedAccount() {
+    if (_gateUsername.isNotEmpty) return _gateUsername;
+    final u = _savedCreds?.username;
+    if (u != null && u.isNotEmpty) return u;
+    final last = _settings?.lastUsername;
+    return (last != null && last.isNotEmpty) ? last : null;
+  }
+
   /// 快照摘取时间刷新：同组 cookie、savedAt 记为现在（服务端时间优先）。
   Future<void> _touchSnapshot() async {
     final snap = _savedSession;
     if (snap == null) return;
     final now = _serverNow();
-    final fresh = SessionSnapshot(cookies: snap.cookies, savedAt: now);
+    final fresh = SessionSnapshot(
+        cookies: snap.cookies, savedAt: now, accountId: snap.accountId);
     try {
       await _enqueueAuth(() => _credStore.saveSession(fresh));
       _savedSession = fresh;
@@ -703,8 +717,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _recheckSnapshotFreshness() async {
     final snap = _savedSession;
     if (snap == null || _serverClockOffset == null) return;
-    final fresh =
-        snap.isFresh(DateTime.now(), serverNow: _serverNow());
+    final fresh = snap.isFresh(DateTime.now(),
+        serverNow: _serverNow(),
+        expectedAccount: _snapshotExpectedAccount());
     if (fresh) return;
     unawaited(_sessionLog.log('snapshot-stale-server-clock',
         extra: 'savedAt=${snap.savedAt.toIso8601String()}'));
@@ -775,6 +790,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (me != null) {
         if (me.username != null && me.username!.isNotEmpty) {
           _gateUsername = me.username!;
+          // QF-02：许可门认到用户名时同步上次登录名（快照恢复后才跑
+          // 许可门的路径也以此保持同步）。
+          unawaited(_settings?.setLastUsername(me.username!));
         }
         final action = resolveGateAction(
           decision: me.decision,
@@ -1617,7 +1635,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (orchestrated) return; // 已走解锁步的拍不再叠加注入
     try {
       final r = await web.evaluateJavascript(
-          source: buildChatBridgeJs(username: user, password: pass)).timeout(
+          source: buildChatBridgeJs(
+              username: user,
+              password: pass,
+              // QF-04：只有用户勾过控制台「记住此设备」才让聊天兜底登录
+              // 建 30 天持久会话；没勾过就不勾 lgRemember。
+              rememberDevice: _settings?.rememberDevice ?? false)).timeout(
           const Duration(seconds: 5));
       debugPrint('QFCHAT bridge -> $r');
     } catch (_) {
@@ -1727,6 +1750,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (s != null) {
         await s.setRememberDevice(pending.rememberDevice);
         await s.setRememberPassword(pending.rememberPassword);
+        // QF-02：登录成功即记上次登录名（冷启恢复快照的账号来源之一）。
+        await s.setLastUsername(pending.username);
       }
       if (pending.rememberPassword) {
         try {
@@ -1810,7 +1835,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if ((map['xid'] ?? '').isEmpty) return;
       // B22：savedAt 优先按服务端时间（预检回包算出的偏移），本地时钟兜底。
-      final snap = SessionSnapshot(cookies: map, savedAt: _serverNow());
+      // QF-02：快照绑账号——写侧与读侧同三路（上次登录名优先：_onConsoleDetected
+      // 里刚用本次登录成功的用户名写过它，是最新鲜的来源；许可门用户名
+      // 其次，已存凭据用户名兜底）。三路都不知道时不绑（accountId 为 null），
+      // 严格档下恢复时不新鲜，下次登录成功即被带账号的新快照覆盖。
+      final last = _settings?.lastUsername;
+      final snapAccount = (last != null && last.isNotEmpty)
+          ? last
+          : (_gateUsername.isNotEmpty ? _gateUsername : _savedCreds?.username);
+      final snap = SessionSnapshot(
+          cookies: map,
+          savedAt: _serverNow(),
+          accountId: (snapAccount != null && snapAccount.isNotEmpty)
+              ? snapAccount
+              : null);
       await _enqueueAuth(() => _credStore.saveSession(snap));
       _savedSession = snap;
       _lastSnapshotAt = _serverNow();
@@ -1896,7 +1934,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 冷启且预检未跑时 _serverNow() 即本地时间，预检跑过后见
     // _recheckSnapshotFreshness() 用服务端时间重算一次。
     final hasSession = _savedSession?.isFresh(DateTime.now(),
-            serverNow: _serverNow()) ??
+            serverNow: _serverNow(),
+            expectedAccount: _snapshotExpectedAccount()) ??
         false;
     final hasCreds = _savedCreds != null;
     final step =
@@ -2092,6 +2131,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
     _savedCreds = null;
     _savedSession = null;
+    // QF-02：凭据被拒时上次登录名一并清掉（该账号已失效，不再作为
+    // 快照恢复的账号来源）。
+    try {
+      await _settings?.setLastUsername(null);
+    } catch (_) {}
   }
 
   Future<void> _clearAuthState() async {
@@ -2105,6 +2149,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _lastSnapshotAt = null;
     try {
       await _settings?.clearAuthPrefs();
+    } catch (_) {}
+    // QF-02：手动退出时上次登录名显式清掉（clearAuthPrefs 里也清，
+    // 这里再明写一遍：退出后冷启不得再用旧账号放行旧快照）。
+    try {
+      await _settings?.setLastUsername(null);
     } catch (_) {}
     try {
       await CookieManager.instance().deleteAllCookies();
@@ -2296,10 +2345,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final startedAt = DateTime.now();
     DevicePresence? presence;
     var timedOut = false;
+    // QF-07：401/403 是登录过期，不是网络超时——单独记，卡片按
+    // authExpired 出「登录已过期」，不误导成设备离线。
+    var authExpired = false;
     try {
       presence = await DevicePresenceClient(
         cookieProvider: _consoleCookieHeader,
       ).fetchPresence(nodeid).timeout(const Duration(seconds: 8));
+    } on AuthExpiredException {
+      authExpired = true;
     } on TimeoutException {
       timedOut = true;
     } catch (_) {
@@ -2315,12 +2369,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 过期，立即清掉快照，不静默沿用本地钟。
       unawaited(_recheckSnapshotFreshness());
     }
-    final outcome = classifyPreflight(presence, timedOut: timedOut);
+    final outcome = authExpired
+        ? PreflightOutcome.authExpired
+        : classifyPreflight(presence, timedOut: timedOut);
     final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
     unawaited(_sessionLog.log(
       'session_preflight',
       nodeid: nodeid,
       extra: 'outcome=$outcome code=${presence?.code ?? 'none'} '
+          'authExpired=$authExpired '
           'elapsedMs=$elapsedMs',
     ));
     if (outcome == PreflightOutcome.ok) {
@@ -3293,15 +3350,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (mounted) _snack('截图为空白，请重试或用系统截图。');
         return;
       }
-      final base = await getExternalStorageDirectory() ?? await getTemporaryDirectory();
+      // QF-08（3.0.0 中组）：截图改存应用内部私有目录（Android 10+
+      // 分区存储下外部专属目录虽他应用一般不可读，但 Android 9 及以下
+      // 传统外部存储可被他应用读取），文件名加随机后缀、不可预测。
+      final base = await getApplicationDocumentsDirectory();
       final dir = Directory('${base.path}/screenshots');
       await dir.create(recursive: true);
       // B20：截图目录 30 天滚动清理（最多保留 50 张）。
       await _pruneScreenshots(dir);
       final now = DateTime.now();
       String two(int n) => n.toString().padLeft(2, '0');
+      final rnd = math.Random.secure();
+      final randHex = List.generate(
+              6, (_) => rnd.nextInt(16).toRadixString(16))
+          .join();
       final name = 'QFRemote-${now.year}${two(now.month)}${two(now.day)}-'
-          '${two(now.hour)}${two(now.minute)}${two(now.second)}.png';
+          '${two(now.hour)}${two(now.minute)}${two(now.second)}-$randHex.png';
       final file = File('${dir.path}/$name');
       await file.writeAsBytes(bytes);
       if (mounted) _snack('截图已保存：$name');

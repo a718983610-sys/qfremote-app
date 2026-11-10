@@ -58,6 +58,15 @@ void main() {
       expect(js, isNot(contains('聊天加密解锁')));
     });
 
+    test('QF-04：默认不勾选 lgRemember；只有用户同意记住设备才勾选', () {
+      final jsDefault = buildChatBridgeJs(username: 'user1', password: 'pass1');
+      expect(jsDefault, isNot(contains('lgRemember')));
+      final jsRemember = buildChatBridgeJs(
+          username: 'user1', password: 'pass1', rememberDevice: true);
+      expect(jsRemember, contains('lgRemember'));
+      expect(jsRemember, contains('r.checked=true'));
+    });
+
     test('无凭据：不带密码、不做任何文案改写', () {
       final js = buildChatBridgeJs();
       expect(js, contains('var user=null,pass=null'));

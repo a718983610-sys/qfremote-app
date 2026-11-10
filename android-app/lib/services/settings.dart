@@ -14,6 +14,12 @@ class QfSettings {
   static const _kRememberPassword = 'auth_remember_password';
   static const _kCredentialBlocked = 'auth_credential_blocked';
 
+  // QF-02（3.0.0 中组）：上次登录成功的用户名（控制台用户名，登录
+  // 成功时写、手动退出／凭据被拒时清）。冷启恢复快照时调用方以此作为
+  // 当前账号的第三路来源（许可门用户名、已存凭据之后），让「记住此
+  // 设备」用户（无已存凭据）在冷启时也能给出账号、走账号一致校验。
+  static const _kLastUsername = 'auth_last_username';
+
   // 2.4.5 B9：远程控制时屏幕常亮（默认开）；B16：弱网放行后待复核标记
   // （进控制台后网络恢复时立即重跑更新门）。
   static const _kKeepScreenOn = 'session_keep_screen_on';
@@ -54,6 +60,15 @@ class QfSettings {
   bool get rememberDevice => _prefs.getBool(_kRememberDevice) ?? false;
   Future<void> setRememberDevice(bool v) => _prefs.setBool(_kRememberDevice, v);
 
+  String? get lastUsername => _prefs.getString(_kLastUsername);
+  Future<void> setLastUsername(String? v) async {
+    if (v == null || v.isEmpty) {
+      await _prefs.remove(_kLastUsername);
+    } else {
+      await _prefs.setString(_kLastUsername, v);
+    }
+  }
+
   bool get rememberPassword => _prefs.getBool(_kRememberPassword) ?? false;
   Future<void> setRememberPassword(bool v) =>
       _prefs.setBool(_kRememberPassword, v);
@@ -74,5 +89,6 @@ class QfSettings {
     await _prefs.remove(_kRememberDevice);
     await _prefs.remove(_kRememberPassword);
     await _prefs.remove(_kCredentialBlocked);
+    await _prefs.remove(_kLastUsername);
   }
 }

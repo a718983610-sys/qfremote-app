@@ -233,8 +233,9 @@ class DevicePresence {
   }
 }
 
-/// 预检失败表现分级（A9）：三级，8 秒内出卡，不进「正在建立会话…」。
-enum PreflightOutcome { ok, offlineStale, offlineConn, preflightTimeout }
+/// 预检失败表现分级（A9）：四级，8 秒内出卡，不进「正在建立会话…」。
+/// QF-07：authExpired＝服务端 401/403（登录已过期），与网络超时分开。
+enum PreflightOutcome { ok, offlineStale, offlineConn, preflightTimeout, authExpired }
 
 /// 预检分类（纯函数，可单测）：服务端 code 为 ONLINE/STALE/OFFLINE/
 /// NOT_FOUND/TIMEOUT/UNKNOWN；STALE＝agent 心跳超 120 秒（即使 node.conn
@@ -296,6 +297,11 @@ PreflightOutcome classifyPreflight(DevicePresence? p, {bool timedOut = false}) {
       return (
         title: '无法确认设备状态',
         body: '服务器响应超时（8 秒内未确认 $name 的状态），请检查网络后重试。',
+      );
+    case PreflightOutcome.authExpired:
+      return (
+        title: '登录已过期',
+        body: '会话已失效（服务端拒绝了当前登录），请重新登录后再打开 $name。',
       );
   }
 }

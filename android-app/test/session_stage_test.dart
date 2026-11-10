@@ -151,6 +151,12 @@ void main() {
           PreflightOutcome.preflightTimeout);
     });
 
+    test('QF-07：authExpired 有独立的「登录已过期」卡片文案', () {
+      final text = preflightCardText(PreflightOutcome.authExpired, presence('ONLINE'));
+      expect(text.title, '登录已过期');
+      expect(text.body, contains('重新登录'));
+    });
+
     test('预检响应解析', () {
       final p = DevicePresence.parse(
           '{"ok":true,"code":"STALE","nodeid":"n1","name":"笔记本","online":true,"fresh":false,"lastAgentPong":1762800000000,"lastAgentPongAgeMs":180000,"serverTime":1762800180000}');

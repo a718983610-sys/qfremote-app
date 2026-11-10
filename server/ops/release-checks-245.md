@@ -18,6 +18,10 @@ cat /opt/meshcentral/meshcentral-data/config.json
       证书名仍为旧 IP 即不过）
 - [ ] `agentAliasDNS` 含 `app.qfremote.top`
 - [ ] `trustedProxy` 覆盖本机反代（127.0.0.1 / cloudflared 回环）
+      ——QF-19：只允许回环/内网地址（127.0.0.1、::1、10/8、172.16/12、
+      192.168/16 等内网段），逐项核对每个地址都在回环/内网段内；
+      出现任一公网 IP 即不过（否则 X-Forwarded-For 伪造可影响限流/
+      审计 IP 归属）
 - [ ] `ports`：`8443`（控制台）/ `8444`（注册）/ `8445`（好友）/
       `8446`（论坛/反馈）/ `8448`（ext）/ `8450`（登录垫片）与
       nginx `proxy_pass` 逐一对应，无一错位
@@ -64,12 +68,19 @@ curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' $BASE/console-engine/
 curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' $BASE/release.json
 curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' $BASE/dl/QFRemote-Setup-v2.4.5.exe
 curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' $BASE/api/device/resolve
+curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' "$BASE/api/device/presence?nodeid=<已知的设备 nodeid>"
 curl -s -o /dev/null -w '%{http_code} %{url_effective}\n' $BASE/lock/
 ```
 
 - [ ] `/`、`/login`、`/console-engine/`、`/release.json`、`/dl/`、
-      `/api/device/resolve`、`/lock/` 逐一返回预期状态
-      （未登录的鉴权端点回 401 属预期；404/502/503 即不过）
+      `/api/device/resolve`、`/api/device/presence`、`/lock/` 逐一返回
+      预期状态（未登录的鉴权端点回 401 属预期；404/502/503 即不过；
+      `/api/device/presence` 已登录时回 200 且 code 为 ONLINE/STALE/
+      OFFLINE 之一）
+- [ ] 桥健康检查（QF-20）：`systemctl is-active qfremote-assistbridge`
+      为 active；无令牌调桥 `curl -s -o /dev/null -w '%{http_code}\n'
+      http://127.0.0.1:18081/status` 回 401（桥在监听且鉴权门活着；
+      回 000/404/500 即不过——桥挂了或鉴权门坏了）
 - [ ] `/release.json` 实取内容与生成器输出一致：
       `node server/ext/make-release-json.js --check <线上取回的 release.json> <exe> <apk>`
       （见 `server/ext/make-release-json.js` 的 `--check` 模式）
@@ -81,8 +92,12 @@ node server/ext/make-release-json.js \
   --exe  QFRemote-Setup-v2.4.5.exe \
   --apk  QFRemote-v2.4.5.apk \
   --version 2.4.5 \
+  --min-usable 2.4.5 \
   --out server/meshcentral/public/release.json
 ```
+
+> QF-17：`--min-usable` 必传（生成器不再默认等于 version）。不抬强更线
+> 时传旧版本号（如 `--min-usable 2.4.4`），与 §5.3 条件口径一致。
 
 - [ ] 生成后自校验通过（size/sha256 实测实算）
 - [ ] `minUsable` 抬到 `2.4.5` 的条件已满足：App 线 A-1～A-4 通过

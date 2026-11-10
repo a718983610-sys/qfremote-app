@@ -7,18 +7,52 @@ const Duration kSessionLifetime = Duration(days: 30);
 /// （xid / xid.sig / qfrem），连同摘取时间一起加密落盘（见 CredentialStore）。
 /// 掉登录时先把它塞回 CookieManager 再刷新页面——服务端认这组签名 cookie，
 /// 认得回就直接回控制台，不用再输密码。
+///
+/// QF-02（3.0.0 中组）：快照绑账号。快照存摘取时当前登录账号
+/// （[accountId]，即控制台用户名）；[isFresh] 收到调用方传来的当前账号
+/// [expectedAccount] 时必须一致才算新鲜——共用设备上 A 的快照绝不能在
+/// B 的账号上下文里被恢复。另要求签名 cookie xid.sig 在场：只有 xid
+/// 没有 xid.sig 的快照不新鲜（服务端认的是签名 cookie 组，缺签名的
+/// 快照塞回去也认不回）。严格档：调用方给不出当前账号（expectedAccount
+/// 为 null/空）时一律不新鲜——账号未知就不能证明快照属于当前使用者，
+/// 退回凭据登录；冷启时调用方从已存凭据／许可门／上次登录名（settings
+/// lastUsername，登录成功时持久化）三路解析账号，正常单用户设备上
+/// 必有一路能给出，不影响「记住此设备」免密恢复。旧版无账号字段的
+/// 快照视为未绑定：任何情况下都不新鲜，下次登录成功即被带账号的
+/// 新快照覆盖。
 class SessionSnapshot {
   final Map<String, String> cookies;
   final DateTime savedAt;
 
-  const SessionSnapshot({required this.cookies, required this.savedAt});
+  /// 摘取时当前登录账号（控制台用户名）；旧版快照无此字段时为 null。
+  final String? accountId;
 
-  /// 还新鲜：有会话 cookie、没超过 30 天、时间没倒流（改系统时间防误判，
-  /// 留 5 分钟宽限）。[serverNow] 为服务端时间（预检回包带 serverTime
-  /// 时以服务端时间为准，B22：本地时钟只作兜底）。
-  bool isFresh(DateTime now, {DateTime? serverNow}) {
+  const SessionSnapshot({
+    required this.cookies,
+    required this.savedAt,
+    this.accountId,
+  });
+
+  /// 还新鲜：有会话 cookie（含签名 xid.sig）、没超过 30 天、时间没倒流
+  /// （改系统时间防误判，留 5 分钟宽限）、账号一致（见类注释）。
+  /// [serverNow] 为服务端时间（预检回包带 serverTime 时以服务端时间
+  /// 为准，B22：本地时钟只作兜底）。[expectedAccount] 为调用方已知的
+  /// 当前账号（已存凭据用户名、许可门认到的用户名或上次登录名），
+  /// 不知道时传 null——严格档下直接不新鲜（fail-closed）。
+  bool isFresh(DateTime now, {DateTime? serverNow, String? expectedAccount}) {
     final ref = serverNow ?? now;
     if (cookies.isEmpty || (cookies['xid'] ?? '').isEmpty) return false;
+    if ((cookies['xid.sig'] ?? '').isEmpty) return false;
+    if (expectedAccount == null || expectedAccount.isEmpty) {
+      // QF-02 严格档：账号未知时无法证明快照属于当前使用者，不恢复。
+      return false;
+    }
+    // 快照有账号：必须与当前账号一致；快照没账号（旧版）：不新鲜。
+    if (accountId == null ||
+        accountId!.isEmpty ||
+        accountId != expectedAccount) {
+      return false;
+    }
     if (savedAt.isAfter(ref.add(const Duration(minutes: 5)))) return false;
     return ref.difference(savedAt) < kSessionLifetime;
   }
@@ -26,6 +60,8 @@ class SessionSnapshot {
   String toJson() => jsonEncode({
         'cookies': cookies,
         'savedAt': savedAt.millisecondsSinceEpoch,
+        if (accountId != null && accountId!.isNotEmpty)
+          'account': accountId,
       });
 
   /// 宽容解析：格式不对一律返回 null（按没有快照处理，不许猜）。
@@ -43,9 +79,11 @@ class SessionSnapshot {
         }
       }
       if (cookies.isEmpty) return null;
+      final account = v['account'];
       return SessionSnapshot(
         cookies: cookies,
         savedAt: DateTime.fromMillisecondsSinceEpoch(t),
+        accountId: account is String && account.isNotEmpty ? account : null,
       );
     } catch (_) {
       return null;

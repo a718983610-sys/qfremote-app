@@ -7,20 +7,27 @@ void main() {
   group('SessionSnapshot（会话快照）', () {
     final now = DateTime(2026, 10, 25, 12, 0);
 
-    test('JSON 往返不丢字段', () {
+    test('JSON 往返不丢字段（含账号绑定）', () {
       final snap = SessionSnapshot(
         cookies: {'xid': 'abc', 'xid.sig': 'sig', 'qfrem': '1'},
         savedAt: now,
+        accountId: 'alice',
       );
       final back = SessionSnapshot.fromJson(snap.toJson());
       expect(back, isNotNull);
       expect(back!.cookies, snap.cookies);
       expect(back.savedAt, now);
+      expect(back.accountId, 'alice');
+      // 旧版无账号字段的快照照常读出，accountId 为 null
+      final legacy = SessionSnapshot.fromJson(
+          '{"cookies":{"xid":"abc","xid.sig":"sig"},"savedAt":${now.millisecondsSinceEpoch}}');
+      expect(legacy?.accountId, isNull);
     });
 
     test('新鲜度：29 天内新鲜、31 天过期、没 xid 不算数', () {
       SessionSnapshot at(Duration age) => SessionSnapshot(
-          cookies: {'xid': 'abc'}, savedAt: now.subtract(age));
+          cookies: {'xid': 'abc', 'xid.sig': 'sig'},
+          savedAt: now.subtract(age));
       expect(at(const Duration(days: 29)).isFresh(now), isTrue);
       expect(at(const Duration(days: 31)).isFresh(now), isFalse);
       expect(
@@ -31,6 +38,30 @@ void main() {
         SessionSnapshot(cookies: const {}, savedAt: now).isFresh(now),
         isFalse,
       );
+    });
+
+    test('QF-02：缺签名 xid.sig 不新鲜；账号不一致不新鲜', () {
+      // 只有 xid、没有 xid.sig：服务端认的是签名 cookie 组，不新鲜
+      expect(
+        SessionSnapshot(cookies: {'xid': 'abc'}, savedAt: now).isFresh(now),
+        isFalse,
+      );
+      SessionSnapshot snap({String? account}) => SessionSnapshot(
+          cookies: {'xid': 'abc', 'xid.sig': 'sig'},
+          savedAt: now,
+          accountId: account);
+      // 快照绑 A：当前账号是 A 才新鲜，是 B 就不新鲜
+      expect(snap(account: 'alice')
+          .isFresh(now, expectedAccount: 'alice'), isTrue);
+      expect(snap(account: 'alice')
+          .isFresh(now, expectedAccount: 'bob'), isFalse);
+      // 旧版无账号快照：调用方给了当前账号时一律不新鲜（fail-closed）
+      expect(snap().isFresh(now, expectedAccount: 'bob'), isFalse);
+      // QF-02 严格档：调用方给不出当前账号时，新旧快照一律不新鲜
+      // （账号未知就不能证明快照属于当前使用者；冷启时调用方从已存
+      // 凭据／许可门／上次登录名三路解析账号，正常设备必有一路能给出）
+      expect(snap().isFresh(now), isFalse);
+      expect(snap(account: 'alice').isFresh(now), isFalse);
     });
 
     test('坏 JSON 返回 null，不许猜', () {
