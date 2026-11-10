@@ -41,7 +41,10 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
 
 (async () => {
   try {
-    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'waitInstallResult', 'maybeInstallSystemServices']
+    // F1 回填：maybeInstallSystemServices 经 preferUnpackedPath／unpackedAppPath
+    // 取脚本路径（打包形态解包路径），不抽取即 ReferenceError——与
+    // update-lea-backfill-test.js 同款抽取清单。
+    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'waitInstallResult', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath']
       .map((n) => extractFunction(MAIN_SRC, n)).join('\n');
     const constM = MAIN_SRC.match(/const INSTALL_WAIT_MS = \d+;/);
     if (!constM) throw new Error('INSTALL_WAIT_MS not found');

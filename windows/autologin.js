@@ -515,7 +515,7 @@ function pageDetect() {
     var r = el.getBoundingClientRect();
     return r.width > 0 || r.height > 0;
   }
-  var out = { state: 'other', failedBanner: false, failureText: '', manualLogout: false, fieldsCleared: false, pending: null };
+  var out = { state: 'other', failedBanner: false, failureText: '', manualLogout: false, fieldsCleared: false, pending: null, username: '' };
   try { out.manualLogout = sessionStorage.getItem('qfShellManualLogout') === '1'; } catch (e) { /* ignore */ }
   try { out.fieldsCleared = sessionStorage.getItem('qfShellFieldsCleared') === '1'; } catch (e) { /* ignore */ }
   try {
@@ -539,6 +539,43 @@ function pageDetect() {
   if (document.getElementById('logoutControl') || document.getElementById('masthead') ||
       document.getElementById('topMenu') || document.getElementById('page_leftbar')) {
     out.state = 'console';
+    return out;
+  }
+  // QFR 自家控制台（webapp，CONSOLE_URL）：原生 MC 标记一律没有——
+  // 登录页是 #loginForm（#li-user/#li-pass，位于 #authRoot 内），控制台是
+  // #shellRoot（非 hidden）。（3.0.0 首启触发器根因：本函数只认原生 MC 标记，
+  // webapp 上登录成功后恒回 'other'，processAuthPage 的 console 分支永不跑，
+  // maybeInstallSystemServices 永不触发。）
+  var qfAuth = document.getElementById('authRoot');
+  var qfShell = document.getElementById('shellRoot');
+  if (document.getElementById('loginForm') && qfAuth && !qfAuth.hidden) {
+    out.state = 'login';
+    var qfErr = document.getElementById('li-err');
+    if (qfErr && !qfErr.hidden) {
+      var qfText = (qfErr.textContent || '').trim();
+      if (qfText) { out.failedBanner = true; out.failureText = qfText.slice(0, 120); }
+    }
+    return out;
+  }
+  if (qfShell && !qfShell.hidden) {
+    out.state = 'console';
+    // 用户名：webapp 会话变量 S.user 为准（doLogin 成功时即写），DOM 兜底。
+    try {
+      if (typeof S !== 'undefined' && S && S.user) out.username = String(S.user);
+    } catch (e) { /* ignore */ }
+    if (!out.username) {
+      try {
+        var qfSmall = document.querySelector('.sideidtx small');
+        if (qfSmall && qfSmall.textContent) out.username = qfSmall.textContent.trim();
+      } catch (e) { /* ignore */ }
+    }
+    if (!out.username) {
+      try {
+        var qfLi = document.getElementById('li-user');
+        if (qfLi && qfLi.value) out.username = String(qfLi.value).trim();
+      } catch (e) { /* ignore */ }
+    }
+    return out;
   }
   return out;
 }

@@ -454,6 +454,12 @@ async function processAuthPage() {
     }
 
     if (det.state === 'console') {
+      // QFR webapp 登录：detection 带回的用户名即当前账号——先落 gateUsername，
+      // 使 currentGateUsername() 在 maybeInstallSystemServices 同步取 owner 时
+      // 已有值（不等 runLicenseGateCheck 的 /me 网络回包，避免 no-owner 竞态）。
+      // （runLicenseGateCheck 与 maybeInstallSystemServices 是同分支内两个不 await
+      // 的并行调用，先跑到的若读不到用户名即报 no-owner。）
+      if (det.username) gateUsername = det.username;
       if (det.pending && det.pending.u && det.pending.p) {
         gateCredsMemory = { username: det.pending.u, password: det.pending.p };
       }
@@ -961,6 +967,15 @@ function attachViewEvents() {
   wc.on('did-navigate', () => {
     const u2 = wc.getURL();
     if (u2 && u2.startsWith(CHAT_URL_PREFIX)) maybeChatUnlock(u2, wc).catch(() => {});
+  });
+  // 应用内登录是 SPA 跳转（fetch /qf-login 成功后 location.hash='#home'，
+  // 无整页加载）：did-finish-load 不触发，processAuthPage 永远看不到登录成功。
+  // 3.0.0 首启触发器根因之二——页内导航（hash/history）也要过一遍检测，
+  // 否则 maybeInstallSystemServices 永不跑，LEA 装不上。console 分支内各调用
+  // 均有守门（licenseCheckedSession／leaLastNotifiedAccount／
+  // systemServicesInstallTried＋每版本设置／devicesLanded），重复触发是廉价空转。
+  wc.on('did-navigate-in-page', () => {
+    processAuthPage().catch(() => {});
   });
 }
 
