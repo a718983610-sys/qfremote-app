@@ -175,6 +175,8 @@ const mockChannel = {
   const b64 = calls[0].cmd.trim().split(/\s+/).pop();
   const decoded = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
   t('下发信封 base64 可解出原信封', decoded.request_id === 'req-2' && decoded.command === 'sys.info');
+  t('S3：下发命令不含裸 JSON（防 shell 元字符，只走 dispatch+base64）', !calls[0].cmd.includes('{"version"'));
+  t('S3：dispatch 的 base64 载荷可被真客户端解码（见 test-lea-realclient.js）', typeof b64 === 'string' && /^[A-Za-z0-9+/=]+$/.test(b64));
   t('下发超时 5s', calls[0].timeoutMs === 5000);
   // 大信封走 inbox 两步
   calls.length = 0;
@@ -186,6 +188,8 @@ const mockChannel = {
   const d2 = await core.dispatchEnvelope(mockChannel, bigEnv, { timeoutMs: 5000 });
   t('大信封下发成功', d2.ok === true);
   t('大信封走两步（写 inbox + apply）', calls.length === 2 && calls[0].cmd.includes('LEA\\inbox') && calls[1].cmd.includes('apply'));
+  t('S3：apply 带 inbox 全路径（旧裸文件名会使客户端误发）', calls[1].cmd.includes('LEA\\inbox\\req-3.json'));
+  t('S3：写 inbox 路径与 apply 路径一致', calls[0].cmd.includes(core.leaInboxPath('req-3.json')) && calls[1].cmd.includes(core.leaInboxPath('req-3.json')));
   // 危险命令不自动重试：通道抛错只发一次
   calls.length = 0;
   const errChannel = { async runCommand() { calls.push(1); throw new Error('boom'); }, async nodeOnline() { return true; } };

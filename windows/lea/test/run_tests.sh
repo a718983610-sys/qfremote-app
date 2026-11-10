@@ -23,7 +23,8 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     python3 gen_whitelist.py --check
     x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/QFRLEA.exe QFRLEA.c \
         lea_protocol.c lea_crypto.c lea_state.c lea_audit.c -ladvapi32 -lcrypt32
-    x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/qf-lea-client.exe qf-lea-client.c
+    # S3：客户端链接 lea_crypto.c（dispatch <base64> 解码用）。
+    x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /tmp/qf-lea-client.exe qf-lea-client.c lea_crypto.c
     file /tmp/QFRLEA.exe /tmp/qf-lea-client.exe
     echo "mingw cross-compile OK"
     cd test

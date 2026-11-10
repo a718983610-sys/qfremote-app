@@ -43,10 +43,12 @@
   真实私钥接入：`createLeaCore({ signingKeyFile })`（Base64 的 64 字节 seed||pub，
   与 lock-envelope 同格式）或 `signingKeyPem`。LEA 客户端验签须配真实公钥后才可信。
 - **下发**：小信封（base64 ≤6000 字符）一次 `runcommands` 直传
-  `"C:\Program Files\QFR\LEA\qf-lea-client.exe" dispatch <base64>`；
-  大信封两步写 `%ProgramData%\QFR\LEA\inbox\<request_id>.json` 再 `apply`
-  （复用隐私锁 Base64 写文件模式）。下发超时 5s；普通命令失败按幂等键重试 1 次，
+  `"C:\Program Files\QFR\LEA\qf-lea-client.exe" dispatch <base64>`（客户端
+  Base64 解码后发往管道；动词统一 S3，2026-11-10，DESIGN §3）；
+  大信封两步写 `%ProgramData%\QFR\LEA\inbox\<request_id>.json` 再
+  `apply "<inbox 全路径>"`（复用隐私锁 Base64 写文件模式）。下发超时 5s；普通命令失败按幂等键重试 1 次，
   危险命令禁自动重试；同步等待 5s 超时返回 `202`＋`job_id`（结果 `UNKNOWN`，须查 job/快照确认，勿直接重试危险操作）。
+  不走裸 JSON argv：裸 JSON 含 `"` 且 params 可含用户输入的 shell 元字符，经 runcommands／cmd.exe 有截断或注入风险。
 - **幂等/防重放**：服务端记每 Key 的 nonce（10 分钟）与幂等键结果（7 天，危险 30 天）；
   时间窗 `expires_at - issued_at = 60s`，HTTP 时间戳偏差 ≤60s。
 - **数据落盘**：`$QFEXT_LEA_DIR`（默认 `/opt/qfremote-ext/data/lea`）下 `keys.json` /
@@ -72,6 +74,12 @@
 ext 服务带 LEA 加载正常（`QFEXT_NO_LISTEN=1` 启动，placeholder 警告符合设计）；
 既有 `server/ext/test-points.js` 11/11 通过；SEC_LEA 的 NSIS 语法经 makensis 3.09
 最小 harness 编译通过（lea/ush 未到货时仅 `/nonfatal` 警告）。
+
+S3 真客户端单测（2026-11-10 新增，不计入上行 mock 单测）：
+`node server/ext/lea/test/test-lea-realclient.js`：**16/16 通过**（沙箱实跑，
+mingw 现编真 `qf-lea-client.exe`＋管道替身 `windows/lea/test/pipe_server.c`，
+wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch／apply 两路与
+坏 base64／缺参／缺文件三例 fail-closed）。缺 mingw／wine64 时 SKIP 退出 0。
 
 ## 未完成 / 须真机或服务端联调验证（不许谎称已验）
 

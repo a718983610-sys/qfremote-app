@@ -26,7 +26,7 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
 | 文件 | 说明 |
 |---|---|
 | `QFRLEA.c` | 服务本体（约 1500 行）：管道、准入、队列 worker、脚本／文件／应用执行、USH 转发、DPAPI 绑定、服务控制、debug 模式 |
-| `qf-lea-client.c` | LEA 客户端：接命令行／文件／stdin 的 JSON 信封，连管道 2s，收响应打印 stdout |
+| `qf-lea-client.c` | LEA 客户端：接 `dispatch <base64>`／`apply <inbox 文件>`／`--file`／裸 JSON／stdin 的信封，连管道 2s，收响应打印 stdout（下发动词统一 S3，DESIGN §3） |
 | `lea_protocol.h/.c` | 纯 C 协议层：信封解析、时间窗、命令表、路径规范化、响应构造 |
 | `lea_crypto.h/.c` | 纯 C 密码学层：SHA-256、Base64、Ed25519 验签**占位**、Key 脱敏 |
 | `lea_state.h/.c` | 纯 C 状态层：绑定状态机、重放表、幂等表（持久化）、队列（双 lane） |
@@ -36,6 +36,7 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
 | `build.sh` | mingw 交叉编译（服务＋客户端），默认生产构建 |
 | `install-lea-service.ps1` | 服务安装脚本（一次 UAC；模式参照 `install-system-services.ps1`） |
 | `test/test_lea.c` | 核心逻辑单测（Linux 可跑） |
+| `test/pipe_server.c` | S3 真客户端单测的管道替身（仅测试用，不进生产包；由 `server/ext/lea/test/test-lea-realclient.js` 驱动） |
 | `test/run_tests.sh` | 单测＋交叉编译一键跑 |
 | `QFRLEA.exe`、`qf-lea-client.exe` | 本沙箱交叉编译产物（生产构建，见下） |
 
@@ -152,6 +153,10 @@ sh test/run_tests.sh
    `ui.*`（USH 未装时应明确报 `QFR_LEA_USH_UNAVAILABLE`）。
 4. 生产构建端到端应拒绝执行（`QFR_LEA_SIG_NOT_CONFIGURED`），直至真实公钥接入。
 5. `qf-lea-client.exe` 经 `runcommands`（SYSTEM）调用：信封投递、stdout 回传、退出码。
+   沙箱内已用 wine64 覆盖到真客户端一级（S3，2026-11-10）：
+   `node server/ext/lea/test/test-lea-realclient.js` 16/16 通过——dispatch／apply
+   两路管道原文 == 原信封，坏 base64／缺参／缺文件三例 exit 2 且管道零接收。
+   仍须真机（ECS／笔记本）验证 runcommands 通道本身与 SYSTEM 身份下的管道连通。
 6. DPAPI 绑定落盘与重启恢复；幂等表重启恢复（RUNNING→UNKNOWN）；日志滚动与 30 天清理。
 7. 队列满、超时、USH 崩溃、换绑竞态等故障注入（DESIGN §13.2）。
 8. 命名管道 ACL 实测：普通用户连接应被拒绝；SYSTEM／管理员可连。

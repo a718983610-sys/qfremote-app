@@ -573,14 +573,29 @@ function createLeaCore(opts) {
   //   listNodes() -> [{id/nodeid, online}] }。缺 channel 时返回 NOT_INSTALLED。
   // 同步预算 SYNC_WAIT_MS；超时则建 job 返回 202（结果 UNKNOWN，须查 job）。
   // 下发失败（通道异常）按幂等键重试 1 次；危险命令不自动重试。
+  //
+  // 下发动词统一（S3，2026-11-10，DESIGN §3；两端同一方案，见
+  // windows/lea/qf-lea-client.c 头注释）：
+  //   小信封：qf-lea-client.exe dispatch <base64 信封>
+  //     客户端 Base64 解码后发往管道。Base64 字母表对 runcommands／
+  //     cmd.exe 安全；裸 JSON 含 `"` 且 params 可含用户输入的 shell
+  //     元字符（& % " ^ | < >），故不走裸 JSON argv。
+  //   大信封（b64 > 6000）：先 powershell 写
+  //     C:\ProgramData\QFR\LEA\inbox\<request_id>.json（原始 JSON），
+  //     再 qf-lea-client.exe apply "<inbox 全路径>"。
+  //   旧服务端曾发 `apply <裸文件名>`，客户端会把 `apply` 当信封原文
+  //   发往管道；现 apply 一律带全路径（客户端也兼容裸文件名）。
+  const LEA_CLIENT_EXE = '"C:\\Program Files\\QFR\\LEA\\qf-lea-client.exe"';
+  const LEA_INBOX_DIR = 'C:\\ProgramData\\QFR\\LEA\\inbox';
+  function leaInboxPath(fileName) { return LEA_INBOX_DIR + '\\' + fileName; }
   function leaClientCmd(envelopeB64) {
-    // 与 LEA 客户端（另一线实现，windows/lea/）的约定命令形态：
-    // 小信封直接传参；大信封走 inbox 文件两步（见 dispatchEnvelope）。
-    return '"C:\\Program Files\\QFR\\LEA\\qf-lea-client.exe" dispatch ' + envelopeB64;
+    // 小信封直接传参（dispatch <base64>，客户端实测可解——见
+    // test/test-lea-realclient.js 对真客户端跑通）。
+    return LEA_CLIENT_EXE + ' dispatch ' + envelopeB64;
   }
   function leaInboxWriteCmd(fileName, b64) {
     // 复用隐私锁 psWriteInbox 同款 Base64 写文件（lock-bridge.js）。
-    return 'powershell -NoProfile -NonInteractive -Command "[IO.File]::WriteAllBytes(\'C:\\ProgramData\\QFR\\LEA\\inbox\\' + fileName + '\',[Convert]::FromBase64String(\'' + b64 + '\'))"';
+    return 'powershell -NoProfile -NonInteractive -Command "[IO.File]::WriteAllBytes(\'' + leaInboxPath(fileName) + '\',[Convert]::FromBase64String(\'' + b64 + '\'))"';
   }
   const ENVELOPE_INLINE_LIMIT = 6000; // 信封 base64 超此长改两步写 inbox
   async function dispatchEnvelope(channel, env, optsD) {
@@ -601,7 +616,7 @@ function createLeaCore(opts) {
           const fn = env.request_id.replace(/[^A-Za-z0-9_-]/g, '_') + '.json';
           await channel.runCommand(env.device_id, leaInboxWriteCmd(fn, b64), timeoutMs);
           out = await channel.runCommand(env.device_id,
-            '"C:\\Program Files\\QFR\\LEA\\qf-lea-client.exe" apply ' + fn, timeoutMs);
+            LEA_CLIENT_EXE + ' apply "' + leaInboxPath(fn) + '"', timeoutMs);
         }
         // 回传：stdout 应为一行 JSON；解析失败即视为回传失败，重试 2 次内
         // 仍失败则按 UNKNOWN 返回（不谎称成功，见 dispatch 内 timeout 分支）。
@@ -641,7 +656,7 @@ function createLeaCore(opts) {
     grantMuse, revokeGrant, hasGrant, getGrant,
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
-    buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd,
+    buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
     createJob, getJob, updateJob,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
     _test: { loadKeys, loadGrants, loadBindings, loadJobs, nonceSeen, idemSeen, hashKey, maskKey },

@@ -4,13 +4,24 @@
  * 信封转命名管道发给 QFRLEA 服务，收一行 JSON 响应并打印到 stdout
  * （runcommands 回传给服务端）。
  *
- * 用法：
+ * 用法（下发动词统一，S3，DESIGN §3）：
+ *   qf-lea-client.exe dispatch "<base64 信封>"
+ *     （服务端小信封的唯一内联形态；客户端 Base64 解码后发往管道。
+ *      Base64 字母表对 runcommands／cmd.exe 安全；裸 JSON 含 `"` 且
+ *      params 可含用户输入的 `& % " ^ | < >` 等 shell 元字符，故不走裸 JSON。）
+ *   qf-lea-client.exe apply "<inbox 文件全路径>"
+ *     （服务端大信封第二步；文件内容为原始 JSON 信封。裸文件名解析到
+ *      C:\ProgramData\QFR\LEA\inbox\；与 --file 同义。）
  *   qf-lea-client.exe "<一行 JSON 信封>"
  *   qf-lea-client.exe --file <信封文件路径>
  *   echo "<一行 JSON 信封>" | qf-lea-client.exe
  *   qf-lea-client.exe --internal "<一行内部命令 JSON>"
  *     （内部命令：{"cmd":"session.login_changed",...} 等，供主程序／安装
  *      脚本以 SYSTEM 身份通知 LEA；同样走管道，不走信封验签）
+ *
+ * 动词缺参或 dispatch Base64 解码失败时退出码 2 且绝不把动词原文发往
+ * 管道（S3 原 bug：旧 main 把 "dispatch" 当信封原文发出，还收到了
+ * 服务端的假成功响应）。
  *
  * 超时：连管道 2s（WaitNamedPipeW，DESIGN §3）；执行等待按信封 timeout_ms
  * 另加 5s（默认 30s）。响应原样打印到 stdout。
@@ -26,11 +37,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lea_crypto.h" /* S3：dispatch 用 lea_b64_decode（纯 C，无 Win32 依赖） */
 
 #define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
 #define CONNECT_TIMEOUT_MS 2000
 #define MAX_ENVELOPE 65536
 #define MAX_RESPONSE 65536
+#define LEA_INBOX_DIR "C:\\ProgramData\\QFR\\LEA\\inbox"
 
 static void print_error_json(const char *code, const char *detail) {
     printf("{\"ok\":false,\"code\":\"%s\",\"request_id\":\"\",\"retryable\":false,"
@@ -85,11 +98,50 @@ static int read_file_all(const char *path, char *buf, size_t size) {
     return total > 0;
 }
 
+/* S3：apply 的参数是 inbox 文件全路径；裸文件名解析到 inbox 目录
+ * （兼容服务端旧形态 `apply <request_id>.json`）。含分隔符／盘符的
+ * 按原样用。返回 0=路径放不下。 */
+static int resolve_apply_path(const char *arg, char *out, size_t out_size) {
+    if (strchr(arg, '\\') || strchr(arg, '/') || strchr(arg, ':')) {
+        if (strlen(arg) >= out_size) return 0;
+        snprintf(out, out_size, "%s", arg);
+        return 1;
+    }
+    if (strlen(LEA_INBOX_DIR) + 1 + strlen(arg) >= out_size) return 0;
+    snprintf(out, out_size, "%s\\%s", LEA_INBOX_DIR, arg);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     static char envelope[MAX_ENVELOPE + 1];
     envelope[0] = '\0';
 
-    if (argc >= 3 && strcmp(argv[1], "--file") == 0) {
+    if (argc >= 3 && strcmp(argv[1], "dispatch") == 0) {
+        /* S3 统一下发动词：dispatch <base64 信封>。解码失败／解出空串／
+         * 超长时退出 2，绝不把动词或乱码发往管道。 */
+        long n = lea_b64_decode(argv[2], (unsigned char *)envelope,
+                                sizeof(envelope) - 1);
+        if (n <= 0) {
+            print_error_json("QFR_LEA_CLIENT_BAD_DISPATCH", "dispatch-base64-decode-failed");
+            return 2;
+        }
+        envelope[n] = '\0';
+    } else if (argc >= 3 && strcmp(argv[1], "apply") == 0) {
+        /* S3 统一下发动词：apply <inbox 文件全路径|裸文件名>；
+         * 文件内容为原始 JSON 信封（与 --file 同义）。 */
+        char path[1024];
+        if (!resolve_apply_path(argv[2], path, sizeof(path)) ||
+            !read_file_all(path, envelope, sizeof(envelope))) {
+            print_error_json("QFR_LEA_CLIENT_FILE_READ_FAILED", "cannot-read-envelope-file");
+            return 2;
+        }
+    } else if (argc == 2 && (strcmp(argv[1], "dispatch") == 0 ||
+                             strcmp(argv[1], "apply") == 0)) {
+        /* S3：动词缺参数时绝不能把动词原文当信封发往管道（原 bug）。 */
+        fprintf(stderr, "usage: qf-lea-client.exe dispatch <base64> | apply <file>\n");
+        print_error_json("QFR_LEA_CLIENT_NO_INPUT", "missing-verb-argument");
+        return 2;
+    } else if (argc >= 3 && strcmp(argv[1], "--file") == 0) {
         if (!read_file_all(argv[2], envelope, sizeof(envelope))) {
             print_error_json("QFR_LEA_CLIENT_FILE_READ_FAILED", "cannot-read-envelope-file");
             return 2;
@@ -108,7 +160,7 @@ int main(int argc, char **argv) {
         snprintf(envelope, sizeof(envelope), "%s", argv[1]);
     } else {
         if (!read_all_stdin(envelope, sizeof(envelope))) {
-            fprintf(stderr, "usage: qf-lea-client.exe \"<json envelope>\" | --file <path> | --internal \"<json>\"\n");
+            fprintf(stderr, "usage: qf-lea-client.exe dispatch \"<base64>\" | apply \"<file>\" | \"<json envelope>\" | --file <path> | --internal \"<json>\"\n");
             print_error_json("QFR_LEA_CLIENT_NO_INPUT", "no-envelope");
             return 2;
         }
