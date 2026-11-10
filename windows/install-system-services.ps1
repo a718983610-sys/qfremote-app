@@ -14,7 +14,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$Owner,
   [Parameter(Mandatory = $true)][string]$HelperExe,
-  [Parameter(Mandatory = $true)][string]$LockDir
+  [Parameter(Mandatory = $true)][string]$LockDir,
+  [string]$LeaDir = '' # LEA 随包暂存目录（$INSTDIR\LEA）；未传时按 HelperExe 旁的 LEA 目录推导；缺失即跳过 LEA，不阻塞
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,6 +86,27 @@ try {
 } catch {
   Write-InstallLog ('lock install threw: ' + $_.Exception.Message + ' (helper kept)')
   exit 1
+}
+
+# ---- ③ QFRLEA（LEA 服务端/安装器线，Stage 1 MVP） ----
+# install-lea.ps1 自行重试 3 次（5s/15s/45s），仍失败标记 LEA_DEGRADED
+# 并 exit 0，绝不阻塞主程序；本段只记日志，不改 exit 码。
+# 注意：main.js 的 whitelist 目前只验本脚本、QFSysHelper.exe 与锁
+# install.ps1 的 SHA-256，install-lea.ps1 尚未纳入——上线前须由
+# main.js 线把 install-lea.ps1 的哈希加入 whitelist.json，否则
+# 本段应暂缓（见 server/ext/lea/README.md「未完成/须联调」）。
+try {
+  if (-not $LeaDir) { $LeaDir = Join-Path (Split-Path -Parent $HelperExe) 'LEA' }
+  $leaScript = Join-Path $LeaDir 'install-lea.ps1'
+  if (-not (Test-Path -LiteralPath $leaScript)) {
+    Write-InstallLog ('LEA install skipped: install-lea.ps1 not found at ' + $leaScript)
+  } else {
+    Write-InstallLog 'installing QFRLEA'
+    & $leaScript -LeaDir $LeaDir
+    Write-InstallLog ('LEA install script exit=' + $LASTEXITCODE + ' (non-blocking)')
+  }
+} catch {
+  Write-InstallLog ('LEA install threw (non-blocking): ' + $_.Exception.Message)
 }
 
 Write-InstallLog 'QFRemote system services install done'

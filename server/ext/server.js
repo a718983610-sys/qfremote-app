@@ -106,6 +106,22 @@ const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: 
   // reconcile 的「一审已落定」标记同源同口径）；非 order 类型恒放行。
   // payOrders 已于上一行先行实例化，无时序问题。
   resolveGuard: (type, refId) => { if (type !== 'order') return true; const o = payOrders.getRaw(refId); return !!(o && o.review1); } });
+// ===== LEA 本地代理（Stage 1 MVP，DESIGN.md §8）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行 =====
+// server.js 只加本段实例化与下方路由注册行，不改既有逻辑。
+let leaCore = null, leaChannel = null, leaRoutes = null;
+try {
+  const _leaCoreMod = require('./lea/lea-core');
+  const _leaChannelMod = require('./lea/lea-channel');
+  const _leaRoutesMod = require('./lea/lea-routes');
+  leaCore = _leaCoreMod.createLeaCore({ dir: process.env.QFEXT_LEA_DIR || path.join(DATA_DIR, 'lea'), log });
+  leaChannel = _leaChannelMod.createLeaChannel({ log });
+  leaRoutes = _leaRoutesMod.createLeaRoutes(leaCore, leaChannel, {
+    sendJson, readJsonBody, log,
+    verifyPassword: (u, p) => verifyAccountPassword(u, p),
+    resolveConsoleAuth: (req) => validateConsoleCookie(req.headers.cookie || '', clientIpFromReq(req)),
+    isSiteAdmin: (a) => isAdmin(a),
+  });
+} catch (e) { log({ ev: 'lea-unavailable', err: String(e && e.message || e) }); }
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
 try {
@@ -3419,6 +3435,13 @@ const server = http.createServer(async (req, res) => {
         return res.end(snap.bytes);
       }
       return sendJson(res, 404, { ok: false, msg: '该接口不存在。' });
+    }
+
+    // ===== LEA 本地代理 API（Stage 1 MVP，DESIGN.md §8.1）：只加路由注册行，不改既有逻辑 =====
+    if (p.startsWith('/api/lea/v1/')) {
+      if (!leaRoutes) return sendJson(res, 503, { ok: false, code: 'LEA_UNAVAILABLE', msg: 'LEA 服务端模块未加载。' });
+      await leaRoutes.handle(req, res);
+      return;
     }
 
     return sendJson(res, 404, { ok: false, msg: '该页面不存在。' });

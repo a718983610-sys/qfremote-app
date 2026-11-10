@@ -1,0 +1,162 @@
+/* test_ush_json.c — USH 纯逻辑层单测（宿主 gcc 可跑，无 Windows 依赖）。
+ * 用法：gcc -I.. -o test_ush_json test_ush_json.c ../ush_json.c && ./test_ush_json
+ * 退出码 0=全部通过；任一失败打印 FAIL 并返回 1。
+ */
+#include <stdio.h>
+#include <string.h>
+#include "ush_json.h"
+
+static int g_pass = 0, g_fail = 0;
+
+#define CHECK(cond, name) do { \
+    if (cond) { g_pass++; printf("PASS %s\n", name); } \
+    else { g_fail++; printf("FAIL %s\n", name); } \
+} while (0)
+
+static void test_parse_click(void) {
+    ush_request_t r;
+    const char *req =
+        "{\"version\":1,\"request_id\":\"req-1\",\"trace_id\":\"tr-1\",\"batch_id\":\"b-1\","
+        "\"seq\":2,\"device_id\":\"node//x\",\"account_id\":\"718983610\","
+        "\"command\":\"ui.click\",\"params\":{\"target\":{\"automation_id\":\"okBtn\"}},"
+        "\"timeout_ms\":5000,\"idempotency_key\":\"idem-1\",\"dangerous\":false}";
+    CHECK(ush_parse_request(req, &r) == 1 && r.valid, "parse: click valid");
+    CHECK(r.cmd == USH_CMD_CLICK, "parse: click cmd enum");
+    CHECK(strcmp(r.request_id, "req-1") == 0, "parse: request_id");
+    CHECK(strcmp(r.trace_id, "tr-1") == 0, "parse: trace_id");
+    CHECK(r.seq == 2, "parse: seq");
+    CHECK(r.timeout_ms == 5000, "parse: timeout_ms");
+    CHECK(r.dangerous == 0, "parse: dangerous false");
+    CHECK(strstr(r.params_json, "okBtn") != NULL, "parse: params kept raw");
+    char tgt[512];
+    CHECK(ush_json_get_object(r.params_json, "target", tgt, sizeof(tgt)) == 1, "parse: target object");
+    char aid[128];
+    CHECK(ush_json_get_string(tgt, "automation_id", aid, sizeof(aid)) == 1
+        && strcmp(aid, "okBtn") == 0, "parse: automation_id value");
+}
+
+static void test_parse_variants(void) {
+    ush_request_t r;
+    CHECK(ush_parse_request("{\"command\":\"ui.ping\"}", &r) == 1 && r.cmd == USH_CMD_PING,
+        "parse: ping minimal");
+    CHECK(r.timeout_ms == 5000, "parse: default timeout 5000");
+    CHECK(ush_parse_request("{\"command\":\"ui.input\",\"params\":{\"text\":\"hi\"},\"timeout_ms\":999999}",
+        &r) == 1 && r.timeout_ms == USH_MAX_TIMEOUT_MS, "parse: timeout clamped to max");
+    CHECK(ush_parse_request("{\"command\":\"ui.tree\",\"params\":{},\"timeout_ms\":0}",
+        &r) == 1 && r.timeout_ms == 1, "parse: timeout clamped to min");
+    CHECK(ush_parse_request("{\"command\":\"ui.nope\"}", &r) == 0
+        && strcmp(r.error, "unknown-command") == 0, "parse: unknown command");
+    CHECK(ush_parse_request("{\"command\":\"ui.nope\",\"request_id\":\"req-x\"}", &r) == 0
+        && strcmp(r.request_id, "req-x") == 0,
+        "parse: unknown command still echoes request_id");
+    CHECK(ush_parse_request("not json", &r) == 0
+        && strcmp(r.error, "bad-request") == 0, "parse: not json");
+    CHECK(ush_parse_request("", &r) == 0, "parse: empty");
+    CHECK(ush_parse_request("{\"command\":\"ui.click\",\"params\":[]}", &r) == 0
+        && strcmp(r.error, "bad-request") == 0, "parse: params not object");
+    CHECK(ush_parse_request("{\"cmd\":\"ui.snapshot\"}", &r) == 1 && r.cmd == USH_CMD_SNAPSHOT,
+        "parse: legacy cmd field accepted");
+    /* 超大请求拒绝 */
+    static char big[USH_MAX_REQUEST + 64];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    CHECK(ush_parse_request(big, &r) == 0, "parse: oversized rejected");
+}
+
+static void test_json_strings(void) {
+    char out[256];
+    CHECK(ush_json_get_string("{\"a\":\"hello\"}", "a", out, sizeof(out)) == 1
+        && strcmp(out, "hello") == 0, "json: plain string");
+    CHECK(ush_json_get_string("{\"a\":\"x\\\\\\\"y\"}", "a", out, sizeof(out)) == 1
+        && strcmp(out, "x\\\"y") == 0, "json: escaped quote+backslash");
+    CHECK(ush_json_get_string("{\"a\":\"line\\nnext\\ttab\"}", "a", out, sizeof(out)) == 1
+        && strcmp(out, "line\nnext\ttab") == 0, "json: \\n \\t escapes");
+    /* \u4e2d = 中，\u6587 = 文 */
+    CHECK(ush_json_get_string("{\"a\":\"\\u4e2d\\u6587\"}", "a", out, sizeof(out)) == 1
+        && strcmp(out, "\xe4\xb8\xad\xe6\x96\x87") == 0, "json: \\uXXXX CJK");
+    /* 代理对 \uD83D\uDE00 = 😀 U+1F600 */
+    CHECK(ush_json_get_string("{\"a\":\"\\uD83D\\uDE00\"}", "a", out, sizeof(out)) == 1
+        && strcmp(out, "\xf0\x9f\x98\x80") == 0, "json: surrogate pair");
+    CHECK(ush_json_get_string("{\"a\":\"\\uD83D\"}", "a", out, sizeof(out)) == 0,
+        "json: lone high surrogate rejected");
+    CHECK(ush_json_get_string("{\"a\":\"\\q\"}", "a", out, sizeof(out)) == 0,
+        "json: bad escape rejected");
+    CHECK(ush_json_get_string("{\"a\":123}", "a", out, sizeof(out)) == 0,
+        "json: non-string rejected");
+    CHECK(ush_json_get_string("{\"b\":\"x\"}", "a", out, sizeof(out)) == 0,
+        "json: missing key");
+    /* 转义输出 */
+    char esc[256];
+    CHECK(ush_json_escape("a\"b\\c\nd", esc, sizeof(esc)) == 1
+        && strcmp(esc, "a\\\"b\\\\c\\nd") == 0, "json: escape output");
+    CHECK(ush_json_escape("ctl\x01" "x", esc, sizeof(esc)) == 1
+        && strcmp(esc, "ctl\\u0001x") == 0, "json: escape control char");
+    /* 嵌套对象提取（含字符串内花括号） */
+    char obj[512];
+    CHECK(ush_json_get_object("{\"target\":{\"name\":\"a}b\",\"x\":1},\"z\":2}",
+        "target", obj, sizeof(obj)) == 1
+        && strcmp(obj, "{\"name\":\"a}b\",\"x\":1}") == 0, "json: object with brace in string");
+    CHECK(ush_json_get_object("{\"a\":1}", "a", obj, sizeof(obj)) == 0,
+        "json: object on non-object");
+    /* long/bool */
+    long v = 0;
+    CHECK(ush_json_get_long("{\"n\":-42}", "n", &v) == 1 && v == -42, "json: negative long");
+    int b = -1;
+    CHECK(ush_json_get_bool("{\"d\":true}", "d", &b) == 1 && b == 1, "json: bool true");
+    CHECK(ush_json_get_bool("{\"d\":false}", "d", &b) == 1 && b == 0, "json: bool false");
+    CHECK(ush_json_get_bool("{\"d\":1}", "d", &b) == 0, "json: bool rejects number");
+}
+
+static void test_response_and_base64(void) {
+    char resp[1024];
+    CHECK(ush_build_response(resp, sizeof(resp), 1, "done", "req-9", 12,
+        "{\"clicked\":true}", NULL) == 1
+        && strcmp(resp, "{\"ok\":true,\"code\":\"done\",\"request_id\":\"req-9\","
+            "\"duration_ms\":12,\"data\":{\"clicked\":true}}\n") == 0,
+        "resp: ok shape");
+    CHECK(ush_build_response(resp, sizeof(resp), 0, "QFR_USH_ELEMENT_NOT_FOUND", "req-9",
+        30, NULL, "no such element \"x\"") == 1
+        && strstr(resp, "\"ok\":false") && strstr(resp, "no such element \\\"x\\\""),
+        "resp: error shape with escaping");
+    CHECK(ush_build_response(resp, 10, 1, "done", "r", 1, "{}", NULL) == 0,
+        "resp: too small buffer rejected");
+
+    char b64[64];
+    CHECK(ush_base64_encode((const unsigned char *)"Man", 3, b64, sizeof(b64)) == 1
+        && strcmp(b64, "TWFu") == 0, "b64: Man");
+    CHECK(ush_base64_encode((const unsigned char *)"Ma", 2, b64, sizeof(b64)) == 1
+        && strcmp(b64, "TWE=") == 0, "b64: Ma padding");
+    CHECK(ush_base64_encode((const unsigned char *)"", 0, b64, sizeof(b64)) == 1
+        && strcmp(b64, "") == 0, "b64: empty");
+    unsigned char dec[16];
+    size_t dl = 0;
+    CHECK(ush_base64_decode("TWFu", dec, sizeof(dec), &dl) == 1 && dl == 3
+        && memcmp(dec, "Man", 3) == 0, "b64: decode round-trip");
+    CHECK(ush_base64_decode("TWE=", dec, sizeof(dec), &dl) == 1 && dl == 2
+        && memcmp(dec, "Ma", 2) == 0, "b64: decode padding");
+    CHECK(ush_base64_decode("!!!", dec, sizeof(dec), &dl) == 0, "b64: bad input rejected");
+}
+
+static void test_retry_and_strategies(void) {
+    CHECK(ush_click_retry_delay_ms(0, 0) == 200, "retry: 1st retry 200ms");
+    CHECK(ush_click_retry_delay_ms(0, 1) == 500, "retry: 2nd retry 500ms");
+    CHECK(ush_click_retry_delay_ms(0, 2) == -1, "retry: no 3rd retry");
+    CHECK(ush_click_retry_delay_ms(1, 0) == -1, "retry: dangerous never retries");
+    CHECK(ush_locator_strategy_count() == 5, "locator: 5 strategies");
+    CHECK(strcmp(ush_locator_strategy_name(0), "automation_id") == 0, "locator: 1st automation_id");
+    CHECK(strcmp(ush_locator_strategy_name(1), "name+control_type") == 0, "locator: 2nd name+type");
+    CHECK(strcmp(ush_locator_strategy_name(2), "class_name+index") == 0, "locator: 3rd class+index");
+    CHECK(strcmp(ush_locator_strategy_name(3), "relative_coords") == 0, "locator: 4th rel coords");
+    CHECK(strcmp(ush_locator_strategy_name(4), "image_template") == 0, "locator: 5th image template");
+    CHECK(ush_locator_strategy_name(5) == NULL, "locator: out of range NULL");
+}
+
+int main(void) {
+    test_parse_click();
+    test_parse_variants();
+    test_json_strings();
+    test_response_and_base64();
+    test_retry_and_strategies();
+    printf("----\n%d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
