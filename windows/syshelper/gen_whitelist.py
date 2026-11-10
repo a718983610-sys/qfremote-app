@@ -107,7 +107,7 @@ def main():
             f.write(header)
         print("wrote whitelist.h")
     if mode in ("all", "json-only"):
-        doc = {"version": "2.4.5", "files": hashes}
+        doc = {"version": "3.0.0", "files": hashes}
         with open(os.path.join(HERE, "whitelist.json"), "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2, sort_keys=True)
             f.write("\n")

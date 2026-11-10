@@ -43,7 +43,7 @@ const pkg = require('../package.json');
     // ---------- A 纯逻辑 ----------
     ok('A1_header_name', cv.HEADER_NAME === 'x-qf-client-version');
     ok('A2_fallback_is_package_version', cv.getClientVersion() === pkg.version, { got: cv.getClientVersion(), pkg: pkg.version });
-    ok('A3_package_version_240', pkg.version === '2.4.5', { pkg: pkg.version });
+    ok('A3_package_version_240', pkg.version === '3.0.0', { pkg: pkg.version });
     cv.setClientVersion('9.8.7');
     ok('A4_set_valid', cv.getClientVersion() === '9.8.7' && cv.clientVersionHeaders()['x-qf-client-version'] === '9.8.7');
     cv.setClientVersion('not-a-version');
@@ -169,12 +169,12 @@ const pkg = require('../package.json');
     // ---------- E 安装器 ----------
     const nsi = src('installer.nsi');
     ok('E1_oninstsuccess_silent_exec', nsi.includes('Function .onInstSuccess') && nsi.includes('IfSilent') && nsi.includes('Exec "$INSTDIR\\QFRemote.exe"'));
-    ok('E2_version_strings_232', nsi.includes('QFRemote-Setup-v2.4.5.exe') && nsi.includes('VIProductVersion "2.4.5.0"') &&
-      nsi.includes('"DisplayName" "QFRemote 2.4.5"') && nsi.includes('"DisplayVersion" "2.4.5"') && !nsi.includes('2.3.1'));
+    ok('E2_version_strings_232', nsi.includes('QFRemote-Setup-v3.0.0.exe') && nsi.includes('VIProductVersion "3.0.0.0"') &&
+      nsi.includes('"DisplayName" "QFRemote 3.0.0"') && nsi.includes('"DisplayVersion" "3.0.0"') && !nsi.includes('2.3.1'));
     ok('E3_finishpage_run_kept', nsi.includes('MUI_FINISHPAGE_RUN "$INSTDIR\\QFRemote.exe"') && nsi.includes('MUI_PAGE_DIRECTORY'));
     // W-31：三处版本号一致（package.json / build-info.json / installer.nsi）
     const bi = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'build-info.json'), 'utf8'));
-    ok('E4_version_files_agree', bi.version === pkg.version && pkg.version === '2.4.5' && bi.buildDate === '2026-11-10', { bi, pkg: pkg.version });
+    ok('E4_version_files_agree', bi.version === pkg.version && pkg.version === '3.0.0' && bi.buildDate === '2026-11-10', { bi, pkg: pkg.version });
 
     // ---------- F 强更墙守卫 ----------
     const forceHtml = src('force-update.html');

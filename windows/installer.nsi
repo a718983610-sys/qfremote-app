@@ -11,20 +11,20 @@ ${Using:StrFunc} StrLoc
 ${Using:StrFunc} StrStr
 
 Name "QFRemote"
-OutFile "/dev/shm/qfr/QFRemote-Setup-v2.4.5.exe"
+OutFile "/dev/shm/qfr/QFRemote-Setup-v3.0.0.exe"
 Icon "icon.ico"
 InstallDir "$LOCALAPPDATA\Programs\QFRemote"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "InstallLocation"
 RequestExecutionLevel user
-VIProductVersion "2.4.5.0"
+VIProductVersion "3.0.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=2052 "FileDescription" "QFRemote 远程控制（控制端）"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.4.5"
-VIAddVersionKey /LANG=2052 "ProductVersion" "2.4.5"
+VIAddVersionKey /LANG=2052 "FileVersion" "3.0.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "3.0.0"
 VIAddVersionKey /LANG=1033 "ProductName" "QFRemote"
 VIAddVersionKey /LANG=1033 "FileDescription" "QFRemote Remote Control (controller)"
-VIAddVersionKey /LANG=1033 "FileVersion" "2.4.5"
-VIAddVersionKey /LANG=1033 "ProductVersion" "2.4.5"
+VIAddVersionKey /LANG=1033 "FileVersion" "3.0.0"
+VIAddVersionKey /LANG=1033 "ProductVersion" "3.0.0"
 
 !define MUI_ICON "icon.ico"
 !define MUI_UNICON "icon.ico"
@@ -223,8 +223,8 @@ waitOldProcDone:
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "EstimatedSize" "$0"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 2.4.5"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "2.4.5"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayName" "QFRemote 3.0.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayVersion" "3.0.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "DisplayIcon" "$INSTDIR\QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "UninstallString" "$INSTDIR\Uninstall QFRemote.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote" "Publisher" "QFRemote"

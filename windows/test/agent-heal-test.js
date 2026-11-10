@@ -211,10 +211,10 @@ try {
       .every((s) => lockSec.includes('File "' + s + '"')) &&
     lockSec.includes('DetailPrint "隐私锁组件 v2.0.3'));
   ok('G3-version-245',
-    NSI.includes('QFRemote-Setup-v2.4.5.exe') &&
-    NSI.includes('VIProductVersion "2.4.5.0"') &&
-    NSI.includes('"DisplayVersion" "2.4.5"') &&
-    NSI.includes('"DisplayName" "QFRemote 2.4.5"'));
+    NSI.includes('QFRemote-Setup-v3.0.0.exe') &&
+    NSI.includes('VIProductVersion "3.0.0.0"') &&
+    NSI.includes('"DisplayVersion" "3.0.0"') &&
+    NSI.includes('"DisplayName" "QFRemote 3.0.0"'));
   ok('G4-iferrors-right-after-extract',
     secMain.indexOf('Nsis7z::Extract') < secMain.indexOf('IfErrors 0 +2') &&
     secMain.indexOf('IfErrors 0 +2') < secMain.indexOf('Delete "$PLUGINSDIR\\app.7z"'));
@@ -262,7 +262,7 @@ try {
   ok('G10-helper-and-heal-packaged',
     ['qf-agent-heal.ps1', 'sys-helper.js', 'install-system-services.ps1',
      'syshelper/QFSysHelper.exe', 'syshelper/whitelist.json']
-      .every((f) => buildFiles.includes(f)) && pkg.version === '2.4.5');
+      .every((f) => buildFiles.includes(f)) && pkg.version === '3.0.0');
 
   // ---- H. F1/F2（深查发现）：asar 解包＋unverified 文案 ----
   const heal = require('../agent-heal');

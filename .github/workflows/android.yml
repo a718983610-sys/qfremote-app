@@ -14,7 +14,7 @@ on:
 # （QFRemote-v<APP_VERSION>.apk / QFRemote-v<APP_VERSION>-apk），
 # 不再写死旧版号；与 android-app/pubspec.yaml 的 version 保持一致。
 env:
-  APP_VERSION: '2.4.5'
+  APP_VERSION: '3.0.0'
 
 jobs:
   build:
