@@ -113,7 +113,7 @@ try {
   const _leaCoreMod = require('./lea/lea-core');
   const _leaChannelMod = require('./lea/lea-channel');
   const _leaRoutesMod = require('./lea/lea-routes');
-  leaCore = _leaCoreMod.createLeaCore({ dir: process.env.QFEXT_LEA_DIR || path.join(DATA_DIR, 'lea'), log });
+  leaCore = _leaCoreMod.createLeaCore({ dir: process.env.QFEXT_LEA_DIR || path.join(DATA_DIR, 'lea'), log, signingKeyFile: process.env.QFEXT_LEA_SIGNING_KEY_FILE || path.join(MC_DATA_DIR, 'lea-signing-key.b64') });
   leaChannel = _leaChannelMod.createLeaChannel({ log });
   leaRoutes = _leaRoutesMod.createLeaRoutes(leaCore, leaChannel, {
     sendJson, readJsonBody, log,
