@@ -23,6 +23,7 @@
 #define QFRLEA_STATE_H
 
 #include <stddef.h>
+#include <stdio.h>
 #include "lea_protocol.h"
 
 #ifdef __cplusplus
@@ -155,13 +156,32 @@ int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix);
 
 /* 序列化／反序列化（JSONL 文本；调用方负责文件读写）。
  * H09：save 时逐行校验，非法行跳过不写（不得写出毒化整表的非法行）；
- * load 时坏行隔离跳过，不清空整表。 */
+ * load 时坏行隔离跳过，不清空整表。
+ * #26：save_to_file 直接逐行写文件流，不再要求整表先装进一块内存缓冲
+ * （旧 4MB static 缓冲超了即不持久化）；load_line 逐行解析，供调用方
+ * 流式读文件时用，同样不再要求整文件先读进内存。 */
 int lea_idem_save_text(const lea_idem_t *t, char *out, size_t out_size);
 /* 同 save_text，另经 skipped 回跳过的非法行数（可为 NULL）。 */
 int lea_idem_save_text_ex(const lea_idem_t *t, char *out, size_t out_size, int *skipped);
+/* #26：把整表逐行写入已打开的文件流（fputs 行＋换行）；非法行跳过记数，
+ * 写失败返回 0。调用方负责 tmp+rename 原子替换。 */
+int lea_idem_save_to_file(const lea_idem_t *t, FILE *f, int *skipped);
 int lea_idem_load_text(lea_idem_t *t, const char *text);
+/* #26：解析单行（不含换行）并在合法时追加一条；坏行／超长行返回 0 且不
+ * 改表（调用方直接跳过该行）。不清空表、不重置表——调用方先 lea_idem_init。 */
+int lea_idem_load_line(lea_idem_t *t, const char *line);
 
-/* ---------------- 队列 ---------------- */
+/* ---------------- 吊销表写入（#17） ---------------- */
+/* C 侧吊销表写入方：lea_revoked_write（全量替换 revoked_keys.txt）。
+ * 主路径仍是服务端下发前推送（H21，lea-core.js syncRevocations，经
+ * runcommands 写本机文件）；本函数是 C 侧的第二写入方——主程序在 rebind
+ * 拿到 revoked_key_ids 后经内部命令 keys.sync-revoked 调入（见 QFRLEA.c
+ * handle_internal），使本地 key_is_revoked 的检查不再是“只读不写”的
+ * 死机制。任一 id 非法（非 token 字符集）即整单拒绝，不写残集；
+ * 原子 tmp+rename；去重＋排序（与服务端全集格式一致）。
+ * 上限 LEA_REVOKED_MAX_IDS 条；path 为空或 n_key_ids < 0 返回 0。 */
+#define LEA_REVOKED_MAX_IDS 512
+int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_ids);
 typedef struct lea_queue_item lea_queue_item_t;
 struct lea_queue_item {
     lea_envelope_t env;

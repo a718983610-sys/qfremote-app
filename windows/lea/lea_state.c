@@ -206,6 +206,55 @@ int lea_replay_check_and_add(lea_replay_t *r, const char *request_id,
     return 1;
 }
 
+/* ---------------- 吊销表写入（#17） ---------------- */
+/* C 侧吊销表写入方：lea_revoked_write（全量替换 revoked_keys.txt）。
+ * 任一 id 非法（非 token 字符集）即整单拒绝，不写残集；去重＋排序后
+ * 原子 tmp+rename 写入（与服务端全集格式一致，一行一个 id）。
+ * n_key_ids == 0 表示清空（写空文件）；上限 LEA_REVOKED_MAX_IDS。 */
+int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_ids);
+
+int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_ids) {
+    if (!path || path[0] == '\0' || n_key_ids < 0 || n_key_ids > LEA_REVOKED_MAX_IDS) return 0;
+    for (int i = 0; i < n_key_ids; i++)
+        if (!key_ids[i] || !lea_validate_token(key_ids[i])) return 0;
+    /* 排序指针数组（插入排序，n ≤ 512）＋去重；写出顺序与服务端全集一致。 */
+    const char **sorted = NULL;
+    if (n_key_ids > 0) {
+        sorted = (const char **)malloc(sizeof(char *) * (size_t)n_key_ids);
+        if (!sorted) return 0;
+        for (int i = 0; i < n_key_ids; i++) sorted[i] = key_ids[i];
+        for (int i = 1; i < n_key_ids; i++) {
+            const char *v = sorted[i];
+            int j = i - 1;
+            while (j >= 0 && strcmp(sorted[j], v) > 0) { sorted[j + 1] = sorted[j]; j--; }
+            sorted[j + 1] = v;
+        }
+    }
+    size_t plen = strlen(path);
+    char *tmp = (char *)malloc(plen + 5);
+    if (!tmp) { free(sorted); return 0; }
+    snprintf(tmp, plen + 5, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { free(tmp); free(sorted); return 0; }
+    int ok = 1;
+    const char *prev = NULL;
+    for (int i = 0; i < n_key_ids && ok; i++) {
+        if (prev && strcmp(prev, sorted[i]) == 0) continue; /* 去重 */
+        prev = sorted[i];
+        if (fputs(sorted[i], f) == EOF || fputc('\n', f) == EOF) ok = 0;
+    }
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok) {
+        remove(path);
+        if (rename(tmp, path) != 0) ok = 0;
+    }
+    if (!ok) remove(tmp);
+    free(tmp);
+    free(sorted);
+    return ok;
+}
+
 /* ---------------- 幂等表 ---------------- */
 const char *lea_idem_status_name(lea_idem_status_t s) {
     switch (s) {
@@ -336,37 +385,41 @@ int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix) {
     return n;
 }
 
-/* 序列化：每行一条 JSON。result 内不含换行（响应构造保证一行）。
- * H09：逐行组装后做严格 JSON 校验再写入输出；非法行跳过不写（skipped
- * 计数），绝不把毒化行写进快照。device_id／account_id／key 经 JSON 转义
- * 后拼接（id 字段可含 '"'，直拼会断行结构）。 */
+/* 单条拼成一行 JSONL（含末尾换行）；非法（字段转义失败／行超长／行非法）
+ * 返回 0。供 save_text_ex 与 save_to_file 共用（#26 流式写盘不再经
+ * 4MB 内存缓冲）。 */
+static int idem_format_line(const lea_idem_entry_t *e, char *line, size_t line_size) {
+    char dev_esc[256] = { 0 }, acc_esc[256] = { 0 }, key_esc[256] = { 0 };
+    size_t eoff = 0;
+    if (!lea_json_escape_into(dev_esc, sizeof(dev_esc), &eoff, e->device_id)) return 0;
+    eoff = 0;
+    if (!lea_json_escape_into(acc_esc, sizeof(acc_esc), &eoff, e->account_id)) return 0;
+    eoff = 0;
+    if (!lea_json_escape_into(key_esc, sizeof(key_esc), &eoff, e->key)) return 0;
+    int n = snprintf(line, line_size,
+                     "{\"device_id\":\"%s\",\"account_id\":\"%s\",\"key\":\"%s\","
+                     "\"status\":\"%s\",\"dangerous\":%d,\"created_at\":%lld,"
+                     "\"updated_at\":%lld,\"result\":%s}\n",
+                     dev_esc, acc_esc, key_esc,
+                     lea_idem_status_name(e->status), e->dangerous,
+                     e->created_at, e->updated_at,
+                     e->result[0] ? e->result : "null");
+    if (n < 0 || (size_t)n >= line_size) return 0;
+    if (!lea_json_is_valid(line)) return 0;
+    return 1;
+}
+
 int lea_idem_save_text_ex(const lea_idem_t *t, char *out, size_t out_size, int *skipped) {
+    if (!t || !out || out_size < 1) return 0;
     size_t off = 0;
     int nskipped = 0;
     char line[LEA_IDEM_RESULT_MAX + 1024];
     for (int i = 0; i < t->count; i++) {
-        const lea_idem_entry_t *e = &t->entries[i];
-        /* 三个 id 字段逐一转义后拼接（lea_json_escape_into 不含外层引号）。 */
-        char dev_esc[256] = { 0 }, acc_esc[256] = { 0 }, key_esc[256] = { 0 };
-        size_t eoff = 0;
-        if (!lea_json_escape_into(dev_esc, sizeof(dev_esc), &eoff, e->device_id)) { nskipped++; continue; }
-        eoff = 0;
-        if (!lea_json_escape_into(acc_esc, sizeof(acc_esc), &eoff, e->account_id)) { nskipped++; continue; }
-        eoff = 0;
-        if (!lea_json_escape_into(key_esc, sizeof(key_esc), &eoff, e->key)) { nskipped++; continue; }
-        int n = snprintf(line, sizeof(line),
-                         "{\"device_id\":\"%s\",\"account_id\":\"%s\",\"key\":\"%s\","
-                         "\"status\":\"%s\",\"dangerous\":%d,\"created_at\":%lld,"
-                         "\"updated_at\":%lld,\"result\":%s}\n",
-                         dev_esc, acc_esc, key_esc,
-                         lea_idem_status_name(e->status), e->dangerous,
-                         e->created_at, e->updated_at,
-                         e->result[0] ? e->result : "null");
-        if (n < 0 || (size_t)n >= sizeof(line)) { nskipped++; continue; }
-        if (!lea_json_is_valid(line)) { nskipped++; continue; }
-        if ((size_t)n >= out_size - off) return 0;
-        memcpy(out + off, line, (size_t)n);
-        off += (size_t)n;
+        if (!idem_format_line(&t->entries[i], line, sizeof(line))) { nskipped++; continue; }
+        size_t n = strlen(line);
+        if (off >= out_size || n >= out_size - off) return 0;
+        memcpy(out + off, line, n);
+        off += n;
     }
     if (off < out_size) out[off] = '\0';
     if (skipped) *skipped = nskipped;
@@ -375,6 +428,58 @@ int lea_idem_save_text_ex(const lea_idem_t *t, char *out, size_t out_size, int *
 
 int lea_idem_save_text(const lea_idem_t *t, char *out, size_t out_size) {
     return lea_idem_save_text_ex(t, out, out_size, NULL);
+}
+
+/* #26：逐行写文件流，不再要求整表先装进内存缓冲。 */
+int lea_idem_save_to_file(const lea_idem_t *t, FILE *f, int *skipped) {
+    if (!t || !f) return 0;
+    int nskipped = 0;
+    char line[LEA_IDEM_RESULT_MAX + 1024];
+    for (int i = 0; i < t->count; i++) {
+        if (!idem_format_line(&t->entries[i], line, sizeof(line))) { nskipped++; continue; }
+        if (fputs(line, f) == EOF) {
+            if (skipped) *skipped = nskipped;
+            return 0;
+        }
+    }
+    if (skipped) *skipped = nskipped;
+    return 1;
+}
+
+/* #26：解析单行（不含换行）并在合法时追加一条。坏行／超长行／表满返回 0
+ * 且不改表（调用方直接跳过该行）；不清空表——调用方先 lea_idem_init。 */
+int lea_idem_load_line(lea_idem_t *t, const char *line) {
+    if (!t || !line || line[0] == '\0') return 0;
+    if (strlen(line) >= LEA_IDEM_RESULT_MAX + 512) return 0; /* 超长行跳过 */
+    lea_idem_entry_t e;
+    memset(&e, 0, sizeof(e));
+    char status[32] = { 0 };
+    long long created = 0, updated = 0;
+    long long dang = 0;
+    if (!lea_json_string(line, "device_id", e.device_id, sizeof(e.device_id))) return 0;
+    if (!lea_json_string(line, "account_id", e.account_id, sizeof(e.account_id))) return 0;
+    if (!lea_json_string(line, "key", e.key, sizeof(e.key))) return 0;
+    if (!lea_json_string(line, "status", status, sizeof(status))) return 0;
+    if (!lea_json_long(line, "dangerous", &dang)) return 0;
+    if (!lea_json_long(line, "created_at", &created)) return 0;
+    if (!lea_json_long(line, "updated_at", &updated)) return 0;
+    /* result：取 "result": 后的原始 JSON 值（对象或 null）。
+     * 注意行尾还有外层 idem 行的 }，必须用花括号配对提取，不能
+     * 直接取到行尾。取出的值须过严格 JSON 校验，否则整行跳过。 */
+    if (lea_json_object_raw(line, "result", e.result, sizeof(e.result))) {
+        if (!lea_json_is_valid(e.result)) return 0;
+    } else {
+        const char *rp = strstr(line, "\"result\":null");
+        if (rp) snprintf(e.result, sizeof(e.result), "%s", "null");
+        else return 0;
+    }
+    e.status = lea_idem_status_from_name(status);
+    e.dangerous = (int)dang;
+    e.created_at = created;
+    e.updated_at = updated;
+    if (t->count >= LEA_IDEM_MAX) return 0;
+    t->entries[t->count++] = e;
+    return 1;
 }
 
 int lea_idem_load_text(lea_idem_t *t, const char *text) {
@@ -391,35 +496,9 @@ int lea_idem_load_text(lea_idem_t *t, const char *text) {
         memcpy(line, p, len);
         line[len] = '\0';
         p = nl ? nl + 1 : p + len;
-        lea_idem_entry_t e;
-        memset(&e, 0, sizeof(e));
-        char status[32] = { 0 };
-        long long created = 0, updated = 0;
-        long long dang = 0;
-        if (!lea_json_string(line, "device_id", e.device_id, sizeof(e.device_id))) continue;
-        if (!lea_json_string(line, "account_id", e.account_id, sizeof(e.account_id))) continue;
-        if (!lea_json_string(line, "key", e.key, sizeof(e.key))) continue;
-        if (!lea_json_string(line, "status", status, sizeof(status))) continue;
-        if (!lea_json_long(line, "dangerous", &dang)) continue;
-        if (!lea_json_long(line, "created_at", &created)) continue;
-        if (!lea_json_long(line, "updated_at", &updated)) continue;
-        /* result：取 "result": 后的原始 JSON 值（对象或 null）。
-         * 注意行尾还有外层 idem 行的 }，必须用花括号配对提取，不能
-         * 直接取到行尾。取出的值须过严格 JSON 校验，否则整行跳过。 */
-        if (lea_json_object_raw(line, "result", e.result, sizeof(e.result))) {
-            if (!lea_json_is_valid(e.result)) continue;
-        } else {
-            const char *rp = strstr(line, "\"result\":null");
-            if (rp) snprintf(e.result, sizeof(e.result), "%s", "null");
-            else continue;
-        }
-        e.status = lea_idem_status_from_name(status);
-        e.dangerous = (int)dang;
-        e.created_at = created;
-        e.updated_at = updated;
+        lea_idem_load_line(t, line);
         /* 表满时停止继续加载，但保留已加载的条目（返回 1，不清空）。 */
         if (t->count >= LEA_IDEM_MAX) break;
-        t->entries[t->count++] = e;
     }
     return 1;
 }

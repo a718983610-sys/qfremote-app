@@ -118,6 +118,16 @@ static void test_response_and_base64(void) {
         30, NULL, "no such element \"x\"") == 1
         && strstr(resp, "\"ok\":false") && strstr(resp, "no such element \\\"x\\\""),
         "resp: error shape with escaping");
+    /* T24 同款（LEA→USH 读循环）：LEA 侧只认 '\n' 为完成，短读不算完成；
+     * 故 USH 两路响应必须恒以 '\n' 结尾，否则 LEA 会等到超时才收行。 */
+    {
+        size_t n = strlen(resp);
+        CHECK(n > 0 && resp[n - 1] == '\n', "resp: error ends with newline");
+        CHECK(ush_build_response(resp, sizeof(resp), 1, "done", "req-9", 12,
+            "{\"clicked\":true}", NULL) == 1, "resp: ok rebuilds");
+        n = strlen(resp);
+        CHECK(n > 0 && resp[n - 1] == '\n', "resp: ok ends with newline");
+    }
     CHECK(ush_build_response(resp, 10, 1, "done", "r", 1, "{}", NULL) == 0,
         "resp: too small buffer rejected");
 

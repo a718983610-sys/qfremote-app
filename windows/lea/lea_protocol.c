@@ -13,6 +13,7 @@
  * 使用，H08）。 */
 static int json_find_member(const char *text, const char *key, const char **val, size_t *val_len);
 static const char *json_decode_string(const char *p, char *out, size_t out_size, size_t *out_len);
+static const char *json_skip_ws(const char *p);
 
 /* ---------------- 命令表（DESIGN §4.4；超时见 §4.3） ---------------- */
 static const lea_command_spec_t k_commands[] = {
@@ -140,6 +141,39 @@ int lea_json_top_level_string(const char *text, const char *key, char *out, size
     if (vlen < 2 || val[0] != '"') return 0;
     if (!json_decode_string(val, out, out_size, NULL)) return 0;
     return 1;
+}
+
+/* 只认顶层对象成员的字符串数组值（#17 keys.sync-revoked 用）。 */
+int lea_json_top_level_string_array(const char *text, const char *key,
+                                    char out[][128], int max_items) {
+    if (!text || !key || !out || max_items <= 0) return -1;
+    const char *val = NULL;
+    size_t vlen = 0;
+    int r = json_find_member(text, key, &val, &vlen);
+    if (r != 1) return -1;
+    const char *p = json_skip_ws(val);
+    if (*p != '[') return -1;
+    p = json_skip_ws(p + 1);
+    int count = 0;
+    if (*p == ']') {
+        p = json_skip_ws(p + 1);
+        return (p == val + vlen) ? 0 : -1;
+    }
+    for (;;) {
+        p = json_skip_ws(p);
+        if (*p != '"') return -1;
+        if (count >= max_items) return -1;
+        const char *after = json_decode_string(p, out[count], 128, NULL);
+        if (!after) return -1;
+        count++;
+        p = json_skip_ws(after);
+        if (*p == ',') { p++; continue; }
+        if (*p == ']') {
+            p = json_skip_ws(p + 1);
+            return (p == val + vlen) ? count : -1;
+        }
+        return -1;
+    }
 }
 
 /* 取 params 对象原文（含花括号），做花括号配对。 */
@@ -871,9 +905,24 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
         set_err(out, LEA_ERR_BAD_ENVELOPE, "command");
         return 0;
     }
-    if (!lea_json_object_raw(text, "params", out->params_raw, sizeof(out->params_raw))) {
-        /* params 缺失时视为空对象（sys.info 等无参命令）。 */
-        snprintf(out->params_raw, sizeof(out->params_raw), "{}");
+    /* #22：区分“params 缺失”和“params 超长／非法”。缺失时视为空对象
+     * （sys.info 等无参命令）；字段存在但取不出对象原文（超 LEA_MAX_PARAMS
+     * 32768、非对象、JSON 残缺）即明确拒绝，绝不再静默置 {} 后改义执行。
+     * json_find_member 返回 -1（重复键／对象语法错／尾部多余内容）同样拒绝。 */
+    {
+        const char *pval = NULL;
+        size_t pvlen = 0;
+        int pr = json_find_member(text, "params", &pval, &pvlen);
+        if (pr < 0) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "params");
+            return 0;
+        }
+        if (pr == 0) {
+            snprintf(out->params_raw, sizeof(out->params_raw), "{}");
+        } else if (!lea_json_object_raw(text, "params", out->params_raw, sizeof(out->params_raw))) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "params-oversize-or-invalid");
+            return 0;
+        }
     }
     long long tmo = 0;
     {

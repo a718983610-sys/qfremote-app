@@ -86,6 +86,12 @@
 #define USH_TOKENS_SDDL_W L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;WD;;;AU)"
 #define PIPE_MAX_INSTANCES 8
 #define USH_CONNECT_TIMEOUT_MS 2000
+/* #14：LEA 管道读一行请求的总 deadline。旧实现读行无超时，一个连上不
+ * 发数据的客户端即可占住 1 个实例（最多 8 个），阻塞后续请求。 */
+#define LEA_PIPE_READ_TIMEOUT_MS 30000
+/* #14：管道响应写超时（句柄为 OVERLAPPED，同步 WriteFile 传 NULL 违反
+ * Win32 文档，见 #8）。 */
+#define LEA_PIPE_WRITE_TIMEOUT_MS 10000
 
 static SERVICE_STATUS_HANDLE g_status_handle = NULL;
 static SERVICE_STATUS g_status;
@@ -172,18 +178,31 @@ static int mkdir_one(const char *path) {
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-/* 目录／文件 ACL：仅 SYSTEM＋Administrators 完全控制。 */
-static void set_sys_admin_acl(const char *path_utf8) {
+/* 目录／文件 ACL：仅 SYSTEM＋Administrators 完全控制。
+ * #24：返回 1=已设置、0=失败——转换失败不再静默 return，调用方必须
+ * 处理（目录：记 ERROR 日志；刚写好的敏感文件：删文件＋记 ERROR，
+ * 见 set_acl_or_remove_file，绝不留一个继承父目录宽松 ACL 的状态文件）。 */
+static int set_sys_admin_acl(const char *path_utf8) {
     PSECURITY_DESCRIPTOR sd = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
             "D:(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL))
-        return;
+        return 0;
     WCHAR w[MAX_PATH];
     utf8_to_utf16(path_utf8, w, MAX_PATH);
-    SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
+    DWORD rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                           NULL, NULL, ((SECURITY_DESCRIPTOR *)sd)->Dacl, NULL);
     LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
+/* #24：给刚写好的敏感文件设 ACL；失败时删文件并记 ERROR（fail-closed，
+ * 不留宽松 ACL 的文件；调用方按“持久化失败”处理）。返回 1=文件在且 ACL 已设。 */
+static int set_acl_or_remove_file(const char *path_utf8) {
+    if (set_sys_admin_acl(path_utf8)) return 1;
+    svc_log("ERROR acl failed for %s, removing file (fail-closed)", path_utf8);
+    remove(path_utf8);
+    return 0;
 }
 
 /* USH token 目录 ACL（H03）：见 USH_TOKENS_SDDL_W。失败静默（调用方不
@@ -228,10 +247,16 @@ static void ensure_dirs(void) {
     mkdir_one(g_state_dir);
     mkdir_one(g_logs_dir);
     mkdir_one(g_work_dir);
-    set_sys_admin_acl(g_base_dir);
-    set_sys_admin_acl(g_state_dir);
-    set_sys_admin_acl(g_logs_dir);
-    set_sys_admin_acl(g_work_dir);
+    /* #24：目录 ACL 失败必须留 ERROR 日志（目录不能像文件那样删了重来，
+     * 服务仍须跑；但失败即意味着状态文件可能继承父目录宽松 ACL）。 */
+    if (!set_sys_admin_acl(g_base_dir))
+        svc_log("ERROR acl failed for base dir %s", g_base_dir);
+    if (!set_sys_admin_acl(g_state_dir))
+        svc_log("ERROR acl failed for state dir %s", g_state_dir);
+    if (!set_sys_admin_acl(g_logs_dir))
+        svc_log("ERROR acl failed for logs dir %s", g_logs_dir);
+    if (!set_sys_admin_acl(g_work_dir))
+        svc_log("ERROR acl failed for work dir %s", g_work_dir);
     snprintf(g_idem_path, sizeof(g_idem_path), "%s\\idempotency.jsonl", g_state_dir);
     snprintf(g_binding_path, sizeof(g_binding_path), "%s\\binding.dat", g_state_dir);
     snprintf(g_revoked_path, sizeof(g_revoked_path), "%s\\revoked_keys.txt", g_state_dir);
@@ -295,47 +320,60 @@ static void audit_for_envelope(const lea_envelope_t *env, const char *event,
 
 /* ---------- 幂等持久化 ---------- */
 static void idem_persist_locked(void) {
-    /* 调用方须持有 g_lock。表可能很大时仍全量重写（MVP：表 ≤2048 条）。 */
-    static char *buf = NULL;
-    static size_t buf_size = 0;
-    if (!buf) {
-        buf_size = 4 * 1024 * 1024;
-        buf = (char *)malloc(buf_size);
-        if (!buf) return;
-    }
-    if (!lea_idem_save_text(&g_idem, buf, buf_size)) {
-        svc_log("WARN idem save overflow, table not persisted");
-        return;
-    }
+    /* 调用方须持有 g_lock。#26：逐行流式写 tmp 文件，不再要求整表先装进
+     * 一块 4MB 内存缓冲（旧实现超 4MB 即记 WARN、不落盘，重启后终态命令
+     * 可重复执行）。写失败／ACL 失败即丢弃 tmp、保留旧快照。 */
     char tmp_path[MAX_PATH];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g_idem_path);
     FILE *f = fopen(tmp_path, "w");
     if (!f) return;
-    fputs(buf, f);
-    fclose(f);
+    int skipped = 0;
+    int ok = lea_idem_save_to_file(&g_idem, f, &skipped);
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (skipped > 0)
+        svc_log("WARN idem save skipped %d invalid lines", skipped);
+    if (!ok) {
+        svc_log("WARN idem save failed, keeping previous snapshot");
+        remove(tmp_path);
+        return;
+    }
+    if (!set_sys_admin_acl(tmp_path)) {
+        svc_log("ERROR idem acl failed, keeping previous snapshot");
+        remove(tmp_path);
+        return;
+    }
     /* 原子替换：先删旧文件再改名（Windows MoveFile 不覆盖已存在目标时用此法）。 */
     remove(g_idem_path);
-    rename(tmp_path, g_idem_path);
-    set_sys_admin_acl(g_idem_path);
+    if (rename(tmp_path, g_idem_path) != 0) {
+        svc_log("WARN idem rename failed, keeping previous snapshot");
+        remove(tmp_path);
+    }
 }
 
 static void idem_load(void) {
+    /* #26：逐行流式读，不再整文件读进 4MB 上限缓冲（旧实现超 4MB 即整表
+     * 放弃加载）。坏行由 lea_idem_load_line 隔离跳过。 */
     FILE *f = fopen(g_idem_path, "r");
     if (!f) return;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 4 * 1024 * 1024) { fclose(f); return; }
-    char *buf = (char *)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return; }
-    size_t r = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[r] = '\0';
-    if (!lea_idem_load_text(&g_idem, buf)) {
-        svc_log("WARN idem load failed, starting with empty table");
-        lea_idem_init(&g_idem);
+    lea_idem_init(&g_idem);
+    char line[LEA_IDEM_RESULT_MAX + 512];
+    for (;;) {
+        if (!fgets(line, sizeof(line), f)) break;
+        size_t len = strlen(line);
+        /* 行超缓冲（fgets 未读到换行且未到 EOF）：整行跳过，丢弃剩余部分。 */
+        if (len > 0 && line[len - 1] != '\n' && !feof(f)) {
+            int c;
+            do { c = fgetc(f); } while (c != EOF && c != '\n');
+            continue;
+        }
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (len == 0) continue;
+        lea_idem_load_line(&g_idem, line);
+        if (g_idem.count >= LEA_IDEM_MAX) break;
     }
-    free(buf);
+    fclose(f);
 }
 
 /* ---------- 绑定持久化（DPAPI LocalMachine） ---------- */
@@ -370,7 +408,9 @@ static void binding_persist_locked(void) {
     fwrite(out.pbData, 1, out.cbData, f);
     fclose(f);
     LocalFree(out.pbData);
-    set_sys_admin_acl(g_binding_path);
+    /* #24：ACL 失败即删文件（fail-closed，不留宽松 ACL 的 binding.dat；
+     * 下次启动即 UNBOUND，须重登重建绑定）。 */
+    set_acl_or_remove_file(g_binding_path);
 }
 
 static void binding_load(void) {
@@ -637,6 +677,14 @@ static int script_is_allowed(const char *script_path, char *norm_out, size_t nor
 }
 
 /* ---------- 执行：PowerShell 脚本 ---------- */
+/* 返回值：1=已执行（exit_code 有效），0=启动失败，-1=超时（已清树），
+ * -2=命令行超长（#23，调用方按 BAD_ENVELOPE 报 powershell-cmdline-too-long）。
+ * #21③：超时不再只 TerminateProcess 直接子进程——脚本进 Job Object
+ * （KILL_ON_JOB_CLOSE），超时用 TerminateJobObject 清整棵树，正常结束
+ * 后关闭 Job 句柄也会清掉残留的孙子进程，不留 SYSTEM 孤儿。Job 建不出／
+ * 挂不进时记日志并退回旧的 TerminateProcess（不因 Job 失败拒绝执行）。
+ * 挂 Job 须在子进程拉起孙子进程前完成：CREATE_SUSPENDED 起进程 → 挂 Job
+ * → ResumeThread（挂失败也照常 Resume，不卡进程）。 */
 static int run_powershell_script(const char *script_norm, char args[][512], int nargs,
                                  long timeout_ms, DWORD *exit_code,
                                  char *output, size_t output_size) {
@@ -657,19 +705,53 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hOut == INVALID_HANDLE_VALUE) return 0;
 
+    /* #23：先把全部参数引用好、算清总宽字符长度，超 8192 即拒绝；不再
+     * 依赖 wcscat_s 的失败语义（MSVC 失败是否清空整行存疑，且失败时已
+     * 拼入的参数会静默丢失）。wcscat_s 返回值仍逐一检查，双保险。 */
     WCHAR cmdline[8192];
     WCHAR wscript[MAX_PATH];
     utf8_to_utf16(script_norm, wscript, MAX_PATH);
-    _snwprintf(cmdline, 8192,
+    int pre = _snwprintf(cmdline, 8192,
                L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%s\"",
                wscript);
+    if (pre < 0 || pre >= 8192) {
+        CloseHandle(hOut);
+        return -2;
+    }
+    size_t need = (size_t)pre + 1;
+    WCHAR wargs[16][1100];
+    if (nargs > 16) nargs = 16;
     for (int i = 0; i < nargs; i++) {
         char q[1100];
         quote_arg(args[i], q, sizeof(q));
-        WCHAR wq[1100];
-        utf8_to_utf16(q, wq, 1100);
-        wcscat_s(cmdline, 8192, L" ");
-        wcscat_s(cmdline, 8192, wq);
+        utf8_to_utf16(q, wargs[i], 1100);
+        need += 1 + wcslen(wargs[i]);
+    }
+    if (need >= 8192) {
+        CloseHandle(hOut);
+        return -2;
+    }
+    for (int i = 0; i < nargs; i++) {
+        if (wcscat_s(cmdline, 8192, L" ") != 0 ||
+            wcscat_s(cmdline, 8192, wargs[i]) != 0) {
+            CloseHandle(hOut);
+            return -2;
+        }
+    }
+    /* Job Object（#21③）：先建 Job、配 KILL_ON_JOB_CLOSE，建不出即不用。 */
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    DWORD create_flags = CREATE_NO_WINDOW;
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        ZeroMemory(&jeli, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
+                                    &jeli, sizeof(jeli)))
+            create_flags |= CREATE_SUSPENDED;
+        else {
+            CloseHandle(hJob);
+            hJob = NULL;
+        }
     }
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
@@ -684,22 +766,34 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
                                NULL, OPEN_EXISTING, 0, NULL);
     if (si.hStdInput == INVALID_HANDLE_VALUE) {
         CloseHandle(hOut);
+        if (hJob) CloseHandle(hJob);
         return 0;
     }
     ZeroMemory(&pi, sizeof(pi));
     if (!CreateProcessW(ps_path, cmdline, NULL, NULL, TRUE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+                        create_flags, NULL, NULL, &si, &pi)) {
         CloseHandle(hOut);
         CloseHandle(si.hStdInput);
+        if (hJob) CloseHandle(hJob);
         return 0;
     }
     CloseHandle(hOut);
     CloseHandle(si.hStdInput);
+    if (hJob && !AssignProcessToJobObject(hJob, pi.hProcess)) {
+        /* 挂不进（如父进程已在 Job 内）：记日志，退回 TerminateProcess。 */
+        svc_log("WARN powershell job assign failed %lu, timeout kills direct child only",
+                (unsigned long)GetLastError());
+        CloseHandle(hJob);
+        hJob = NULL;
+    }
+    if (create_flags & CREATE_SUSPENDED) ResumeThread(pi.hThread);
     DWORD w = WaitForSingleObject(pi.hProcess, (DWORD)timeout_ms);
     if (w == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 1);
+        if (hJob) TerminateJobObject(hJob, 1);
+        else TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        if (hJob) CloseHandle(hJob);
         return -1;
     }
     DWORD code = 1;
@@ -707,6 +801,8 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
     if (exit_code) *exit_code = code;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    /* 正常结束也关 Job 句柄：KILL_ON_JOB_CLOSE 会清掉脚本残留的孙子进程。 */
+    if (hJob) CloseHandle(hJob);
     /* 读回输出（截断到 output_size-1）。 */
     FILE *f = fopen(out_path, "rb");
     if (f) {
@@ -791,8 +887,53 @@ static int app_open_allowed(const char *path, char *norm_out, size_t norm_size,
 }
 
 /* ---------- USH 转发 ---------- */
+/* #8：句柄以 FILE_FLAG_OVERLAPPED 打开时，WriteFile/ReadFile 必须传
+ * OVERLAPPED（传 NULL 违反 Win32 文档、行为不可靠）；读侧用一个绝对
+ * deadline（start+timeout_ms），每 chunk 只等剩余时间，不再每 chunk
+ * 等完整 timeout_ms（慢速响应可把等待拉长到多倍 timeout）。
+ * 注：LEA→USH 转发此前从未在真机跑过；修后须阿里真机冒烟覆盖此路径
+ * （见改动清单遗留项）。 */
+static int ush_write_all_overlapped(HANDLE pipe, const char *buf, size_t len,
+                                    ULONGLONG deadline_tick) {
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) return 0;
+    size_t sent = 0;
+    int ok = 0;
+    while (sent < len) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        /* 每轮重用事件前先复位：系统不在新操作开始时复位事件，残留的
+         * signaled 会让 WaitForSingleObject 误判已完成。 */
+        ResetEvent(ev);
+        DWORD chunk = 0;
+        DWORD want = (DWORD)(len - sent);
+        BOOL r = WriteFile(pipe, buf + sent, want, &chunk, &ov);
+        if (!r && GetLastError() == ERROR_IO_PENDING) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) { CancelIo(pipe); break; }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                break;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &chunk, FALSE)) break;
+        } else if (!r) {
+            break;
+        }
+        if (chunk == 0) break;
+        sent += chunk;
+    }
+    if (sent == len) ok = 1;
+    CloseHandle(ev);
+    return ok;
+}
+
 static int ush_forward(const char *envelope_line, long timeout_ms,
                        char *resp, size_t resp_size, char *detail, size_t detail_size) {
+    /* 绝对 deadline：写＋读共享同一个 timeout_ms 预算。 */
+    ULONGLONG deadline_tick = GetTickCount64() +
+        (ULONGLONG)(timeout_ms > 0 ? timeout_ms : 5000);
     HANDLE pipe = INVALID_HANDLE_VALUE;
     if (!WaitNamedPipeW(USH_PIPE_NAME_W, USH_CONNECT_TIMEOUT_MS)) {
         snprintf(detail, detail_size, "%s", "ush-pipe-connect-timeout-or-missing");
@@ -807,7 +948,6 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
     }
     DWORD mode = PIPE_READMODE_BYTE;
     SetNamedPipeHandleState(pipe, &mode, NULL, NULL);
-    DWORD written = 0;
     char sendbuf[LEA_MAX_ENVELOPE + 2];
     size_t slen = strlen(envelope_line);
     if (slen + 1 > sizeof(sendbuf)) {
@@ -818,31 +958,37 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
     memcpy(sendbuf, envelope_line, slen);
     sendbuf[slen] = '\n';
     sendbuf[slen + 1] = '\0';
-    if (!WriteFile(pipe, sendbuf, (DWORD)(slen + 1), &written, NULL) ||
-        written != slen + 1) {
+    if (!ush_write_all_overlapped(pipe, sendbuf, slen + 1, deadline_tick)) {
         CloseHandle(pipe);
         snprintf(detail, detail_size, "%s", "ush-write-failed");
         return 0;
     }
-    /* 带超时的读：用 OVERLAPPED + WaitForSingleObject 做 deadline。 */
-    OVERLAPPED ov;
-    memset(&ov, 0, sizeof(ov));
-    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!ov.hEvent) {
+    /* 带绝对 deadline 的读：每次只等剩余时间。 */
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) {
         CloseHandle(pipe);
         snprintf(detail, detail_size, "%s", "event-failed");
         return 0;
     }
     size_t total = 0;
-    DWORD deadline = (DWORD)(timeout_ms > 0 ? timeout_ms : 5000);
     int ok = 0;
     char chunk[4096];
     while (total + 1 < resp_size) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        /* 同写侧：每轮重用事件前先复位，防残留 signaled 误判。 */
+        ResetEvent(ev);
         DWORD got = 0;
         BOOL r = ReadFile(pipe, chunk, sizeof(chunk), &got, &ov);
         if (!r && GetLastError() == ERROR_IO_PENDING) {
-            DWORD wr = WaitForSingleObject(ov.hEvent, deadline);
-            if (wr != WAIT_OBJECT_0) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) {
+                CancelIo(pipe);
+                break;
+            }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
                 CancelIo(pipe);
                 break;
             }
@@ -850,16 +996,20 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
         } else if (!r) {
             break;
         }
-        if (got == 0) break;
+        /* T24 同款（M-B 修法，同根）：got==0（对端关闭）时，若已收到部分
+         * 数据即视为本次响应结束（无换行也以已收内容为准）；尚未收到任何
+         * 数据则仍判无响应。管道短读是常态，不得把 got < sizeof(chunk)
+         * 当作完成。 */
+        if (got == 0) { if (total > 0) ok = 1; break; }
         size_t take = got;
         if (total + take >= resp_size) take = resp_size - total - 1;
         memcpy(resp + total, chunk, take);
         total += take;
         resp[total] = '\0';
         if (memchr(chunk, '\n', got)) { ok = 1; break; }
-        if (got < sizeof(chunk)) { ok = 1; break; }
+        /* 短读继续读：只有读到换行、对端关闭或超时才算完成。 */
     }
-    CloseHandle(ov.hEvent);
+    CloseHandle(ev);
     CloseHandle(pipe);
     if (!ok || total == 0) {
         snprintf(detail, detail_size, "%s", "ush-read-timeout-or-empty");
@@ -878,6 +1028,37 @@ static int ush_probe(void) {
     if (pipe == INVALID_HANDLE_VALUE) return 0;
     CloseHandle(pipe);
     return 1;
+}
+
+/* #7：响应构造包装——lea_build_response 放不下时返回 0 且 resp 里是截断
+ * 半行 JSON；各处若不检查返回值就原样发回，客户端收到非法 JSON。
+ * 此处统一检查：失败时改发预置的小错误 JSON（detail=response-overflow），
+ * 绝不发送截断半行。request_id 只取 token 字符集内的前缀后拼入，
+ * 保证 fallback 本身恒为合法 JSON。 */
+static void build_resp(char *resp, size_t resp_size, int ok, const char *code,
+                       const char *request_id, int retryable,
+                       const char *detail, const char *result_json) {
+    if (lea_build_response(resp, resp_size, ok, code, request_id, retryable,
+                           detail, result_json))
+        return;
+    svc_log("ERROR response-overflow code=%s request=%s",
+            code ? code : "", request_id ? request_id : "");
+    char rid[64] = { 0 };
+    if (request_id) {
+        size_t i = 0;
+        for (; i < sizeof(rid) - 1 && request_id[i]; i++) {
+            char c = request_id[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                break;
+            rid[i] = c;
+        }
+        rid[i] = '\0';
+    }
+    snprintf(resp, resp_size,
+             "{\"ok\":false,\"code\":\"%s\",\"request_id\":\"%s\",\"retryable\":false,"
+             "\"detail\":\"response-overflow\",\"result\":null}\n",
+             LEA_ERR_INTERNAL, rid);
 }
 
 /* ---------- 队列项上下文（引用计数：管道线程与 worker 各持 1 份引用；
@@ -910,7 +1091,7 @@ static void execute_item(lea_queue_item_t *item) {
      * result_json＋SetEvent＋释放 worker 侧引用）。 */
     if (t0 > env->expires_at + LEA_MAX_CLOCK_SKEW_SEC) {
         char resp[LEA_MAX_RESPONSE] = { 0 };
-        lea_build_response(resp, sizeof(resp), 0, LEA_ERR_EXPIRED, env->request_id, 0,
+        build_resp(resp, sizeof(resp), 0, LEA_ERR_EXPIRED, env->request_id, 0,
                            "expired-before-execution", NULL);
         EnterCriticalSection(&g_lock);
         if (item->idem) {
@@ -978,7 +1159,12 @@ static void execute_item(lea_queue_item_t *item) {
                         char output[8192] = { 0 };
                         int r = run_powershell_script(norm, args, nargs, timeout_ms,
                                                       &exit_code, output, sizeof(output));
-                        if (r == -1) {
+                        if (r == -2) {
+                            /* #23：命令行超 8192 宽字符——参数未被截断执行，
+                             * 明确报 BAD_ENVELOPE，调用方缩短参数后重试。 */
+                            ok = 0; code = LEA_ERR_BAD_ENVELOPE;
+                            snprintf(detail, sizeof(detail), "%s", "powershell-cmdline-too-long");
+                        } else if (r == -1) {
                             ok = 0; code = LEA_ERR_TIMEOUT;
                             snprintf(detail, sizeof(detail), "script-timeout-ms:%ld", timeout_ms);
                         } else if (r == 0) {
@@ -1206,12 +1392,21 @@ static void execute_item(lea_queue_item_t *item) {
                 code = LEA_ERR_EXEC_FAILED;
                 snprintf(detail, sizeof(detail), "%s", "ush-failed-no-code");
             }
+            /* #7：ush_resp 最长近 64KB，转义后可能超 64KB。转义失败即
+             * 丢弃 result、明言 ush-response-too-large，绝不把截断半行
+             * 拼进 result 发回（build_resp 的 fallback 只兜底整行放不下，
+             * 兜不住 result 内部已截断的情形）。 */
             size_t off = 0;
             off += (size_t)snprintf(result_buf + off, sizeof(result_buf) - off,
                                     "{\"ush_response\":\"");
-            lea_json_escape_into(result_buf, sizeof(result_buf), &off, ush_resp);
-            snprintf(result_buf + off, sizeof(result_buf) - off, "\"}");
-            result_json = result_buf;
+            if (!lea_json_escape_into(result_buf, sizeof(result_buf), &off, ush_resp)) {
+                ok = 0; code = LEA_ERR_INTERNAL;
+                snprintf(detail, sizeof(detail), "%s", "ush-response-too-large");
+                result_json = NULL;
+            } else {
+                snprintf(result_buf + off, sizeof(result_buf) - off, "\"}");
+                result_json = result_buf;
+            }
         }
     } else {
         ok = 0; code = LEA_ERR_BAD_ENVELOPE;
@@ -1220,7 +1415,7 @@ static void execute_item(lea_queue_item_t *item) {
 
     long duration_ms = (long)((now_unix() - t0) * 1000);
     (void)duration_ms;
-    lea_build_response(resp, sizeof(resp), ok, code, env->request_id,
+    build_resp(resp, sizeof(resp), ok, code, env->request_id,
                        lea_error_retryable(code), detail[0] ? detail : "",
                        result_json);
     /* 幂等终态＋审计 */
@@ -1300,7 +1495,7 @@ static void handle_sys_info(const lea_envelope_t *env, char *resp, size_t resp_s
              "\"queue_max\":%d,\"ush_available\":%s,\"uptime_s\":%ld}",
              LEA_VERSION_STR, LEA_PROTOCOL_VERSION, bstate, account, epoch,
              qd, LEA_QUEUE_MAX, ush ? "true" : "false", uptime);
-    lea_build_response(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
 }
 
 /* ---------- 内部命令（登录事件／绑定票据／登出） ---------- */
@@ -1308,13 +1503,13 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
     char cmd[64] = { 0 };
     /* H08：内部命令各字段同样只认顶层成员（嵌套同名键不得遮蔽顶层值）。 */
     if (!lea_json_top_level_string(text, "cmd", cmd, sizeof(cmd))) {
-        lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "cmd-missing", NULL);
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "cmd-missing", NULL);
         return;
     }
     if (strcmp(cmd, "session.login_changed") == 0) {
         char account[128] = { 0 }, device[128] = { 0 };
         if (!lea_json_top_level_string(text, "account_id", account, sizeof(account)) || !account[0]) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "account_id-missing", NULL);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "account_id-missing", NULL);
             return;
         }
         lea_json_top_level_string(text, "device_id", device, sizeof(device));
@@ -1339,10 +1534,10 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         svc_log("binding login_changed account=%s epoch=%lld -> PENDING", account, epoch);
         char result[256];
         if (!lea_binding_login_result(epoch, result, sizeof(result))) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "login-result-too-small", NULL);
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "login-result-too-small", NULL);
             return;
         }
-        lea_build_response(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
     if (strcmp(cmd, "session.logout") == 0) {
@@ -1358,7 +1553,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.detail = "logout: binding revoked, no rollback";
         audit_event(&ev);
         svc_log("binding logout -> UNBOUND");
-        lea_build_response(resp, resp_size, 1, LEA_OK, "", 0, "", NULL);
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", NULL);
         return;
     }
     if (strcmp(cmd, "binding.confirm") == 0) {
@@ -1368,7 +1563,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
          * lea_ticket_canonical() 拒绝），调用点不得 truthy 归一化。 */
         lea_ticket_t tk;
         if (!lea_parse_ticket(text, &tk)) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "ticket-fields-invalid", NULL);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "ticket-fields-invalid", NULL);
             svc_log("binding confirm rejected: ticket-fields-invalid");
             return;
         }
@@ -1379,7 +1574,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         if (!lea_ticket_canonical(tk.account_id, tk.device_id, tk.binding_epoch, tk.grant_epoch,
                                   tk.grant_muse_execute, tk.scopes, tk.lease_id, tk.expires_at,
                                   canonical, sizeof(canonical))) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "canonical-build-failed", NULL);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "canonical-build-failed", NULL);
             svc_log("binding confirm rejected: canonical-build-failed");
             return;
         }
@@ -1387,7 +1582,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         if (!lea_verify_ticket_signature(tk.signature, canonical, reason, sizeof(reason))) {
             const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0
                 ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
-            lea_build_response(resp, resp_size, 0, code, "", 0, reason, NULL);
+            build_resp(resp, resp_size, 0, code, "", 0, reason, NULL);
             svc_log("binding confirm rejected: %s", reason);
             return;
         }
@@ -1399,7 +1594,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         long long cur_epoch = g_binding.epoch;
         LeaveCriticalSection(&g_lock);
         if (!okc) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, "", 0,
+            build_resp(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, "", 0,
                                "epoch-mismatch-or-not-pending", NULL);
             return;
         }
@@ -1417,10 +1612,49 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         char result[256];
         snprintf(result, sizeof(result),
                  "{\"binding_state\":\"ACTIVE\",\"binding_epoch\":%lld}", cur_epoch);
-        lea_build_response(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
-    lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "unknown-internal-cmd", NULL);
+    if (strcmp(cmd, "keys.sync-revoked") == 0) {
+        /* #17：C 侧吊销表写入方。主程序在 rebind 拿到 revoked_key_ids 后
+         * 经 qf-lea-client.exe --internal 发
+         * {"cmd":"keys.sync-revoked","key_ids":["k_...","k_..."]}，
+         * 全量替换本机 revoked_keys.txt（与服务端下发前推送 H21 同格式，
+         * 一行一个 id）。调用方已由 pipe_client_thread 按 H01 验过
+         * （安装目录客户端＋主程序父进程），此处不再另验。
+         * key_ids 缺失／非数组／元素非法即拒绝，不写残集；写盘失败
+         * （含 ACL 失败删文件）即报 INTERNAL，调用方下次下发前服务端
+         * 推送会重新同步（H21 pushed_epoch 未追上即重推）。 */
+        char ids[LEA_REVOKED_MAX_IDS][128];
+        int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
+        if (n < 0) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
+            return;
+        }
+        const char *ptrs[LEA_REVOKED_MAX_IDS];
+        for (int i = 0; i < n; i++) ptrs[i] = ids[i];
+        if (!lea_revoked_write(g_revoked_path, ptrs, n)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoked-write-failed", NULL);
+            svc_log("ERROR keys.sync-revoked write failed count=%d", n);
+            return;
+        }
+        if (!set_sys_admin_acl(g_revoked_path))
+            /* 只记 ERROR，不删文件：主路径（服务端 H21 推送）写此文件时
+             * 同样不设 ACL，删了反而丢吊销数据；下次下发前服务端会重推。 */
+            svc_log("ERROR keys.sync-revoked acl failed for %s", g_revoked_path);
+        lea_audit_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "keys";
+        ev.command = "keys.sync-revoked";
+        ev.result = "ok";
+        ev.detail = "revoked_keys.txt replaced from rebind";
+        audit_event(&ev);
+        char result[128];
+        snprintf(result, sizeof(result), "{\"revoked_count\":%d}", n);
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        return;
+    }
+    build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "unknown-internal-cmd", NULL);
 }
 
 /* ---------- 信封处理（管道线程） ---------- */
@@ -1431,7 +1665,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         /* 解析失败时 request_id 可能未知；尽力提取后回包。 */
         char rid[64] = { 0 };
         lea_json_string(text, "request_id", rid, sizeof(rid));
-        lea_build_response(resp, resp_size, 0, env.error, rid,
+        build_resp(resp, resp_size, 0, env.error, rid,
                            lea_error_retryable(env.error),
                            env.error_detail[0] ? env.error_detail : "", NULL);
         svc_log("REJECT parse error=%s detail=%s", env.error, env.error_detail);
@@ -1442,7 +1676,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
      * （batch_id／seq／account_id／api_key_id／timeout_ms／params 哈希）。 */
     char canonical[4096];
     if (!lea_envelope_canonical(&env, canonical, sizeof(canonical))) {
-        lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env.request_id, 0,
                            "canonical-build-failed", NULL);
         audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_BAD_ENVELOPE, 0,
                            "canonical-build-failed");
@@ -1453,7 +1687,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     if (!lea_verify_envelope_signature(env.signature, canonical, reason, sizeof(reason))) {
         const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0
             ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
-        lea_build_response(resp, resp_size, 0, code, env.request_id, 0, reason, NULL);
+        build_resp(resp, resp_size, 0, code, env.request_id, 0, reason, NULL);
         audit_for_envelope(&env, "admit-reject", "rejected", code, 0, reason);
         svc_log("REJECT sig request=%s reason=%s", env.request_id, reason);
         return;
@@ -1470,7 +1704,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
             snprintf(err, sizeof(err), "%s", LEA_ERR_KEY_REVOKED);
         }
         if (!admitted) {
-            lea_build_response(resp, resp_size, 0, err, env.request_id,
+            build_resp(resp, resp_size, 0, err, env.request_id,
                                lea_error_retryable(err), "", NULL);
             audit_for_envelope(&env, "admit-reject", "rejected", err, 0, "");
             return;
@@ -1483,7 +1717,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     int fresh = lea_replay_check_and_add(&g_replay, env.request_id, env.nonce, t0);
     LeaveCriticalSection(&g_lock);
     if (!fresh) {
-        lea_build_response(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
                            "nonce-or-request_id-reused", NULL);
         audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_REPLAY, 0,
                            "replay");
@@ -1499,7 +1733,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         snprintf(err, sizeof(err), "%s", LEA_ERR_KEY_REVOKED);
     }
     if (!admitted) {
-        lea_build_response(resp, resp_size, 0, err, env.request_id,
+        build_resp(resp, resp_size, 0, err, env.request_id,
                            lea_error_retryable(err), "", NULL);
         audit_for_envelope(&env, "admit-reject", "rejected", err, 0, "");
         svc_log("REJECT admit request=%s code=%s", env.request_id, err);
@@ -1517,7 +1751,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
                                          env.batch_id, env.seq, t0, &batch_prev_seq);
         LeaveCriticalSection(&g_lock);
         if (!seq_ok) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
+            build_resp(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
                                "batch-seq-not-monotonic", NULL);
             audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_REPLAY, 0,
                                "batch-seq-not-monotonic");
@@ -1544,20 +1778,20 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     }
     if (idem && idem->status == LEA_IDEM_RUNNING) {
         LeaveCriticalSection(&g_lock);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_DUPLICATE, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_DUPLICATE, env.request_id, 0,
                            "same idempotency_key already running", NULL);
         audit_for_envelope(&env, "execute", "rejected", LEA_ERR_DUPLICATE, 0, "");
         return;
     }
     if (idem && idem->status == LEA_IDEM_UNKNOWN) {
         LeaveCriticalSection(&g_lock);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_UNKNOWN, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_UNKNOWN, env.request_id, 0,
                            "previous attempt outcome unknown; confirm manually", NULL);
         return;
     }
     if (!idem) {
         LeaveCriticalSection(&g_lock);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0,
                            "idempotency-table-full", NULL);
         return;
     }
@@ -1575,7 +1809,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         lea_idem_set_status(&g_idem, idem, LEA_IDEM_UNKNOWN, NULL, t0);
         idem_persist_locked();
         LeaveCriticalSection(&g_lock);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0,
                            "alloc-failed", NULL);
         return;
     }
@@ -1596,7 +1830,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         lea_idem_set_status(&g_idem, idem, LEA_IDEM_RECEIVED, NULL, t0);
         idem_persist_locked();
         LeaveCriticalSection(&g_lock);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_QUEUE_FULL, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_QUEUE_FULL, env.request_id, 0,
                            "queue-full", NULL);
         audit_for_envelope(&env, "queue", "rejected", LEA_ERR_QUEUE_FULL, 0, "");
         return;
@@ -1610,7 +1844,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     if (w == WAIT_TIMEOUT) {
         char result[256];
         snprintf(result, sizeof(result), "{\"job_id\":\"%s\"}", env.request_id);
-        lea_build_response(resp, resp_size, 0, LEA_ERR_TIMEOUT, env.request_id, 0,
+        build_resp(resp, resp_size, 0, LEA_ERR_TIMEOUT, env.request_id, 0,
                            "execution still running past timeout_ms", result);
         audit_for_envelope(&env, "execute", "timeout", LEA_ERR_TIMEOUT,
                            (long)timeout_ms, "wait-timeout");
@@ -1624,18 +1858,93 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
 }
 
 /* ---------- 管道连接处理 ---------- */
+/* #14：重叠写一行响应（带超时；句柄为 FILE_FLAG_OVERLAPPED，同步
+ * WriteFile 传 NULL 不可靠）。 */
+static int pipe_write_all(HANDLE pipe, const char *buf, size_t len) {
+    ULONGLONG deadline_tick = GetTickCount64() + LEA_PIPE_WRITE_TIMEOUT_MS;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) return 0;
+    size_t sent = 0;
+    int ok = 0;
+    while (sent < len) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        ResetEvent(ev);
+        DWORD chunk = 0;
+        DWORD want = (DWORD)(len - sent);
+        BOOL r = WriteFile(pipe, buf + sent, want, &chunk, &ov);
+        if (!r && GetLastError() == ERROR_IO_PENDING) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) { CancelIo(pipe); break; }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                break;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &chunk, FALSE)) break;
+        } else if (!r) {
+            break;
+        }
+        if (chunk == 0) break;
+        sent += chunk;
+    }
+    if (sent == len) ok = 1;
+    CloseHandle(ev);
+    return ok;
+}
+
 static DWORD WINAPI pipe_client_thread(LPVOID param) {
     HANDLE pipe = (HANDLE)param;
     char buf[LEA_MAX_ENVELOPE + 1];
     size_t total = 0;
-    /* 读一行（'\n' 结束），上限 LEA_MAX_ENVELOPE。 */
+    /* #14：读一行（'\n' 结束），上限 LEA_MAX_ENVELOPE，总 deadline 30s。
+     * 旧实现同步 ReadFile 无超时，连上不发数据的客户端永久占住实例。
+     * 超时即断开、不处理（不把半行当请求解析）。 */
+    ULONGLONG deadline_tick = GetTickCount64() + LEA_PIPE_READ_TIMEOUT_MS;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    int read_timed_out = 0;
+    if (!ev) {
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+        return 0;
+    }
     while (total < LEA_MAX_ENVELOPE) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        ResetEvent(ev);
         DWORD got = 0;
-        BOOL ok = ReadFile(pipe, buf + total, (DWORD)(LEA_MAX_ENVELOPE - total), &got, NULL);
-        if (!ok || got == 0) break;
+        BOOL ok = ReadFile(pipe, buf + total, (DWORD)(LEA_MAX_ENVELOPE - total), &got, &ov);
+        if (!ok && GetLastError() == ERROR_IO_PENDING) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) {
+                CancelIo(pipe);
+                read_timed_out = 1;
+                break;
+            }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                read_timed_out = 1;
+                break;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) break;
+        } else if (!ok) {
+            break;
+        }
+        if (got == 0) break;
         total += got;
         buf[total] = '\0';
         if (memchr(buf, '\n', total)) break;
+    }
+    CloseHandle(ev);
+    if (read_timed_out) {
+        svc_log("WARN pipe read timeout (30s), disconnecting idle client");
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+        return 0;
     }
     if (total > 0) {
         buf[total] = '\0';
@@ -1661,7 +1970,7 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
                 ev.result = "rejected";
                 ev.detail = "internal-caller-not-allowed";
                 audit_event(&ev);
-                lea_build_response(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
+                build_resp(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
                                    "internal-caller-not-allowed", NULL);
             } else {
                 handle_internal(buf, resp, sizeof(resp));
@@ -1669,8 +1978,8 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
         } else {
             handle_envelope(buf, resp, sizeof(resp));
         }
-        DWORD written = 0;
-        WriteFile(pipe, resp, (DWORD)strlen(resp), &written, NULL);
+        /* #14：响应写同样走重叠 I/O（句柄为 OVERLAPPED）。 */
+        pipe_write_all(pipe, resp, strlen(resp));
     }
     FlushFileBuffers(pipe);
     DisconnectNamedPipe(pipe);
@@ -1692,8 +2001,10 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     sa.bInheritHandle = FALSE;
     svc_log("START pipe listening \\\\.\\pipe\\QFR\\LEA\\v1");
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
+        /* #14：实例以 FILE_FLAG_OVERLAPPED 创建，连接与读写一律走重叠 I/O，
+         * 读行才有总 deadline 可言（同步句柄的 ReadFile 无法设超时）。 */
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_MAX_INSTANCES, LEA_MAX_ENVELOPE, LEA_MAX_ENVELOPE, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
@@ -1701,9 +2012,25 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             Sleep(1000);
             continue;
         }
-        /* 同步等连接（监听线程阻塞；连接后另起线程处理）。
+        /* 重叠等连接（监听线程阻塞；连接后另起线程处理）。
          * 停止时 service_main 用一次本地客户端连接自唤醒（同 QFSysHelper）。 */
-        BOOL connected = ConnectNamedPipe(pipe, NULL);
+        HANDLE cev = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!cev) {
+            CloseHandle(pipe);
+            Sleep(1000);
+            continue;
+        }
+        OVERLAPPED cov;
+        memset(&cov, 0, sizeof(cov));
+        cov.hEvent = cev;
+        BOOL connected = ConnectNamedPipe(pipe, &cov);
+        if (!connected && GetLastError() == ERROR_IO_PENDING) {
+            if (WaitForSingleObject(cev, INFINITE) == WAIT_OBJECT_0) {
+                DWORD dummy = 0;
+                connected = GetOverlappedResult(pipe, &cov, &dummy, FALSE);
+            }
+        }
+        CloseHandle(cev);
         if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
             CloseHandle(pipe);
             continue;

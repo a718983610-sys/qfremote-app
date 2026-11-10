@@ -130,6 +130,14 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
     `session.login_changed` 的 result 格式由 `lea_binding_login_result`
     锁死并单测覆盖（H07 第二轮：main.js 从 `result.binding_epoch` 取
     epoch 去调 rebind，格式一变钩子就空转）。
+    吊销同步（内部命令 `keys.sync-revoked`，#17）：主程序在 rebind 拿到
+    `revoked_key_ids` 后经 `qf-lea-client.exe --internal` 发
+    `{"cmd":"keys.sync-revoked","key_ids":["k_..."]}`，全量替换本机
+    `state/revoked_keys.txt`（一行一个 id，去重＋排序；任一 id 非法即
+    整单拒绝，不写残集；回 `{"revoked_count":N}`）。主路径仍是服务端
+    下发前推送（H21，`lea-core.js syncRevocations` 经 runcommands 写本机
+    文件）；本命令是 C 侧的第二写入方，使 `key_is_revoked` 的检查不再是
+    “只读不写”的死机制。调用方同样先验 H01（安装目录客户端＋主程序父进程）。
 11. **危险命令初始定义**（待站长确认完整清单，DESIGN §14 #4）：`script.run`、
     `file.write`，以及 `params.dangerous=true` 的 `ui.click`／`ui.input`。
     危险命令禁自动重试、进单独 lane、幂等保留 30 天。
@@ -151,8 +159,8 @@ sh test/run_tests.sh
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 核心单测（测试构建） | **294 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）**、**H02 票据签名存取与加载重验、H03 信封行末 `ush_token` 插入、H07 同账号重登不升 epoch／换号升 epoch 且清签名、H07 第二轮 `lea_binding_login_result` 格式锁死** |
-| 核心单测（严格构建） | **289 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
+| 核心单测（测试构建） | **326 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）**、**H02 票据签名存取与加载重验、H03 信封行末 `ush_token` 插入、H07 同账号重登不升 epoch／换号升 epoch 且清签名、H07 第二轮 `lea_binding_login_result` 格式锁死**、**中组 C（#22 params 缺失／20KB 保留／40KB 拒绝／非对象拒绝、#17 顶层字符串数组＋吊销写入排序去重与非法整单拒绝、#26 700 条约 5.6MB 幂等表流式写盘与逐行加载回表）** |
+| 核心单测（严格构建） | **321 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
 | mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，503003 B）、`qf-lea-client.exe`（266641 B） |
 | 生产构建核查 | **通过** | `strings QFRLEA.exe` 不含 `test-only-unsigned-accepted`（0 处），含 `ed25519-pubkey-not-configured`（2 处） |
 | 白名单核查 | **通过** | `gen_whitelist.py --check`：`qf-agent-heal.ps1` sha256 与 `whitelist.h` 一致 |

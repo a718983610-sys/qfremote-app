@@ -32,6 +32,10 @@ extern "C" {
 #define LEA_MAX_ENVELOPE_TTL_SEC 60  /* expires_at - issued_at ≤ 60s */
 #define LEA_MAX_SCRIPT_OUTPUT 65536
 #define LEA_MAX_FILE_SIZE 1048576
+/* params 对象原文上限（#22）：与 USH 的 USH_MAX_PARAMS（32768）一致；
+ * 旧值 8192 会把长参数命令静默改成无参执行（超长 params 须明确拒绝，
+ * 见 lea_parse_envelope）。 */
+#define LEA_MAX_PARAMS 32768
 
 /* 错误码（DESIGN.md §4.5 为主；带 * 的为 MVP 补充码，见 README）。 */
 #define LEA_OK "done"
@@ -95,7 +99,7 @@ typedef struct {
     long long expires_at;
     char idempotency_key[128];
     char command[32];
-    char params_raw[8192]; /* params 对象原文（用于 params_hash 与参数提取） */
+    char params_raw[LEA_MAX_PARAMS]; /* params 对象原文（用于 params_hash 与参数提取） */
     long long timeout_ms;  /* 0=用命令默认超时 */
     int has_timeout;
     char signature[512];
@@ -126,6 +130,11 @@ int lea_json_bool(const char *text, const char *key, int *out);
  * 信封验签。顶层须为单个 JSON 对象且成员恰好出现一次；值须为 JSON
  * 字符串（按 JSON 转义解码）。 */
 int lea_json_top_level_string(const char *text, const char *key, char *out, size_t out_size);
+/* 只认顶层对象成员的字符串数组值（#17 keys.sync-revoked 用）：成员须恰好
+ * 出现一次、值为 JSON 数组、元素全为字符串（按 JSON 转义解码）。
+ * 返回元素个数（0=空数组），-1=缺失／类型错／重复键／元素溢出。 */
+int lea_json_top_level_string_array(const char *text, const char *key,
+                                    char out[][128], int max_items);
 /* 严格 JSON 值校验（H09：幂等快照写盘前校验行合法性）。 */
 int lea_json_is_valid(const char *text);
 int lea_json_object_raw(const char *text, const char *key, char *out, size_t out_size);

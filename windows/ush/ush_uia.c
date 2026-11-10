@@ -283,14 +283,24 @@ int ush_session_interactive(char *err_code, size_t err_size) {
         if (pstate) WTSFreeMemory(pstate);
         /* 查不到会话态时不直接放行：继续用输入桌面判据兜底 */
     }
-    /* ② 能打开输入桌面（锁屏时输入桌面是 Winlogon 桌面，OpenInputDesktop 失败
-     * 或返回非默认桌面；此处以打不开为锁屏判据）。 */
+    /* ② 打开输入桌面后查桌面名是否为 Default（#10）。锁屏时输入桌面切
+     * 到 Winlogon，OpenInputDesktop 可能成功返回 Winlogon 桌面句柄，
+     * 只看“打不打开”拦不住锁屏；桌面名不是 Default 即判锁屏。
+     * 桌面名取不到时 fail-closed（不放行）。 */
     HDESK desk = OpenInputDesktop(0, FALSE, GENERIC_READ);
     if (!desk) {
         if (err_code && err_size) strncpy(err_code, USH_ERR_SESSION_LOCKED, err_size - 1);
         return 0;
     }
+    WCHAR desk_name[64] = { 0 };
+    DWORD needed = 0;
+    BOOL name_ok = GetUserObjectInformationW(desk, UOI_NAME, desk_name,
+                                             sizeof(desk_name), &needed);
     CloseDesktop(desk);
+    if (!name_ok || _wcsicmp(desk_name, L"Default") != 0) {
+        if (err_code && err_size) strncpy(err_code, USH_ERR_SESSION_LOCKED, err_size - 1);
+        return 0;
+    }
     return 1;
 }
 
@@ -853,15 +863,16 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
         in.ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(1, &in, sizeof(INPUT));
     }
-    /* 确认：能读回 Value 时比对（只比对长度与前缀，避免长文本逐字误判） */
+    /* 确认：能读回 Value 时比对（#12：必须整串相等才算确认。旧逻辑把
+     * “现有值是输入文本前缀”也判 confirmed=true——要求输 "hello world"
+     * 而字段只剩 "hello" 时也会误报已输入）。 */
     int confirmed = 0;
     {
         char cur[4096];
         get_str_prop(el, UIA_ValueValuePropertyId, cur, sizeof(cur));
         if (cur[0]) {
             size_t tl = strlen(text), cl = strlen(cur);
-            confirmed = (cl >= tl && strncmp(cur, text, tl) == 0) ||
-                        (tl >= cl && cl > 0 && strncmp(text, cur, cl) == 0);
+            confirmed = (cl == tl && strncmp(cur, text, tl) == 0);
         } else if (strcmp(method, "value-pattern") == 0) {
             confirmed = 1; /* SetValue 返回 S_OK 即确认 */
         }

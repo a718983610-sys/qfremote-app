@@ -138,7 +138,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File register-ush.ps1 `
 
 ## 测试
 
-- 沙箱单测：`sh test/run_tests.sh`（纯逻辑层，宿主 gcc；58 项，见 `test/test_ush_json.c`）。
+- 沙箱单测：`sh test/run_tests.sh`（纯逻辑层，宿主 gcc；72 项，见 `test/test_ush_json.c`，
+  含 T24 同款契约：`ush_build_response` 两路响应恒以 `\n` 结尾——LEA→USH 读循环只认
+  `\n` 为完成，短读不算完成）。
 - Wine 冒烟：`test/pipe_probe.c`（mingw 编译）连管道发请求；Wine 下 `ui.ping` 通、
   未知命令／UI 失败均返回结构化错误、进程不崩、日志落盘、重复实例自退。
   Wine 无真实 UIA／无显示驱动，`ui.click/input/tree/snapshot` 在 Wine 下预期失败——

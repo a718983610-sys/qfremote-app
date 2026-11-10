@@ -188,19 +188,94 @@ static int pipe_probe_alive(void) {
 }
 
 /* ---------- 读一行请求（直到 \n 或上限） ---------- */
+/* #14：总 deadline 30s。旧实现逐字节同步读、无超时；USH 单实例串行，
+ * 一个连上不发数据的客户端即可占住实例，阻塞后续请求。超时返回 0
+ * （调用方直接断开，不处理半行）。 */
+#define USH_PIPE_READ_TIMEOUT_MS 30000
+#define USH_PIPE_WRITE_TIMEOUT_MS 10000
 static int read_request_line(HANDLE pipe, char *buf, size_t buf_size) {
+    ULONGLONG deadline_tick = GetTickCount64() + USH_PIPE_READ_TIMEOUT_MS;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) return 0;
     size_t n = 0;
+    int timed_out = 0;
+    char chunk[4096];
     while (n + 1 < buf_size) {
-        char c = 0;
-        DWORD read = 0;
-        if (!ReadFile(pipe, &c, 1, &read, NULL) || read == 0) {
-            return n > 0 ? 1 : 0; /* 对端关闭：有内容算一行，无内容算断开 */
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        ResetEvent(ev);
+        DWORD want = (DWORD)(buf_size - 1 - n);
+        if (want > sizeof(chunk)) want = sizeof(chunk);
+        DWORD got = 0;
+        BOOL r = ReadFile(pipe, chunk, want, &got, &ov);
+        if (!r && GetLastError() == ERROR_IO_PENDING) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) { CancelIo(pipe); timed_out = 1; break; }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                timed_out = 1;
+                break;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) break;
+        } else if (!r) {
+            break;
         }
-        if (c == '\n') break;
-        buf[n++] = c;
+        if (got == 0) break;
+        char *nl = memchr(chunk, '\n', got);
+        size_t take = nl ? (size_t)(nl - chunk) : got;
+        if (n + take >= buf_size - 1) take = buf_size - 1 - n;
+        memcpy(buf + n, chunk, take);
+        n += take;
+        if (nl) {
+            buf[n] = '\0';
+            CloseHandle(ev);
+            return 1;
+        }
+        if (n + 1 >= buf_size) break;
+        /* 短读且无换行：继续等（总 deadline 内），不把半行当整行解析。 */
     }
+    CloseHandle(ev);
     buf[n] = '\0';
-    return 1;
+    if (timed_out) return 0;
+    return n > 0 ? 1 : 0;
+}
+
+/* #14：重叠写响应（带超时；实例句柄为 FILE_FLAG_OVERLAPPED，同步
+ * WriteFile 传 NULL 不可靠，见 LEA #8）。 */
+static int ush_pipe_write_all(HANDLE pipe, const char *buf, size_t len) {
+    ULONGLONG deadline_tick = GetTickCount64() + USH_PIPE_WRITE_TIMEOUT_MS;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) return 0;
+    size_t sent = 0;
+    int ok = 0;
+    while (sent < len) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = ev;
+        ResetEvent(ev);
+        DWORD chunk = 0;
+        DWORD want = (DWORD)(len - sent);
+        BOOL r = WriteFile(pipe, buf + sent, want, &chunk, &ov);
+        if (!r && GetLastError() == ERROR_IO_PENDING) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline_tick) { CancelIo(pipe); break; }
+            DWORD wait_ms = (DWORD)(deadline_tick - now);
+            if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                break;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &chunk, FALSE)) break;
+        } else if (!r) {
+            break;
+        }
+        if (chunk == 0) break;
+        sent += chunk;
+    }
+    if (sent == len) ok = 1;
+    CloseHandle(ev);
+    return ok;
 }
 
 /* ---------- 单次请求处理 ---------- */
@@ -349,9 +424,11 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     }
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
         /* 注意：CreateNamedPipe 的缓冲大小只是内核缓冲，不是消息上限
-         * （WriteFile 可分片写大响应）；给 16MB 会建管道失败，须用小值。 */
+         * （WriteFile 可分片写大响应）；给 16MB 会建管道失败，须用小值。
+         * #14：实例以 FILE_FLAG_OVERLAPPED 创建，连接与读写一律走重叠 I/O，
+         * 读行才有总 deadline 可言（同步句柄的 ReadFile 无法设超时）。 */
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1, USH_MAX_REQUEST, USH_MAX_REQUEST, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
@@ -372,7 +449,25 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             Sleep(1000);
             continue;
         }
-        BOOL connected = ConnectNamedPipe(pipe, NULL);
+        /* #14：重叠等连接（监听线程阻塞；停止时主线程用一次本地客户端
+         * 连接自唤醒）。 */
+        HANDLE cev = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!cev) {
+            CloseHandle(pipe);
+            Sleep(1000);
+            continue;
+        }
+        OVERLAPPED cov;
+        memset(&cov, 0, sizeof(cov));
+        cov.hEvent = cev;
+        BOOL connected = ConnectNamedPipe(pipe, &cov);
+        if (!connected && GetLastError() == ERROR_IO_PENDING) {
+            if (WaitForSingleObject(cev, INFINITE) == WAIT_OBJECT_0) {
+                DWORD dummy = 0;
+                connected = GetOverlappedResult(pipe, &cov, &dummy, FALSE);
+            }
+        }
+        CloseHandle(cev);
         if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
             CloseHandle(pipe);
             continue;
@@ -384,8 +479,7 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             char deny[512];
             ush_build_response(deny, sizeof(deny), 0, USH_ERR_CALLER_NOT_ALLOWED, "", 0,
                                NULL, "pipe caller is not QFRLEA.exe or QFUserHelper.exe");
-            DWORD written = 0;
-            WriteFile(pipe, deny, (DWORD)strlen(deny), &written, NULL);
+            ush_pipe_write_all(pipe, deny, strlen(deny));
             FlushFileBuffers(pipe);
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
@@ -395,8 +489,7 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
         if (read_request_line(pipe, req_buf, sizeof(req_buf))) {
             DWORD dur = 0;
             handle_request(req_buf, resp_buf, USH_MAX_RESPONSE, &dur, caller);
-            DWORD written = 0;
-            WriteFile(pipe, resp_buf, (DWORD)strlen(resp_buf), &written, NULL);
+            ush_pipe_write_all(pipe, resp_buf, strlen(resp_buf));
         }
         FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);

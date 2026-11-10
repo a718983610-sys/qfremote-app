@@ -1377,6 +1377,213 @@ int main(void) {
         CHECK(!lea_rebuild_envelope(&e, tiny, sizeof(tiny)), "rebuild-tiny-buffer-fails-clean");
     }
 
+    /* ---------- #22 params：缺失为空对象、长参数保留、超长／非法明确拒绝 ---------- */
+    {
+        char *big = (char *)malloc(70000);
+        CHECK(big != NULL, "m22-alloc");
+        if (big) {
+            /* 缺失 params → {}。 */
+            {
+                char env2[2048];
+                snprintf(env2, sizeof(env2),
+                    "{\"version\":1,\"request_id\":\"req-m22a01\",\"batch_id\":\"batch-0001\","
+                    "\"seq\":1,\"device_id\":\"node-1\",\"account_id\":\"alice\","
+                    "\"api_key_id\":\"key-abc12345\",\"binding_epoch\":3,\"nonce\":\"nonce-m22a01\","
+                    "\"issued_at\":%lld,\"expires_at\":%lld,\"idempotency_key\":\"idem-m22a01\","
+                    "\"command\":\"sys.info\",\"timeout_ms\":5000,\"signature\":\"TEST-UNSIGNED\"}",
+                    now, now + 60);
+                lea_envelope_t e2;
+                CHECK(lea_parse_envelope(env2, now, &e2) && strcmp(e2.params_raw, "{}") == 0,
+                      "m22-params-missing-is-empty-object");
+            }
+            /* 约 20KB 合法 params（> 旧 8192 上限）须完整保留。 */
+            {
+                char pad[20000];
+                memset(pad, 'a', sizeof(pad) - 1);
+                pad[sizeof(pad) - 1] = '\0';
+                int n = snprintf(big, 70000,
+                    "{\"version\":1,\"request_id\":\"req-m22b01\",\"batch_id\":\"batch-0001\","
+                    "\"seq\":1,\"device_id\":\"node-1\",\"account_id\":\"alice\","
+                    "\"api_key_id\":\"key-abc12345\",\"binding_epoch\":3,\"nonce\":\"nonce-m22b01\","
+                    "\"issued_at\":%lld,\"expires_at\":%lld,\"idempotency_key\":\"idem-m22b01\","
+                    "\"command\":\"sys.info\",\"params\":{\"pad\":\"%s\"},"
+                    "\"timeout_ms\":5000,\"signature\":\"TEST-UNSIGNED\"}",
+                    now, now + 60, pad);
+                CHECK(n > 0 && n < 70000, "m22-big-built");
+                lea_envelope_t e2;
+                CHECK(lea_parse_envelope(big, now, &e2) && strlen(e2.params_raw) > 8192,
+                      "m22-params-20k-preserved");
+            }
+            /* 约 40KB params（> 32768 上限）须明确拒绝，不得静默置 {}。 */
+            {
+                char pad[40000];
+                memset(pad, 'b', sizeof(pad) - 1);
+                pad[sizeof(pad) - 1] = '\0';
+                int n = snprintf(big, 70000,
+                    "{\"version\":1,\"request_id\":\"req-m22c01\",\"batch_id\":\"batch-0001\","
+                    "\"seq\":1,\"device_id\":\"node-1\",\"account_id\":\"alice\","
+                    "\"api_key_id\":\"key-abc12345\",\"binding_epoch\":3,\"nonce\":\"nonce-m22c01\","
+                    "\"issued_at\":%lld,\"expires_at\":%lld,\"idempotency_key\":\"idem-m22c01\","
+                    "\"command\":\"sys.info\",\"params\":{\"pad\":\"%s\"},"
+                    "\"timeout_ms\":5000,\"signature\":\"TEST-UNSIGNED\"}",
+                    now, now + 60, pad);
+                CHECK(n > 0 && n < 70000, "m22-oversize-built");
+                lea_envelope_t e2;
+                CHECK(!lea_parse_envelope(big, now, &e2) &&
+                      strcmp(e2.error, LEA_ERR_BAD_ENVELOPE) == 0 &&
+                      strcmp(e2.error_detail, "params-oversize-or-invalid") == 0,
+                      "m22-params-40k-rejected");
+            }
+            /* params 非对象（字符串／数组）须拒绝。 */
+            {
+                lea_envelope_t e2;
+                make_envelope(env_buf, sizeof(env_buf), now, "sys.info", "\"x\"",
+                              3, "node-1", "alice", "idem-m22d01", "nonce-m22d01",
+                              "req-m22d01", "TEST-UNSIGNED");
+                CHECK(!lea_parse_envelope(env_buf, now, &e2), "m22-params-string-rejected");
+                make_envelope(env_buf, sizeof(env_buf), now, "sys.info", "[1,2]",
+                              3, "node-1", "alice", "idem-m22d02", "nonce-m22d02",
+                              "req-m22d02", "TEST-UNSIGNED");
+                CHECK(!lea_parse_envelope(env_buf, now, &e2), "m22-params-array-rejected");
+            }
+        }
+        free(big);
+    }
+
+    /* ---------- #17 吊销写入方＋顶层字符串数组 ---------- */
+    {
+        char ids[8][128];
+        int n = lea_json_top_level_string_array(
+            "{\"cmd\":\"keys.sync-revoked\",\"key_ids\":[\"k_abc1234567\",\"k_xyz1234567\"]}",
+            "key_ids", ids, 8);
+        CHECK(n == 2 && strcmp(ids[0], "k_abc1234567") == 0 && strcmp(ids[1], "k_xyz1234567") == 0,
+              "m17-top-array");
+        CHECK(lea_json_top_level_string_array(
+            "{\"cmd\":\"keys.sync-revoked\",\"key_ids\":[]}", "key_ids", ids, 8) == 0,
+            "m17-top-array-empty");
+        CHECK(lea_json_top_level_string_array(
+            "{\"cmd\":\"keys.sync-revoked\"}", "key_ids", ids, 8) == -1,
+            "m17-top-array-missing");
+        CHECK(lea_json_top_level_string_array(
+            "{\"cmd\":\"keys.sync-revoked\",\"key_ids\":\"k_abc1234567\"}", "key_ids", ids, 8) == -1,
+            "m17-top-array-not-array");
+        CHECK(lea_json_top_level_string_array(
+            "{\"cmd\":\"keys.sync-revoked\",\"key_ids\":[\"k_abc1234567\",123]}", "key_ids", ids, 8) == -1,
+            "m17-top-array-nonstring-elem");
+        /* 嵌套在 params 里的同名键不得命中顶层。 */
+        CHECK(lea_json_top_level_string_array(
+            "{\"cmd\":\"x\",\"params\":{\"key_ids\":[\"k_abc1234567\"]}}", "key_ids", ids, 8) == -1,
+            "m17-top-array-nested-not-matched");
+        /* 转义元素解码。 */
+        n = lea_json_top_level_string_array(
+            "{\"key_ids\":[\"k_a\\\"b\"]}", "key_ids", ids, 8);
+        CHECK(n == 1 && strcmp(ids[0], "k_a\"b") == 0, "m17-top-array-escaped");
+        /* lea_revoked_write：排序＋去重＋全量替换；非法 id 整单拒绝。 */
+        const char *path = "/tmp/m17-revoked.txt";
+        remove(path);
+        const char *set1[] = { "k_bbb2222222", "k_aaa1111111", "k_bbb2222222" };
+        CHECK(lea_revoked_write(path, set1, 3), "m17-revoked-write");
+        {
+            FILE *f = fopen(path, "r");
+            CHECK(f != NULL, "m17-revoked-readable");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\n") == 0, "m17-revoked-sorted-dedup");
+        }
+        const char *bad[] = { "k_aaa1111111", "bad id!" };
+        CHECK(!lea_revoked_write(path, bad, 2), "m17-revoked-bad-id-rejected");
+        {
+            /* 拒绝后文件内容不变（无残集）。 */
+            FILE *f = fopen(path, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\n") == 0, "m17-revoked-reject-keeps-file");
+        }
+        CHECK(lea_revoked_write(path, NULL, 0), "m17-revoked-clear");
+        {
+            FILE *f = fopen(path, "r");
+            int c = f ? fgetc(f) : -2;
+            if (f) fclose(f);
+            CHECK(c == EOF, "m17-revoked-empty-after-clear");
+        }
+        remove(path);
+    }
+
+    /* ---------- #26 幂等表超 4MB 仍持久化（流式写盘＋逐行加载） ---------- */
+    {
+        static lea_idem_t t26;
+        static lea_idem_t t26b;
+        lea_idem_init(&t26);
+        /* 每条 result 约 7900 字节、700 条 ≈ 5.6MB（> 旧 4MB 缓冲）。 */
+        char big_result[8100];
+        {
+            int pn = snprintf(big_result, sizeof(big_result),
+                "{\"ok\":true,\"code\":\"done\",\"request_id\":\"r26\",\"retryable\":false,"
+                "\"detail\":\"\",\"result\":{\"x\":\"");
+            memset(big_result + pn, 'a', 7800);
+            big_result[pn + 7800] = '\0';
+            strcat(big_result, "\"}}");
+        }
+        int created = 0;
+        for (int i = 0; i < 700; i++) {
+            char key[32];
+            snprintf(key, sizeof(key), "key-%04d", i);
+            lea_idem_entry_t *e = lea_idem_get_or_create(&t26, "node-1", "alice", key, 0, now);
+            if (!e) break;
+            lea_idem_set_status(&t26, e, LEA_IDEM_SUCCEEDED, big_result, now);
+            created++;
+        }
+        CHECK(created == 700 && t26.count == 700, "m26-create-700");
+        /* 旧路（4MB 内存缓冲）装不下：返回 0；新路（流式写文件）必须成功。 */
+        static char buf4m[4 * 1024 * 1024];
+        CHECK(!lea_idem_save_text(&t26, buf4m, sizeof(buf4m)), "m26-save-text-4mb-overflow");
+        const char *path26 = "/tmp/m26-idem.jsonl";
+        remove(path26);
+        FILE *f = fopen(path26, "w");
+        CHECK(f != NULL, "m26-open");
+        int skipped = -1;
+        int okw = f ? lea_idem_save_to_file(&t26, f, &skipped) : 0;
+        if (f) fclose(f);
+        CHECK(okw && skipped == 0, "m26-save-to-file");
+        long fsz = 0;
+        {
+            FILE *fr = fopen(path26, "rb");
+            if (fr) { fseek(fr, 0, SEEK_END); fsz = ftell(fr); fclose(fr); }
+        }
+        CHECK(fsz > 4 * 1024 * 1024, "m26-file-over-4mb");
+        /* 逐行加载回表：条数与终态结果完整。 */
+        lea_idem_init(&t26b);
+        {
+            FILE *fr = fopen(path26, "r");
+            CHECK(fr != NULL, "m26-reopen");
+            char line[LEA_IDEM_RESULT_MAX + 512];
+            while (fr && fgets(line, sizeof(line), fr)) {
+                size_t len = strlen(line);
+                while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                    line[--len] = '\0';
+                if (len) lea_idem_load_line(&t26b, line);
+            }
+            if (fr) fclose(fr);
+        }
+        CHECK(t26b.count == 700, "m26-load-count-700");
+        {
+            lea_idem_entry_t *e = lea_idem_lookup(&t26b, "node-1", "alice", "key-0699");
+            CHECK(e != NULL && e->status == LEA_IDEM_SUCCEEDED &&
+                  strcmp(e->result, big_result) == 0, "m26-load-result-intact");
+        }
+        /* 坏行隔离：load_line 拒坏行、不改表。 */
+        {
+            int before = t26b.count;
+            CHECK(!lea_idem_load_line(&t26b, "{\"device_id\":broken"), "m26-load-line-bad");
+            CHECK(t26b.count == before, "m26-load-line-bad-keeps-table");
+        }
+        remove(path26);
+    }
+
     printf("\n==== LEA core tests: %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
