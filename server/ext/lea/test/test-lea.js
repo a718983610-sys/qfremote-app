@@ -101,9 +101,11 @@ const genNoGrant = core.generateKey('carol', { device_scope: DEV });
 core.revokeGrant('carol', 'owner');
 adm = core.admit({ key: core.findKeyById(genNoGrant.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('账号授权已撤销 → 403 QFR_GRANT_REVOKED', adm.ok === false && adm.code === 'QFR_GRANT_REVOKED');
-// 未绑定设备（用无 device_scope 的 Key，免得先触发 SCOPE_DENIED）
+// 未绑定设备（用显式未绑定设备域的 Key，免得先触发 SCOPE_DENIED；
+  // DC-A-1：device_scope 为空的 Key 现由 generateKey 自动取设备，
+  // 此处须显式给未绑定设备域才能走到 NOT_BOUND 分支）
 core.grantMuse('carol', 'owner'); // 重新授予，genNoScope 才能建出
-const genNoScope = core.generateKey('carol', {});
+const genNoScope = core.generateKey('carol', { device_scope: 'node//never-bound' });
 adm = core.admit({ key: core.findKeyById(genNoScope.record.key_id), deviceId: 'node//never-bound', command: 'ui.click' });
 t('设备未绑定 → 403 QFR_LEA_NOT_BOUND', adm.ok === false && adm.code === 'QFR_LEA_NOT_BOUND');
 // 危险命令 scope
@@ -634,7 +636,7 @@ const mockChannel = {
   fs.writeFileSync(path.join(tmpDir, 'jobs.json'), JSON.stringify(jobsSt, null, 2));
   core.sweepStaleJobs();
   t('H14 失联 RUNNING job 推进为 UNKNOWN', core.getJob(staleJob.job_id).status === 'UNKNOWN');
-  t('H14 失联 job 的幂等键转 UNKNOWN（重试不再卡 409）', core.idemLookup(USER, g5.record.key_id, 'idem-stale-1').status === 'UNKNOWN');
+  t('H14 失联 job 的幂等键转 UNKNOWN（重试不再卡 409）', core.idemLookup(USER, g5.record.key_id, 'idem-stale-1', core.IDEM_NS.EXEC).status === 'UNKNOWN');
   // 新鲜 RUNNING job 不动
   const freshJob = core.createJob({
     account_id: USER, device_id: DEV, api_key_id: g5.record.key_id,
@@ -761,9 +763,9 @@ const mockChannel = {
   t('H13 路由 batches 重复提交返回缓存 duplicate', rh.code === 200 && rh.obj.duplicate === true && rh.obj.status === 'SUCCEEDED');
   t('H13 路由 batches 重复提交不重跑步骤', calls.length === callsBeforeDup);
   // H13：步级幂等键已写入 idemSeen
-  t('H13 步级幂等键已写入 idemSeen', core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1') !== null
-    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1').status === 'SUCCEEDED'
-    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-2').status === 'SUCCEEDED');
+  t('H13 步级幂等键已写入 idemSeen', core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1', core.IDEM_NS.STEP) !== null
+    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-1', core.IDEM_NS.STEP).status === 'SUCCEEDED'
+    && core.idemLookup(USER, g6.record.key_id, 'route-batch-1-2', core.IDEM_NS.STEP).status === 'SUCCEEDED');
   // H13：含失败步的批次终态 FAILED（不谎称 SUCCEEDED）
   rh = await callRoute('POST', '/api/lea/v1/batches',
     Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-badstep' }),
@@ -772,9 +774,9 @@ const mockChannel = {
   // H13（DS 复查）：UNKNOWN 重试时 steps 指纹不一致 → 步级缓存不复用
   const fpSteps = [{ command: 'sys.info', params: {} }, { command: 'ui.snapshot', params: {} }];
   const fpMatch = crypto.createHash('sha256').update(JSON.stringify(fpSteps)).digest('hex');
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp', { status: 'UNKNOWN', job_id: 'job_fp', steps_fp: 'different-fingerprint' });
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-1', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } });
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-2', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp', { status: 'UNKNOWN', job_id: 'job_fp', steps_fp: 'different-fingerprint' }, core.IDEM_NS.BATCH);
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-1', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } }, core.IDEM_NS.STEP);
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp-2', { status: 'SUCCEEDED', job_id: 'job_fp', result: { ok: true, code: 'done', nodeId: DEV } }, core.IDEM_NS.STEP);
   const callsBeforeFp = calls.length;
   rh = await callRoute('POST', '/api/lea/v1/batches',
     Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-fp' }),
@@ -782,9 +784,9 @@ const mockChannel = {
   t('H13 指纹不一致时不复用步级缓存（全部重跑）', rh.code === 200 && rh.obj.status === 'SUCCEEDED'
     && calls.length === callsBeforeFp + 2 && !(rh.obj.results || []).some((x) => x.duplicate));
   // 指纹一致 → 复用已成功步
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2', { status: 'UNKNOWN', job_id: 'job_fp2', steps_fp: fpMatch });
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-1', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } });
-  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-2', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } });
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2', { status: 'UNKNOWN', job_id: 'job_fp2', steps_fp: fpMatch }, core.IDEM_NS.BATCH);
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-1', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } }, core.IDEM_NS.STEP);
+  core.idemRecord(USER, g6.record.key_id, 'route-batch-fp2-2', { status: 'SUCCEEDED', job_id: 'job_fp2', result: { ok: true, code: 'done', nodeId: DEV } }, core.IDEM_NS.STEP);
   const callsBeforeFp2 = calls.length;
   rh = await callRoute('POST', '/api/lea/v1/batches',
     Object.assign(bearerHeaders(g6.key), { 'idempotency-key': 'route-batch-fp2' }),
@@ -1087,13 +1089,13 @@ const mockChannel = {
   t('H07 recordBinding 接受 LEA epoch（向前）', rbEpoch.binding_epoch === 99);
   const rbEpoch2 = core.recordBinding('node//epoch-dev', USER, 'test-h07-epoch2', { bindingEpoch: 5 });
   t('H07 recordBinding epoch 永不倒退', rbEpoch2.binding_epoch === 99);
-  // H06 路由：自选 dangerous scope → 403
-  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', scopes: ['muse.execute', 'muse.execute.dangerous'] });
+  // H06 路由：自选 dangerous scope → 403（device_id 明示：DC-A-1 后无 device_id 时按绑定设备数自动取／拒绝）
+  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', device_id: DEV, scopes: ['muse.execute', 'muse.execute.dangerous'] });
   t('H06 路由生成 dangerous scope Key（无审批）→ 403', r.code === 403 && r.obj.code === 'QFR_SCOPE_DENIED');
   // H06 路由：站长授 dangerous 后可生成
   r = await callAdminRoute('POST', '/api/lea/v1/grants', {}, { account_id: USER, action: 'grant', dangerous: true });
   t('H06 路由站长授 dangerous → 200 且带 dangerous', r.code === 200 && r.obj.dangerous === true);
-  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', scopes: ['muse.execute', 'muse.execute.dangerous'] });
+  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', device_id: DEV, scopes: ['muse.execute', 'muse.execute.dangerous'] });
   t('H06 路由生成 dangerous scope Key（已审批）→ 200', r.code === 200 && !!r.obj.key && r.obj.record.scopes.includes('muse.execute.dangerous'));
 
   // ---------- 15) L-B 低组：T04 旧前缀迁移／T10 key_id 唯一／T30 单 Key
@@ -1143,6 +1145,155 @@ const mockChannel = {
     t('T21 install-lea.ps1 失败仍 exit 0（DESIGN §9.2 口径不变）', leaPs1.includes('exit 0 # 失败不阻塞主程序'));
     const mainJs = fs.readFileSync(path.join(repoRoot, 'windows', 'main.js'), 'utf8');
     t('T21 main.js 补装后复核 LEA_DEGRADED（lea-degraded／lea-installed 日志）', mainJs.includes('system-services.lea-degraded') && mainJs.includes('system-services.lea-installed'));
+  }
+
+  // ---------- 12) DC-A 发版前兜底深查新发现 ----------
+  // DC-A-1：控制台生成 Key 不传 device_id 时不得再发 binding_epoch 0 的死钥
+  {
+    const dirA1 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-dca1-'));
+    const coreA1 = createLeaCore({ dir: dirA1, enableSweeps: false, whitelist: [DEV, 'node//test-device-2'] });
+    coreA1.grantMuse(USER, 'owner');
+    coreA1.recordBinding(DEV, USER, 'dc-a1');
+    const gA1 = coreA1.generateKey(USER, {});
+    t('DC-A-1 无 device_scope 且恰绑 1 台 → 自动取该台', gA1.record.device_scope === DEV);
+    t('DC-A-1 自动取设备后 binding_epoch 与绑定一致', gA1.record.binding_epoch === 1);
+    const admA1 = coreA1.admit({ key: coreA1.findKeyById(gA1.record.key_id), deviceId: DEV, command: 'ui.click' });
+    t('DC-A-1 自动取设备的 Key 准入通过（不再出生即死）', admA1.ok === true);
+    coreA1.grantMuse('eve', 'owner');
+    let threwNoDev = null;
+    try { coreA1.generateKey('eve', {}); } catch (e) { threwNoDev = e; }
+    t('DC-A-1 无绑定设备时生成 Key 拒绝（不发死钥）', !!threwNoDev && threwNoDev.code === 'QFR_DEVICE_SCOPE_REQUIRED' && threwNoDev.reason === 'no-device');
+    coreA1.recordBinding('node//test-device-2', USER, 'dc-a1-2');
+    let threwMulti = null;
+    try { coreA1.generateKey(USER, {}); } catch (e) { threwMulti = e; }
+    t('DC-A-1 绑定多台时生成 Key 须明示 device_id', !!threwMulti && threwMulti.code === 'QFR_DEVICE_SCOPE_REQUIRED' && threwMulti.reason === 'multi-device');
+    // 路由层：控制台 UI 只发 {password}（不传 device_id），须 200 且自动取设备。
+    // 主 core 里 alice 已绑 2 台（DEV＋node//epoch-dev），须用恰绑 1 台的新 core 验路由自动取；
+    // 多台时路由应 400 并明示须选设备。
+    const dir1r = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-dca1r-'));
+    const core1r = createLeaCore({ dir: dir1r, enableSweeps: false, whitelist: [DEV, 'node//test-device-2'] });
+    core1r.grantMuse(USER, 'owner');
+    core1r.recordBinding(DEV, USER, 'dc-a1r');
+    const routes1r = createLeaRoutes(core1r, mockChannel, {
+      sendJson: (res, code, obj) => { sent.push({ code, obj }); res._code = code; res._obj = obj; },
+      readJsonBody: async (req) => req._body || {},
+      log: () => {},
+      verifyPassword: async (u, p) => p === 'correct-password',
+      resolveConsoleAuth: async () => ({ user: USER, siteadmin: 0 }),
+      isSiteAdmin: (a) => a.user === '718983610',
+    });
+    async function callRoute1r(method, url, headers, body) {
+      sent.length = 0;
+      const req = mkReq(method, url, headers); req._body = body;
+      await routes1r.handle(req, mkRes());
+      return { code: sent.length ? sent[sent.length - 1].code : null, obj: sent.length ? sent[sent.length - 1].obj : null };
+    }
+    const rA1r = await callRoute1r('POST', '/api/lea/v1/keys', {}, { password: 'correct-password' });
+    t('DC-A-1 路由生成 Key 不传 device_id → 200 且自动取唯一绑定设备',
+      rA1r.code === 200 && !!rA1r.obj.key && rA1r.obj.record.device_scope === DEV
+      && rA1r.obj.record.binding_epoch === core1r.getBinding(DEV).binding_epoch);
+    core1r.recordBinding('node//test-device-2', USER, 'dc-a1r-2');
+    const rA1m = await callRoute1r('POST', '/api/lea/v1/keys', {}, { password: 'correct-password' });
+    t('DC-A-1 路由多设备不传 device_id → 400 明示须选设备',
+      rA1m.code === 400 && rA1m.obj.code === 'QFR_DEVICE_SCOPE_REQUIRED' && /多台/.test(rA1m.obj.msg || ''));
+  }
+  // DC-A-3：设备状态／吊销快照只许归属账号或设备域 Key 读
+  // （g6 已在 §11 被 revoke-all 吊销，须用新 Key；以下 DC-A-4 同）
+  const gA = core.generateKey(USER, { device_scope: DEV });
+  {
+    core.recordBinding('node//test-device-2', 'carol', 'dc-a3');
+    core.grantMuse('carol', 'owner');
+    const gCarol = core.generateKey('carol', { device_scope: 'node//test-device-2' });
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/status', bearerHeaders(gCarol.key));
+    t('DC-A-3 他人 Key 读设备状态 → 403', r.code === 403 && r.obj.code === 'QFR_SCOPE_DENIED');
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/revocations', bearerHeaders(gCarol.key));
+    t('DC-A-3 他人 Key 读吊销快照 → 403', r.code === 403 && r.obj.code === 'QFR_SCOPE_DENIED');
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/status', bearerHeaders(gA.key));
+    t('DC-A-3 归属账号 Key 读设备状态 → 200', r.code === 200 && r.obj.account_id === USER);
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent('node//test-device-2') + '/status', bearerHeaders(gCarol.key));
+    t('DC-A-3 设备域 Key 读本设备状态 → 200', r.code === 200 && r.obj.device_id === 'node//test-device-2');
+  }
+  // DC-A-4：幂等命名空间隔离（单条／批量／批量步互不串槽）
+  {
+    core.idemRecord(USER, g6.record.key_id, 'dc-a4-1', { status: 'SUCCEEDED', result: { job_id: 'job_dca4_single' } }, core.IDEM_NS.EXEC);
+    t('DC-A-4 单条缓存不被批量步查到', core.idemLookup(USER, g6.record.key_id, 'dc-a4-1', core.IDEM_NS.STEP) === null);
+    core.idemRecord(USER, g6.record.key_id, 'dc-a4-1', { status: 'SUCCEEDED', result: { job_id: 'job_dca4_step' } }, core.IDEM_NS.STEP);
+    t('DC-A-4 批量步缓存不被单条查到', (core.idemLookup(USER, g6.record.key_id, 'dc-a4-1', core.IDEM_NS.EXEC) || {}).result.job_id === 'job_dca4_single');
+    core.idemRecord(USER, g6.record.key_id, 'dc-a4-legacy', { status: 'SUCCEEDED', result: { job_id: 'job_dca4_legacy' } });
+    t('DC-A-4 旧版无命名空间条目仍可读（升级兼容）', (core.idemLookup(USER, g6.record.key_id, 'dc-a4-legacy', core.IDEM_NS.EXEC) || {}).result.job_id === 'job_dca4_legacy');
+    // DC-A-4 负向（DS round 1 要求）：旧条目被 EXEC 查到后单向迁移，旧键删除；
+    // 同键再写新 EXEC 条目不与旧条目冲突，STEP 查不到 EXEC 的条目。
+    t('DC-A-4 迁移后旧键不再可读（单向迁移）', core.idemLookup(USER, g6.record.key_id, 'dc-a4-legacy') === null);
+    core.idemRecord(USER, g6.record.key_id, 'dc-a4-legacy', { status: 'SUCCEEDED', result: { job_id: 'job_dca4_exec_new' } }, core.IDEM_NS.EXEC);
+    t('DC-A-4 同键新 EXEC 写入覆盖迁移来的旧条目', (core.idemLookup(USER, g6.record.key_id, 'dc-a4-legacy', core.IDEM_NS.EXEC) || {}).result.job_id === 'job_dca4_exec_new');
+    t('DC-A-4 同键新 EXEC 写入不被 STEP 查到', core.idemLookup(USER, g6.record.key_id, 'dc-a4-legacy', core.IDEM_NS.STEP) === null);
+    const dispCount = () => calls.filter((c) => c.cmd.includes(' dispatch ')).length;
+    r = await callRoute('POST', '/api/lea/v1/execute',
+      Object.assign(bearerHeaders(gA.key), { 'idempotency-key': 'dc-a4r-1' }),
+      { device_id: DEV, command: 'sys.info', params: {} });
+    t('DC-A-4 单条 dc-a4r-1 执行成功', r.code === 200 && r.obj.ok === true);
+    const before = dispCount();
+    r = await callRoute('POST', '/api/lea/v1/batches',
+      Object.assign(bearerHeaders(gA.key), { 'idempotency-key': 'dc-a4r-1' }),
+      { device_id: DEV, steps: [{ command: 'sys.info', params: {} }, { command: 'sys.info', params: {} }] });
+    t('DC-A-4 批量步不复用单条缓存（两步都真执行）', r.code === 200 && r.obj.status === 'SUCCEEDED'
+      && (r.obj.results || []).every((x) => x.ok === true && !x.duplicate) && dispCount() - before === 2);
+    r = await callRoute('POST', '/api/lea/v1/batches',
+      Object.assign(bearerHeaders(gA.key), { 'idempotency-key': 'dc-a4b-01' }),
+      { device_id: DEV, steps: [{ command: 'sys.info', params: {} }] });
+    t('DC-A-4 批量 dc-a4b-01 执行成功', r.code === 200 && r.obj.status === 'SUCCEEDED');
+    const before2 = dispCount();
+    r = await callRoute('POST', '/api/lea/v1/execute',
+      Object.assign(bearerHeaders(gA.key), { 'idempotency-key': 'dc-a4b-01' }),
+      { device_id: DEV, command: 'sys.info', params: {} });
+    t('DC-A-4 单条不复用批量缓存（真执行）', r.code === 200 && r.obj.duplicate !== true && dispCount() - before2 === 1);
+  }
+  // DC-A-5：批量取消后终态不得被在途步骤的超时／失败覆盖
+  {
+    const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-dca5-'));
+    const core5 = createLeaCore({ dir: dir5, enableSweeps: false, whitelist: [DEV] });
+    core5.grantMuse(USER, 'owner');
+    core5.recordBinding(DEV, USER, 'dc-a5');
+    const g5b = core5.generateKey(USER, { device_scope: DEV });
+    let releaseSlow = null;
+    const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+    const slowChannel = {
+      async runCommand() { await slowGate; throw new Error('slow-fail'); },
+      async nodeOnline() { return true; },
+      async listNodes() { return [{ _id: DEV, conn: 1 }]; },
+    };
+    const routes5 = createLeaRoutes(core5, slowChannel, {
+      sendJson: (res, code, obj) => { sent.push({ code, obj }); res._code = code; res._obj = obj; },
+      readJsonBody: async (req) => req._body || {},
+      log: () => {},
+      verifyPassword: async (u, p) => p === 'correct-password',
+      resolveConsoleAuth: async () => ({ user: USER, siteadmin: 0 }),
+      isSiteAdmin: (a) => a.user === '718983610',
+    });
+    async function callRoute5(method, url, headers, body) {
+      sent.length = 0;
+      const req = mkReq(method, url, headers, body);
+      const res = mkRes();
+      const matched = await routes5.handle(req, res);
+      return { matched, code: sent.length ? sent[sent.length - 1].code : null, obj: sent.length ? sent[sent.length - 1].obj : null };
+    }
+    const batchP = callRoute5('POST', '/api/lea/v1/batches',
+      Object.assign(bearerHeaders(g5b.key), { 'idempotency-key': 'dc-a5-batch-1' }),
+      { device_id: DEV, steps: [{ command: 'sys.info', params: {} }, { command: 'sys.info', params: {} }] });
+    // 等 job 建好（createJob 在首步下发前同步落盘），再取消
+    let jobId5 = null;
+    for (let i = 0; i < 100 && !jobId5; i++) {
+      const js = core5._test.loadJobs().jobs || {};
+      const found = Object.values(js).find((j) => j && j.idempotency_key === 'dc-a5-batch-1');
+      if (found) jobId5 = found.job_id;
+      else await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    t('DC-A-5 慢步骤批量建 job', !!jobId5);
+    const rc = await callRoute5('POST', '/api/lea/v1/jobs/' + jobId5 + '/cancel', bearerHeaders(g5b.key), {});
+    t('DC-A-5 在途取消 → 200 CANCELLED', rc.code === 200 && rc.obj.status === 'CANCELLED');
+    releaseSlow(); // 在途步骤随即失败（旧实现会把 job 置 FAILED）
+    const rb = await batchP;
+    t('DC-A-5 取消后在途步骤失败，job 终态仍为 CANCELLED', core5.getJob(jobId5).status === 'CANCELLED' && rb.obj.status === 'CANCELLED');
   }
 
   console.log('\n通过 ' + pass + ' / ' + (pass + fail) + '；失败 ' + fail + (failures.length ? '：' + failures.join('；') : ''));

@@ -130,6 +130,8 @@ function createLeaCore(opts) {
   // 重启后危险命令可重复执行）。
   const NONCE_FILE = path.join(dir, 'nonce-seen.json');
   const IDEM_FILE = path.join(dir, 'idem-seen.json');
+  // H21：本机吊销表推送台账（revocations.json）——按设备记录待推送的
+  // 吊销 key_id 全集（C 端 state/revoked_keys.txt 的服务端镜像）。
   const REVOCATIONS_FILE = path.join(dir, 'revocations.json');
 
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
@@ -567,16 +569,42 @@ function createLeaCore(opts) {
     persistNonce();
     return true;
   }
-  function idemLookup(accountId, keyId, idemKey) {
-    const k = accountId + '|' + keyId + '|' + idemKey;
-    const e = idemSeen.get(k);
+  // DC-A-4：幂等命名空间——单条 exec／批量 batch／批量步 step 三类调用
+  // 共用一张 idemSeen 表时，单条键 "X-1" 会与批量 "X" 的第 1 步撞槽，
+  // 批量级 "X" 也会与单条 "X" 撞槽：一方缓存结果会被另一方误认复用，
+  // 导致“该执行的不执行／返回别人的结果”。内部键加命名空间隔离。
+  // 读时兼容旧版无命名空间条目（升级前已落盘的 idem-seen.json 仍为
+  // account|key|idem 形态，命名空间查找不到时回落旧键；旧条目最多
+  // 保留 7 天（危险 30 天），过期后自然消失）。
+  const IDEM_NS = { EXEC: 'exec', BATCH: 'batch', STEP: 'step' };
+  function idemMapKey(accountId, keyId, idemKey, ns) {
+    return (ns ? ns + '|' : '') + accountId + '|' + keyId + '|' + idemKey;
+  }
+  function idemLookup(accountId, keyId, idemKey, ns) {
+    const k = idemMapKey(accountId, keyId, idemKey, ns);
+    let e = idemSeen.get(k);
+    if (!e && ns) {
+      // DC-A-4 升级兼容：旧版无命名空间条目首次被带命名空间查到时，就地迁移到命名空间键下
+      // （旧键删除、落盘一次），之后读写一律走命名空间键；旧条目最多保留 7 天／危险 30 天。
+      // 已知不可复原的边界（DS round 1 确认）：旧条目本身不带命名空间信息，若同一 idemKey
+      // 在升级前曾跨命名空间复用过（正是 DC-A-4 修的旧 bug 形态），本次迁移会把它归到首次查到
+      // 它的那个命名空间下——该误归只影响升级前已存在且未过期的旧条目，升级后所有写入都带
+      // 命名空间，此情形不再产生；相对旧版“所有命名空间共用同一槽位”，迁移只缩小不扩大串扰面。
+      const legacyKey = idemMapKey(accountId, keyId, idemKey, '');
+      e = idemSeen.get(legacyKey);
+      if (e) { idemSeen.delete(legacyKey); idemSeen.set(k, e); persistIdem(); }
+    }
     if (!e) return null;
     const ttl = e.dangerous ? 30 * 24 * 3600 * 1000 : IDEMPOTENT_RETENTION_MS;
-    if (now() - e.at > ttl) { idemSeen.delete(k); persistIdem(); return null; }
+    if (now() - e.at > ttl) {
+      idemSeen.delete(k);
+      if (ns) idemSeen.delete(idemMapKey(accountId, keyId, idemKey, ''));
+      persistIdem(); return null;
+    }
     return e;
   }
-  function idemRecord(accountId, keyId, idemKey, entry) {
-    idemSeen.set(accountId + '|' + keyId + '|' + idemKey, Object.assign({ at: now() }, entry));
+  function idemRecord(accountId, keyId, idemKey, entry, ns) {
+    idemSeen.set(idemMapKey(accountId, keyId, idemKey, ns), Object.assign({ at: now() }, entry));
     persistIdem();
   }
 
@@ -648,6 +676,24 @@ function createLeaCore(opts) {
       const e = new Error('LEA dangerous scope requires station-admin approval');
       e.code = 'QFR_SCOPE_DENIED'; throw e;
     }
+    // DC-A-1：device_scope 为空时不得再发 binding_epoch 0 的死钥——
+    // 控制台 UI 生成 Key 从不传 device_id，此前发出的 Key 表面 active、
+    // 准入恒 409（H22 要求 epoch 与绑定一致，0 永不对上）。无 device_scope
+    // 时：该账号恰绑 1 台即自动取该台（epoch 与 scope 一并落定）；0 台
+    // 即尚未绑定、须先登录绑定；多台须调用方明示 device_id。
+    let deviceScope = optsGen.device_scope || null;
+    if (!deviceScope) {
+      const bound = devicesForAccount(String(accountId));
+      if (bound.length === 1) deviceScope = bound[0];
+      else {
+        const e = new Error(bound.length === 0
+          ? 'LEA key generation requires a bound device: account has no bound device yet'
+          : 'LEA key generation requires device_id: account has ' + bound.length + ' bound devices');
+        e.code = 'QFR_DEVICE_SCOPE_REQUIRED';
+        e.reason = bound.length === 0 ? 'no-device' : 'multi-device';
+        throw e;
+      }
+    }
     const plain = KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
     const salt = crypto.randomBytes(16).toString('hex');
     const st = loadKeys();
@@ -662,9 +708,9 @@ function createLeaCore(opts) {
       prefix: sha256Hex(plain.slice(0, 12)).slice(0, 16),
       salt, hash: hashKey(plain, salt),
       account_id: String(accountId),
-      device_scope: optsGen.device_scope || null, // null = 该账号已绑定设备（由绑定态定）
+      device_scope: deviceScope, // DC-A-1：恒有值（显式传参或恰绑 1 台自动取），不再发 device_scope=null 的死钥
       scopes: wantScopes,
-      binding_epoch: currentBindingEpoch(optsGen.device_scope, String(accountId)),
+      binding_epoch: currentBindingEpoch(deviceScope, String(accountId)),
       // T07/D1：Key 盖上生成时账号授权的 grant_epoch；admit 比对，授权撤销
       // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。H06 已保证生成
       // 时必有在效授权，故此处 grant_epoch 恒 ≥1。
@@ -1176,10 +1222,13 @@ function createLeaCore(opts) {
         if (now() - (j.updated_at || j.created_at || 0) <= JOB_STALE_MS) continue;
         j.status = 'UNKNOWN'; j.error_code = ERR.UNKNOWN; j.updated_at = now(); dirty = true;
         if (j.idempotency_key && j.account_id && j.api_key_id) {
-          const prev = idemLookup(j.account_id, j.api_key_id, j.idempotency_key);
+          // DC-A-4：失联 job 的幂等键按类型取命名空间（批量 job 带 batch_id，
+          // 单条 job 没有），与写入侧一致，否则推进写不到同一槽。
+          const ns = j.batch_id ? IDEM_NS.BATCH : IDEM_NS.EXEC;
+          const prev = idemLookup(j.account_id, j.api_key_id, j.idempotency_key, ns);
           if (prev && prev.status === 'RUNNING') {
             idemRecord(j.account_id, j.api_key_id, j.idempotency_key,
-              Object.assign({}, prev, { status: 'UNKNOWN' }));
+              Object.assign({}, prev, { status: 'UNKNOWN' }), ns);
           }
         }
         audit('lea-job-stale', {
@@ -1279,7 +1328,7 @@ function createLeaCore(opts) {
 
   return {
     dir, log, audit, pruneAudit, pruneJobs,
-    COMMANDS, ERR, KEY_PREFIX,
+    COMMANDS, ERR, KEY_PREFIX, IDEM_NS,
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,

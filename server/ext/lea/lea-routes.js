@@ -101,7 +101,7 @@ function createLeaRoutes(core, channel, deps) {
       binding_epoch: key.binding_epoch, command, idempotency_key: idemKey, ip: clientIp(req),
     };
     // 幂等：已完成返回缓存结果不重复执行；执行中返回 DUPLICATE_IN_PROGRESS。
-    const prev = core.idemLookup(key.account_id, key.key_id, idemKey);
+    const prev = core.idemLookup(key.account_id, key.key_id, idemKey, core.IDEM_NS.EXEC);
     if (prev && prev.status === 'RUNNING') return fail(res, 409, ERR.DUPLICATE, '同一幂等键的命令正在执行中。');
     if (prev && prev.status === 'SUCCEEDED') {
       return sendJson(res, 200, Object.assign({ ok: true, duplicate: true, request_id: requestId }, prev.result || {}));
@@ -140,7 +140,7 @@ function createLeaRoutes(core, channel, deps) {
       account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id,
       command, request_id: requestId, idempotency_key: idemKey, status: 'RUNNING',
     });
-    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous });
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous }, core.IDEM_NS.EXEC);
     const env = core.buildEnvelope({
       requestId, batchId: null, seq: 1, deviceId, accountId: key.account_id,
       keyId: key.key_id, bindingEpoch: adm.binding.binding_epoch,
@@ -154,7 +154,7 @@ function createLeaRoutes(core, channel, deps) {
     const durationMs = Date.now() - t0;
     if (disp.ok) {
       core.updateJob(job.job_id, { status: 'SUCCEEDED', result: disp.result });
-      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'SUCCEEDED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, result: disp.result } });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'SUCCEEDED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, result: disp.result } }, core.IDEM_NS.EXEC);
       auditCall(Object.assign({}, baseAudit, { result: 'ok', job_id: job.job_id, duration_ms: durationMs }));
       try { core.audit('lea-deliver', Object.assign({}, baseAudit, { job_id: job.job_id, direction: 'reply', duration_ms: durationMs })); } catch (e) {}
       return sendJson(res, 200, { ok: true, request_id: requestId, job_id: job.job_id, result: disp.result, duration_ms: durationMs });
@@ -162,12 +162,12 @@ function createLeaRoutes(core, channel, deps) {
     if (disp.timeout) {
       // 同步等待 5s 超时 → 202 + job_id，长任务异步（结果 UNKNOWN，须查 job/快照确认）。
       core.updateJob(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN });
-      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous }, core.IDEM_NS.EXEC);
       auditCall(Object.assign({}, baseAudit, { result: 'timeout-async', job_id: job.job_id, error_code: ERR.UNKNOWN, duration_ms: durationMs }));
       return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'UNKNOWN', code: ERR.UNKNOWN, msg: '执行超时，已转异步任务；结果未知，请用 job_id 查询或快照确认，勿直接重试危险操作。' });
     }
     core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' });
-    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } });
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.EXEC);
     auditCall(Object.assign({}, baseAudit, { result: 'dispatch-failed', job_id: job.job_id, error_code: 'QFR_LEA_DISPATCH_FAILED', duration_ms: durationMs }));
     return fail(res, 502, 'QFR_LEA_DISPATCH_FAILED', '下发失败：' + String((disp.error && disp.error.message) || 'channel-error'));
   }
@@ -215,7 +215,7 @@ function createLeaRoutes(core, channel, deps) {
     // H13：批量级幂等——重复提交去重（此前批量级键只要求不记录，步级键
     // 也不写入 idemSeen，重复提交重跑全部步骤）。UNKNOWN 不拦重放
     //（H14 推进器已把失联 RUNNING 转 UNKNOWN），继续执行并覆盖记录。
-    const prevBatch = core.idemLookup(key.account_id, key.key_id, idemKey);
+    const prevBatch = core.idemLookup(key.account_id, key.key_id, idemKey, core.IDEM_NS.BATCH);
     if (prevBatch && prevBatch.status === 'RUNNING') return fail(res, 409, ERR.DUPLICATE, '同一幂等键的批量任务正在执行中。');
     if (prevBatch && prevBatch.status === 'SUCCEEDED') {
       return sendJson(res, 200, Object.assign({ ok: true, duplicate: true, request_id: requestId }, prevBatch.result || {}));
@@ -248,9 +248,18 @@ function createLeaRoutes(core, channel, deps) {
       const s = core.COMMANDS[String((st && st.command) || '')];
       return !!(s && s.dangerous);
     });
-    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp });
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp }, core.IDEM_NS.BATCH);
     // 后台顺序执行；同步等待 5s，超时即 202 + job_id（继续后台跑完）。
     const startedAt = Date.now();
+    // DC-A-5：取消后终态不得再被覆盖——超时／失败分支曾无条件把 job 置
+    // UNKNOWN/FAILED，用户取消后查到的终态是 UNKNOWN/FAILED 而非
+    // CANCELLED。只守 job 终态；步级／批量级幂等记录照常（保留 UNKNOWN
+    // 可重试、FAILED 可查的语义）。
+    function setJobTerminalUnlessCancelled(jobId, patch) {
+      const cur = core.getJob(jobId);
+      if (cur && cur.status === 'CANCELLED') return;
+      core.updateJob(jobId, patch);
+    }
     const run = (async () => {
       const results = [];
       let failed = false;
@@ -266,13 +275,13 @@ function createLeaRoutes(core, channel, deps) {
         if (!adm.ok) { results.push({ seq: i + 1, command, ok: false, code: adm.code }); failed = true; break; }
         // H13：步级幂等——已成功的步不再重跑，复用缓存结果（仅当 steps
         // 指纹一致；UNKNOWN 重试改了 steps 时不复用，见 reuseSteps）。
-        const prevStep = core.idemLookup(key.account_id, key.key_id, stepKey(i));
+        const prevStep = core.idemLookup(key.account_id, key.key_id, stepKey(i), core.IDEM_NS.STEP);
         if (reuseSteps && prevStep && prevStep.status === 'SUCCEEDED') {
           results.push({ seq: i + 1, command, ok: true, result: prevStep.result || null, duplicate: true });
           core.updateJob(job.job_id, { results, steps_done: i + 1 });
           continue;
         }
-        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous });
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous }, core.IDEM_NS.STEP);
         const env = core.buildEnvelope({
           // 步级 request_id／幂等键用 '-' 连接步号：':' 不合 token 规则
           //（C 端解析层拒绝），旧 ':' 形态的批量信封到 LEA 即被拒。
@@ -286,20 +295,20 @@ function createLeaRoutes(core, channel, deps) {
         catch (e) { disp = { ok: false, error: e }; }
         if (disp.timeout) {
           results.push({ seq: i + 1, command, ok: false, code: ERR.UNKNOWN });
-          core.updateJob(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
-          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous });
-          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous }, core.IDEM_NS.STEP);
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
           return;
         }
         if (!disp.ok) {
           results.push({ seq: i + 1, command, ok: false, code: 'QFR_LEA_DISPATCH_FAILED' });
-          core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED', results, steps_done: i + 1 });
-          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } });
-          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED', results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.STEP);
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
           return;
         }
         results.push({ seq: i + 1, command, ok: true, result: disp.result });
-        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: disp.result });
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: disp.result }, core.IDEM_NS.STEP);
         core.updateJob(job.job_id, { results, steps_done: i + 1 });
         // 撤销检查：批内每步开始前核 grant_epoch（§6.2）——admit 已每步重查。
       }
@@ -309,12 +318,12 @@ function createLeaRoutes(core, channel, deps) {
         // 批次谎称为 SUCCEEDED（此前 break 后仍置 SUCCEEDED）。
         const status = failed ? 'FAILED' : 'SUCCEEDED';
         core.updateJob(job.job_id, { status, results });
-        core.idemRecord(key.account_id, key.key_id, idemKey, { status, job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status, results, steps_done: results.length } });
+        core.idemRecord(key.account_id, key.key_id, idemKey, { status, job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status, results, steps_done: results.length } }, core.IDEM_NS.BATCH);
       }
     })();
     run.catch((e) => {
-      try { core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' }); } catch (e2) {}
-      try { core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED' } }); } catch (e2) {}
+      try { setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' }); } catch (e2) {}
+      try { core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED' } }, core.IDEM_NS.BATCH); } catch (e2) {}
       log({ ev: 'lea-batch-error', job_id: job.job_id, err: String(e && e.message) });
     });
     // 同步等 5s：跑完直接回 200，否则 202 + job_id。
@@ -327,6 +336,16 @@ function createLeaRoutes(core, channel, deps) {
       return sendJson(res, 200, { ok: true, request_id: requestId, job_id: job.job_id, batch_id: batchId, status: cur.status, results: cur.results || [], steps_done: cur.steps_done || 0 });
     }
     return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, batch_id: batchId, status: 'RUNNING', msg: '批量执行中，请用 job_id 轮询。' });
+  }
+
+  // DC-A-3：设备状态／吊销快照只许“绑定归属账号的 Key”或“该设备域的 Key”
+  // 读——此前 device_scope 为空的任意有效 Key 可读任意设备的绑定账号／
+  // 在线态／吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。未绑定设备
+  // 一律 403（不以 404 区分“不存在”与“非本人设备”，防存在性预言）。
+  function deviceVisibleTo(key, deviceId) {
+    if (key.device_scope && key.device_scope === deviceId) return true;
+    const binding = core.getBinding(deviceId);
+    return !!(binding && binding.account_id === key.account_id);
   }
 
   // ---- 查 job / 取消 job ----
@@ -358,8 +377,8 @@ function createLeaRoutes(core, channel, deps) {
     const auth = bearerAuth(req);
     if (!auth.ok) return fail(res, auth.status, auth.code, auth.msg);
     const key = auth.key;
-    if (key.device_scope && key.device_scope !== deviceId) {
-      return fail(res, 403, ERR.SCOPE_DENIED, '该 Key 不能操作此设备。');
+    if (!deviceVisibleTo(key, deviceId)) {
+      return fail(res, 403, ERR.SCOPE_DENIED, '该 Key 不能查看此设备状态。');
     }
     const binding = core.getBinding(deviceId);
     let online = null;
@@ -434,6 +453,13 @@ function createLeaRoutes(core, channel, deps) {
     } catch (e) {
       if (e && e.code === 'QFR_MUSE_NOT_AUTHORIZED') return fail(res, 403, e.code, '该账号未授权 Muse 操作，请先请站长授予 muse.execute。');
       if (e && e.code === 'QFR_SCOPE_DENIED') return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      // DC-A-1：无 device_scope 且无法自动取设备（未绑定／绑定多台）时
+      // 拒绝发死钥，由调用方明示 device_id（路由层 body.device_id）。
+      if (e && e.code === 'QFR_DEVICE_SCOPE_REQUIRED') {
+        return fail(res, 400, e.code, e.reason === 'multi-device'
+          ? '该账号绑定了多台设备，生成 Key 时须指定 device_id。'
+          : '该账号尚未绑定设备，请先在设备上登录 QFRemote 完成绑定后再生成 Key。');
+      }
       throw e;
     }
     // 明文仅本次响应返回一次；前端只显示一次，关闭后不再明文展示（§7.2）。
@@ -557,8 +583,8 @@ function createLeaRoutes(core, channel, deps) {
     const auth = bearerAuth(req);
     if (!auth.ok) return fail(res, auth.status, auth.code, auth.msg);
     const key = auth.key;
-    if (key.device_scope && key.device_scope !== deviceId) {
-      return fail(res, 403, ERR.SCOPE_DENIED, '该 Key 不能操作此设备。');
+    if (!deviceVisibleTo(key, deviceId)) {
+      return fail(res, 403, ERR.SCOPE_DENIED, '该 Key 不能查看此设备吊销表。');
     }
     return sendJson(res, 200, Object.assign({ ok: true }, core.getRevocations(deviceId)));
   }
