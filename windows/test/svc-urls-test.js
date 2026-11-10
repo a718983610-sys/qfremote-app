@@ -62,6 +62,36 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
     await poison.refresh();
     ok('D6_cache_poison_dropped', poison.get('forumUrl') === FALLBACKS.forumUrl && poison.get('pointsUrl') === 'https://app.qfremote.top/points', poison.all());
 
+    // E（M-C 中组 DS-4）：cookie 按目标 URL 的域/路径过滤再发，不整罐转发
+    const { filterCookiesForUrl, cookiesHeaderForUrl } = require('../svc-urls');
+    const JAR = [
+      { name: 'appSess', value: 'A', domain: 'app.qfremote.top', hostOnly: true, path: '/', secure: true },
+      { name: 'wideSess', value: 'W', domain: '.qfremote.top', hostOnly: false, path: '/', secure: false },
+      { name: 'licOnly', value: 'L', domain: 'app.qfremote.top', hostOnly: true, path: '/license', secure: false },
+      { name: 'rootOnly', value: 'R', domain: 'qfremote.top', hostOnly: true, path: '/', secure: false },
+    ];
+    const names = (url) => filterCookiesForUrl(JAR, url).map((c) => c.name).sort().join(',');
+    ok('E1_app_cookie_only_to_app', names('https://app.qfremote.top/license/api/me') === 'appSess,licOnly,wideSess');
+    ok('E2_app_cookie_not_to_admin', names('https://admin.qfremote.top/admin/api/users') === 'wideSess');
+    ok('E3_wide_cookie_to_subdomain', names('https://x.qfremote.top/points') === 'wideSess');
+    ok('E4_no_leak_to_lookalike_host', names('https://qfremote.top.evil.com/') === '' && names('https://evil.example/') === '');
+    ok('E5_path_scoped_cookie', names('https://app.qfremote.top/points/api/me') === 'appSess,wideSess');
+    ok('E6_secure_cookie_not_to_http', names('http://app.qfremote.top/license/api/me') === 'licOnly,wideSess');
+    ok('E7_hostonly_root_not_to_subdomain', names('https://qfremote.top/') === 'rootOnly,wideSess');
+    ok('E8_bad_url_and_empty', filterCookiesForUrl(JAR, 'not a url').length === 0 && filterCookiesForUrl([], 'https://app.qfremote.top/').length === 0 && filterCookiesForUrl(null, 'https://app.qfremote.top/').length === 0);
+    ok('E9_header_joins_filtered_only', cookiesHeaderForUrl(JAR, 'https://admin.qfremote.top/x') === 'wideSess=W');
+    // E10（DS-4 复审 round 1）：路径按边界匹配，/license 不发给兄弟路径 /licenseX
+    const licJar = [{ name: 'licOnly', value: 'L', domain: 'app.qfremote.top', hostOnly: true, path: '/license', secure: false }];
+    ok('E10_path_boundary', filterCookiesForUrl(licJar, 'https://app.qfremote.top/licenseX').length === 0
+      && filterCookiesForUrl(licJar, 'https://app.qfremote.top/license/api/me').length === 1
+      && filterCookiesForUrl(licJar, 'https://app.qfremote.top/license').length === 1);
+    // F（M-C 中组 DS-4 接线）：main.js 的 extRequest 须把目标地址传给
+    // getConsoleCookieHeader，取 cookie 头须走 svc-urls 的域过滤，不再整罐拼接。
+    const mainSrc = fs.readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+    ok('F1_extrequest_passes_target_url', mainSrc.includes('await getConsoleCookieHeader(urlStr)'));
+    ok('F2_cookie_header_uses_filter', mainSrc.includes('svcUrlsMod.cookiesHeaderForUrl(cookies, urlStr)'));
+    ok('F3_no_unfiltered_whole_jar', !/cookies\.map\(c => c\.name \+ '=' \+ c\.value\)/.test(mainSrc));
+
     result.pass = Object.values(result.cases).every(x => x.pass);
   } catch (e) {
     result.fatal = e.message;

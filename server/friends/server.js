@@ -78,6 +78,10 @@ function isFrozenSiteadmin(siteadmin) { const v = siteadmin || 0; return v !== S
 const OWNER_ACCOUNT = '718983610'; // 站长本人账号：限制只约束他人、不约束本人（2026-10-25 站长令，好友/聊天校验点对本人放行）
 function isOwnerAccount(name) { return String(name || '').toLowerCase() === OWNER_ACCOUNT; }
 function tierRights(tier) { return tier === 'operate' ? RIGHTS_OPERATE : RIGHTS_VIEW; }
+// pkg3 #3（M-C 中组，DS-REVIEW §3.3）：MC 的 addmeshuser 回包同时含 success 与
+// failed（如 {success:1, failed:1}）时，只看 success>0 会把部分失败当全成功
+// 记台账。改为：须 success>0 且 failed 为 0/缺失；纯函数，放模块层供单测。
+function execOk(res) { return !!(res && typeof res.success === 'number' && res.success > 0 && !res.failed); }
 function tierName(rights) { return rights === RIGHTS_OPERATE ? 'operate' : 'view'; }
 function norm(name) { return String(name || '').toLowerCase().trim(); }
 function userIdOf(name) { return 'user//' + norm(name); }
@@ -529,8 +533,8 @@ function main() {
     const res = await svcCall(cfg, { action: 'addmeshuser', meshid, userids: [norm(granteeName)], meshadmin: 0, remove: true });
     return res;
   }
-  function execOk(res) { return res && typeof res.success === 'number' && res.success > 0; }
-
+  // pkg3 #3：execOk 已提至模块层（见 tierRights 下方），此处不再重复定义；
+  // handleShare / revokeShare / 对账仍共用同一 execOk。
   // 回收一条共享（执行＋落台账）。reason: unfriend/owner-revoke/grantee-frozen/grantee-gone/admin-revoke
   // H23：执行失败（异常或返回值 success<=0）不置 revoked——共享保持 active，
   // 下次 reconcile/重试时自动再收；成功才置 revoked。返回 {ok, exec}。
@@ -1170,4 +1174,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { newState, areFriends, setFriends, unsetFriends, findRequest, getBlock, setBlock, planRequest, requestQuota, searchQuota, sharesBetween, exportPairs, tierRights, isGuardName, GUARD, isFrozenSiteadmin, RIGHTS_VIEW, RIGHTS_OPERATE, COOLDOWN_MS };
+module.exports = { newState, areFriends, setFriends, unsetFriends, findRequest, getBlock, setBlock, planRequest, requestQuota, searchQuota, sharesBetween, exportPairs, tierRights, execOk, isGuardName, GUARD, isFrozenSiteadmin, RIGHTS_VIEW, RIGHTS_OPERATE, COOLDOWN_MS };

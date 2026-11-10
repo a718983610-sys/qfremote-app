@@ -96,5 +96,66 @@ lim.end('carol'); lim.end('dave');
 t('status 为空时 findRejectedEvent=null、hasEvent=false', findRejectedEvent(null, ENV_ID) === null && hasEvent(null, 'arm', () => true) === false);
 t('lastEvents 缺失时同上', findRejectedEvent({}, ENV_ID) === null && hasEvent({}, 'arm', () => true) === false);
 
+// --- pkg3 #6：设备 pin（机主＋公钥指纹服务端 pin） ---
+const { createDevicePinStore, fingerprintPublicKey } = B._test;
+const KEY_A = '-----BEGIN PUBLIC KEY-----\nAAAACgAAAAB\n-----END PUBLIC KEY-----';
+const KEY_B = '-----BEGIN PUBLIC KEY-----\nBBBBDgAAAAC\n-----END PUBLIC KEY-----';
+const FP_A = fingerprintPublicKey(KEY_A);
+t('pin 指纹：同钥不同换行折指纹一致', fingerprintPublicKey(KEY_A.replace(/\n/g, ' ')) === FP_A && /^[0-9a-f]{64}$/.test(FP_A));
+t('pin 指纹：CRLF／尾换行／多余空白不影响指纹（去全部空白）', fingerprintPublicKey(KEY_A.replace(/\n/g, '\r\n') + '\n\n') === FP_A && fingerprintPublicKey('  ' + KEY_A + '  ') === FP_A);
+t('pin 指纹：空/缺公钥为 null', fingerprintPublicKey('') === null && fingerprintPublicKey(null) === null && fingerprintPublicKey('   ') === null);
+t('pin 指纹：不同公钥指纹不同', fingerprintPublicKey(KEY_B) !== FP_A);
+const noFile = () => { throw new Error('ENOENT'); };
+// TOFU：首见记下，之后一致 ok、换机主／换钥失配
+const tofu = createDevicePinStore({ statFile: noFile, readFile: noFile });
+const stAliceA = { ownerUsername: 'alice', devicePublicKey: KEY_A, state: 'Off' };
+t('pin TOFU 首见为 no-pin', tofu.check('node-1', stAliceA).state === 'no-pin');
+t('pin TOFU 再见一致为 ok', tofu.check('node-1', stAliceA).state === 'ok');
+t('pin TOFU 机主被改为 bob 即 owner-mismatch', tofu.check('node-1', { ownerUsername: 'bob', devicePublicKey: KEY_A, state: 'Off' }).state === 'owner-mismatch');
+t('pin TOFU 公钥被换即 key-mismatch', tofu.check('node-1', { ownerUsername: 'alice', devicePublicKey: KEY_B, state: 'Off' }).state === 'key-mismatch');
+t('pin TOFU 机主大小写不敏感', tofu.check('node-1', { ownerUsername: 'ALICE', devicePublicKey: KEY_A, state: 'Off' }).state === 'ok');
+t('pin TOFU 缺字段不 pin 不判', tofu.check('node-2', { ownerUsername: 'carol', state: 'Off' }).state === 'no-pin' && tofu.check('node-2', { ownerUsername: 'carol', state: 'Off' }).state === 'no-pin');
+t('pin TOFU status 为空为 no-pin', tofu.check('node-1', null).state === 'no-pin');
+// 运维 pin 表：权威，优先于首次所见；只 pin 填了的项
+let _pinNow = 1000000000000;
+let _pinMtime = 1000;
+let _pinContent = JSON.stringify({ pins: { 'node-9': { owner: 'alice', publicKeySha256: FP_A } } });
+const ops = createDevicePinStore({
+  statFile: () => ({ mtimeMs: _pinMtime }), readFile: () => _pinContent, now: () => _pinNow,
+});
+t('pin 运维表一致为 ok', ops.check('node-9', stAliceA).state === 'ok');
+t('pin 运维表机主不符为 owner-mismatch', ops.check('node-9', { ownerUsername: 'mallory', devicePublicKey: KEY_A, state: 'Off' }).state === 'owner-mismatch');
+t('pin 运维表公钥不符为 key-mismatch', ops.check('node-9', { ownerUsername: 'alice', devicePublicKey: KEY_B, state: 'Off' }).state === 'key-mismatch');
+t('pin 运维表无此台为 no-pin（不挡未登记设备）', ops.check('node-10', stAliceA).state === 'no-pin');
+// 别名感知：登记名为曾用名时仍认机主（ownerMatches 注入）
+const aliasOps = createDevicePinStore({
+  statFile: () => ({ mtimeMs: 1000 }),
+  readFile: () => JSON.stringify({ pins: { 'node-9': { owner: 'alice', publicKeySha256: FP_A } } }),
+  ownerMatches: (recorded, owner) => recorded.toLowerCase() === owner.toLowerCase() || (recorded === 'oldname' && owner === 'alice'),
+});
+t('pin 别名：登记曾用名仍认机主', aliasOps.check('node-9', { ownerUsername: 'oldname', devicePublicKey: KEY_A, state: 'Off' }).state === 'ok');
+// 损坏的运维表：保留上次好表，不抛错
+_pinNow += 60000; _pinMtime = 2000; _pinContent = '{bad json';
+t('pin 运维表损坏后仍用上次好表', ops.check('node-9', stAliceA).state === 'ok');
+_pinNow += 60000; _pinMtime = 3000; _pinContent = JSON.stringify({ pins: { 'node-9': { owner: 'bob', publicKeySha256: FP_A } } });
+t('pin 运维表更新后新表生效', ops.check('node-9', stAliceA).state === 'owner-mismatch');
+// 首次加载即损坏（无上次好表）：不抛错，走 no-pin＋TOFU，不误判失配
+const badFirst = createDevicePinStore({
+  statFile: () => ({ mtimeMs: 1000 }), readFile: () => '{bad json', now: () => 1000000000000,
+});
+t('pin 首次加载即损坏不抛错、走 no-pin', badFirst.check('node-77', stAliceA).state === 'no-pin');
+t('pin 首次损坏后 TOFU 仍可 pin 并比对', badFirst.check('node-77', stAliceA).state === 'ok'
+  && badFirst.check('node-77', { ownerUsername: 'alice', devicePublicKey: KEY_B, state: 'Off' }).state === 'key-mismatch');
+// 首次 pin 审计日志：首见记一条（机主哈希＋指纹前缀），不得静默信任；
+// pin 建立后伪造机主／公钥一律拒绝（TOFU 防的是“登记后篡改”，首见信任
+// 本身是 TOFU 固有边界，见 lock-bridge.js 工厂注释）。
+const firstLogs = [];
+const logged = createDevicePinStore({ statFile: noFile, readFile: noFile, log: (tag, msg) => firstLogs.push(tag + ':' + msg) });
+t('pin 首次登记记审计日志', logged.check('node-55', stAliceA).state === 'no-pin' && firstLogs.length === 1 && firstLogs[0].startsWith('device-pin-first:'));
+t('pin 首次日志不记明文账号与完整指纹', !firstLogs[0].includes('alice') && !firstLogs[0].includes(FP_A));
+t('pin 再见一致不再重复记首次日志', logged.check('node-55', stAliceA).state === 'ok' && firstLogs.length === 1);
+t('pin 登记后伪造机主被拒', logged.check('node-55', { ownerUsername: 'mallory', devicePublicKey: KEY_A, state: 'Off' }).state === 'owner-mismatch');
+t('pin 登记后伪造公钥被拒', logged.check('node-55', { ownerUsername: 'alice', devicePublicKey: KEY_B, state: 'Off' }).state === 'key-mismatch');
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -253,16 +253,45 @@ try {
   const onlinePresence = async () => heal.parsePresenceResponse({ code: 'ONLINE', fresh: true, online: true, lastAgentPongAgeMs: 1000 });
   const rP1 = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: onlinePresence, runRepair: fixRepair, log: logNoop });
   ok('P1-already-correct', rP1.outcome === 'already_correct' && rP1.rounds === 0);
-  // stale → 修一次 → presence online → fixed
+  // 补-中（M-C 中组）：p1 单次 stale 不得直接修——须二次查询一致＋年龄>180s
+  // 才认定。stale 一次、二次查询回 online＝瞬时陈旧，不修，报 already_correct。
   let pCalls = 0;
+  let p2Repairs = 0;
   const staleThenOnline = async () => {
     pCalls++;
     return pCalls === 1
       ? heal.parsePresenceResponse({ code: 'STALE', fresh: false, online: false, lastAgentPongAgeMs: 200000 })
       : heal.parsePresenceResponse({ code: 'ONLINE', fresh: true, online: true, lastAgentPongAgeMs: 1000 });
   };
-  const rP2 = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: staleThenOnline, runRepair: fixRepair, log: logNoop });
-  ok('P2-stale-fixed', rP2.outcome === 'fixed' && rP2.rounds === 1);
+  const countingRepair = async () => { p2Repairs++; return { outcome: 'fixed' }; };
+  const rP2 = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: staleThenOnline, runRepair: countingRepair, log: logNoop });
+  ok('P2-stale-once-online-no-repair', rP2.outcome === 'already_correct' && rP2.rounds === 0 && p2Repairs === 0 && pCalls === 2);
+  // 两次一致 stale（年龄 200s>180s）→ 修一次 → presence online → fixed
+  let p2bCalls = 0;
+  const staleTwiceThenOnline = async () => {
+    p2bCalls++;
+    return p2bCalls <= 2
+      ? heal.parsePresenceResponse({ code: 'STALE', fresh: false, online: false, lastAgentPongAgeMs: 200000 })
+      : heal.parsePresenceResponse({ code: 'ONLINE', fresh: true, online: true, lastAgentPongAgeMs: 1000 });
+  };
+  let p2bRepairs = 0;
+  const rP2b = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: staleTwiceThenOnline, runRepair: async () => { p2bRepairs++; return { outcome: 'fixed' }; }, log: logNoop });
+  ok('P2b-stale-twice-fixed', rP2b.outcome === 'fixed' && rP2b.rounds === 1 && p2bRepairs === 1);
+  // 两次 stale 但年龄 100s 未过 180s → 不认定，不修
+  let p2cRepairs = 0;
+  const youngStale = async () => heal.parsePresenceResponse({ code: 'STALE', fresh: false, online: false, lastAgentPongAgeMs: 100000 });
+  const rP2c = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: youngStale, runRepair: async () => { p2cRepairs++; return { outcome: 'fixed' }; }, log: logNoop });
+  ok('P2c-stale-young-no-repair', rP2c.outcome === 'unverified' && rP2c.rounds === 0 && p2cRepairs === 0);
+  // 补-中（复审 round 1）：judgeTriggered 取较新一次查询的年龄——p1 年龄
+  // 200s、p1b 年龄 100s（二次查询已新鲜）→ 不认定，不修。
+  let p2dCalls = 0;
+  let p2dRepairs = 0;
+  const staleOldThenYoung = async () => {
+    p2dCalls++;
+    return heal.parsePresenceResponse({ code: 'STALE', fresh: false, online: false, lastAgentPongAgeMs: p2dCalls === 1 ? 200000 : 100000 });
+  };
+  const rP2d = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probePass, queryPresence: staleOldThenYoung, runRepair: async () => { p2dRepairs++; return { outcome: 'fixed' }; }, log: logNoop });
+  ok('P2d-judge-uses-latest-age', rP2d.outcome === 'unverified' && rP2d.rounds === 0 && p2dRepairs === 0);
   // 本地一直 stale：3 轮耗尽 → unverified
   const rP3 = await heal.runHealLadder({ checkState: async () => staleState, probeConnectivity: probePass, queryPresence: onlinePresence, runRepair: fixRepair, log: logNoop });
   ok('P3-exhausted', rP3.outcome === 'unverified' && rP3.rounds === 3);

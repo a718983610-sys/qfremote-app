@@ -978,11 +978,16 @@ function findDbUser(docs, name) {
 // 与 mcdb guardNotAdmin 同口径的预检（拒绝时不进停服窗，服务不受影响）
 // 注意：guardCheck 同时被 licLockAccount/licUnlockAccount 等自动执法联动复用，
 // 那条链的「护栏」口径不变——自动流程永远不碰站长/服务/全权账号。
+// pkg3 #1（M-C 中组，DS-REVIEW §3.3）：拒绝名单须与 friends 侧 GUARD
+// （server/friends/server.js）完全一致——此前只挡 qf-regsvc /
+// qf-socialsvc，device_review violation 联动 licLockAccount 时可能误锁
+// qf-locksvc / qf-support / qf-official 等服务账号。两份名单字面同步，
+// 改一处须改另一处；站长本人（ADMIN_EMAIL）仍由首行单独挡。
+const GUARD_NAMES = new Set(['qf-regsvc', 'qf-socialsvc', 'qf-locksvc', 'qf-support', 'qf-official', 'admin', 'administrator', 'root', 'system']);
 function guardCheck(user, name) {
   const n = String(name).toLowerCase();
   if (n === ADMIN_EMAIL) return '拒绝：站长管理员账号永不触碰。';
-  if (n === 'qf-regsvc') return '拒绝：qf-regsvc 是注册服务的专用服务账号，永不触碰。';
-  if (n === 'qf-socialsvc') return '拒绝：qf-socialsvc 是好友服务的执行账号，永不触碰。';
+  if (GUARD_NAMES.has(n)) return '拒绝：' + n + ' 是系统／服务账号，永不触碰。';
   if (user && user.siteadmin === SITEADMIN_FULL) return '拒绝：目标是全权管理员账号（siteadmin=4294967295），永不触碰。';
   return null;
 }

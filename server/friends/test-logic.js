@@ -88,5 +88,12 @@ t('客服不在 pairs', !JSON.stringify(pairs).includes('qf-support'));
 t('守护名单含注册服务/执行账号/客服、站长本人不在内（2026-10-26 定版口径：限制不约束本人）', M.isGuardName('qf-regsvc') && M.isGuardName('qf-socialsvc') && M.isGuardName('qf-support') && M.isGuardName('QF-REGSVC') && !M.isGuardName('a718983610@gmail.com'));
 t('普通账号不在守护名单', !M.isGuardName(A));
 
+// --- pkg3 #3（M-C 中组）：execOk 须 success>0 且 failed 为 0/缺失
+t('execOk 全成功 {success:1} 通过', M.execOk({ success: 1 }) === true);
+t('execOk 多组全成功 {success:2, failed:0} 通过', M.execOk({ success: 2, failed: 0 }) === true);
+t('execOk 部分失败 {success:1, failed:1} 不通过', M.execOk({ success: 1, failed: 1 }) === false);
+t('execOk 全失败 {success:0, failed:1} 不通过', M.execOk({ success: 0, failed: 1 }) === false);
+t('execOk 无 success 不通过', M.execOk({ failed: 0 }) === false && M.execOk(null) === false && M.execOk({}) === false);
+
 console.log('\n结果：' + pass + ' 过 / ' + fail + ' 挂');
 process.exit(fail ? 1 : 0);

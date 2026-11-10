@@ -9,6 +9,9 @@
  *       所以本桥的 xid 校验不套用好友的 GUARD/管理员拒绝规则，改由逐设备机主核对把关。
  * 机主：请求账号 == 组件 status.json 里登记的 ownerUsername（大小写不敏感），
  *       只认这一条（status 读不到即判非机主，写操作本来也要求先读到 status）。
+ *       pkg3 #6（M-C 中组）：status.json 本身完全信任被控机文件，机主与公钥
+ *       另有服务端 pin（createDevicePinStore）：机主 pin 失配判非机主，
+ *       公钥 pin 失配时 arm/reset 拒绝把一次性密码加密给未 pin 的公钥。
  * 投递：调度 Ed25519 签名信封 → 经投递服务账号 qf-locksvc 的 control 通道
  *       用 runcommands 把信封写进设备 inbox → 触发 qf-lockctl apply →
  *       轮询 status.json 对账（30 秒超时）。status 读取同样走 runcommands+Base64 回传。
@@ -159,6 +162,106 @@ function createResetPwLimiter(nowFn) {
   };
 }
 
+/* ---------- 设备 pin：机主＋公钥指纹服务端 pin（pkg3 #6，M-C 中组） ----------
+   问题：机主判定与 devicePublicKey 完全信任被控机 status.json——本机
+   SYSTEM/管理员改 ownerUsername 可伪造机主、换 devicePublicKey 可让一次
+   性密码加密给攻击者公钥（DS-REVIEW §3.3 #6）。
+   两层 pin（查哪层都以指纹比对，不存公钥原文）：
+   ① 运维 pin 表（权威，优先于首次所见）：/opt/qfremote-lock/device-pins.json，
+      与 owner-alias.json 同款运维维护格式——
+        { "pins": { "<nodeId>": { "owner": "<账号现名>",
+                                  "publicKeySha256": "<指纹 hex 64 位>" } } }
+      文件缺失＝无运维 pin（常态降级）；内容损坏＝保留上次好表＋日志，绝不抛错。
+      owner / publicKeySha256 可只填其一（只 pin 填了的那项）；运维在装机后
+      以 /lock/owner-check 核对登记名、用 status.json 的 devicePublicKey
+      算指纹填表（指纹算法见 fingerprintPublicKey）。
+   ② 首次所见 pin（TOFU，进程内）：首个带齐机主＋公钥的 fresh status 到达即
+      记下，之后同一台 status 与 pin 不符即拒绝。固有限制：装机前已被控的
+      机器 pin 到的就是攻击值——运维 pin 可覆盖纠正，组件重装换钥后须重启
+      服务端（清 TOFU）或以运维 pin 重新登记。
+   判定语义（check 返回 state）：
+     ok ＝与 pin 一致；no-pin ＝无 pin（本次已 TOFU 记下，或 status 缺字段）；
+     owner-mismatch / key-mismatch ＝与 pin 不符。
+   强制点：机主 pin 失配 → isOwner 判非机主（读写路径都挡）；公钥 pin 失配
+   → arm/reset 加密前 409 拒绝（绝不加密给未 pin 的公钥），读路径只记日志
+   不挡列表（避免组件重装换钥后设备直接消失）。 */
+function fingerprintPublicKey(pem) {
+  if (typeof pem !== 'string' || !pem.trim()) return null;
+  return crypto.createHash('sha256').update(pem.replace(/\s+/g, '')).digest('hex');
+}
+function foldPinName(s) { return typeof s === 'string' ? s.trim().toLowerCase() : ''; }
+function createDevicePinStore(opts) {
+  const o = opts || {};
+  const pinPath = o.pinPath || '/opt/qfremote-lock/device-pins.json';
+  const readFile = o.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const statFile = o.statFile || ((p) => fs.statSync(p));
+  // ownerMatches(recorded, owner)：status 登记名是否属于 pin 的机主。
+  // 默认 fold 相等；桥内传入别名感知版（现名直认或曾用名别名）。
+  const ownerMatches = o.ownerMatches || ((recorded, owner) => foldPinName(recorded) === foldPinName(owner));
+  const logFn = o.log || (() => {});
+  const nowFn = typeof o.now === 'function' ? o.now : Date.now; // 可注入时钟（单测控 mtime 窗口）
+  const OPS_RELOAD_MS = 30000;
+  let opsPins = new Map(); // nodeId -> { owner, publicKeySha256 }
+  let opsMtimeMs = -1;
+  let opsLastCheck = 0;
+  const seen = new Map(); // TOFU：nodeId -> { owner, publicKeySha256 }
+  function loadOpsPins(force) {
+    const now = nowFn();
+    if (!force && (now - opsLastCheck) < OPS_RELOAD_MS) return;
+    opsLastCheck = now;
+    let st;
+    try { st = statFile(pinPath); } catch (e) {
+      if (opsMtimeMs !== -1) { opsPins = new Map(); opsMtimeMs = -1; }
+      return;
+    }
+    if (!force && opsMtimeMs === st.mtimeMs) return;
+    try {
+      const raw = JSON.parse(readFile(pinPath));
+      const src = (raw && typeof raw === 'object' && raw.pins && typeof raw.pins === 'object' && !Array.isArray(raw.pins)) ? raw.pins : raw;
+      const next = new Map();
+      if (src && typeof src === 'object' && !Array.isArray(src)) {
+        for (const nodeId of Object.keys(src)) {
+          const p = src[nodeId];
+          if (!p || typeof p !== 'object') continue;
+          const owner = foldPinName(p.owner);
+          const fp = typeof p.publicKeySha256 === 'string' ? p.publicKeySha256.trim().toLowerCase() : '';
+          if (!owner && !/^[0-9a-f]{64}$/.test(fp)) continue;
+          next.set(String(nodeId), { owner, publicKeySha256: /^[0-9a-f]{64}$/.test(fp) ? fp : '' });
+        }
+      }
+      opsPins = next;
+      opsMtimeMs = st.mtimeMs;
+    } catch (e) {
+      logFn('device-pins-bad', '设备 pin 表读取失败（保留上次好表继续服务）：' + (e && e.message));
+    }
+  }
+  function pinOf(nodeId) { loadOpsPins(false); return opsPins.get(String(nodeId)) || seen.get(String(nodeId)) || null; }
+  function check(nodeId, status) {
+    if (!status || typeof status !== 'object') return { state: 'no-pin' };
+    const pin = pinOf(nodeId);
+    const owner = typeof status.ownerUsername === 'string' ? status.ownerUsername : '';
+    const fp = fingerprintPublicKey(status.devicePublicKey);
+    if (!pin) {
+      if (owner && fp) {
+        seen.set(String(nodeId), { owner: foldPinName(owner), publicKeySha256: fp });
+        // 首次 pin 必须留痕，不得静默信任（DS #6 复审 round 1）：TOFU 的固有
+        // 边界是装机前已被控的机器 pin 到的就是攻击值，服务端无法仅凭首见
+        // 区分合法装机与首次伪造——首次登记记一条审计日志（机主哈希＋指纹
+        // 前 12 位，不记明文），运维凭 /lock/owner-check 核对，发现不对即
+        // 以运维 pin 表覆盖纠正；pin 建立后的一切伪造（换机主／换钥）一律拒绝。
+        logFn('device-pin-first', '设备 pin 首次登记（TOFU）：node=' + String(nodeId)
+          + ' 机主哈希=' + crypto.createHash('sha256').update(foldPinName(owner)).digest('hex').slice(0, 16)
+          + ' 公钥指纹=' + fp.slice(0, 12) + '…（首次所见信任，运维 pin 可覆盖）');
+      }
+      return { state: 'no-pin' };
+    }
+    if (owner && pin.owner && !ownerMatches(owner, pin.owner)) return { state: 'owner-mismatch' };
+    if (fp && pin.publicKeySha256 && fp !== pin.publicKeySha256) return { state: 'key-mismatch' };
+    return { state: 'ok' };
+  }
+  return { check, loadOpsPins, fingerprintPublicKey };
+}
+
 function createLockBridge(deps) {
   const cfg = deps.cfg;
   const log = typeof deps.log === 'function' ? deps.log : function () {};
@@ -280,6 +383,15 @@ function createLockBridge(deps) {
     }
     return false;
   }
+
+  // pkg3 #6：设备 pin（机主＋公钥指纹服务端 pin，见模块顶 createDevicePinStore）。
+  // ownerMatches 语义：status 登记名属于 pin 的机主（现名直认或曾用名别名）。
+  // pin 表路径可由 deps.devicePinPath 注入（单测用临时路径）；缺省运维表。
+  const devicePinStore = createDevicePinStore({
+    pinPath: deps.devicePinPath || '/opt/qfremote-lock/device-pins.json',
+    ownerMatches: (recorded, owner) => ownerNameMatches(owner, recorded),
+    log: (tag, msg) => log('lock', msg),
+  });
 
   function svcNotifyReady() {
     const w = svc.waiters.splice(0);
@@ -593,8 +705,21 @@ function createLockBridge(deps) {
   /* ---------- 机主判定 ---------- */
   // 只认组件登记机主：status.json 的 ownerUsername 与请求账号大小写不敏感相等。
   // status 读不到或没登记名 → 一律判非机主（保守；写操作本来也要求先读到 status）。
+  // pkg3 #6：机主 pin 失配 → 判非机主（读写路径都挡）；公钥 pin 失配 → 读路径
+  // 只记日志（加密使用点另有 409 硬挡），不让组件换钥直接抹掉设备列表。
   function isOwner(me, node, status) {
-    return !!(status && status.ownerUsername && ownerNameMatches(me, status.ownerUsername));
+    if (!(status && status.ownerUsername && ownerNameMatches(me, status.ownerUsername))) return false;
+    const pin = devicePinStore.check(node._id, status);
+    if (pin.state === 'owner-mismatch') {
+      logThrottled('pin-owner-mismatch-' + node._id,
+        'lock 设备 pin 失配（机主）：node=' + node._id + ' 登记名与服务端 pin 不符，已判非机主。', 60000);
+      return false;
+    }
+    if (pin.state === 'key-mismatch') {
+      logThrottled('pin-key-mismatch-' + node._id,
+        'lock 设备 pin 失配（公钥）：node=' + node._id + ' devicePublicKey 指纹与服务端 pin 不符，arm/reset 将拒绝加密。', 60000);
+    }
+    return true;
   }
 
   /* ---------- HTTP 小工具 ---------- */
@@ -786,8 +911,11 @@ function createLockBridge(deps) {
         if (!status) { fail(res, 503, ERR.unreachable); return true; }
         const recorded = status.ownerUsername || '';
         const matches = recorded ? ownerNameMatches(me, recorded) : false;
-        log('lock', 'owner-check：nodeid=' + node._id + ' 登记名哈希=' + ownerNameHash(recorded) + ' matches=' + matches);
-        sendJson(res, 200, { ok: true, nodeId: node._id, name: node.name || '', recordedOwner: recorded || null, recordedOwnerHash: ownerNameHash(recorded), matches, reachable: true });
+        // pkg3 #6：顺带回 pin 状态，供运维核对／登记 pin 表（ok / no-pin /
+        // owner-mismatch / key-mismatch），不含公钥原文与指纹。
+        const pinState = devicePinStore.check(node._id, status).state;
+        log('lock', 'owner-check：nodeid=' + node._id + ' 登记名哈希=' + ownerNameHash(recorded) + ' matches=' + matches + ' pin=' + pinState);
+        sendJson(res, 200, { ok: true, nodeId: node._id, name: node.name || '', recordedOwner: recorded || null, recordedOwnerHash: ownerNameHash(recorded), matches, pin: pinState, reachable: true });
         return true;
       }
       if (req.method === 'POST' && (p === '/lock/enable' || p === '/lock/disable' || p === '/lock/reset' || p === '/lock/update')) {
@@ -803,6 +931,8 @@ function createLockBridge(deps) {
           if (typeof body.password !== 'string' || body.password.length < 4 || body.password.length > 64) { fail(res, 400, ERR.badPw); return true; }
           if (status.state === 'Locked') { fail(res, 409, ERR.alreadyLocked); return true; }
           if (!status.devicePublicKey) { fail(res, 409, ERR.fault); return true; }
+          // pkg3 #6：公钥 pin 失配时绝不把一次性密码加密给未 pin 的公钥。
+          if (devicePinStore.check(node._id, status).state === 'key-mismatch') { fail(res, 409, ERR.fault); return true; }
           const env = envelope.buildEnvelope(dispatcherKey, { op: 'arm', nodeId: node._id, by: me, password: body.password, devicePublicKeyPem: status.devicePublicKey });
           await deliverEnvelope(node._id, env);
           const r = await reconcile(node._id, env, (st) => st.state === 'Locked' && hasEvent(st, 'arm', (ev) => ev.fields && ev.fields.armId === env.id));
@@ -868,6 +998,8 @@ function createLockBridge(deps) {
         }
         resetPwLimiter.clear(me); // 验密成功即清零
         if (!status.devicePublicKey) { fail(res, 409, ERR.fault); return true; }
+        // pkg3 #6：公钥 pin 失配时绝不把一次性密码加密给未 pin 的公钥。
+        if (devicePinStore.check(node._id, status).state === 'key-mismatch') { fail(res, 409, ERR.fault); return true; }
         const env = envelope.buildEnvelope(dispatcherKey, { op: 'reset', nodeId: node._id, by: me, password: body.newPassword, devicePublicKeyPem: status.devicePublicKey });
         await deliverEnvelope(node._id, env);
         const r = await reconcile(node._id, env, (st) => st.state === 'Locked' && hasEvent(st, 'remote-reset', (ev) => ev.fields && ev.fields.id === env.id));
@@ -901,4 +1033,4 @@ function createLockBridge(deps) {
   return { handle, purgeUser };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey } };

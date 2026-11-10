@@ -1297,16 +1297,19 @@ function startProbeLoop() {
 // 会话 cookie 取自控制台所在的 persist 会话分区（控制台页就跑在这个分区里）；
 // 请求只发往 svc-urls 解析出的自家服务地址，失败一律安静忽略，不弹窗不打断。
 function consoleSession() { return session.fromPartition('persist:qfremote'); }
-async function getConsoleCookieHeader() {
+// DS-4（M-C 中组，DS-REVIEW §3.4）：只发目标 URL 域/路径下有效的 cookie——
+// 整罐不分域发给白名单子域会绕过同源边界。过滤逻辑在 svc-urls.js
+// （filterCookiesForUrl，纯函数可单测），此处只传目标地址。
+async function getConsoleCookieHeader(urlStr) {
   try {
     const cookies = await consoleSession().cookies.get({});
-    return cookies.map(c => c.name + '=' + c.value).join('; ');
+    return svcUrlsMod.cookiesHeaderForUrl(cookies, urlStr);
   } catch (e) { return ''; }
 }
 async function extRequest(method, urlStr, bodyObj, opts) {
   // opts.noCookie：不附会话 cookie（许可领取的无会话核验入口专用——体里
   // 带账号＋密码只核验不签发登录态，契约 §7.5.3；其余调用口径不变）。
-  const cookie = (opts && opts.noCookie) ? '' : await getConsoleCookieHeader();
+  const cookie = (opts && opts.noCookie) ? '' : await getConsoleCookieHeader(urlStr);
   return new Promise((resolve) => {
     let u;
     try { u = new URL(urlStr); } catch (e) { resolve({ status: 0, json: null, text: '' }); return; }
@@ -3058,6 +3061,24 @@ async function syncLockOwner(account) {
   return { ok: true, changed, uacDispatched: needUac.length > 0 };
 }
 
+// DS-6（M-C 中组，DS-REVIEW §3.4）：安装拉起须等结果、读 exit 码。
+// UAC 人工确认＋三件安装的上限 180 秒；超时杀掉子进程报 install-timeout。
+const INSTALL_WAIT_MS = 180000;
+function waitInstallResult(child, timeoutMs) {
+  return new Promise((resolve) => {
+    let stderr = '';
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; clearTimeout(timer); resolve(r); };
+    const timer = setTimeout(() => { try { child.kill(); } catch (e) {} finish({ timedOut: true, code: null, error: null, stderr }); }, timeoutMs || INSTALL_WAIT_MS);
+    try {
+      if (child.stderr && typeof child.stderr.on === 'function') child.stderr.on('data', (d) => { stderr += String(d); if (stderr.length > 4096) stderr = stderr.slice(-4096); });
+      if (child.stdout && typeof child.stdout.on === 'function') child.stdout.on('data', () => {});
+    } catch (e) { /* 流挂载失败不影响等退出码 */ }
+    child.on('error', (err) => finish({ timedOut: false, code: null, error: err, stderr }));
+    child.on('close', (code) => finish({ timedOut: false, code: code, error: null, stderr }));
+  });
+}
+
 async function maybeInstallSystemServices(force) {
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
@@ -3075,11 +3096,12 @@ async function maybeInstallSystemServices(force) {
   const helperExe = (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'QFSysHelper.exe')))
     ? path.join(process.resourcesPath, 'QFSysHelper.exe')
     : path.join(__dirname, 'syshelper', 'QFSysHelper.exe');
-  if (!fs.existsSync(installPs1) && !fs.existsSync(sysPs1)) {
-    bootLog('system-services.no-component');
+  if (!fs.existsSync(sysPs1)) {
+    // DS-6（M-C 中组，DS-REVIEW §3.4）：sysPs1 单独必须存在——旧检查是
     // “两者都不存在才报”，installPs1 在、sysPs1 缺失时仍会拉起引用缺失
     // sysPs1 的命令。installPs1 缺失仍可容忍（install-system-services.ps1
     // 内部处理无锁源目录的情况），只把真正被执行的 sysPs1 卡死。
+    bootLog('system-services.no-component', 'install-system-services.ps1');
     return { ok: false, reason: 'no-component' };
   }
   let leaBackfill = false; // B-LEA：本轮是否为 LEA 升级补装（供结果日志打标）。
@@ -3138,7 +3160,19 @@ async function maybeInstallSystemServices(force) {
     const childProcess = require('child_process');
     const child = childProcess.spawn('powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner], { windowsHide: true });
-    if (child && typeof child.on === 'function') child.on('error', () => {});
+    // DS-6：spawn 后等结果、读 exit 码，UAC 被拒／脚本非零退出即报失败，
+    // 不再一拉起就返 launched。reason 仍为 'launched'（调用方与 B-LEA 测试
+    // 约定的成功串），但此时已是退出码为 0 后的确认，不再是仅拉起。
+    // 子进程无可观测的 stdout/stderr 时无法等结果（如 stdio 被设为 ignore），
+    // 退回 launched 并记日志——正常 spawn（默认 pipe）一律有流、一律等结果。
+    if (!child || typeof child.on !== 'function' || !child.stdout || !child.stderr) {
+      bootLog('system-services.launched-unobserved', 'owner-set');
+      return { ok: true, reason: 'launched' };
+    }
+    const r = await waitInstallResult(child, INSTALL_WAIT_MS);
+    if (r.timedOut) { bootLog('system-services.install-timeout', ''); return { ok: false, reason: 'install-timeout' }; }
+    if (r.error) { bootLog('system-services.launch-failed', String((r.error && r.error.message) || r.error)); return { ok: false, reason: 'launch-failed' }; }
+    if (r.code !== 0) { bootLog('system-services.install-failed', 'code=' + r.code + (r.stderr ? ' ' + r.stderr : '')); return { ok: false, reason: 'install-failed' }; }
     bootLog('system-services.launched', 'owner-set');
     return { ok: true, reason: 'launched' };
   } catch (e) {

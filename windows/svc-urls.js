@@ -34,6 +34,39 @@ function isTrustedSvcUrl(v) {
   return isHttpsUrl(v) && isAllowedSvcHost(v);
 }
 
+// DS-4（M-C 中组，DS-REVIEW §3.4）：按目标 URL 的域/路径过滤 cookie 再发。
+// 整罐 cookie 不分域发给白名单子域，会绕过浏览器同源边界：app.qfremote.top
+// 的会话 cookie 本不会发给 admin.qfremote.top，手工 Cookie 头会。
+// 规则（RFC 6265 简化版）：
+//   域：hostOnly 的 cookie 只发给 domain 本身；domain cookie（domain 带或
+//   不带前导点）发给 domain 本身及其子域；
+//   路径：目标 path 须以 cookie.path（缺省 '/'）开头；
+//   安全：secure 的 cookie 只发给 https 目标。
+// 过期 cookie 由 Electron 的 cookies.get 事先滤掉，此处不另判。
+function filterCookiesForUrl(cookies, urlStr) {
+  let u;
+  try { u = new URL(urlStr); } catch (e) { return []; }
+  const host = u.hostname.toLowerCase();
+  const pathName = u.pathname || '/';
+  const secureTarget = u.protocol === 'https:';
+  return (Array.isArray(cookies) ? cookies : []).filter((c) => {
+    if (!c || typeof c.name !== 'string' || typeof c.value !== 'string') return false;
+    if (c.secure && !secureTarget) return false;
+    const dom = String(c.domain || '').toLowerCase().replace(/^\./, '');
+    if (!dom) return false;
+    if (c.hostOnly) { if (host !== dom) return false; }
+    else if (host !== dom && !host.endsWith('.' + dom)) return false;
+    // 路径须按边界匹配：/license 只发 /license 与 /license/...，不发 /licenseX
+    //（浏览器 path 语义；DS-4 复审 round 1 指出 startsWith 前缀会误配兄弟路径）。
+    const cPath = (typeof c.path === 'string' && c.path) ? c.path : '/';
+    if (pathName !== cPath && !pathName.startsWith(cPath.endsWith('/') ? cPath : cPath + '/')) return false;
+    return true;
+  });
+}
+function cookiesHeaderForUrl(cookies, urlStr) {
+  return filterCookiesForUrl(cookies, urlStr).map((c) => c.name + '=' + c.value).join('; ');
+}
+
 const FALLBACKS = {
   forumUrl: PROD_WEB_BASE + '/forum',
   registerUrl: PROD_WEB_BASE + '/register',
@@ -163,4 +196,4 @@ function createSvcUrls(opts) {
   return { refresh, get, all, pointsApi, adminApi, adminLoginUrl, forumApi, forumSsoLoginUrl, extOrigin, homeUrl, purchaseUrl, licenseStatusUrl, rebindUrl, appealUrl, supportUrl, licenseApi };
 }
 
-module.exports = { createSvcUrls, parseProductJson, isHttpsUrl, isAllowedSvcHost, isTrustedSvcUrl, PRODUCT_JSON_URL, FALLBACKS };
+module.exports = { createSvcUrls, parseProductJson, isHttpsUrl, isAllowedSvcHost, isTrustedSvcUrl, filterCookiesForUrl, cookiesHeaderForUrl, PRODUCT_JSON_URL, FALLBACKS };

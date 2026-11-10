@@ -611,6 +611,28 @@ async function runHealLadder(deps) {
   queries.push(p1);
   log('ladder presence verdict=' + p1.verdict + ' code=' + p1.code + ' ageMs=' + p1.ageMs);
   let lastCode = p1.code;
+  // 补-中（M-C 中组，DS-REVIEW §3.4）：p1 单次 stale/offline 不得直接调
+  // runRepair——文件头口径是“年龄>180s 且两次查询结果一致才认定离线/陈旧”，
+  // 一次瞬时陈旧就重启 Mesh Agent 服务属于误判。先二次查询确认：
+  // 回 online 按 online 处理；verdict 不一致／年龄未过 180s／无确认 →
+  // unverified，不修。两次一致且 judgeTriggered 才进修复循环。
+  const p1b = await queryPresence();
+  if (!p1b || p1b.verdict === 'unknown') {
+    return { outcome: 'unverified', code: HEAL_CODES.SERVER_UNCONFIRMED, rounds };
+  }
+  if (p1b.verdict === 'online') {
+    return { outcome: rounds > 0 ? 'fixed' : 'already_correct', code: HEAL_CODES.ONLINE, rounds };
+  }
+  if (p1b.verdict === 'not-found') {
+    return { outcome: 'unverified', code: HEAL_CODES.NOT_FOUND, rounds };
+  }
+  queries.push(p1b);
+  log('ladder presence confirm verdict=' + p1b.verdict + ' code=' + p1b.code + ' ageMs=' + p1b.ageMs);
+  lastCode = p1b.code;
+  if (!judgeTriggered(queries)) {
+    log('ladder judge not triggered, skip repair');
+    return { outcome: 'unverified', code: lastCode, rounds };
+  }
   while (rounds < maxRounds) {
     rounds++;
     const r = await runRepair('presence-' + p1.verdict);
