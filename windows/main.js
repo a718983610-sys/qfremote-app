@@ -2851,12 +2851,18 @@ function recordHealOutcome(outcome, detail) {
 }
 
 // ---------- 锁组件与 SYSTEM helper 首装（W-11，2.4.5） ----------
-// 首次运行一次 UAC：以提权安装两件系统级活——
+// 首次运行一次 UAC：以提权安装三件系统级活——
 //   ① QFLockSvc 锁服务（调锁组件 install.ps1，-Owner 必填，从登录账号自动填）；
 //   ② QFSysHelper 服务（SYSTEM helper，最小安全版，见 syshelper/）。
-// 两件都由 install-system-services.ps1 一次完成；脚本 SHA-256 先按
+//   ③ QFRLEA 本地代理（B-LEA 升级补装：锁已装但 LEA 缺失／降级时，升级首启
+//      一次 UAC 补装；LEA 齐全时不重复拉起）。
+// 三件都由 install-system-services.ps1 一次完成；脚本 SHA-256 先按
 // whitelist.json 校验，校验不过绝不拉起。每版本只尝试一次，失败留痕
-// 不反复弹 UAC；后续缺失改走 helper 管道（零 UAC）或手动重试。
+// 不反复弹 UAC；后续缺失改走 helper 管道（零 UAC）或手动重试，LEA 缺失
+// 在下个版本首启再补一次；owner 同步 UAC 在飞时本轮 defer（不叠加第二
+// 个 UAC），下次登录再补。补装拉起后的成败见拉起块既有日志（launched／
+// install-failed／install-timeout／launch-failed），与 lea-missing 行
+// 按序可对上；白名单拦下时另记 lea-backfill-failed。
 let systemServicesInstallTried = false;
 function lockComponentSourceDir() {
   if (app.isPackaged) {
@@ -2873,6 +2879,35 @@ function lockServiceInstalled() {
     if (fs.existsSync(path.join(lockComponentSourceDir(), 'device.json'))) return true;
   } catch (e) { /* ignore */ }
   return false;
+}
+// B-LEA：LEA 已装判据（偏保守：宁可多弹一次 UAC，不可静默跳过补装）。
+// 检查项：%ProgramFiles%\QFR\LEA\ 下 QFRLEA.exe（服务本体）＋
+// qf-lea-client.exe（客户端，与服务本体同在 install-lea.ps1 ②步拷入）＋
+// version.json（⑥版本绑定）齐全；无 LEA_DEGRADED 标记（install-lea.ps1
+// 失败时写该标记，有标记说明上次装过但没装成）；且 QFRLEA 服务已注册
+// （sc.exe query 只读、无需提权——文件齐全≠服务在，卸载残留／中途失败
+// 都可能只剩文件，查不到／查失败一律按未装）。
+// 不检查项：服务是否 Running（起停由 install-lea 自检与自愈管，注册即算
+// 已装）；USH 计划任务（主程序有兜底拉起，任务缺失≠LEA 不可用）。
+// 注意：不设开发态目录回退——windows/lea/QFRLEA.exe 本就随包在仓内，
+// 回退会让开发机永远判已装，升级补装分支测不到。
+function leaServiceInstalled() {
+  try {
+    const pf = process.env.ProgramFiles || '';
+    if (!pf) return false;
+    const dir = path.join(pf, 'QFR', 'LEA');
+    if (!fs.existsSync(path.join(dir, 'QFRLEA.exe'))) return false;
+    if (!fs.existsSync(path.join(dir, 'qf-lea-client.exe'))) return false;
+    if (!fs.existsSync(path.join(dir, 'version.json'))) return false;
+    const pd = process.env.ProgramData || '';
+    if (pd && fs.existsSync(path.join(pd, 'QFR', 'LEA', 'LEA_DEGRADED'))) return false;
+    try {
+      const cp = require('child_process');
+      const r = cp.spawnSync('sc.exe', ['query', 'QFRLEA'], { windowsHide: true, timeout: 10000, encoding: 'utf8' });
+      if (!r || r.status !== 0) return false;
+    } catch (e) { return false; }
+    return true;
+  } catch (e) { return false; }
 }
 // ---------- LEA 本地代理：登录／登出／换号通知（H07／pkg4 DS-2） ----------
 // 绑定跟随当前登录账号：登录成功（processAuthPage 的 console 分支）调
@@ -3042,16 +3077,40 @@ async function maybeInstallSystemServices(force) {
     : path.join(__dirname, 'syshelper', 'QFSysHelper.exe');
   if (!fs.existsSync(installPs1) && !fs.existsSync(sysPs1)) {
     bootLog('system-services.no-component');
+    // “两者都不存在才报”，installPs1 在、sysPs1 缺失时仍会拉起引用缺失
+    // sysPs1 的命令。installPs1 缺失仍可容忍（install-system-services.ps1
+    // 内部处理无锁源目录的情况），只把真正被执行的 sysPs1 卡死。
     return { ok: false, reason: 'no-component' };
   }
+  let leaBackfill = false; // B-LEA：本轮是否为 LEA 升级补装（供结果日志打标）。
   if (lockServiceInstalled()) {
     // H25：锁组件已装也不盲返——ownerUsername 须跟随当前登录账号。
     const sync = await syncLockOwner(owner);
-    // DS 第二轮 #3：直接写成功报 owner-updated；只发起了 UAC 报
-    // owner-uac-pending（结果见 8 秒后校验日志），不谎报已更新。
-    const reason = sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : 'already-installed');
-    bootLog('system-services.already-installed', sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : undefined));
-    return { ok: true, reason };
+    // B-LEA（3.0.0 升级补装）：锁已装≠LEA 已装。老版本升级上来的用户锁在、
+    // LEA 不在；此处若直接返 already-installed，install-system-services.ps1
+    // 永不拉起，LEA 永不补装（违反站长 13:44 定）。LEA 缺失／降级时不返回，
+    // 落到下面的白名单校验＋一次 UAC 拉起，由 install-system-services.ps1
+    // ③段补装 LEA（helper／锁重装是该脚本既有幂等分支）；LEA 齐全时才按原路返回。
+    // DS-R1 Q4 串行化：syncLockOwner 的 UAC 还在飞时不拉第二次 UAC——本轮
+    // defer（恢复每版本守门，下次登录再试；owner UAC 完成后 device.json 已
+    // 是新账号，下次即走直接补装），避免两次 UAC 叠加与两个提权脚本并发改服务。
+    if (!leaServiceInstalled()) {
+      if (sync.uacDispatched) {
+        systemServicesInstallTried = false;
+        settings.systemServicesTriedVersion = triedVersion;
+        saveSettings();
+        bootLog('system-services.lea-backfill-deferred', 'owner-uac-pending');
+        return { ok: false, reason: 'owner-uac-pending' };
+      }
+      leaBackfill = true;
+      bootLog('system-services.lea-missing', 'backfill');
+    } else {
+      // DS 第二轮 #3：直接写成功报 owner-updated；只发起了 UAC 报
+      // owner-uac-pending（结果见 8 秒后校验日志），不谎报已更新。
+      const reason = sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : 'already-installed');
+      bootLog('system-services.already-installed', sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : undefined));
+      return { ok: true, reason };
+    }
   }
   // SHA-256 白名单校验（sys-helper.js）：脚本/二进制被改过就绝不提权拉起。
   // H20：install-lea.ps1 同在白名单（whitelist.json，5 件）；校验路径取
@@ -3066,11 +3125,11 @@ async function maybeInstallSystemServices(force) {
     for (const f of [sysPs1, helperExe, installPs1, leaPs1]) {
       if (fs.existsSync(f) && !sysHelper.verifyFileHash(f, wl)) bad.push(path.basename(f));
     }
-    if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); return { ok: false, reason: 'hash-mismatch' }; }
+    if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); if (leaBackfill) bootLog('system-services.lea-backfill-failed', 'hash-mismatch'); return { ok: false, reason: 'hash-mismatch' }; }
     if (fs.existsSync(leaPs1) && wl && wl.files && typeof wl.files['install-lea.ps1'] === 'string') {
       leaScriptHash = wl.files['install-lea.ps1'];
     }
-  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); return { ok: false, reason: 'hash-mismatch' }; }
+  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); if (leaBackfill) bootLog('system-services.lea-backfill-failed', 'whitelist-throw'); return { ok: false, reason: 'hash-mismatch' }; }
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
   const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
     q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) +
