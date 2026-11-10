@@ -34,7 +34,7 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
 | `whitelist.h` | 脚本白名单 hash（`gen_whitelist.py` 生成，勿手改） |
 | `gen_whitelist.py` | 从发版文件算 hash 生成 `whitelist.h`（`--check` 校验） |
 | `build.sh` | mingw 交叉编译（服务＋客户端），默认生产构建 |
-| `install-lea-service.ps1` | 服务安装脚本（一次 UAC；模式参照 `install-system-services.ps1`） |
+| `../install-lea.ps1` | 服务安装脚本（唯一入口，H18；一次 UAC；拷载荷前验 SHA-256，见 H17） |
 | `test/test_lea.c` | 核心逻辑单测（Linux 可跑） |
 | `test/pipe_server.c` | S3 真客户端单测的管道替身（仅测试用，不进生产包；由 `server/ext/lea/test/test-lea-realclient.js` 驱动） |
 | `test/run_tests.sh` | 单测＋交叉编译一键跑 |
@@ -65,8 +65,9 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    `lea_server_pubkey_hex()` 接入口；规范串格式须与服务端冻结后写入此处）。
 4. **第二层准入**（`lea_admit`，顺序按 DESIGN §6.2）：绑定态 → 设备一致 →
    epoch 一致 → 账号一致 → `muse.execute` 授权 → 本地吊销表（`state/revoked_keys.txt`，
-   每行一个 key_id；服务端吊销的本地镜像）→ scope（危险命令另需
-   `muse.execute.dangerous`）。拒绝码见 DESIGN §4.5；仅 `QFR_LEA_BINDING_PENDING`
+   每行一个 key_id；服务端吊销的本地镜像——写入方：服务端下发命令前经
+   runcommands 推送全集，见 H21；admit 的授权代次比对（T07）是第一层控制）
+   → scope（危险命令另需 `muse.execute.dangerous`）。拒绝码见 DESIGN §4.5；仅 `QFR_LEA_BINDING_PENDING`
    可重试。准入读内存实时绑定态（服务内 `g_binding`，无缓存过期问题）。
 5. **幂等**：键 `(device_id, account_id, idempotency_key)`，状态
    RECEIVED/RUNNING/SUCCEEDED/FAILED/UNKNOWN/EXPIRED；持久化到
@@ -87,8 +88,9 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    MSVC 规则引用转义（C 版 `ArgumentList` 等价物），禁 `cmd /c`、
    禁 `-Command` 拼接；参数禁控制字符；输出回传上限 8192 字节。
    文件读写仅限 `%ProgramData%\QFR\LEA\work\`（规范化＋前缀判定，`..`
-   越界拒绝；`file.read` 内联上限 32KB，超限拒绝）。`app.open` 仅限安装
-   目录内 `.exe`；`app.close` MVP 仅允许 `QFRemote.exe`（清单待站长确认）。
+   越界拒绝；`file.read` 内联上限 32KB，超限拒绝）。`app.open` 仅限显式 exe
+   白名单（H16：名＋SHA-256 双重判定，初版仅 `QFUserHelper.exe`，见 `whitelist.h`）；
+   `app.close` MVP 仅允许 `QFRemote.exe`（清单待站长确认）。
 8. **UI 类转 USH**：`ui.click/input/snapshot/tree` 由 worker 重建信封行，
    经 `\\.\pipe\QFR\LEA\UserHelper\v1` 转发（连接超时 2s，执行按
    `timeout_ms`）；USH 不可用时明确报 `QFR_LEA_USH_UNAVAILABLE`
@@ -130,8 +132,8 @@ sh test/run_tests.sh
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 核心单测（测试构建） | **218 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）** |
-| 核心单测（严格构建） | **217 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
+| 核心单测（测试构建） | **220 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、app.open 白名单 hash 钉死（H16）、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）** |
+| 核心单测（严格构建） | **219 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
 | mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，485000 B）、`qf-lea-client.exe`（260528 B） |
 | 生产构建核查 | **通过** | `strings QFRLEA.exe` 不含 `test-only-unsigned-accepted`（0 处），含 `ed25519-pubkey-not-configured`（2 处） |
 | 白名单核查 | **通过** | `gen_whitelist.py --check`：`qf-agent-heal.ps1` sha256 与 `whitelist.h` 一致 |
@@ -145,7 +147,7 @@ sh test/run_tests.sh
 以下均须在阿里云 ECS Windows Server（DESIGN §13.1）或 Win11 笔记本上实测，
 本沙箱（Linux）无法运行 Windows 服务／命名管道／DPAPI／PowerShell：
 
-1. `install-lea-service.ps1` 一次 UAC 安装：服务创建、启动、Running 状态、失败回滚。
+1. `install-lea.ps1`（唯一安装入口，H18）一次 UAC 安装：服务创建、启动、Running 状态、失败回滚。
 2. `QFRLEA.exe debug` 前台模式：管道可连接、一问一答。
 3. 冒烟构建（`LEA_TEST_UNSIGNED=1`）端到端：`session.login_changed` →
    `binding.confirm`（TEST-UNSIGNED）→ `sys.info` → `script.run`
@@ -178,7 +180,7 @@ sh test/run_tests.sh
 - USH 管道协议细节（USH 线）：当前按一行 JSON 请求 → 一行 JSON 响应假设，
   与 QFSysHelper 同形。
 - `installer.nsi` 的 `SEC_LEA` 段与 `main.js` 登录成功分支调用
-  `install-lea-service.ps1`（安装器线／主程序线）。
+  `install-lea.ps1`（唯一入口，H18；旧 `install-lea-service.ps1` 已删）。
 - `qf-agent-heal.ps1` 在包内的实际路径（打包线）。
 
 ## 八、错误码表（DESIGN §4.5 ＋ MVP 补充码，补充码标 *）

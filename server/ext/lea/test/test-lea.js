@@ -38,6 +38,10 @@ function bearerHeaders(plain, extra) {
 }
 
 // ---------- 1) Key 生成：格式 / 只存哈希 / 列表脱敏 ----------
+// T07：Key 生成时盖上当时的 grant_epoch——先建立绑定＋授权再建 Key；
+// §3 会再次确认同一状态（同账号重复绑定／重复 grant 不动 epoch）。
+core.recordBinding(DEV, USER, 'test-login');
+core.grantMuse(USER, 'owner');
 const gen = core.generateKey(USER, { device_scope: DEV });
 t('Key 格式 qfr_lea_+43 位 base64url', /^qfr_lea_[A-Za-z0-9_-]{43}$/.test(gen.key));
 t('key_id 形如 k_+10 字符', /^k_[a-z0-9]{10}$/.test(gen.record.key_id));
@@ -71,18 +75,26 @@ t('缺 nonce → 401 QFR_REPLAY_DETECTED', a.ok === false && a.code === 'QFR_REP
 // 绑定 + 授权先行建立
 core.recordBinding(DEV, USER, 'test-login');
 core.grantMuse(USER, 'owner');
-let adm = core.admit({ key: core.findKeyById(gen.record.key_id), deviceId: DEV, command: 'ui.click' });
+// T07/H22：Key 必须在绑定＋授权建立之后生成——生成时盖上当时的 binding_epoch
+// 与 grant_epoch；绑定前生成的 Key（binding_epoch 0）准入时按不匹配拒绝；
+// 授权前生成的 Key 盖上的 grant_epoch 为 0，准入时按授权撤销拒绝。
+const genBound = core.generateKey(USER, { device_scope: DEV });
+let adm = core.admit({ key: core.findKeyById(genBound.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('绑定+授权齐全 → 准入通过', adm.ok === true);
 // scope：device_scope 不一致
 const genOther = core.generateKey(USER, { device_scope: 'node//other-device' });
 adm = core.admit({ key: core.findKeyById(genOther.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('device_id 与 Key 绑定不一致 → 403 QFR_SCOPE_DENIED', adm.ok === false && adm.status === 403 && adm.code === 'QFR_SCOPE_DENIED');
-// 未授权账号
-const genNoGrant = core.generateKey('carol', { device_scope: DEV });
+// 未授权账号：先授 carol、换绑、建 Key，再撤销授权，准入应报授权已撤销
+// （T07：revokeGrant 递增 grant_epoch，旧 Key 的 epoch 再也对不上）。
+core.grantMuse('carol', 'owner');
 core.recordBinding(DEV, 'carol', 'test-login-carol'); // 换绑到 carol：alice 的旧 Key 应随之失效（见 §7.4，下组断言）
+const genNoGrant = core.generateKey('carol', { device_scope: DEV });
+core.revokeGrant('carol', 'owner');
 adm = core.admit({ key: core.findKeyById(genNoGrant.record.key_id), deviceId: DEV, command: 'ui.click' });
-t('账号无 muse.execute 授权 → 403 QFR_MUSE_NOT_AUTHORIZED', adm.ok === false && adm.code === 'QFR_MUSE_NOT_AUTHORIZED');
+t('账号授权已撤销 → 403 QFR_GRANT_REVOKED', adm.ok === false && adm.code === 'QFR_GRANT_REVOKED');
 // 未绑定设备（用无 device_scope 的 Key，免得先触发 SCOPE_DENIED）
+core.grantMuse('carol', 'owner'); // 重新授予，genNoScope 才能建出
 const genNoScope = core.generateKey('carol', {});
 adm = core.admit({ key: core.findKeyById(genNoScope.record.key_id), deviceId: 'node//never-bound', command: 'ui.click' });
 t('设备未绑定 → 403 QFR_LEA_NOT_BOUND', adm.ok === false && adm.code === 'QFR_LEA_NOT_BOUND');
@@ -474,15 +486,21 @@ const mockChannel = {
   });
   const d = await core.dispatchEnvelope(mockChannel, env2, { timeoutMs: 5000 });
   t('mock 下发成功', d.ok === true && d.result.code === 'done');
-  t('下发目标为绑定设备', calls[0].nodeId === DEV);
-  t('下发命令含 LEA 客户端路径', calls[0].cmd.includes('qf-lea-client.exe'));
-  t('下发命令含 dispatch 动词', calls[0].cmd.includes('dispatch'));
-  const b64 = calls[0].cmd.trim().split(/\s+/).pop();
+  // H21：此前 §5/§6 已吊销多把 Key，下发前会先同步一次本机吊销表
+  // （powershell 写 revoked_keys.txt），故 calls[0] 是同步命令；下发命令
+  // 须按“含 ' dispatch '”过滤出来断言（exe 路径带引号，'exe dispatch'
+  // 连写匹配不上）。
+  const disp1 = calls.filter((c) => c.cmd.includes(' dispatch '));
+  t('下发目标为绑定设备', disp1.length === 1 && disp1[0].nodeId === DEV);
+  t('下发命令含 LEA 客户端路径', disp1.length === 1 && disp1[0].cmd.includes('qf-lea-client.exe'));
+  t('下发命令含 dispatch 动词', disp1.length === 1 && disp1[0].cmd.includes('dispatch'));
+  const b64 = disp1[0].cmd.trim().split(/\s+/).pop();
   const decoded = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
   t('下发信封 base64 可解出原信封', decoded.request_id === 'req-000002' && decoded.command === 'sys.info');
-  t('S3：下发命令不含裸 JSON（防 shell 元字符，只走 dispatch+base64）', !calls[0].cmd.includes('{"version"'));
+  t('S3：下发命令不含裸 JSON（防 shell 元字符，只走 dispatch+base64）', !disp1[0].cmd.includes('{"version"'));
   t('S3：dispatch 的 base64 载荷可被真客户端解码（见 test-lea-realclient.js）', typeof b64 === 'string' && /^[A-Za-z0-9+/=]+$/.test(b64));
-  t('下发超时 5s', calls[0].timeoutMs === 5000);
+  t('下发超时 5s', disp1[0].timeoutMs === 5000);
+  t('H21 吊销表只同步一次（本次下发后 pushed_epoch 已追上）', calls.filter((c) => c.cmd.includes('revoked_keys.txt')).length === 1);
   // 大信封走 inbox 两步
   calls.length = 0;
   const bigEnv = core.buildEnvelope({
@@ -495,16 +513,16 @@ const mockChannel = {
   t('大信封走两步（写 inbox + apply）', calls.length === 2 && calls[0].cmd.includes('LEA\\inbox') && calls[1].cmd.includes('apply'));
   t('S3：apply 带 inbox 全路径（旧裸文件名会使客户端误发）', calls[1].cmd.includes('LEA\\inbox\\req-000003.json'));
   t('S3：写 inbox 路径与 apply 路径一致', calls[0].cmd.includes(core.leaInboxPath('req-000003.json')) && calls[1].cmd.includes(core.leaInboxPath('req-000003.json')));
-  // 危险命令不自动重试：通道抛错只发一次
+  // 危险命令不自动重试：通道抛错只发一次（H21 同步命令不计入下发次数）
   calls.length = 0;
-  const errChannel = { async runCommand() { calls.push(1); throw new Error('boom'); }, async nodeOnline() { return true; } };
+  const errChannel = { async runCommand(nodeId, cmd) { calls.push({ nodeId, cmd }); throw new Error('boom'); }, async nodeOnline() { return true; } };
   const dangEnv = core.buildEnvelope({
     requestId: 'req-000004', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
     keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-000004',
     command: 'script.run', params: {}, timeoutMs: 5000,
   });
   const d3 = await core.dispatchEnvelope(errChannel, dangEnv, { timeoutMs: 5000 });
-  t('危险命令失败只尝试 1 次（禁自动重试）', d3.ok === false && calls.length === 1);
+  t('危险命令失败只尝试 1 次（禁自动重试）', d3.ok === false && calls.filter((c) => c.cmd.includes(' dispatch ')).length === 1);
   // 普通命令失败重试 1 次（共 2 次）
   calls.length = 0;
   const normalEnv = core.buildEnvelope({
@@ -513,7 +531,7 @@ const mockChannel = {
     command: 'sys.info', params: {}, timeoutMs: 5000,
   });
   const d4 = await core.dispatchEnvelope(errChannel, normalEnv, { timeoutMs: 5000 });
-  t('普通命令失败重试 1 次（共 2 次）', d4.ok === false && calls.length === 2);
+  t('普通命令失败重试 1 次（共 2 次）', d4.ok === false && calls.filter((c) => c.cmd.includes(' dispatch ')).length === 2);
 
   // ---------- 10) 通道模块：无配置时 fail-closed ----------
   const ch = createLeaChannel({ log: () => {}, configPath: path.join(tmpDir, 'no-such-config.json') });
@@ -641,6 +659,7 @@ const mockChannel = {
   const jobId = r.obj.job_id;
   r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(g6.key));
   t('路由查 job 200', r.code === 200 && r.obj.job.job_id === jobId);
+  core.grantMuse(OTHER, 'owner'); // T07：bob 建 Key 前先授权，否则盖上的 grant_epoch 为 0
   r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(core.generateKey(OTHER, { device_scope: DEV }).key));
   t('他人 job 查不到 → 404（不泄露存在性）', r.code === 404);
   // 设备状态
@@ -690,6 +709,85 @@ const mockChannel = {
     && rb.ticket.expires_at - Math.floor(Date.now() / 1000) <= 24 * 3600);
   r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
   t('路由 rebind 200 且返回可验签票据', r.code === 200 && !!r.obj.ticket && core.verifyTicket(r.obj.ticket) === true);
+
+  // ---------- 14) C 组：T07 Key 绑 grant_epoch／H22 epoch 不跳 0／H21 吊销推送 ----------
+  // 用独立账号/设备，避免干扰前面的共享状态。
+  const DEV2 = 'node//test-device-2';
+  const USER2 = 'dave';
+  core.recordBinding(DEV2, USER2, 'test-t07');
+  core.grantMuse(USER2, 'owner');
+  // T07：授权后生成的 Key 可用；撤销授权 → 拒绝；重授予后旧 Key 仍拒绝
+  // （不复活），新 Key 可用。（授权前生成的 Key 盖上的 grant_epoch 为 0，
+  // admit 按授权撤销拒绝。）
+  const postGrant = core.generateKey(USER2, { device_scope: DEV2 });
+  let adm14 = core.admit({ key: core.findKeyById(postGrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
+  t('T07 授权后生成的 Key 准入通过', adm14.ok === true);
+  // 撤销授权 → 拒绝；重授予后旧 Key 仍拒绝（不复活），新 Key 可用
+  core.revokeGrant(USER2, 'owner');
+  adm14 = core.admit({ key: core.findKeyById(postGrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
+  t('T07 撤销授权后旧 Key → 403 QFR_GRANT_REVOKED', adm14.ok === false && adm14.code === 'QFR_GRANT_REVOKED');
+  core.grantMuse(USER2, 'owner');
+  adm14 = core.admit({ key: core.findKeyById(postGrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
+  t('T07 撤销后重授予旧 Key 仍拒绝（不复活）', adm14.ok === false && adm14.code === 'QFR_GRANT_REVOKED');
+  const postRegrant = core.generateKey(USER2, { device_scope: DEV2 });
+  adm14 = core.admit({ key: core.findKeyById(postRegrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
+  t('T07 重授予后新生成的 Key 准入通过', adm14.ok === true);
+  // 重复 grant 不动 epoch（在用 Key 不被误废）
+  const epochBefore = core.getGrant(USER2).grant_epoch;
+  core.grantMuse(USER2, 'owner');
+  t('T07 在效授权上重复 grant 不递增 grant_epoch', core.getGrant(USER2).grant_epoch === epochBefore);
+  adm14 = core.admit({ key: core.findKeyById(postRegrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
+  t('T07 重复 grant 后在用 Key 仍可准入', adm14.ok === true);
+  // H22：绑定前生成的 Key（binding_epoch 0），绑定后按不匹配拒绝
+  const preBind = core.generateKey(USER2, { device_scope: 'node//test-device-3' });
+  core.recordBinding('node//test-device-3', USER2, 'test-h22');
+  const adm22 = core.admit({ key: core.findKeyById(preBind.record.key_id), deviceId: 'node//test-device-3', command: 'ui.click' });
+  t('H22 binding_epoch 0 的 Key 绑定后 → 409 QFR_BINDING_CHANGED', adm22.ok === false && adm22.code === 'QFR_BINDING_CHANGED');
+  // H21：吊销记入推送台账；下发时先同步写本机文件，写成功后不再重复推
+  const rvKey = core.generateKey(USER2, { device_scope: DEV2 });
+  core.revokeKey(rvKey.record.key_id, USER2, 'test-h21');
+  let snap = core.getRevocations(DEV2);
+  t('H21 吊销后推送台账含该 key_id', snap.revoked_key_ids.includes(rvKey.record.key_id) && snap.revocation_epoch >= 1 && snap.pushed_epoch === 0);
+  calls.length = 0;
+  const env21 = core.buildEnvelope({
+    requestId: 'req-h21-1', batchId: null, seq: 1, deviceId: DEV2, accountId: USER2,
+    keyId: postRegrant.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-h21-1',
+    command: 'sys.info', params: {}, timeoutMs: 5000,
+  });
+  const d21 = await core.dispatchEnvelope(mockChannel, env21, { timeoutMs: 5000 });
+  const syncCalls = calls.filter((c) => c.cmd.includes('revoked_keys.txt'));
+  t('H21 下发前先同步本机吊销表（写 revoked_keys.txt）', d21.ok === true && syncCalls.length === 1);
+  const syncB64 = syncCalls[0].cmd.match(/FromBase64String\('([^']+)'\)/)[1];
+  const syncText = Buffer.from(syncB64, 'base64').toString('utf8');
+  t('H21 同步文件内容为吊销 key_id 全集（每行一个）', syncText.split('\n').filter(Boolean).includes(rvKey.record.key_id));
+  snap = core.getRevocations(DEV2);
+  t('H21 同步成功后 pushed_epoch 追上 revocation_epoch', snap.pushed_epoch === snap.revocation_epoch);
+  calls.length = 0;
+  const env21b = core.buildEnvelope({
+    requestId: 'req-h21-2', batchId: null, seq: 1, deviceId: DEV2, accountId: USER2,
+    keyId: postRegrant.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-h21-2',
+    command: 'sys.info', params: {}, timeoutMs: 5000,
+  });
+  const d21b = await core.dispatchEnvelope(mockChannel, env21b, { timeoutMs: 5000 });
+  t('H21 已同步后下次下发不再重复写吊销表', d21b.ok === true && calls.filter((c) => c.cmd.includes('revoked_keys.txt')).length === 0);
+  // H21：同步失败不拦本次命令（admit 是第一层），下次重试
+  const flaky = { async runCommand(nodeId, cmd) { if (cmd.includes('revoked_keys.txt')) throw new Error('nope'); return JSON.stringify({ ok: true, code: 'done' }); }, async nodeOnline() { return true; } };
+  const rvKey2 = core.generateKey(USER2, { device_scope: DEV2 });
+  core.revokeKey(rvKey2.record.key_id, USER2, 'test-h21b');
+  const env21c = core.buildEnvelope({
+    requestId: 'req-h21-3', batchId: null, seq: 1, deviceId: DEV2, accountId: USER2,
+    keyId: postRegrant.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-h21-3',
+    command: 'sys.info', params: {}, timeoutMs: 5000,
+  });
+  const d21c = await core.dispatchEnvelope(flaky, env21c, { timeoutMs: 5000 });
+  snap = core.getRevocations(DEV2);
+  t('H21 吊销同步失败不拦下发且 pushed_epoch 不动（下次重试）', d21c.ok === true && snap.pushed_epoch < snap.revocation_epoch);
+  // H21：路由 GET revocations 返回台账快照；换绑响应带 revocations 快照
+  r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV2) + '/revocations', bearerHeaders(postRegrant.key));
+  t('H21 路由 GET revocations 200 且含已吊销 key_id', r.code === 200 && Array.isArray(r.obj.revoked_key_ids) && r.obj.revoked_key_ids.includes(rvKey.record.key_id));
+  // 用 alice 自己的 DEV（其台账含 §6 撤销授权时记入的 g5），断言快照在位。
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
+  t('H21 路由 rebind 200 且带 revocations 快照', r.code === 200 && r.obj.revocations && Array.isArray(r.obj.revocations.revoked_key_ids) && r.obj.revocations.revoked_key_ids.includes(g5.record.key_id));
 
   // ---------- 12) 审计不含 Key 明文 ----------
   const auditText = fs.readdirSync(tmpDir).filter((f) => f.startsWith('audit-'))

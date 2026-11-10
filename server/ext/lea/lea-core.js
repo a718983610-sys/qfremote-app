@@ -116,6 +116,7 @@ function createLeaCore(opts) {
   const GRANTS_FILE = path.join(dir, 'grants.json');
   const BINDINGS_FILE = path.join(dir, 'bindings.json');
   const JOBS_FILE = path.join(dir, 'jobs.json');
+  const REVOCATIONS_FILE = path.join(dir, 'revocations.json');
 
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
 
@@ -140,6 +141,8 @@ function createLeaCore(opts) {
   function saveBindings(s) { writeJsonAtomic(BINDINGS_FILE, s); }
   function loadJobs() { return readJson(JOBS_FILE, { jobs: {} }); }
   function saveJobs(s) { writeJsonAtomic(JOBS_FILE, s); }
+  function loadRevocations() { return readJson(REVOCATIONS_FILE, { devices: {} }); }
+  function saveRevocations(s) { writeJsonAtomic(REVOCATIONS_FILE, s); }
 
   // ---------- 审计（JSONL 按天，§11.2；保留 ≥180 天，定期清扫） ----------
   function auditFileName(d) {
@@ -512,6 +515,7 @@ function createLeaCore(opts) {
       scopes: k.scopes, status: keyStatus(k),
       created_at: k.created_at, last_used_at: k.last_used_at || null,
       expires_at: k.expires_at || null, binding_epoch: k.binding_epoch,
+      grant_epoch: (k.grant_epoch || 0),
     };
   }
   function keyStatus(k) {
@@ -532,6 +536,10 @@ function createLeaCore(opts) {
       device_scope: optsGen.device_scope || null, // null = 该账号已绑定设备（由绑定态定）
       scopes: Array.isArray(optsGen.scopes) && optsGen.scopes.length ? optsGen.scopes : ['muse.execute'],
       binding_epoch: currentBindingEpoch(optsGen.device_scope, String(accountId)),
+      // T07/D1：Key 盖上生成时账号授权的 grant_epoch；admit 比对，授权撤销
+      // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。无授权记录时
+      // grant_epoch 为 0，admit 按授权撤销拒绝（须先授权再建 Key）。
+      grant_epoch: currentGrantEpoch(String(accountId)),
       key_epoch: 1,
       created_at: now(), last_used_at: null, expires_at: null,
       revoked_at: null, revoked_by: null, revoked_by_rebind: false, revoke_reason: null,
@@ -558,19 +566,27 @@ function createLeaCore(opts) {
     k.key_epoch = (k.key_epoch || 1) + 1; // 吊销后递增 key_epoch，缓存立即失效
     saveKeys(st);
     audit('lea-key-revoked', { account_id: k.account_id, device_id: k.device_scope || null, api_key_id: k.key_id, key_prefix: maskKey(k.prefix), by: by || null, reason: reason || null });
+    // H21：记入本机吊销推送台账（有设备域只推该设备，无设备域推该账号全部已绑设备）。
+    try {
+      const devs = k.device_scope ? [k.device_scope] : devicesForAccount(k.account_id);
+      recordRevocations(devs, [k.key_id], 'key-revoked');
+    } catch (e) {}
     return { ok: true, record: keyPublicView(k) };
   }
   function revokeAllKeys(accountId, by, reason) {
     const st = loadKeys();
     let count = 0;
+    const revokedIds = [];
     for (const k of st.keys) {
       if (k.account_id === String(accountId) && !k.revoked_at) {
         k.revoked_at = now(); k.revoked_by = by || null; k.revoke_reason = reason || 'revoke-all';
-        k.key_epoch = (k.key_epoch || 1) + 1; count++;
+        k.key_epoch = (k.key_epoch || 1) + 1; count++; revokedIds.push(k.key_id);
       }
     }
     if (count) saveKeys(st);
     audit('lea-keys-revoke-all', { account_id: String(accountId), revoked_count: count, by: by || null, reason: reason || null });
+    // H21：记入本机吊销推送台账（该账号全部已绑设备）。
+    try { recordRevocations(devicesForAccount(accountId), revokedIds, 'revoke-all'); } catch (e) {}
     return { ok: true, revoked_count: count };
   }
   function listKeys(accountId) {
@@ -594,9 +610,16 @@ function createLeaCore(opts) {
   }
   function grantMuse(accountId, by) {
     const st = loadGrants();
+    const isFirst = !st.grants[String(accountId)];
     const cur = st.grants[String(accountId)] || { account_id: String(accountId), grant_epoch: 0 };
+    const wasRevoked = !!cur.revoked_at;
     cur.scope = 'muse.execute'; cur.granted_at = now(); cur.granted_by = by || null;
-    cur.revoked_at = null; cur.grant_epoch = (cur.grant_epoch || 0) + 1;
+    cur.revoked_at = null;
+    // T07/D1：grant_epoch 只在“首次授予／撤销后重授予”这两个代次跃迁时递增；
+    // 在效授权上重复 grant 不动 epoch（否则每次点“授予”都会废掉全部在用 Key）。
+    // Key 生成时盖上当时 epoch（见 generateKey），admit 比对——撤销后重授予
+    // epoch 已变，旧 Key 永不复活。
+    if (isFirst || wasRevoked) cur.grant_epoch = (cur.grant_epoch || 0) + 1;
     st.grants[String(accountId)] = cur;
     saveGrants(st);
     audit('lea-grant-changed', { account_id: String(accountId), action: 'grant', grant_epoch: cur.grant_epoch, by: by || null });
@@ -610,6 +633,17 @@ function createLeaCore(opts) {
     cur.grant_epoch = (cur.grant_epoch || 0) + 1;
     saveGrants(st);
     audit('lea-grant-changed', { account_id: String(accountId), action: 'revoke', grant_epoch: cur.grant_epoch, by: by || null });
+    // T07/D1：授权撤销即连带吊销该账号在用 Key——admit 的 grant_epoch 比对
+    // 是第一层（旧 Key 因 epoch 不符永不复活）；同时把这些 key_id 记入本机
+    // 吊销推送台账（H21），让本机第二层也拒掉它们。keys.json 里的记录本身
+    // 不改 revoked_at（admit 仍按授权撤销报 QFR_GRANT_REVOKED，保持既有
+    // 错误码契约）；Key 的实际效力以 admit 为准。
+    try {
+      const activeIds = loadKeys().keys
+        .filter((k) => k && k.account_id === String(accountId) && !k.revoked_at)
+        .map((k) => k.key_id);
+      if (activeIds.length) recordRevocations(devicesForAccount(accountId), activeIds, 'grant-revoked');
+    } catch (e) {}
     return { ok: true, grant_epoch: cur.grant_epoch };
   }
   function hasGrant(accountId) {
@@ -626,6 +660,11 @@ function createLeaCore(opts) {
     if (b && b.account_id === String(accountId)) return b.binding_epoch;
     return 0;
   }
+  // T07：生成 Key 时盖上的授权代次（无授权记录时为 0）。
+  function currentGrantEpoch(accountId) {
+    const g = getGrant(accountId);
+    return g ? (g.grant_epoch || 0) : 0;
+  }
   // 换绑：新账号绑定即递增 epoch；旧账号在该设备上的全部 Key 标记
   // revoked_by_rebind 立即失效（§7.4）。失败不回滚旧绑定（§6.1）。
   function recordBinding(deviceId, accountId, trigger) {
@@ -641,15 +680,18 @@ function createLeaCore(opts) {
     };
     saveBindings(st);
     let revokedKeys = 0;
+    const revokedKeyIds = [];
     if (oldAccount && oldAccount !== accountId) {
       const ks = loadKeys();
       for (const k of ks.keys) {
         if (k.account_id === oldAccount && (!k.device_scope || k.device_scope === deviceId) && !k.revoked_at) {
           k.revoked_at = now(); k.revoked_by_rebind = true; k.revoke_reason = 'rebind';
-          k.key_epoch = (k.key_epoch || 1) + 1; revokedKeys++;
+          k.key_epoch = (k.key_epoch || 1) + 1; revokedKeys++; revokedKeyIds.push(k.key_id);
         }
       }
       if (revokedKeys) saveKeys(ks);
+      // H21：换绑吊销的 Key 同步记入本机吊销推送台账。
+      try { recordRevocations([deviceId], revokedKeyIds, 'rebind'); } catch (e) {}
     }
     audit('lea-rebind', {
       device_id: deviceId, old_account_id: oldAccount, new_account_id: accountId,
@@ -673,7 +715,93 @@ function createLeaCore(opts) {
       grant_epoch: ticket.grant_epoch, grant_muse_execute: ticket.grant_muse_execute,
       lease_id: ticket.lease_id,
     });
-    return { ok: true, device_id: deviceId, account_id: accountId, binding_epoch: newEpoch, revoked_keys: revokedKeys, ticket };
+    return { ok: true, device_id: deviceId, account_id: accountId, binding_epoch: newEpoch, revoked_keys: revokedKeys, revoked_key_ids: revokedKeyIds, ticket };
+  }
+
+  // ---------- 本机吊销表推送（H21） ----------
+  // 问题：吊销只改服务端 keys.json，没有任何向 LEA 本机写吊销的路径；
+  // C 端 key_is_revoked 读本机 %ProgramData%\QFR\LEA\state\revoked_keys.txt
+  // （每行一个 key_id），此前没有任何写入方，该文件永远为空，第二层准入
+  // 名存实亡。正常路径下 admit 每次实时查吊销，是有效控制；这里补的是
+  // 设计的第二层，不是替代 admit。
+  // 机制：revocations.json 按设备记待推送的吊销 key_id 全集（只增不减）；
+  // dispatchEnvelope 下发前先经 runcommands 把全集写到本机（写成功才记
+  // pushed_epoch；写失败留待下次下发重试）。设备离线收不到推送时吊销照
+  // 样在服务端被 admit 拦住，本机表 stale 的最坏情况有 admit 兜底。
+  // 推送走 runcommands 通道（服务端→MeshCentral agent，SYSTEM 身份写文件，
+  // 与下发信封同一信任通道）；文件内容只有 key_id（非秘密），无敏感信息。
+  function devicesForAccount(accountId) {
+    const out = [];
+    try {
+      const bs = loadBindings().bindings || {};
+      for (const [deviceId, b] of Object.entries(bs)) {
+        if (b && b.account_id === String(accountId)) out.push(deviceId);
+      }
+    } catch (e) {}
+    return out.sort();
+  }
+  function recordRevocations(deviceIds, keyIds, reason) {
+    const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
+    const devs = [...new Set((deviceIds || []).filter((x) => typeof x === 'string' && x))].sort();
+    if (!ids.length || !devs.length) return [];
+    const st = loadRevocations();
+    st.devices = st.devices || {};
+    let changed = false;
+    for (const d of devs) {
+      const cur = st.devices[d] || { revoked_key_ids: [], revocation_epoch: 0, pushed_epoch: 0, updated_at: 0 };
+      const merged = [...new Set([...(cur.revoked_key_ids || []), ...ids])].sort();
+      if (merged.length !== (cur.revoked_key_ids || []).length) {
+        st.devices[d] = { revoked_key_ids: merged, revocation_epoch: (cur.revocation_epoch || 0) + 1, pushed_epoch: cur.pushed_epoch || 0, updated_at: now() };
+        changed = true;
+      }
+    }
+    if (changed) {
+      saveRevocations(st);
+      audit('lea-revocation-recorded', { device_ids: devs, key_ids: ids, reason: reason || null });
+    }
+    return devs;
+  }
+  function getRevocations(deviceId) {
+    const cur = (loadRevocations().devices || {})[String(deviceId)];
+    if (!cur) return { device_id: String(deviceId), revoked_key_ids: [], revocation_epoch: 0, pushed_epoch: 0, updated_at: 0 };
+    return { device_id: String(deviceId), revoked_key_ids: [...(cur.revoked_key_ids || [])], revocation_epoch: cur.revocation_epoch || 0, pushed_epoch: cur.pushed_epoch || 0, updated_at: cur.updated_at || 0 };
+  }
+  function markRevocationsPushed(deviceId, epoch) {
+    try {
+      const st = loadRevocations();
+      const cur = st.devices[String(deviceId)];
+      if (!cur) return;
+      if ((cur.revocation_epoch || 0) === epoch) { cur.pushed_epoch = epoch; saveRevocations(st); }
+    } catch (e) {}
+  }
+  // 下发前把本机吊销表同步到最新全集（best-effort：写失败不拦本次命令，
+  // admit 已放行且是第一层控制）。全量写：文件内容即全集——超长时宁可
+  // 跳过也不发残集（残集会让本机误以为部分 Key 未吊销）。
+  const LEA_REVOKED_PATH = 'C:\\ProgramData\\QFR\\LEA\\state\\revoked_keys.txt';
+  const REVOCATION_SYNC_B64_LIMIT = 4000; // 约 230 个 key_id；超了等下次（admit 兜底）
+  function leaRevocationsWriteCmd(b64) {
+    return 'powershell -NoProfile -NonInteractive -Command "[IO.File]::WriteAllBytes(\'' + LEA_REVOKED_PATH + '\',[Convert]::FromBase64String(\'' + b64 + '\'))"';
+  }
+  async function syncRevocations(channel, deviceId) {
+    if (!channel || typeof channel.runCommand !== 'function') return { synced: false, reason: 'no-channel' };
+    let snap;
+    try { snap = getRevocations(deviceId); } catch (e) { return { synced: false, reason: 'read-failed' }; }
+    if (!snap.revoked_key_ids.length) return { synced: true, reason: 'empty' };
+    if ((snap.pushed_epoch || 0) >= (snap.revocation_epoch || 0)) return { synced: true, reason: 'already-synced' };
+    const text = snap.revoked_key_ids.join('\n') + '\n';
+    const b64 = Buffer.from(text, 'utf8').toString('base64');
+    if (b64.length > REVOCATION_SYNC_B64_LIMIT) {
+      log({ ev: 'lea-revocation-sync-skipped', device_id: deviceId, reason: 'oversize', revocation_epoch: snap.revocation_epoch });
+      return { synced: false, reason: 'oversize' };
+    }
+    try {
+      await channel.runCommand(deviceId, leaRevocationsWriteCmd(b64), 15000);
+    } catch (e) {
+      log({ ev: 'lea-revocation-sync-failed', device_id: deviceId, revocation_epoch: snap.revocation_epoch, err: String(e && e.message) });
+      return { synced: false, reason: 'write-failed' };
+    }
+    markRevocationsPushed(deviceId, snap.revocation_epoch);
+    return { synced: true, reason: 'pushed' };
   }
 
   // ---------- 准入：七项校验（DESIGN §6.2），服务端先拦 ----------
@@ -709,7 +837,9 @@ function createLeaCore(opts) {
     if (binding.account_id !== k.account_id) {
       return { ok: false, status: 409, code: ERR.BINDING_CHANGED, msg: '设备已换绑到其他账号，本次 Key 不再适用。' };
     }
-    if (k.binding_epoch && k.binding_epoch !== binding.binding_epoch) {
+    // H22：epoch 校验不跳过 0——binding_epoch 恒 ≥1（recordBinding 从 1 起），
+    // 0 即“绑定前／无设备域生成的 Key”，必须按不匹配拒绝并重新生成。
+    if ((k.binding_epoch || 0) !== binding.binding_epoch) {
       return { ok: false, status: 409, code: ERR.BINDING_CHANGED, msg: '绑定代次已变更，请重新生成 Key。' };
     }
     // ④ 账号授权 + grant_epoch
@@ -717,6 +847,11 @@ function createLeaCore(opts) {
     if (!grant || grant.revoked_at || grant.scope !== 'muse.execute') {
       const code = (grant && grant.revoked_at) ? ERR.GRANT_REVOKED : ERR.NOT_AUTHORIZED;
       return { ok: false, status: 403, code, msg: '该账号未授权 Muse 操作，或授权已被撤销。' };
+    }
+    // T07/D1：Key 绑定生成时的 grant_epoch；授权撤销／重授予都会递增
+    // grant_epoch，旧 Key 的 epoch 再也对不上，永不复活。重授予后须发新 Key。
+    if ((k.grant_epoch || 0) !== grant.grant_epoch) {
+      return { ok: false, status: 403, code: ERR.GRANT_REVOKED, msg: '授权代次已变更，请重新生成 Key。' };
     }
     return { ok: true, binding, grant };
   }
@@ -856,6 +991,9 @@ function createLeaCore(opts) {
   const ENVELOPE_INLINE_LIMIT = 6000; // 信封 base64 超此长改两步写 inbox
   async function dispatchEnvelope(channel, env, optsD) {
     optsD = optsD || {};
+    // H21：下发前先把本机吊销表推到最新全集（best-effort，不拦本次命令；
+    // 同步失败只记日志，下次下发重试；admit 是第一层控制）。
+    try { await syncRevocations(channel, env.device_id); } catch (e) { log({ ev: 'lea-revocation-sync-failed', device_id: env.device_id, err: String(e && e.message) }); }
     const spec = COMMANDS[env.command] || { dangerous: false };
     const b64 = Buffer.from(JSON.stringify(env), 'utf8').toString('base64');
     const timeoutMs = optsD.timeoutMs || DISPATCH_TIMEOUT_MS;
@@ -915,8 +1053,9 @@ function createLeaCore(opts) {
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
     createJob, getJob, updateJob,
+    getRevocations, syncRevocations, leaRevocationsWriteCmd,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
-    _test: { loadKeys, loadGrants, loadBindings, loadJobs, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
+    _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
   };
 }
 

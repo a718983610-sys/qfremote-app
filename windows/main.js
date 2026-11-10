@@ -2893,17 +2893,27 @@ async function maybeInstallSystemServices(force) {
   }
   if (lockServiceInstalled()) { bootLog('system-services.already-installed'); return { ok: true, reason: 'already-installed' }; }
   // SHA-256 白名单校验（sys-helper.js）：脚本/二进制被改过就绝不提权拉起。
+  // H20：install-lea.ps1 同在白名单（whitelist.json，5 件）；校验路径取
+  // helperExe 旁的 LEA/install-lea.ps1，与将被执行的那一份完全一致。
+  // 不存在时跳过（开发态无 LEA 目录不阻塞）。白名单加载异常即 fail-closed
+  //（不再只记日志继续拉起——否则一次异常就能绕过本白名单）。
+  let leaScriptHash = '';
   try {
     const wl = sysHelper.loadWhitelist({ resourcesPath: process.resourcesPath || '', dirname: path.join(__dirname, 'syshelper') });
+    const leaPs1 = path.join(path.dirname(helperExe), 'LEA', 'install-lea.ps1');
     const bad = [];
-    for (const f of [sysPs1, helperExe, installPs1]) {
+    for (const f of [sysPs1, helperExe, installPs1, leaPs1]) {
       if (fs.existsSync(f) && !sysHelper.verifyFileHash(f, wl)) bad.push(path.basename(f));
     }
     if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); return { ok: false, reason: 'hash-mismatch' }; }
-  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); }
+    if (fs.existsSync(leaPs1) && wl && wl.files && typeof wl.files['install-lea.ps1'] === 'string') {
+      leaScriptHash = wl.files['install-lea.ps1'];
+    }
+  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); return { ok: false, reason: 'hash-mismatch' }; }
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
   const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
-    q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) + " -Verb RunAs -WindowStyle Hidden";
+    q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) +
+    (leaScriptHash ? ",'-LeaScriptHash'," + q(leaScriptHash) : '') + " -Verb RunAs -WindowStyle Hidden";
   try {
     const childProcess = require('child_process');
     const child = childProcess.spawn('powershell.exe',

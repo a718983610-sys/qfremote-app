@@ -23,6 +23,7 @@
  *   GET  /api/lea/v1/jobs/{job_id}      查长任务
  *   POST /api/lea/v1/jobs/{job_id}/cancel 取消任务
  *   GET  /api/lea/v1/devices/{device_id}/status 查设备状态
+ *   GET  /api/lea/v1/devices/{device_id}/revocations 查本机吊销表应有快照（H21）
  *   POST /api/lea/v1/keys               生成 Key（控制台会话＋密码二次确认）
  *   GET  /api/lea/v1/keys               列表（只显 key_id/前缀/时间/状态）
  *   POST /api/lea/v1/keys/{key_id}/revoke 吊销单个
@@ -34,6 +35,10 @@ const crypto = require('crypto');
 
 const BODY_LIMIT = 1024 * 1024; // 执行请求体上限 1MB（信封 params 含文本时用）
 const MAX_BATCH_STEPS = 50;
+// 危险 scope 常量（与 lea-core.js 的 COMMANDS 表同值）。HEAD 遗留：
+// handleCreateKey 早已引用 DANGEROUS_SCOPE，此处此前无定义，带 scopes
+// 的建 Key 请求恒 500（无 scopes 时短路未触发）；此处补定义。
+const DANGEROUS_SCOPE = 'muse.execute.dangerous';
 
 function createLeaRoutes(core, channel, deps) {
   deps = deps || {};
@@ -419,7 +424,22 @@ function createLeaRoutes(core, channel, deps) {
       return fail(res, 403, 'FORBIDDEN', '只能绑定自己的账号。');
     }
     const out = core.recordBinding(deviceId, accountId, 'manual-rebind');
-    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, ticket: out.ticket });
+    // H21：换绑响应带本次吊销的 key_id 与本机吊销表应有的全集快照
+    // （调用方／客户端据此核对本机 revoked_keys.txt 是否已同步）。
+    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations: core.getRevocations(deviceId), ticket: out.ticket });
+  }
+
+  // ---- 查本机吊销表应有快照（H21） ----
+  // 返回服务端台账里该设备的吊销 key_id 全集＋推送进度；供控制台／客户端
+  // 核对本机 revoked_keys.txt。只读，不触发推送（推送发生在下次下发）。
+  async function handleRevocations(req, res, deviceId) {
+    const auth = bearerAuth(req);
+    if (!auth.ok) return fail(res, auth.status, auth.code, auth.msg);
+    const key = auth.key;
+    if (key.device_scope && key.device_scope !== deviceId) {
+      return fail(res, 403, ERR.SCOPE_DENIED, '该 Key 不能操作此设备。');
+    }
+    return sendJson(res, 200, Object.assign({ ok: true }, core.getRevocations(deviceId)));
   }
 
   // ---- 总入口：server.js 只调这一处 ----
@@ -432,6 +452,7 @@ function createLeaRoutes(core, channel, deps) {
     const cancelM = p.match(/^\/api\/lea\/v1\/jobs\/([^/]+)\/cancel$/);
     const devM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/status$/);
     const rebindM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/rebind$/);
+    const revocM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/revocations$/);
     const revokeM = p.match(/^\/api\/lea\/v1\/keys\/([^/]+)\/revoke$/);
     try {
       if (req.method === 'POST' && p === '/api/lea/v1/execute') { await handleExecute(req, res); return true; }
@@ -439,6 +460,7 @@ function createLeaRoutes(core, channel, deps) {
       if (req.method === 'GET' && jobM) { await handleGetJob(req, res, decodeURIComponent(jobM[1])); return true; }
       if (req.method === 'POST' && cancelM) { await handleCancelJob(req, res, decodeURIComponent(cancelM[1])); return true; }
       if (req.method === 'GET' && devM) { await handleDeviceStatus(req, res, decodeURIComponent(devM[1])); return true; }
+      if (req.method === 'GET' && revocM) { await handleRevocations(req, res, decodeURIComponent(revocM[1])); return true; }
       if (req.method === 'POST' && rebindM) { await handleRebind(req, res, decodeURIComponent(rebindM[1])); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/keys') { await handleCreateKey(req, res); return true; }
       if (req.method === 'GET' && p === '/api/lea/v1/keys') { await handleListKeys(req, res); return true; }

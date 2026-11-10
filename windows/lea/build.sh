@@ -3,7 +3,10 @@
 #   1) 生成 whitelist.h（脚本类 hash）；
 #   2) 编译服务本体 QFRLEA.exe；
 #   3) 编译客户端 qf-lea-client.exe；
-#   4) 校验 whitelist.h 与当前脚本一致。
+#   4) 校验 whitelist.h 与当前脚本一致；
+#   5) 重写 version.txt（H19：供 installer.nsi SEC_LEA fatal 打包）；
+#   6) 刷新 install-lea.ps1 的载荷哈希＋whitelist.json（H17/H20：exe
+#      每重编一次哈希就变，不刷新则安装直接 fail-closed 报 degraded）。
 # 依赖：x86_64-w64-mingw32-gcc（apt install gcc-mingw-w64-x86-64）。
 # 默认构建为生产形态：Ed25519 验签占位 fail-closed（无真实公钥）。
 # 测试冒烟构建（仅单测／真机冒烟，生产绝不启用）：
@@ -26,4 +29,9 @@ x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_protocol.c l
 # S3：客户端用 lea_crypto.c 的 lea_b64_decode 解析 dispatch <base64>（纯 C，无需额外库）。
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o qf-lea-client.exe qf-lea-client.c lea_crypto.c $TEST_FLAG
 python3 gen_whitelist.py --check
-ls -l QFRLEA.exe qf-lea-client.exe whitelist.h
+# H19：每次构建重写 version.txt（与 install-lea.ps1 的默认值 0.1.0 一致）。
+printf '0.1.0\n' > version.txt
+# H17/H20：刚编出的 exe 哈希已变，同步刷新安装脚本的载荷哈希与白名单。
+python3 gen_whitelist.py --update-installer
+python3 ../syshelper/gen_whitelist.py
+ls -l QFRLEA.exe qf-lea-client.exe whitelist.h version.txt

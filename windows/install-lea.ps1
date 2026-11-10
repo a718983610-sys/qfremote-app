@@ -17,6 +17,12 @@
 # 失败处理（DESIGN §9.2/§10.1）：每步重试 3 次，退避 5s/15s/45s；
 # 仍失败不阻塞主程序——写 LEA_DEGRADED 标记 + 日志，本脚本仍 exit 0，
 # 调用方照常继续；回滚用 -Rollback <版本> 显式触发。
+# 哈希链（H17/H20）：本脚本自身由 main.js 按 whitelist.json 验 SHA-256 后
+# 才被提权拉起（install-system-services.ps1 的 -LeaScriptHash 参数会再验
+# 一次）；本脚本在拷文件前验 $LeaDir 里三件载荷的 SHA-256（$expectedHashes，
+# 由 windows/lea/gen_whitelist.py --update-installer 从发版二进制现算刷新）；
+# 任一文件缺失／哈希不对即拒绝安装、写 LEA_DEGRADED，不阻塞主程序。
+# version.txt 只作版本标签，不验哈希（改它只改得了显示的版号）。
 # 日志：%TEMP%\qf-lea-install.log（本地时间）。
 # 服务端上报：自检报告写本地 install-report.json；若环境变量
 # QFR_LEA_REPORT_URL 有值则尝试 POST 上报一次（失败只记日志，不阻塞）。
@@ -54,6 +60,40 @@ $serviceExeName = 'QFRLEA.exe'        # LEA 服务本体（windows/lea/ 线：QF
 $clientExeName = 'qf-lea-client.exe'    # LEA 客户端（windows/lea/ 线；QFRLEA.c 注释所指的 runcommands 接令程序，尚未出包）
 $ushExeName = 'QFUserHelper.exe'        # USH（windows/ush/ 线：build.sh 产物）
 $retryDelays = @(5, 15, 45)             # 重试退避 5s/15s/45s（DESIGN §9.2）
+
+# 载荷期望哈希（H17）：拷文件前逐件验 SHA-256。块内由
+# windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
+# BEGIN LEA-EXPECTED-HASHES (gen_whitelist.py --update-installer)
+$expectedHashes = @{
+  'QFRLEA.exe' = '315538594c54fb001abe7d7088694ab93ff3c6128d5f2d1aaf271f9d40b3f0ef'
+  'QFUserHelper.exe' = 'b7568d15d17e665c9b007b7accf3ec713c29545b82a4ef9db0db5dca4ea0301f'
+  'qf-lea-client.exe' = '81cc1b0aeb4f62aabb154cae45f939a72eb2c7dd89b8f9ad19289658665c1c07'
+}
+# END LEA-EXPECTED-HASHES
+
+function Test-LeaPayloadHash {
+  # 拷文件前验哈希（H17）：$LeaDir 里三件载荷须逐件存在且 SHA-256 与期望一致。
+  # 返回 $true=全过；失败时记日志（调用方据此写 LEA_DEGRADED，不继续安装）。
+  foreach ($name in $expectedHashes.Keys) {
+    $p = Join-Path $LeaDir $name
+    if (-not (Test-Path -LiteralPath $p)) {
+      Write-LeaLog ("payload hash check failed: missing " + $name)
+      return $false
+    }
+    try {
+      $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+    } catch {
+      Write-LeaLog ("payload hash check failed: cannot hash " + $name + " err=" + $_.Exception.Message)
+      return $false
+    }
+    if ($h.ToLower() -ne $expectedHashes[$name].ToLower()) {
+      Write-LeaLog ("payload hash check failed: mismatch " + $name)
+      return $false
+    }
+  }
+  Write-LeaLog 'payload hash check ok'
+  return $true
+}
 
 function Invoke-WithRetry([string]$step, [scriptblock]$action) {
   for ($i = 0; $i -lt 3; $i++) {
@@ -202,6 +242,13 @@ try {
   }
   if (-not $leaVersion) { $leaVersion = '0.1.0' }
 } catch { if (-not $leaVersion) { $leaVersion = '0.1.0' } }
+
+# H17：拷文件前验三件载荷哈希；缺失／不对即拒绝安装（degraded，不阻塞主程序）。
+if (-not (Test-LeaPayloadHash)) {
+  Write-Degraded 'payload-hash-mismatch'
+  Write-InstallReport @{} 'degraded' 'payload-hash-mismatch'
+  exit 0
+}
 
 $failedStep = ''
 try {

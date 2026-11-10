@@ -255,19 +255,19 @@ SectionEnd
 Section "LEA 本地代理" SEC_LEA
   SectionIn RO
   ; LEA 服务端/安装器线（Stage 1 MVP，DESIGN.md §10.1）：lea/ 与 ush/
-  ; 产物由另一线交付；/nonfatal 使产物未到货时安装包仍能编译（缺失只
-  ; 警告、不报错），产物到货后自动打进包。显式逐文件列出（不打包源码）：
-  ; 服务本体 QFRLEA.exe、客户端 qf-lea-client.exe（lea 线，尚未出包）、
+  ; 产物由另一线交付；关键产物一律 fatal（H19：缺失即出包错，绝不出残包；
+  ; 与 SEC_LOCK 一致）。显式逐文件列出（不打包源码）：
+  ; 服务本体 QFRLEA.exe、客户端 qf-lea-client.exe（lea 线）、
   ; USH QFUserHelper.exe（ush 线 build.sh 产物）；对方新增产物须在此加一行。
   ; 安装器本身不提权、不装服务（RequestExecutionLevel user）；QFRLEA
   ; 服务安装在应用首次登录后一次 UAC 内由 install-lea.ps1 完成（经
   ; install-system-services.ps1 调用），失败不阻塞主程序。
   SetOutPath "$INSTDIR\LEA"
   File "install-lea.ps1"
-  File /nonfatal "lea\QFRLEA.exe"
-  File /nonfatal "lea\qf-lea-client.exe"
-  File /nonfatal "lea\version.txt"
-  File /nonfatal "ush\QFUserHelper.exe"
+  File "lea\QFRLEA.exe"
+  File "lea\qf-lea-client.exe"
+  File "lea\version.txt"
+  File "ush\QFUserHelper.exe"
   DetailPrint "LEA 本地代理组件已安装（$INSTDIR\LEA；服务在首次登录后安装）"
 SectionEnd
 

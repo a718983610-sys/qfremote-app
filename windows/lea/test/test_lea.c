@@ -10,7 +10,8 @@
  *   ./test_lea_strict
  *
  * 覆盖：协议解析、签名验签占位、幂等去重、准入拒绝各码、脚本白名单
- * 判定（路径部分＋文件 hash）、队列超限、审计脱敏、SHA-256 向量。
+ * 判定（路径部分＋文件 hash）、app.open 白名单 hash 钉死（H16）、队列超限、
+ * 审计脱敏、SHA-256 向量。
  * Windows 服务本体（QFRLEA.c、qf-lea-client.c）无法在 Linux 沙箱运行，
  * 只做 mingw 交叉编译检查，须 Windows 真机／Wine 验证（见 README）。
  */
@@ -23,6 +24,7 @@
 #include "../lea_crypto.h"
 #include "../lea_state.h"
 #include "../lea_audit.h"
+#include "../whitelist.h" /* H16：app.open 白名单 hash（W_USH_EXE_SHA256）须与发版 USH 一致 */
 
 static int g_pass = 0, g_fail = 0;
 #define CHECK(cond, name) do { \
@@ -102,6 +104,19 @@ int main(void) {
                          "sha256-heal-ps1-matches-whitelist");
         } else {
             printf("SKIP sha256-file tests (qf-agent-heal.ps1 not found at %s)\n", heal);
+        }
+        /* H16：app.open 白名单——发版 QFUserHelper.exe 的 hash 须与 whitelist.h
+         * 的 W_USH_EXE_SHA256 一致（USH 重编后须重跑 gen_whitelist.py）。 */
+        {
+            char uhex[65] = { 0 };
+            const char *ush = "../../ush/QFUserHelper.exe";
+            if (access(ush, R_OK) == 0) {
+                CHECK(lea_sha256_file_hex(ush, uhex), "sha256-ush-file-readable");
+                CHECK_STR_EQ(uhex, W_USH_EXE_SHA256,
+                             "sha256-ush-exe-matches-whitelist");
+            } else {
+                printf("SKIP sha256-ush test (QFUserHelper.exe not found at %s)\n", ush);
+            }
         }
     }
 

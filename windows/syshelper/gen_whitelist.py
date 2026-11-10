@@ -6,6 +6,8 @@
   python3 syshelper/gen_whitelist.py                 # 两步都做（exe 已存在时）
 白名单文件与本次发版文件一一对应；任一脚本改动后必须重新生成＋重新编译服务，
 否则服务算出的 hash 与白名单对不上、拒绝执行（fail-closed）。
+H20：install-lea.ps1 纳入 whitelist.json（main.js 提权拉起前验 hash；LEA
+服务安装脚本自此有白名单约束，不再是注释里说的“未纳入白名单”状态）。
 """
 import hashlib
 import json
@@ -19,6 +21,7 @@ FILES = {
     "qf-agent-heal.ps1": os.path.join(WIN, "qf-agent-heal.ps1"),
     "install.ps1": os.path.join(WIN, "privacy-lock", "install.ps1"),
     "install-system-services.ps1": os.path.join(WIN, "install-system-services.ps1"),
+    "install-lea.ps1": os.path.join(WIN, "install-lea.ps1"),
     "QFSysHelper.exe": os.path.join(HERE, "QFSysHelper.exe"),
 }
 

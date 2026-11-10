@@ -4,10 +4,12 @@
 #   ① QFSysHelper 服务（SYSTEM helper 最小安全版，见 syshelper/）；
 #   ② QFLockSvc 锁服务（调锁组件 install.ps1，-Owner 必填）。
 # 调用方（main.js maybeInstallSystemServices）在拉起前已按
-# whitelist.json 验过本脚本、QFSysHelper.exe 与锁 install.ps1 的
-# SHA-256，hash 不对绝不拉起。本脚本自身只做固定动作：停旧服务→
-# 拷文件→sc create→sc start→调锁安装，不接受除 -Owner/-HelperExe/
-# -LockDir 之外的任何参数，不执行任何其他脚本。
+# whitelist.json 验过本脚本、QFSysHelper.exe、锁 install.ps1 与
+# install-lea.ps1 的 SHA-256（H20：5 件），hash 不对绝不拉起；LEA 段
+# 执行前再把 install-lea.ps1 的哈希对一次 -LeaScriptHash（双重门）。
+# 本脚本自身只做固定动作：停旧服务→拷文件→sc create→sc start→调锁安装，
+# 不接受除 -Owner/-HelperExe/-LockDir/-LeaScriptHash 之外的任何参数，
+# 不执行任何其他脚本。
 # 失败能回滚：helper 安装失败时 sc delete＋删文件；锁安装失败时
 # helper 保留（可独立重试），只记日志＋exit 1。
 # 日志：%TEMP%\qf-system-install.log（本地时间）。
@@ -15,7 +17,8 @@ param(
   [Parameter(Mandatory = $true)][string]$Owner,
   [Parameter(Mandatory = $true)][string]$HelperExe,
   [Parameter(Mandatory = $true)][string]$LockDir,
-  [string]$LeaDir = '' # LEA 随包暂存目录（$INSTDIR\LEA）；未传时按 HelperExe 旁的 LEA 目录推导；缺失即跳过 LEA，不阻塞
+  [string]$LeaDir = '', # LEA 随包暂存目录（$INSTDIR\LEA）；未传时按 HelperExe 旁的 LEA 目录推导；缺失即跳过 LEA，不阻塞
+  [string]$LeaScriptHash = '' # H20：install-lea.ps1 的期望 SHA-256（main.js 按 whitelist.json 传来）；提供时本段执行前再验一次，不对则跳过 LEA 段；未提供时记日志后继续（保兼容旧版 main.js）
 )
 
 $ErrorActionPreference = 'Stop'
@@ -91,19 +94,34 @@ try {
 # ---- ③ QFRLEA（LEA 服务端/安装器线，Stage 1 MVP） ----
 # install-lea.ps1 自行重试 3 次（5s/15s/45s），仍失败标记 LEA_DEGRADED
 # 并 exit 0，绝不阻塞主程序；本段只记日志，不改 exit 码。
-# 注意：main.js 的 whitelist 目前只验本脚本、QFSysHelper.exe 与锁
-# install.ps1 的 SHA-256，install-lea.ps1 尚未纳入——上线前须由
-# main.js 线把 install-lea.ps1 的哈希加入 whitelist.json，否则
-# 本段应暂缓（见 server/ext/lea/README.md「未完成/须联调」）。
+# H20 已解决：install-lea.ps1 已纳入 whitelist.json（5 件），main.js
+# 拉起前已验过一次；本段执行前再按 -LeaScriptHash 对一次（双重门）。
 try {
   if (-not $LeaDir) { $LeaDir = Join-Path (Split-Path -Parent $HelperExe) 'LEA' }
   $leaScript = Join-Path $LeaDir 'install-lea.ps1'
   if (-not (Test-Path -LiteralPath $leaScript)) {
     Write-InstallLog ('LEA install skipped: install-lea.ps1 not found at ' + $leaScript)
   } else {
-    Write-InstallLog 'installing QFRLEA'
-    & $leaScript -LeaDir $LeaDir
-    Write-InstallLog ('LEA install script exit=' + $LASTEXITCODE + ' (non-blocking)')
+    $leaHashOk = $true
+    if ($LeaScriptHash) {
+      try {
+        $actualLeaHash = (Get-FileHash -LiteralPath $leaScript -Algorithm SHA256).Hash
+        if ($actualLeaHash.ToLower() -ne $LeaScriptHash.ToLower()) {
+          Write-InstallLog 'LEA install skipped: install-lea.ps1 hash mismatch'
+          $leaHashOk = $false
+        }
+      } catch {
+        Write-InstallLog ('LEA install skipped: cannot hash install-lea.ps1 err=' + $_.Exception.Message)
+        $leaHashOk = $false
+      }
+    } else {
+      Write-InstallLog 'LEA install: no -LeaScriptHash provided, relying on caller whitelist check'
+    }
+    if ($leaHashOk) {
+      Write-InstallLog 'installing QFRLEA'
+      & $leaScript -LeaDir $LeaDir
+      Write-InstallLog ('LEA install script exit=' + $LASTEXITCODE + ' (non-blocking)')
+    }
   }
 } catch {
   Write-InstallLog ('LEA install threw (non-blocking): ' + $_.Exception.Message)

@@ -17,6 +17,8 @@
  *     待站长确认完整清单 DESIGN §14 #5）；PowerShell 固定
  *     -NoProfile -NonInteractive -ExecutionPolicy Bypass -File，参数逐个
  *     引用转义，禁 shell 拼接；路径规范化防 .. 越界。
+ *   - app.open：只允许显式 exe 白名单（H16：名＋SHA-256 双重判定，初版仅
+ *     QFUserHelper.exe；安装目录内其他 exe 一律拒绝）。
  *   - UI 类命令：经命名管道 \\.\pipe\QFR\LEA\UserHelper\v1 转发 USH
  *     （USH 由另一线实现；此处只做转发＋超时＋USH 不可用时明确报错）。
  *   - 日志：%ProgramData%\QFR\LEA\logs\lea-YYYY-MM-DD.jsonl，保留 30 天，
@@ -416,6 +418,19 @@ done:
 /* 初始清单（DESIGN §5.2，待站长确认完整清单 §14 #5）：仅 qf-agent-heal.ps1。
  * 判定三重门：① 路径规范化后位于安装目录内；② basename 吻合；
  * ③ SHA-256 与 whitelist.h 一致（gen_whitelist.py 从发版文件生成）。 */
+/* SHA-256 十六进制串大小写不敏感比较（白名单 hash 比对共用）。 */
+static int hash_hex_equal(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    size_t la = strlen(a), lb = strlen(b);
+    if (la == 0 || la != lb) return 0;
+    for (size_t i = 0; i < la; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'F') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'F') cb = (char)(cb + 32);
+        if (ca != cb) return 0;
+    }
+    return 1;
+}
 static int script_is_allowed(const char *script_path, char *norm_out, size_t norm_size,
                              char *detail, size_t detail_size) {
     if (!lea_normalize_path(script_path, norm_out, norm_size)) {
@@ -450,18 +465,7 @@ static int script_is_allowed(const char *script_path, char *norm_out, size_t nor
         snprintf(detail, detail_size, "%s", "script-not-found");
         return 0;
     }
-    /* 大小写不敏感比较 */
-    for (int i = 0; hex[i] && W_HEAL_PS1_SHA256[i]; i++) {
-        char a = hex[i], b = W_HEAL_PS1_SHA256[i];
-        if (a >= 'A' && a <= 'F') a = (char)(a + 32);
-        if (b >= 'A' && b <= 'F') b = (char)(b + 32);
-        if (a != b) {
-            snprintf(detail, detail_size, "%s", "hash-mismatch");
-            return 0;
-        }
-    }
-    if (hex[0] == '\0' || W_HEAL_PS1_SHA256[0] == '\0' ||
-        strlen(hex) != strlen(W_HEAL_PS1_SHA256)) {
+    if (!hash_hex_equal(hex, W_HEAL_PS1_SHA256)) {
         snprintf(detail, detail_size, "%s", "hash-mismatch");
         return 0;
     }
@@ -572,6 +576,17 @@ static int file_in_work_root(const char *path, char *norm_out, size_t norm_size,
 }
 
 /* ---------- 执行：app.open / app.close ---------- */
+/* H16：app.open 显式 exe 白名单（名＋SHA-256，双重判定；见 whitelist.h，
+ * gen_whitelist.py 从发版文件生成）。初版唯一入口：QFUserHelper.exe
+ * （用户会话助手；远程重启是其合法用途）。
+ * 明确不许：QFRLEA.exe（服务本体，SCM 管理，绝不裸拉）、qf-lea-client.exe
+ * （管道搬运，裸拉无意义）；QFRemote.exe／QFSysHelper.exe／qf-lockctl.exe
+ * 不在 LEA 安装目录内，不入此表（仍被安装目录门挡住）。
+ * 判定四重门：① 路径规范化后位于安装目录内；② 是 .exe；③ basename 在
+ * 名单内；④ SHA-256 与 whitelist.h 一致。 */
+static const struct { const char *name; const char *sha256; } APP_OPEN_ALLOW[] = {
+    { "QFUserHelper.exe", W_USH_EXE_SHA256 },
+};
 static int app_open_allowed(const char *path, char *norm_out, size_t norm_size,
                             char *detail, size_t detail_size) {
     if (!lea_normalize_path(path, norm_out, norm_size)) {
@@ -589,6 +604,23 @@ static int app_open_allowed(const char *path, char *norm_out, size_t norm_size,
     size_t bl = strlen(base);
     if (bl < 5 || _stricmp(base + bl - 4, ".exe") != 0) {
         snprintf(detail, detail_size, "%s", "not-exe");
+        return 0;
+    }
+    const char *want_hash = NULL;
+    for (size_t i = 0; i < sizeof(APP_OPEN_ALLOW) / sizeof(APP_OPEN_ALLOW[0]); i++) {
+        if (_stricmp(base, APP_OPEN_ALLOW[i].name) == 0) { want_hash = APP_OPEN_ALLOW[i].sha256; break; }
+    }
+    if (!want_hash) {
+        snprintf(detail, detail_size, "not-in-app-whitelist:%.64s", base);
+        return 0;
+    }
+    char hex[65] = { 0 };
+    if (!lea_sha256_file_hex(norm_out, hex)) {
+        snprintf(detail, detail_size, "%s", "app-not-found");
+        return 0;
+    }
+    if (!hash_hex_equal(hex, want_hash)) {
+        snprintf(detail, detail_size, "%s", "hash-mismatch");
         return 0;
     }
     return 1;

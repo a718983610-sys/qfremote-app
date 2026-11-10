@@ -66,18 +66,22 @@
 
 ## 单测结果
 
-`node server/ext/lea/test/test-lea.js`：**184/184 通过**（2026-11-10 沙箱实跑，第五轮）。
+`node server/ext/lea/test/test-lea.js`：**203/203 通过**（2026-11-10 沙箱实跑；200 例为 C 组，另 3 例为 febd53e 已合入的 D 组 H26 吊销立即生效测试）。
 覆盖：Key 生成格式/只存哈希/列表脱敏、认证拒绝各码、换号失效、吊销/一键吊销、
 授权撤销、签名验签占位、**规范串 v1（信封 16 行／票据 9 行、定稿向量与 C 端字节一致、
 params 归一化（整数键数值序＋`__proto__` 保留）、篡改矩阵、票据签发与 rebind 路由返回票据、
 严格校验（timeout／seq／grant／scopes／lease）、固定密钥跨实例验签、批量 `-` 连接与
 幂等键 400、JSON 安全值（toJSON／函数／Date 拒签）、UTF-8 字节长度、scopes 256 上限、
 显式空 leaseId 拒签、批量后缀留长与非对象 params 400、安全整数、路由 timeout 显式非法 400）**、幂等去重、防重放、
-runcommands 下发构造（mock 通道）、路由层 execute/batches/jobs 全流程、审计不含 Key 明文。
+runcommands 下发构造（mock 通道）、路由层 execute/batches/jobs 全流程、审计不含 Key 明文、
+**H21 吊销推送（台账／下发前同步／失败不拦下发／已同步不重复写）、H22 绑定 epoch 不跳过 0
+（绑定前 Key 绑定后 409）、T07 授权代次（撤销后旧 Key 403／重授予后不复活／新 Key 可用／
+重复 grant 不递增）**。
 另验：`node --check` 通过全部新文件与 `server/ext/server.js`；
 ext 服务带 LEA 加载正常（`QFEXT_NO_LISTEN=1` 启动，placeholder 警告符合设计）；
 既有 `server/ext/test-points.js` 11/11 通过；SEC_LEA 的 NSIS 语法经 makensis 3.09
-最小 harness 编译通过（lea/ush 未到货时仅 `/nonfatal` 警告）。
+最小 harness 编译通过。H19：SEC_LEA 关键产物已改 fatal（缺失即出包错，不出残包）；
+`lea/version.txt` 由 `build.sh` 每次构建重写。
 **兼容性：规范串 v1 与旧串完全不兼容，旧串验签失败是预期行为，不设版本协商、不设 v0 回落；
 LEA 尚未随任何正式版发布（现行版 2.4.4 无 LEA），服务端与 LEA 随同一版本升级，
 不存在滚动混用；发版说明须写死“必须同时升级两端”。**
@@ -87,6 +91,24 @@ S3 真客户端单测（2026-11-10 新增，不计入上行 mock 单测）：
 mingw 现编真 `qf-lea-client.exe`＋管道替身 `windows/lea/test/pipe_server.c`，
 wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch／apply 两路与
 坏 base64／缺参／缺文件三例 fail-closed）。缺 mingw／wine64 时 SKIP 退出 0。
+
+## 吊销与密钥代次（H21/H22/T07，2026-11-10）
+
+- **T07（D1）**：Key 绑 `grant_epoch`。`generateKey` 生成时盖上当前授权代次；
+  `admit` 比对 `(k.grant_epoch||0) !== grant.grant_epoch` → 403 `QFR_GRANT_REVOKED`。
+  撤销授权（`revokeGrant`）递增 `grant_epoch`，旧 Key 立即失效；撤销后重授予
+  再递增一次，旧 Key 仍拒绝（不复活），须发新 Key。在效授权上重复 grant 不动
+  epoch（否则每次点“授予”都会废掉全部在用 Key）。
+- **H22**：绑定 epoch 校验不跳过 0——`(k.binding_epoch||0) !== binding.binding_epoch`
+  即拒绝；绑定前生成的 Key 绑定后按 `QFR_BINDING_CHANGED` 409 拒绝。
+- **H21**：服务端吊销推送。`revokeKey`／`revokeAllKeys`／`revokeGrant`／换绑
+  （`recordBinding`）把吊销的 key_id 记入 `revocations.json` 台账（按设备，
+  集合只增不减）；下次 `dispatchEnvelope` 下发前，`syncRevocations` 经
+  runcommands 用 powershell 把全集写进本机 `C:\ProgramData\QFR\LEA\state\revoked_keys.txt`
+  （每行一个 key_id），成功才记 `pushed_epoch`；同步失败不拦本次下发，下次重试。
+  全集超长（Base64 > 4000，约 230 个 key_id）时跳过不发残集。admit 的授权代次
+  比对是第一层控制，本地吊销表是第二层。只读路由
+  `GET /api/lea/v1/devices/:deviceId/revocations`。
 
 ## 未完成 / 须真机或服务端联调验证（不许谎称已验）
 
@@ -99,9 +121,10 @@ wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch�
 3. **LEA 客户端/USH 未到货**：`windows/lea/`、`windows/ush/` 由另一线负责，
    本线未动（2026-11-10 04:22–04:27 另一线已在同一工作树内交付了
    `lea/*.c` 源码与 `ush/QFUserHelper.exe`，本线只读核对、未改动）。
+   客户端 `qf-lea-client.exe` 另一线已出包（2026-11-10 当日），SEC_LEA
+   对其已改 fatal（H19）。
    文件名已按另一线实际产物对齐：服务本体 `QFRLEA.exe`、USH `QFUserHelper.exe`；
-   客户端 `qf-lea-client.exe` 另一线尚未出包（只有 `QFRLEA.c` 注释提及），
-   `SEC_LEA` 对其用 `/nonfatal`，到货后自动打进包。
+   客户端 `qf-lea-client.exe` 已到货，`SEC_LEA` 对其已改 fatal（H19）。
 4. **安装脚本未在 Windows 上跑过**：两份 PS1 仅做了括号平衡检查与人工复核，
    沙箱无 PowerShell，未做语法解析；须 Windows 真机跑 `install-lea.ps1` 全程
    （服务创建/ACL/计划任务/自检/回滚）与 `install-system-services.ps1` 联调。
@@ -110,10 +133,12 @@ wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch�
    SEC_LEA 本身的 NSIS 语法已用最小 harness 编译通过。
 5. **MFA 未接**：Key 生成的二次确认目前只走密码（`verifyPassword`）。
    本站暂无 MFA 校验入口；若 MFA 上线，须把 `verifyMfa` 注入 `lea-routes` 的 deps。
-6. **main.js 白名单未覆盖 `install-lea.ps1`**：`maybeInstallSystemServices` 拉起前
-   只验本脚本、QFSysHelper.exe 与锁 install.ps1 的 SHA-256。上线前须由 main.js 线
-   把 `install-lea.ps1` 哈希加入 `whitelist.json`（已在 `install-system-services.ps1`
-   内留注释提醒）；在此之前本段调用应暂缓或只在受控环境跑。
+6. **main.js 白名单已覆盖 `install-lea.ps1`（H20，已解决）**：`maybeInstallSystemServices`
+   拉起前按 `whitelist.json`（5 件）验 `install-lea.ps1` 的 SHA-256，路径取
+   helperExe 旁的 `LEA/install-lea.ps1`（与将被执行的那一份一致）；白名单加载
+   异常即 fail-closed；`install-system-services.ps1` 的 LEA 段执行前再按
+   `-LeaScriptHash` 对一次（双重门）。`install-lea.ps1` 本身在拷文件前验三件
+   载荷的 SHA-256（H17）。
 7. **绑定事件源未接线**：`recordBinding` 目前只由 Key 生成时与
    `POST /devices/{id}/rebind` 手动触发；主程序登录成功/换号时自动通知 LEA
    换绑（DESIGN §6.1 的命名管道事件）由主程序线接线，届时调同一 `recordBinding`。

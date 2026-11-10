@@ -532,17 +532,28 @@ function main() {
   function execOk(res) { return res && typeof res.success === 'number' && res.success > 0; }
 
   // 回收一条共享（执行＋落台账）。reason: unfriend/owner-revoke/grantee-frozen/grantee-gone/admin-revoke
+  // H23：执行失败（异常或返回值 success<=0）不置 revoked——共享保持 active，
+  // 下次 reconcile/重试时自动再收；成功才置 revoked。返回 {ok, exec}。
   async function revokeShare(share, reason) {
     let execResult = null;
+    let ok = false;
     try {
       const res = await execRemoveShare(share.meshid, share.grantee);
       execResult = res && res.result;
-    } catch (e) { execResult = 'exec-error:' + (e && e.message); }
+      ok = execOk(res);
+    } catch (e) { execResult = 'exec-error:' + (e && e.message); ok = false; }
+    if (!ok) {
+      share.revokeAttempts = (share.revokeAttempts || 0) + 1;
+      share.revokeError = execResult;
+      share.lastRevokeAttemptAt = new Date().toISOString();
+      shareLog({ ev: 'share.revoke-failed', owner: share.owner, grantee: share.grantee, mesh: share.meshName, rights: share.rights, reason, exec: execResult, attempts: share.revokeAttempts });
+      return { ok: false, exec: execResult };
+    }
     share.status = 'revoked';
     share.revokedAt = new Date().toISOString();
     share.revokeReason = reason;
     shareLog({ ev: 'share.revoke', owner: share.owner, grantee: share.grantee, mesh: share.meshName, rights: share.rights, reason, exec: execResult });
-    return execResult;
+    return { ok: true, exec: execResult };
   }
 
   // ---- 对账：冻结/封禁（账号消失）联动回收＋关系清理 ----
@@ -917,10 +928,16 @@ function main() {
     let list = state.shares.filter(s => s.status === 'active' && s.owner === me && s.grantee === target);
     if (data.meshid) list = list.filter(s => s.meshid === data.meshid);
     if (list.length === 0) return sendJson(res, 404, { ok: false, msg: '该共享已不在生效中。' });
-    for (const s of list) await revokeShare(s, 'owner-revoke');
+    const results = [];
+    for (const s of list) results.push(await revokeShare(s, 'owner-revoke'));
     saveState();
-    log({ ev: 'unshare', user: me, target, count: list.length });
-    return sendJson(res, 200, { ok: true, msg: '共享已收回，对方将立即无法查看您的电脑。' });
+    const failed = results.filter(r => !r.ok).length;
+    log({ ev: 'unshare', user: me, target, count: list.length, failed });
+    if (failed > 0) {
+      // H23：执行失败的共享保持 active（下次可重试），不宣称对方已无法查看。
+      return sendJson(res, 502, { ok: false, msg: '共享收回失败（' + failed + '/' + list.length + ' 条），对方可能仍可查看，请稍后重试。' });
+    }
+    return sendJson(res, 200, { ok: true, msg: '共享已收回，对方无法再通过该共享查看您的电脑。' });
   }
 
   // ---- HTTP 入口 ----

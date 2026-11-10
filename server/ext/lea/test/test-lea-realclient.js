@@ -94,8 +94,8 @@ async function main() {
   const core = createLeaCore({ dir: tmpDir, enableSweeps: false });
   const DEV = 'node//test-device-1';
   const USER = 'alice';
+  core.grantMuse(USER, 'owner'); // T07：建 Key 前先授权，否则盖上的 grant_epoch 为 0
   const gen = core.generateKey(USER, { device_scope: DEV });
-  core.grantMuse(USER, 'owner');
   let seq = 0;
 
   function splitCmd(cmd) {
