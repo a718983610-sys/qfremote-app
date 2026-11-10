@@ -2986,8 +2986,30 @@ async function notifyLeaLogin(account) {
         const snap = rb.json.revocations;
         const fullIds = (snap && Array.isArray(snap.revoked_key_ids)) ? snap.revoked_key_ids : null;
         if (fullIds && fullIds.every((x) => typeof x === 'string' && x)) {
-          const sr = leaNotifyInternal({ cmd: 'keys.sync-revoked', key_ids: fullIds });
-          if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
+          // #1 版本化：只认 generation 字段（新版服务端字段；顶层
+          // revocation_generation 与 revocations.generation 同值）。
+          // 旧版回包无此字段即按缺失处理——不拿 revocation_epoch 凑合、
+          // 不静默当最新；缺失时不发 generation，C 侧做无版本并集合并
+          // （不推进本机 generation）。存在但非法（非安全整数／负数）
+          // → 不发 sync（记 bootLog，等下次下发重推），绝不降级成无版
+          // 本合并——非法是服务端／传输出错的信号，与“旧版缺失”语义
+          // 不同，须与 C 侧 lea_json_top_level_long 的三态保持一致。
+          const hasSnapGen = snap && snap.generation !== undefined;
+          const genRaw = hasSnapGen ? snap.generation : rb.json.revocation_generation;
+          let gen = null;
+          let genBad = false;
+          if (genRaw !== undefined) {
+            if (typeof genRaw === 'number' && Number.isSafeInteger(genRaw) && genRaw >= 0) gen = genRaw;
+            else genBad = true;
+          }
+          if (genBad) {
+            bootLog('lea.sync-revoked-bad-generation', JSON.stringify(genRaw));
+          } else {
+            const syncObj = { cmd: 'keys.sync-revoked', key_ids: fullIds };
+            if (gen !== null) syncObj.generation = gen;
+            const sr = leaNotifyInternal(syncObj);
+            if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
+          }
         } else {
           bootLog('lea.sync-revoked-no-snapshot', snap === undefined ? 'missing' : 'invalid');
         }

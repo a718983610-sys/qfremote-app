@@ -1001,6 +1001,52 @@ const mockChannel = {
   r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
   t('H21 路由 rebind 200 且带 revocations 快照', r.code === 200 && r.obj.revocations && Array.isArray(r.obj.revocations.revoked_key_ids) && r.obj.revocations.revoked_key_ids.includes(g5.record.key_id));
 
+  // ---------- #1 版本化（B-补线）：generation 单调／推送携带／回包携带／不回退 ----------
+  // 未知设备 generation 为 0；旧台账（只有 revocation_epoch）读时归一。
+  t('#1 未知设备 generation 为 0', core.getRevocations('node//never-bound').generation === 0);
+  const genBefore = core.getRevocations(DEV2).generation;
+  const rvKey3 = core.generateKey(USER2, { device_scope: DEV2 });
+  core.revokeKey(rvKey3.record.key_id, USER2, 'test-gen');
+  const snapGen = core.getRevocations(DEV2);
+  t('#1 generation 随吊销变更单调 +1', snapGen.generation === genBefore + 1 && snapGen.revocation_epoch === snapGen.generation);
+  t('#1 pushed_generation 与 pushed_epoch 别名一致', snapGen.pushed_generation === snapGen.pushed_epoch);
+  // 推送命令携带 generation 门（写世代文件＋陈旧判断），内容仍为全集。
+  calls.length = 0;
+  const envGen = core.buildEnvelope({
+    requestId: 'req-h21-gen-1', batchId: null, seq: 1, deviceId: DEV2, accountId: USER2,
+    keyId: postRegrant.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-h21-gen-1',
+    command: 'sys.info', params: {}, timeoutMs: 5000,
+  });
+  const dGen = await core.dispatchEnvelope(mockChannel, envGen, { timeoutMs: 5000 });
+  const syncGen = calls.filter((c) => c.cmd.includes('revoked_keys.txt'));
+  t('#1 H21 推送命令携带 generation 门', dGen.ok === true && syncGen.length === 1 &&
+    syncGen[0].cmd.includes('revoked_keys.gen') && syncGen[0].cmd.includes('$incoming=' + snapGen.generation) &&
+    syncGen[0].cmd.includes('-lt $cur') && syncGen[0].cmd.includes('Move($tmpGen, $genFile)'));
+  const syncGenB64 = syncGen[0].cmd.match(/FromBase64String\('([^']+)'\)/)[1];
+  t('#1 世代推送内容仍为吊销全集', Buffer.from(syncGenB64, 'base64').toString('utf8').split('\n').filter(Boolean).includes(rvKey3.record.key_id));
+  t('#1 推送成功后 pushed_generation 追上 generation', core.getRevocations(DEV2).pushed_generation === snapGen.generation);
+  // 无 generation 即拒绝（fail-closed，不发无版本直写）。
+  let genThrew = false;
+  try { core.leaRevocationsWriteCmd('QUJD'); } catch (e) { genThrew = true; }
+  t('#1 leaRevocationsWriteCmd 缺 generation 即抛错', genThrew);
+  genThrew = false;
+  try { core.leaRevocationsWriteCmd('QUJD', -1); } catch (e) { genThrew = true; }
+  t('#1 leaRevocationsWriteCmd 负 generation 即抛错', genThrew);
+  t('#1 leaRevocationsWriteCmd 带 generation 生成带门命令', core.leaRevocationsWriteCmd('QUJD', 3).includes('$incoming=3'));
+  // 不回退：台账文件被旧备份覆盖后，已发出的 generation 不往下发（用后恢复）。
+  const revocFile = path.join(tmpDir, 'revocations.json');
+  const revocOrig = fs.readFileSync(revocFile, 'utf8');
+  const rolledBack = JSON.parse(revocOrig);
+  rolledBack.devices[DEV2] = { revoked_key_ids: [], generation: 0, revocation_epoch: 0, pushed_generation: 0, pushed_epoch: 0, updated_at: 0 };
+  fs.writeFileSync(revocFile, JSON.stringify(rolledBack));
+  t('#1 台账回滚后 getRevocations 的 generation 不回退', core.getRevocations(DEV2).generation >= snapGen.generation);
+  fs.writeFileSync(revocFile, revocOrig);
+  t('#1 台账恢复后 generation 仍为原值', core.getRevocations(DEV2).generation === snapGen.generation);
+  // rebind 回包顶层附带 generation 且与快照一致（测试路由的 consoleAuth
+  // 恒为 alice，只可换绑自己的 DEV）。
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
+  t('#1 rebind 回包附带 revocation_generation 且与快照一致', r.code === 200 && r.obj.revocation_generation === r.obj.revocations.generation && Number.isSafeInteger(r.obj.revocation_generation));
+
   // ---------- 12) 审计不含 Key 明文 ----------
   const auditText = fs.readdirSync(tmpDir).filter((f) => f.startsWith('audit-'))
     .map((f) => fs.readFileSync(path.join(tmpDir, f), 'utf8')).join('\n');

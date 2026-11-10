@@ -191,9 +191,33 @@ int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_id
  * 读到的现有表，累积只增）全在表内，缺失则有界重试（最多 3 次）。
  * 现有行非法／并集超上限即整单拒绝、原文件不动。 */
 int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_ids);
-/* 测试钩子（仅单测用）：merge 每轮基线读后、写前重读前调用一次（若已
- * 设置），用于确定性模拟 H21 直写落在读-写之间。生产代码永不设置。 */
+/* 吊销表世代 sidecar（#1 版本化）：revoked_keys.txt → revoked_keys.gen，
+ * 与服务端 H21 推送脚本写同一文件。内容为十进制整数＋换行。
+ * generation_read：缺失即 *out=0 返回 1；内容损坏／其他读失败返回 0。
+ * generation_write：原子 tmp+rename 写盘，generation 为负返回 0。
+ * generation_advance：只向前推进（当前已 ≥ generation 即无操作成功，
+ * 绝不回退）；读失败返回 0。 */
+int lea_revoked_gen_path(const char *path, char *out, size_t out_size);
+int lea_revoked_generation_read(const char *gen_path, long long *out);
+int lea_revoked_generation_write(const char *gen_path, long long generation);
+int lea_revoked_generation_advance(const char *gen_path, long long generation);
+/* 带世代的并集合并（#1 版本化）：keys.sync-revoked 带 generation 时的
+ * 写入方。generation < 0 表示成员缺失（旧版回包），走无版本合并，不碰
+ * 世代文件；generation ≥ 0 时陈旧判定只在首轮做一次（小于本机已接受
+ * 的最大世代即陈旧，*out_stale 置 1 并返回 0，不写盘；重试轮不再重判，
+ * 否则本函数自己推进的世代会让下一轮自判 stale），否则并集合并，成功
+ * 后条件推进世代，再最终重读验累积期望集＋世代稳定性（写盘后世代被
+ * 他方改动即重合并，最多 3 轮）。世代文件损坏即整单拒绝。out_stale
+ * 可为 NULL。 */
+int lea_revoked_merge_with_generation(const char *path, const char *const *key_ids, int n_key_ids,
+                                      long long generation, int *out_stale);
+/* 测试钩子（仅单测用，测试专用编译隔离：只在定义 LEA_TEST_HOOKS 时
+ * 声明；生产构建不定义）：merge 每轮基线读后、写前重读前调用一次，
+ * 世代合并在世代推进后、最终重读前亦调用一次（同一钩子），用于确定
+ * 性模拟 H21 直写落在读-写之间或写盘与世代推进之间。生产代码永不设置。 */
+#ifdef LEA_TEST_HOOKS
 void lea_revoked_merge_set_pre_write_hook(void (*hook)(const char *path));
+#endif
 typedef struct lea_queue_item lea_queue_item_t;
 struct lea_queue_item {
     lea_envelope_t env;

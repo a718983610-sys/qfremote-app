@@ -126,6 +126,11 @@ long lea_effective_timeout_ms(const lea_envelope_t *env);
 /* JSON 取值助手（平铺字段；params 内字段用 lea_params_*）。 */
 int lea_json_string(const char *text, const char *key, char *out, size_t out_size);
 int lea_json_long(const char *text, const char *key, long long *out);
+/* 只认顶层对象成员的裸整数值（#1 世代字段 generation 用）：严格顶层
+ * 解析（重复键／嵌套／尾部垃圾即非法）；值须整体为可选负号＋十进制
+ * 数字，禁引号／小数／溢出钳制。返回 1=成功、0=成员缺失、-1=成员存在
+ * 但非法；调用方须区分缺失与非法。 */
+int lea_json_top_level_long(const char *text, const char *key, long long *out);
 int lea_json_bool(const char *text, const char *key, int *out);
 /* USH 响应 ok 判定（execute_item USH 分支用）：严格顶层解析，只认顶层
  * 对象中唯一一个布尔 "ok"（*out_ok=true/false）；缺失／非布尔／未闭合／

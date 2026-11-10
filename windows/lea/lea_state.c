@@ -342,15 +342,30 @@ static int revoked_sets_equal(const char a[][129], int na, const char b[][129], 
     return 1;
 }
 
-/* 测试钩子：merge 每轮基线读后、写前重读前调用一次（若已设置）。
- * 仅单测用——确定性模拟 H21 直写落在读-写之间。生产代码永不设置。 */
+/* 测试钩子：merge 每轮基线读后、写前重读前调用一次（若已设置），
+ * 世代合并（lea_revoked_merge_with_generation）在世代推进后、最终重读
+ * 前亦调用一次（同一钩子）——确定性模拟 H21 直写落在读-写之间或写盘
+ * 与世代推进之间。仅单测用，测试专用编译隔离：只在定义
+ * LEA_TEST_HOOKS 时编译（run_tests.sh 的两路单测构建定义它；生产
+ * 构建／mingw 交叉编译不定义，符号不存在）。生产代码永不设置。
+ * 本文件所有 g_merge_pre_write_hook 引用必须在 #ifdef LEA_TEST_HOOKS
+ * 内，否则生产构建链接失败。 */
+#ifdef LEA_TEST_HOOKS
 static void (*g_merge_pre_write_hook)(const char *path) = NULL;
 void lea_revoked_merge_set_pre_write_hook(void (*hook)(const char *path)) {
     g_merge_pre_write_hook = hook;
 }
+#endif
 
-int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_ids) {
+/* 并集合并内层：lea_revoked_merge 与 lea_revoked_merge_with_generation
+ * 共用。expected/n_expected 为调用方提供的累积期望集（in/out）：先把
+ * 传入 id 并入（去重），每轮再把读到的现有表并入，只增不减；成功时
+ * *n_expected 为最终期望集大小。写前重读 CAS＋写后校验期望集＋有界
+ * 重试（最多 3 次），语义与 R6 审定版一致。 */
+static int revoked_merge_inner(const char *path, const char *const *key_ids, int n_key_ids,
+                               char expected[][129], int *n_expected) {
     if (!path || path[0] == '\0' || n_key_ids < 0 || n_key_ids > LEA_REVOKED_MAX_IDS) return 0;
+    if (n_key_ids > 0 && !key_ids) return 0; /* R2-2.6：显式禁解引用 NULL（与下行同义，双保险） */
     /* 空集真 no-op：不读盘、不写盘（缺失文件也不创建）。 */
     if (n_key_ids == 0) return 1;
     if (!key_ids) return 0;
@@ -361,32 +376,32 @@ int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_id
      * 并集会把上轮见过的 id 丢了还验通过（R4 反例：现有 [A,B]、传入
      * [C]、H21 直写 [A] 后重试写回 [A,C] 即丢 B）。期望集只增不减，
      * 与服务端台账只增不减一致；超 512 即整单拒绝。 */
-    char expected[LEA_REVOKED_MAX_IDS][129];
-    int n_expected = 0;
     for (int i = 0; i < n_key_ids; i++) {
-        if (revoked_has_id(expected, n_expected, key_ids[i])) continue;
-        if (n_expected >= LEA_REVOKED_MAX_IDS) return 0;
+        if (revoked_has_id(expected, *n_expected, key_ids[i])) continue;
+        if (*n_expected >= LEA_REVOKED_MAX_IDS) return 0;
         /* token 已验（≤128），定长拷贝（snprintf 会报截断警告）。 */
         size_t kl = strlen(key_ids[i]);
-        memcpy(expected[n_expected], key_ids[i], kl);
-        expected[n_expected][kl] = '\0';
-        n_expected++;
+        memcpy(expected[*n_expected], key_ids[i], kl);
+        expected[*n_expected][kl] = '\0';
+        (*n_expected)++;
     }
     for (int attempt = 0; attempt < 3; attempt++) {
         char existing[LEA_REVOKED_MAX_IDS][129];
         int n_existing = 0;
         if (!revoked_read_ids(path, existing, &n_existing)) return 0;
         for (int i = 0; i < n_existing; i++) {
-            if (revoked_has_id(expected, n_expected, existing[i])) continue;
-            if (n_expected >= LEA_REVOKED_MAX_IDS) return 0;
+            if (revoked_has_id(expected, *n_expected, existing[i])) continue;
+            if (*n_expected >= LEA_REVOKED_MAX_IDS) return 0;
             /* 读盘时已验（≤128），定长拷贝。 */
             size_t el = strlen(existing[i]);
-            memcpy(expected[n_expected], existing[i], el);
-            expected[n_expected][el] = '\0';
-            n_expected++;
+            memcpy(expected[*n_expected], existing[i], el);
+            expected[*n_expected][el] = '\0';
+            (*n_expected)++;
         }
         /* 测试钩子（仅单测设置）：模拟 H21 直写落在本轮基线读之后。 */
+#ifdef LEA_TEST_HOOKS
         if (g_merge_pre_write_hook) g_merge_pre_write_hook(path);
+#endif
         /* 写前重读（CAS）：文件若与本轮基线不一致，说明有其他写入方
          * 在读后写盘（例如 H21 新增了 id），不得直接覆盖——本轮不写，
          * 下一轮以累积的期望集重合并。只验期望集的写后校验发现不了
@@ -397,17 +412,199 @@ int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_id
         if (!revoked_sets_equal(existing, n_existing, current, n_current)) continue;
         /* 期望集即并集：lea_revoked_write 排序＋去重＋原子写回。 */
         const char *ptrs[LEA_REVOKED_MAX_IDS];
-        for (int i = 0; i < n_expected; i++) ptrs[i] = expected[i];
-        if (!lea_revoked_write(path, ptrs, n_expected)) return 0;
+        for (int i = 0; i < *n_expected; i++) ptrs[i] = expected[i];
+        if (!lea_revoked_write(path, ptrs, *n_expected)) return 0;
         /* 写后校验：重读确认期望集全在表内（H21 直写若落在读-改-写
-         * 之间即在此发现，下一轮以累积的期望集重合并，不丢已见 id）。 */
+         * 之间即在此发现，下一轮以累积的期望集重合并，不丢已见 id）。
+         * R2-2.2 字面要求：同时验写前 CAS 读到的 current 集合仍在表内。
+         * CAS 通过时 current == existing ⊆ expected，本是同一结论；
+         * 此处显式再验一次（防御性不变量），防期望集累积逻辑未来回归。
+         * 注意：它发现不了“写盘后才到达、从未见过的新 id”——那一窗口
+         * 由世代合并外层的世代稳定性重验兜（见
+         * lea_revoked_merge_with_generation），不是本处能验的。 */
+        char verify[LEA_REVOKED_MAX_IDS][129];
+        int n_verify = 0;
+        if (!revoked_read_ids(path, verify, &n_verify)) return 0;
+        int missing = 0;
+        for (int i = 0; i < *n_expected; i++)
+            if (!revoked_has_id(verify, n_verify, expected[i])) { missing = 1; break; }
+        for (int i = 0; i < n_current && !missing; i++)
+            if (!revoked_has_id(verify, n_verify, current[i])) { missing = 1; break; }
+        if (!missing) return 1;
+    }
+    return 0;
+}
+
+int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_ids) {
+    char expected[LEA_REVOKED_MAX_IDS][129];
+    int n_expected = 0;
+    return revoked_merge_inner(path, key_ids, n_key_ids, expected, &n_expected);
+}
+
+/* ---------------- 吊销表世代（#1 版本化） ---------------- */
+/* 世代 sidecar 路径：revoked_keys.txt → revoked_keys.gen（与服务端 H21
+ * 推送脚本写同一文件，见 lea-core.js leaRevocationsWriteCmd；无 .txt
+ * 后缀时直接追加 .gen）。 */
+int lea_revoked_gen_path(const char *path, char *out, size_t out_size) {
+    if (!path || !path[0] || !out || out_size < 2) return 0;
+    size_t len = strlen(path);
+    int has_txt = 0;
+    if (len >= 4) {
+        const char *suf = path + len - 4;
+        if (suf[0] == '.' && (suf[1] == 't' || suf[1] == 'T') &&
+            (suf[2] == 'x' || suf[2] == 'X') && (suf[3] == 't' || suf[3] == 'T'))
+            has_txt = 1;
+    }
+    size_t need = has_txt ? len + 1 : len + 5; /* ".gen" 替换 ".txt" 或追加＋'\0' */
+    if (need > out_size) return 0;
+    if (has_txt) {
+        memcpy(out, path, len - 4);
+        memcpy(out + len - 4, ".gen", 4);
+        out[len] = '\0';
+    } else {
+        memcpy(out, path, len);
+        memcpy(out + len, ".gen", 4);
+        out[len + 4] = '\0';
+    }
+    return 1;
+}
+
+/* 世代文件内容：十进制整数＋换行。缺失即 0（未接受过任何世代）；内容
+ * 非纯数字／空／超长／含多余内容／负数／溢出／其他读失败即返回 0
+ * （fail-closed：调用方不得把损坏的世代当 0 推进）。 */
+int lea_revoked_generation_read(const char *gen_path, long long *out) {
+    if (!gen_path || !gen_path[0] || !out) return 0;
+    FILE *f = fopen(gen_path, "r");
+    if (!f) {
+        if (errno == ENOENT) { *out = 0; return 1; }
+        return 0;
+    }
+    char buf[64];
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return 0; } /* 空文件即损坏 */
+    /* 行须完整（无换行且未到 EOF 即超长）且其后无多余内容。 */
+    size_t n = strlen(buf);
+    int complete = (n > 0 && buf[n - 1] == '\n') || feof(f);
+    if (!complete) { fclose(f); return 0; }
+    if (fgetc(f) != EOF) { fclose(f); return 0; }
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+                     buf[n - 1] == ' ' || buf[n - 1] == '\t'))
+        buf[--n] = '\0';
+    if (n == 0) { fclose(f); return 0; }
+    for (size_t i = 0; i < n; i++)
+        if (buf[i] < '0' || buf[i] > '9') { fclose(f); return 0; }
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(buf, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0') { fclose(f); return 0; }
+    fclose(f);
+    *out = v;
+    return 1;
+}
+
+/* 世代文件原子写（tmp+rename，与 lea_revoked_write 同范式）；generation
+ * 为负即拒绝。 */
+int lea_revoked_generation_write(const char *gen_path, long long generation) {
+    if (!gen_path || !gen_path[0] || generation < 0) return 0;
+    size_t plen = strlen(gen_path);
+    char *tmp = (char *)malloc(plen + 5);
+    if (!tmp) return 0;
+    snprintf(tmp, plen + 5, "%s.tmp", gen_path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { free(tmp); return 0; }
+    int ok = 1;
+    if (fprintf(f, "%lld\n", generation) < 0) ok = 0;
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok) {
+        remove(gen_path);
+        if (rename(tmp, gen_path) != 0) ok = 0;
+    }
+    if (!ok) remove(tmp);
+    free(tmp);
+    return ok;
+}
+
+/* 只向前推进世代：当前已 ≥ generation 即成功无操作（不回退）；更小才
+ * 写盘。读失败（损坏）即返回 0。 */
+int lea_revoked_generation_advance(const char *gen_path, long long generation) {
+    if (!gen_path || !gen_path[0] || generation < 0) return 0;
+    long long cur = 0;
+    if (!lea_revoked_generation_read(gen_path, &cur)) return 0;
+    if (cur >= generation) return 1;
+    return lea_revoked_generation_write(gen_path, generation);
+}
+
+/* 带世代的并集合并（#1 版本化）：keys.sync-revoked 带 generation 时的
+ * 实际写入方；generation < 0 表示成员缺失（旧版回包），走无版本合并，
+ * 不碰世代文件。generation ≥ 0 时：
+ *   1. 读本机已接受的最大世代；损坏即整单拒绝（fail-closed）；
+ *   2. 陈旧判定只做一次（首轮进入时）：generation 更小即陈旧快照，
+ *      *out_stale 置 1 并返回 0，不写盘。R2-2.1：重试轮不再重判——
+ *      首轮已通过检查后，本函数自己把世代推进到了 generation，若
+ *      下一轮再判 `generation < cur`，会把自己刚写的世代当成“外部
+ *      更新”而自废武功（表已被陈旧推送覆盖却不再重合并）。一旦开始
+ *      合并，继续只会加 id（并集），永不删 id，所以继续总是安全的；
+ *      世代在中途被他方推得更高，只说明有更新的推送在途，见第 5 步；
+ *   3. 否则做并集合并（CAS＋期望集校验，与 lea_revoked_merge 同语义）；
+ *   4. 合并成功后条件推进世代（已有更新世代在位即无操作，绝不回退）；
+ *   5. 最终重读：确认累积期望集仍在表内——陈旧 H21 推送若恰在写盘与
+ *      世代推进之间落地，会在此被发现并进下一轮重合并（期望集跨轮
+ *      累积，不丢已见 id）；再重读世代文件做稳定性校验：写盘后世代
+ *      若被他方改动（更新推送已到／陈旧推送回退了世代），本次写盘所
+ *      依据的世代假设已失效，亦进下一轮重合并。R2-2.2 实质：只验
+ *      期望集发现不了“写盘后才到达、从未见过的新 id”——但新 id 只会
+ *      随一次世代推进到达（H21 推送先写世代、再写表），世代文件变动
+ *      就是它的可见信号；三轮仍不稳定即诚实报失败（下次下发重推）。
+ *      世代已推进且稳定后，陈旧推送过不了 H21 的世代门，故最后一轮
+ *      重读通过即闭合（见 lea-core.js 注释的自愈链：服务端
+ *      pushed_epoch 只在当前世代同步成功时才追上，陈旧推送误标不了
+ *      已同步，下次下发会重推当前世代全集；admit 始终是第一层控制）。
+ *      有界重试（最多 3 轮）；空集＋世代时只推进世代。
+ * out_stale 可为 NULL。 */
+int lea_revoked_merge_with_generation(const char *path, const char *const *key_ids, int n_key_ids,
+                                      long long generation, int *out_stale) {
+    if (out_stale) *out_stale = 0;
+    if (generation < 0) return lea_revoked_merge(path, key_ids, n_key_ids);
+    if (!path || path[0] == '\0' || n_key_ids < 0 || n_key_ids > LEA_REVOKED_MAX_IDS) return 0;
+    if (n_key_ids > 0 && !key_ids) return 0;
+    for (int i = 0; i < n_key_ids; i++)
+        if (!key_ids[i] || !lea_validate_token(key_ids[i])) return 0;
+    char gen_path[1024];
+    if (!lea_revoked_gen_path(path, gen_path, sizeof(gen_path))) return 0;
+    /* 期望集跨外层重试轮累积（与 inner 的 in/out 语义一致）。 */
+    char expected[LEA_REVOKED_MAX_IDS][129];
+    int n_expected = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        long long cur = 0;
+        if (!lea_revoked_generation_read(gen_path, &cur)) return 0;
+        /* R2-2.1：陈旧判定只在首轮做一次（见上注释第 2 步）。 */
+        if (attempt == 0 && generation < cur) { if (out_stale) *out_stale = 1; return 0; }
+        long long gen_at_start = cur;
+        if (n_key_ids > 0) {
+            if (!revoked_merge_inner(path, key_ids, n_key_ids, expected, &n_expected)) return 0;
+        }
+        if (!lea_revoked_generation_advance(gen_path, generation)) return 0;
+        /* 测试钩子（仅单测设置）：模拟 H21 直写落在写盘与世代推进之间。 */
+#ifdef LEA_TEST_HOOKS
+        if (g_merge_pre_write_hook) g_merge_pre_write_hook(path);
+#endif
+        /* 最终重读：期望集须仍全在表内，否则下一轮以累积期望集重合并。 */
         char verify[LEA_REVOKED_MAX_IDS][129];
         int n_verify = 0;
         if (!revoked_read_ids(path, verify, &n_verify)) return 0;
         int missing = 0;
         for (int i = 0; i < n_expected; i++)
             if (!revoked_has_id(verify, n_verify, expected[i])) { missing = 1; break; }
-        if (!missing) return 1;
+        if (missing) continue;
+        /* R2-2.2 世代稳定性：本次推进后世代文件应为 max(轮首世代,
+         * generation)——即本函数自己的推进结果；若被他方改动（更新推
+         * 送已到／陈旧推送回退了世代），本次写盘所依据的世代假设已
+         * 失效，须再合并一轮（重读表吸入新到 id、重断世代）再验。 */
+        long long expected_gen = gen_at_start > generation ? gen_at_start : generation;
+        long long cur_after = 0;
+        if (!lea_revoked_generation_read(gen_path, &cur_after)) return 0;
+        if (cur_after != expected_gen) continue;
+        return 1;
     }
     return 0;
 }

@@ -1873,7 +1873,11 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
          * （含 ACL 失败删文件）即报 INTERNAL，调用方下次下发前服务端
          * 推送会重新同步（H21 pushed_epoch 未追上即重推）。调用方已由
          * pipe_client_thread 按 H01 验过（安装目录客户端＋主程序父进程），
-         * 此处不再另验。 */
+         * 此处不再另验。
+         * #1 版本化：generation 成员缺失（旧版回包）即走无版本并集合并，
+         * 不推进本机世代；存在但非法（非裸整数／负数／溢出／重复键）
+         * 即整单拒绝；存在且小于本机已接受的最大世代即陈旧快照，拒绝
+         * 不写盘（detail revoked-generation-stale）。 */
         char ids[LEA_REVOKED_MAX_IDS][128];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
@@ -1882,7 +1886,22 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         }
         const char *ptrs[LEA_REVOKED_MAX_IDS];
         for (int i = 0; i < n; i++) ptrs[i] = ids[i];
-        if (!lea_revoked_merge(g_revoked_path, ptrs, n)) {
+        long long gen = -1;
+        int gen_rc = lea_json_top_level_long(text, "generation", &gen);
+        if (gen_rc < 0 || (gen_rc == 1 && gen < 0)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "generation-invalid", NULL);
+            return;
+        }
+        if (gen_rc == 1) {
+            int stale = 0;
+            if (!lea_revoked_merge_with_generation(g_revoked_path, ptrs, n, gen, &stale)) {
+                build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0,
+                           stale ? "revoked-generation-stale" : "revoked-write-failed", NULL);
+                svc_log("ERROR keys.sync-revoked %s count=%d generation=%lld",
+                        stale ? "stale-generation" : "write failed", n, gen);
+                return;
+            }
+        } else if (!lea_revoked_merge(g_revoked_path, ptrs, n)) {
             build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoked-write-failed", NULL);
             svc_log("ERROR keys.sync-revoked write failed count=%d", n);
             return;
@@ -1899,7 +1918,10 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.detail = "revoked_keys.txt merged from rebind";
         audit_event(&ev);
         char result[128];
-        snprintf(result, sizeof(result), "{\"revoked_count\":%d}", n);
+        if (gen_rc == 1)
+            snprintf(result, sizeof(result), "{\"revoked_count\":%d,\"generation\":%lld}", n, gen);
+        else
+            snprintf(result, sizeof(result), "{\"revoked_count\":%d}", n);
         build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }

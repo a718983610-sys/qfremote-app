@@ -541,7 +541,13 @@ function createLeaRoutes(core, channel, deps) {
     const out = core.recordBinding(deviceId, accountId, 'manual-rebind', { bindingEpoch: clientEpoch });
     // H21：换绑响应带本次吊销的 key_id 与本机吊销表应有的全集快照
     // （调用方／客户端据此核对本机 revoked_keys.txt 是否已同步）。
-    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations: core.getRevocations(deviceId), ticket: out.ticket });
+    // #1 版本化：快照带 generation（revocations.generation，顶层
+    // revocation_generation 同值），永不回退（见 lea-core.js
+    // getRevocations 高水位）；旧版服务端回包无 generation 字段时，
+    // 客户端须按缺失处理（只做无版本并集合并，不推进本机 generation），
+    // 绝不把缺失静默当成最新——见 windows/main.js notifyLeaLogin。
+    const revocations = core.getRevocations(deviceId);
+    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations, revocation_generation: revocations.generation, ticket: out.ticket });
   }
 
   // ---- 查本机吊销表应有快照（H21） ----

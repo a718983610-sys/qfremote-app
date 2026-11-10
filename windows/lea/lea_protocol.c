@@ -109,6 +109,36 @@ int lea_json_long(const char *text, const char *key, long long *out) {
     return 1;
 }
 
+/* 只认顶层对象成员的裸整数值（#1 世代字段 generation 用）：复用
+ * json_find_member 严格顶层解析（重复键／嵌套／尾部垃圾即 -1）；值
+ * 切片须整体为可选负号＋十进制数字（禁引号、禁小数、禁尾部字符），
+ * strtoll 全量消费且禁 ERANGE 溢出钳制。返回 1=解析成功、0=成员缺失、
+ * -1=成员存在但非法——调用方须区分“缺失”（按缺失处理）与“非法”
+ * （整单拒绝），不得把非法当缺失静默放过。 */
+int lea_json_top_level_long(const char *text, const char *key, long long *out) {
+    if (!text || !key || !out) return -1;
+    const char *val = NULL;
+    size_t vlen = 0;
+    int r = json_find_member(text, key, &val, &vlen);
+    if (r == 0) return 0;
+    if (r != 1) return -1;
+    if (vlen == 0 || vlen >= 32) return -1;
+    char buf[32];
+    memcpy(buf, val, vlen);
+    buf[vlen] = '\0';
+    size_t i = 0;
+    if (buf[0] == '-') i = 1;
+    if (i >= vlen) return -1;
+    for (; i < vlen; i++)
+        if (buf[i] < '0' || buf[i] > '9') return -1;
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(buf, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0') return -1;
+    *out = v;
+    return 1;
+}
+
 int lea_json_bool(const char *text, const char *key, int *out) {
     if (!text || !key || !out) return 0;
     char pat[80];

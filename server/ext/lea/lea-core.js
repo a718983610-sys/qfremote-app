@@ -872,6 +872,11 @@ function createLeaCore(opts) {
   // 名存实亡。正常路径下 admit 每次实时查吊销，是有效控制；这里补的是
   // 设计的第二层，不是替代 admit。
   // 机制：revocations.json 按设备记待推送的吊销 key_id 全集（只增不减）；
+  // 每设备带单调 generation（每次台账变更 +1，见 recordRevocations），
+  // H21 推送与 rebind 回包都携带它；C 侧持久化已接受的最大 generation，
+  // 陈旧推送拒绝写盘（见 leaRevocationsWriteCmd 的世代门与 C 侧
+  // lea_revoked_merge_with_generation），根治 merge 最终重读通过后陈旧
+  // H21 落地的那一瞬窗口（#1 版本化）。
   // dispatchEnvelope 下发前先经 runcommands 把全集写到本机（写成功才记
   // pushed_epoch；写失败留待下次下发重试）。设备离线收不到推送时吊销照
   // 样在服务端被 admit 拦住，本机表 stale 的最坏情况有 admit 兜底。
@@ -887,6 +892,29 @@ function createLeaCore(opts) {
     } catch (e) {}
     return out.sort();
   }
+  // #1 版本化：generation 是 revocations.json 里每设备单调递增的世代，
+  // 每次吊销台账变更即 +1（与旧字段 revocation_epoch 同值，后者保留为
+  // 别名供旧客户端／旧测试读取）。H21 推送与 rebind 回包都携带它；C 侧
+  // 持久化已接受的最大 generation，陈旧推送（generation 更小）拒绝写盘。
+  // 旧台账文件可能只有 revocation_epoch（无 generation），读时取两者
+  // 最大值归一，不把缺失当 0 回退。锁死：revocation_epoch 是 generation
+  // 的只读别名，禁止单独写——两处写点（recordRevocations、
+  // markRevocationsPushed）必须同时写两字段且同值，否则别名即分叉。
+  function revocGeneration(cur) {
+    const g = cur && Number.isSafeInteger(cur.generation) ? cur.generation : 0;
+    const e = cur && Number.isSafeInteger(cur.revocation_epoch) ? cur.revocation_epoch : 0;
+    return Math.max(g, e, 0);
+  }
+  function revocPushed(cur) {
+    const g = cur && Number.isSafeInteger(cur.pushed_generation) ? cur.pushed_generation : 0;
+    const e = cur && Number.isSafeInteger(cur.pushed_epoch) ? cur.pushed_epoch : 0;
+    return Math.max(g, e, 0);
+  }
+  // 不回退（进程内高水位）：一旦某个 generation 被发给过客户端，就不得
+  // 再往下发——即使 revocations.json 被旧备份覆盖回滚，已发出的值也不
+  // 回退（否则本机可能重新接受陈旧推送）。持久化台账本身只增不减，
+  // 重启后以台账为准。
+  const revocIssuedGen = {};
   function recordRevocations(deviceIds, keyIds, reason) {
     const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
     const devs = [...new Set((deviceIds || []).filter((x) => typeof x === 'string' && x))].sort();
@@ -898,7 +926,8 @@ function createLeaCore(opts) {
       const cur = st.devices[d] || { revoked_key_ids: [], revocation_epoch: 0, pushed_epoch: 0, updated_at: 0 };
       const merged = [...new Set([...(cur.revoked_key_ids || []), ...ids])].sort();
       if (merged.length !== (cur.revoked_key_ids || []).length) {
-        st.devices[d] = { revoked_key_ids: merged, revocation_epoch: (cur.revocation_epoch || 0) + 1, pushed_epoch: cur.pushed_epoch || 0, updated_at: now() };
+        const gen = revocGeneration(cur) + 1;
+        st.devices[d] = { revoked_key_ids: merged, generation: gen, revocation_epoch: gen, pushed_generation: revocPushed(cur), pushed_epoch: revocPushed(cur), updated_at: now() };
         changed = true;
       }
     }
@@ -910,15 +939,20 @@ function createLeaCore(opts) {
   }
   function getRevocations(deviceId) {
     const cur = (loadRevocations().devices || {})[String(deviceId)];
-    if (!cur) return { device_id: String(deviceId), revoked_key_ids: [], revocation_epoch: 0, pushed_epoch: 0, updated_at: 0 };
-    return { device_id: String(deviceId), revoked_key_ids: [...(cur.revoked_key_ids || [])], revocation_epoch: cur.revocation_epoch || 0, pushed_epoch: cur.pushed_epoch || 0, updated_at: cur.updated_at || 0 };
+    if (!cur) return { device_id: String(deviceId), revoked_key_ids: [], generation: 0, revocation_epoch: 0, pushed_generation: 0, pushed_epoch: 0, updated_at: 0 };
+    const gen = Math.max(revocGeneration(cur), revocIssuedGen[String(deviceId)] || 0);
+    revocIssuedGen[String(deviceId)] = gen;
+    const pushed = revocPushed(cur);
+    return { device_id: String(deviceId), revoked_key_ids: [...(cur.revoked_key_ids || [])], generation: gen, revocation_epoch: gen, pushed_generation: pushed, pushed_epoch: pushed, updated_at: cur.updated_at || 0 };
   }
-  function markRevocationsPushed(deviceId, epoch) {
+  function markRevocationsPushed(deviceId, generation) {
     try {
       const st = loadRevocations();
       const cur = st.devices[String(deviceId)];
       if (!cur) return;
-      if ((cur.revocation_epoch || 0) === epoch) { cur.pushed_epoch = epoch; saveRevocations(st); }
+      // 只在 generation 与当前台账一致时才追上：陈旧推送（其 generation
+      // 已落后于当前台账）即使写盘命令返回成功，也不得误标已同步。
+      if (revocGeneration(cur) === generation) { cur.pushed_generation = generation; cur.pushed_epoch = generation; saveRevocations(st); }
     } catch (e) {}
   }
   // 下发前把本机吊销表同步到最新全集（best-effort：写失败不拦本次命令，
@@ -926,29 +960,44 @@ function createLeaCore(opts) {
   // 跳过也不发残集（残集会让本机误以为部分 Key 未吊销）。
   const LEA_REVOKED_PATH = 'C:\\ProgramData\\QFR\\LEA\\state\\revoked_keys.txt';
   const REVOCATION_SYNC_B64_LIMIT = 4000; // 约 230 个 key_id；超了等下次（admit 兜底）
-  function leaRevocationsWriteCmd(b64) {
-    return 'powershell -NoProfile -NonInteractive -Command "[IO.File]::WriteAllBytes(\'' + LEA_REVOKED_PATH + '\',[Convert]::FromBase64String(\'' + b64 + '\'))"';
+  // H21 推送写命令（带 generation 门）：PowerShell 先读本机世代文件
+  // revoked_keys.gen（已接受的最大 generation，不存在即 0）；incoming
+  // generation 更小即陈旧推送，直接退出不写盘（返回成功——无事可做；
+  // 服务端 pushed_epoch 只在 generation 与当前台账一致时才追上，见
+  // markRevocationsPushed，故陈旧推送不会误标已同步）。世代文件损坏
+  // （非纯数字）即抛错不写盘（fail-closed；下次下发重试，admit 仍是
+  // 第一层控制）。写顺序：先写世代文件、再写 revoked_keys.txt——中途
+  // 失败时世代超前于表是安全方向（陈旧推送被拦，新表由下次重推补齐）；
+  // 反过来（表超前于世代）会留一个陈旧推送可覆盖新表的窗口。世代文件
+  // 用 tmp+rename 写（与 C 侧同范式），不断电写半截；tmp 名带 $PID，
+  // 防两路并发推送撞同名。
+  // generation 必传：缺失／非安全整数／负数即抛错，绝不发无版本直写。
+  function leaRevocationsWriteCmd(b64, generation) {
+    if (typeof b64 !== 'string' || !b64) throw new Error('leaRevocationsWriteCmd: b64 required');
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('leaRevocationsWriteCmd: generation required');
+    const genFile = LEA_REVOKED_PATH.replace(/\.txt$/i, '.gen');
+    return 'powershell -NoProfile -NonInteractive -Command "$genFile=\'' + genFile + '\'; $txtFile=\'' + LEA_REVOKED_PATH + '\'; $incoming=' + generation + '; $cur=0; if (Test-Path -LiteralPath $genFile) { $raw=[IO.File]::ReadAllText($genFile).Trim(); if ($raw -match \'^[0-9]+$\') { $cur=[int64]$raw } else { throw \'revoked generation file corrupt\' } }; if ($incoming -lt $cur) { exit 0 }; $tmpGen=$genFile + \'.\' + $PID + \'.tmp\'; [IO.File]::WriteAllText($tmpGen, [string]$incoming); Remove-Item -LiteralPath $genFile -ErrorAction SilentlyContinue; [IO.File]::Move($tmpGen, $genFile); [IO.File]::WriteAllBytes($txtFile,[Convert]::FromBase64String(\'' + b64 + '\'))"';
   }
   async function syncRevocations(channel, deviceId) {
     if (!channel || typeof channel.runCommand !== 'function') return { synced: false, reason: 'no-channel' };
     let snap;
     try { snap = getRevocations(deviceId); } catch (e) { return { synced: false, reason: 'read-failed' }; }
     if (!snap.revoked_key_ids.length) return { synced: true, reason: 'empty' };
-    if ((snap.pushed_epoch || 0) >= (snap.revocation_epoch || 0)) return { synced: true, reason: 'already-synced' };
+    if ((snap.pushed_generation || 0) >= (snap.generation || 0)) return { synced: true, reason: 'already-synced', generation: snap.generation };
     const text = snap.revoked_key_ids.join('\n') + '\n';
     const b64 = Buffer.from(text, 'utf8').toString('base64');
     if (b64.length > REVOCATION_SYNC_B64_LIMIT) {
-      log({ ev: 'lea-revocation-sync-skipped', device_id: deviceId, reason: 'oversize', revocation_epoch: snap.revocation_epoch });
+      log({ ev: 'lea-revocation-sync-skipped', device_id: deviceId, reason: 'oversize', generation: snap.generation, revocation_epoch: snap.revocation_epoch });
       return { synced: false, reason: 'oversize' };
     }
     try {
-      await channel.runCommand(deviceId, leaRevocationsWriteCmd(b64), 15000);
+      await channel.runCommand(deviceId, leaRevocationsWriteCmd(b64, snap.generation), 15000);
     } catch (e) {
-      log({ ev: 'lea-revocation-sync-failed', device_id: deviceId, revocation_epoch: snap.revocation_epoch, err: String(e && e.message) });
+      log({ ev: 'lea-revocation-sync-failed', device_id: deviceId, generation: snap.generation, revocation_epoch: snap.revocation_epoch, err: String(e && e.message) });
       return { synced: false, reason: 'write-failed' };
     }
-    markRevocationsPushed(deviceId, snap.revocation_epoch);
-    return { synced: true, reason: 'pushed' };
+    markRevocationsPushed(deviceId, snap.generation);
+    return { synced: true, reason: 'pushed', generation: snap.generation };
   }
 
   // ---------- 准入：七项校验（DESIGN §6.2），服务端先拦 ----------

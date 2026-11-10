@@ -6,13 +6,13 @@ set -e
 cd "$(dirname "$0")"
 
 echo "== [1/4] core tests (test build: TEST-UNSIGNED accepted) =="
-gcc -O1 -Wall -Wextra -DLEA_TEST_UNSIGNED=1 -o /tmp/test_lea test_lea.c \
+gcc -O1 -Wall -Wextra -DLEA_TEST_UNSIGNED=1 -DLEA_TEST_HOOKS=1 -o /tmp/test_lea test_lea.c \
     ../lea_protocol.c ../lea_crypto.c ../lea_state.c ../lea_audit.c
 /tmp/test_lea
 
 echo
 echo "== [2/4] core tests (strict build: signature fail-closed) =="
-gcc -O1 -Wall -Wextra -o /tmp/test_lea_strict test_lea.c \
+gcc -O1 -Wall -Wextra -DLEA_TEST_HOOKS=1 -o /tmp/test_lea_strict test_lea.c \
     ../lea_protocol.c ../lea_crypto.c ../lea_state.c ../lea_audit.c
 /tmp/test_lea_strict
 

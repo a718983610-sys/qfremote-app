@@ -82,7 +82,9 @@ static void active_binding(lea_binding_t *b, long long epoch, int grant,
 }
 
 /* CAS 测试钩子：第一次调用时把文件全量替换为 [A,D]（模拟 H21 直写
- * 落在 merge 基线读之后、写前重读之前），之后不再触发。 */
+ * 落在 merge 基线读之后、写前重读之前），之后不再触发。
+ * 仅在定义 LEA_TEST_HOOKS 时编译（见 lea_state.h）。 */
+#ifdef LEA_TEST_HOOKS
 static int g_cas_hook_fired = 0;
 static void cas_hook(const char *path) {
     if (g_cas_hook_fired) return;
@@ -90,6 +92,40 @@ static void cas_hook(const char *path) {
     const char *hd[] = { "k_aaa1111111", "k_ddd4444444" };
     lea_revoked_write(path, hd, 2);
 }
+
+/* 世代合并最终重读测试钩子：第 2 次调用时把文件全量替换为 [A]（模拟
+ * 陈旧 H21 直写落在写盘与世代推进之间），其余调用无操作。调用序：
+ * 第 1 次＝内层写前重读前，第 2 次＝世代推进后、最终重读前。 */
+static int g_gen_hook_calls = 0;
+static void gen_hook(const char *path) {
+    g_gen_hook_calls++;
+    if (g_gen_hook_calls != 2) return;
+    const char *hd[] = { "k_aaa1111111" };
+    lea_revoked_write(path, hd, 1);
+}
+
+/* R2 交错钩子：第 2 次调用（世代推进后）按模式模拟他方写盘：
+ * 模式 1＝只把世代文件推到 9（更新推送的世代写已到、表写未到）；
+ * 模式 2＝只把世代文件回退到 2（陈旧推送回退了世代）；
+ * 模式 3＝世代推到 9 且把表覆盖为 [A]（更新推送世代已到＋陈旧推送
+ * 覆盖了表——R2-2.1 反例：旧写法第 2 轮入口即判 stale 而不重合并）。 */
+static int g_gen_interleave_mode = 0;
+static void gen_interleave_hook(const char *path) {
+    g_gen_hook_calls++;
+    if (g_gen_hook_calls != 2) return;
+    char gf[512];
+    if (!lea_revoked_gen_path(path, gf, sizeof(gf))) return;
+    if (g_gen_interleave_mode == 1) {
+        lea_revoked_generation_write(gf, 9);
+    } else if (g_gen_interleave_mode == 2) {
+        lea_revoked_generation_write(gf, 2);
+    } else if (g_gen_interleave_mode == 3) {
+        lea_revoked_generation_write(gf, 9);
+        const char *hd[] = { "k_aaa1111111" };
+        lea_revoked_write(path, hd, 1);
+    }
+}
+#endif
 
 int main(void) {
     long long now = (long long)time(NULL);
@@ -1666,7 +1702,9 @@ int main(void) {
     /* ---------- #17 R6：写前 CAS——H21 直写落在读-写之间不得丢项 ----------
      * 钩子在 merge 基线读后、写前重读前把文件全量替换为 [A,D]（H21 直写
      * 形态）。无 CAS 时 merge 会以 [A,B,C] 覆盖丢 D，且只验传入 id 的
-     * 写后校验照常通过；有 CAS 时应检测到文件已变、重合并，最终表含 D。 */
+     * 写后校验照常通过；有 CAS 时应检测到文件已变、重合并，最终表含 D。
+     * 仅在定义 LEA_TEST_HOOKS 时跑（钩子本身只在该宏下编译）。 */
+#ifdef LEA_TEST_HOOKS
     {
         const char *cpath = "/tmp/m17-revoked-cas.txt";
         remove(cpath);
@@ -1686,6 +1724,264 @@ int main(void) {
             CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\nk_ddd4444444\n") == 0, "m17-cas-keeps-h21-item");
         }
         remove(cpath);
+    }
+
+    /* ---------- #1 版本化：世代合并——陈旧 H21 落在写盘与世代推进之间 ----------
+     * 钩子第 2 次调用（世代推进后、最终重读前）把文件全量替换为 [A]
+     * （陈旧 H21 形态，丢 B、C）。无最终重读＋重试时 merge 返回成功但
+     * 表只剩 [A]；有最终重读时应发现期望集缺失、以外层累积期望集重合并，
+     * 最终表为 [A,B,C] 且世代文件为 6。 */
+    {
+        const char *gpath = "/tmp/m17-revoked-gen.txt";
+        char genfile[512];
+        CHECK(lea_revoked_gen_path(gpath, genfile, sizeof(genfile)), "gen-merge-genpath-ok");
+        CHECK(strcmp(genfile, "/tmp/m17-revoked-gen.gen") == 0, "gen-merge-genpath-txt-suffix");
+        remove(gpath);
+        remove(genfile);
+        const char *ginit[] = { "k_aaa1111111", "k_bbb2222222" };
+        CHECK(lea_revoked_write(gpath, ginit, 2), "gen-merge-setup");
+        CHECK(lea_revoked_generation_write(genfile, 5), "gen-merge-setup-gen");
+        g_gen_hook_calls = 0;
+        lea_revoked_merge_set_pre_write_hook(gen_hook);
+        const char *ginc[] = { "k_ccc3333333" };
+        int gstale = -1;
+        CHECK(lea_revoked_merge_with_generation(gpath, ginc, 1, 6, &gstale), "gen-merge-ok");
+        CHECK(gstale == 0, "gen-merge-not-stale");
+        lea_revoked_merge_set_pre_write_hook(NULL);
+        {
+            FILE *f = fopen(gpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen-merge-final-table");
+        }
+        {
+            long long gv = -1;
+            CHECK(lea_revoked_generation_read(genfile, &gv) && gv == 6, "gen-merge-final-gen");
+        }
+        remove(gpath);
+        remove(genfile);
+    }
+
+    /* ---------- #1 版本化 R2：入口一次性 stale 检查＋世代稳定性重验 ----------
+     * 三个模式共用同一初态（表 [A,B]、世代 5，传入 [C]、generation 6）：
+     * 模式 3＝R2-2.1 反例（世代推进后更新推送世代 9 已到、表又被陈旧
+     * 推送覆盖为 [A]）：旧写法第 2 轮入口 `6 < 9` 即判 stale 返回 0，
+     * 表停在 [A]；新写法只在首轮判 stale，重试轮以累积期望集重合并，
+     * 终表 [A,B,C]、世代保持 9（不回退）。模式 1＝R2-2.2 稳定性·更新
+     * （世代被推到 9、表未变）：须多跑一轮确认稳定后才返回 1。模式 2
+     * ＝R2-2.2 稳定性·回退（世代被回退到 2）：须重合并一轮重断世代，
+     * 终表 [A,B,C]、世代恢复为 6。 */
+    {
+        const char *gpath = "/tmp/m17-revoked-gen2.txt";
+        char genfile[512];
+        CHECK(lea_revoked_gen_path(gpath, genfile, sizeof(genfile)), "gen2-genpath-ok");
+        const char *ginit[] = { "k_aaa1111111", "k_bbb2222222" };
+        const char *ginc[] = { "k_ccc3333333" };
+        /* 模式 3：2.1 反例。 */
+        remove(gpath);
+        remove(genfile);
+        CHECK(lea_revoked_write(gpath, ginit, 2), "gen2-setup");
+        CHECK(lea_revoked_generation_write(genfile, 5), "gen2-setup-gen");
+        g_gen_interleave_mode = 3;
+        g_gen_hook_calls = 0;
+        lea_revoked_merge_set_pre_write_hook(gen_interleave_hook);
+        int gstale = -1;
+        CHECK(lea_revoked_merge_with_generation(gpath, ginc, 1, 6, &gstale), "gen2-retry-not-stale-ok");
+        CHECK(gstale == 0, "gen2-retry-not-stale-flag");
+        lea_revoked_merge_set_pre_write_hook(NULL);
+        {
+            FILE *f = fopen(gpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen2-retry-final-table");
+        }
+        {
+            long long gv = -1;
+            CHECK(lea_revoked_generation_read(genfile, &gv) && gv == 9, "gen2-retry-final-gen-kept");
+        }
+        /* 模式 1：2.2 稳定性·更新。定位说明：本测试锁定新写法在世代被
+         * 推高时不误报失败／不回退（回归防护），旧写法下也通过，非旧
+         * bug 反例——与模式 2／模式 3（旧写法失败型）定位不同。 */
+        remove(gpath);
+        remove(genfile);
+        CHECK(lea_revoked_write(gpath, ginit, 2), "gen2-stable-setup");
+        CHECK(lea_revoked_generation_write(genfile, 5), "gen2-stable-setup-gen");
+        g_gen_interleave_mode = 1;
+        g_gen_hook_calls = 0;
+        lea_revoked_merge_set_pre_write_hook(gen_interleave_hook);
+        CHECK(lea_revoked_merge_with_generation(gpath, ginc, 1, 6, NULL), "gen2-stable-newer-ok");
+        lea_revoked_merge_set_pre_write_hook(NULL);
+        {
+            FILE *f = fopen(gpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen2-stable-newer-table");
+        }
+        {
+            long long gv = -1;
+            CHECK(lea_revoked_generation_read(genfile, &gv) && gv == 9, "gen2-stable-newer-gen");
+        }
+        /* 模式 2：2.2 稳定性·回退。 */
+        remove(gpath);
+        remove(genfile);
+        CHECK(lea_revoked_write(gpath, ginit, 2), "gen2-regress-setup");
+        CHECK(lea_revoked_generation_write(genfile, 5), "gen2-regress-setup-gen");
+        g_gen_interleave_mode = 2;
+        g_gen_hook_calls = 0;
+        lea_revoked_merge_set_pre_write_hook(gen_interleave_hook);
+        CHECK(lea_revoked_merge_with_generation(gpath, ginc, 1, 6, NULL), "gen2-stable-regress-ok");
+        lea_revoked_merge_set_pre_write_hook(NULL);
+        {
+            FILE *f = fopen(gpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen2-stable-regress-table");
+        }
+        {
+            long long gv = -1;
+            CHECK(lea_revoked_generation_read(genfile, &gv) && gv == 6, "gen2-stable-regress-gen-restored");
+        }
+        remove(gpath);
+        remove(genfile);
+    }
+#endif
+
+    /* ---------- #1 版本化：世代文件读写与带世代合并 ----------
+     * 世代文件 revoked_keys.gen 与表文件同目录；旧 generation 直写拒绝
+     * （不写盘、世代不动），新 generation 接受（合并＋推进世代），缺失
+     * generation 走无版本合并（不碰世代文件），世代文件损坏即整单拒绝。 */
+    {
+        const char *vpath = "/tmp/m17-revoked-ver.txt";
+        char vgen[512];
+        long long gv = -1;
+        /* 世代路径派生：.txt→.gen；无后缀追加；大小写不敏感；缓冲不足拒绝。 */
+        CHECK(lea_revoked_gen_path(vpath, vgen, sizeof(vgen)) && strcmp(vgen, "/tmp/m17-revoked-ver.gen") == 0, "gen-path-txt");
+        CHECK(lea_revoked_gen_path("/tmp/x/revoked_keys.TXT", vgen, sizeof(vgen)) && strcmp(vgen, "/tmp/x/revoked_keys.gen") == 0, "gen-path-txt-upper");
+        CHECK(lea_revoked_gen_path("/tmp/x/table", vgen, sizeof(vgen)) && strcmp(vgen, "/tmp/x/table.gen") == 0, "gen-path-append");
+        CHECK(!lea_revoked_gen_path(vpath, vgen, 8), "gen-path-small-buf-rejected");
+        CHECK(!lea_revoked_gen_path(NULL, vgen, sizeof(vgen)), "gen-path-null-rejected");
+        remove(vpath);
+        remove("/tmp/m17-revoked-ver.gen");
+        /* 缺失世代文件读作 0；写读往返；负数拒绝写。 */
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 0, "gen-read-missing-zero");
+        CHECK(lea_revoked_generation_write("/tmp/m17-revoked-ver.gen", 7), "gen-write-ok");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 7, "gen-read-roundtrip");
+        CHECK(!lea_revoked_generation_write("/tmp/m17-revoked-ver.gen", -1), "gen-write-negative-rejected");
+        /* 损坏内容一律拒绝读：非数字／带尾巴／空文件／超长行。 */
+        {
+            FILE *f = fopen("/tmp/m17-revoked-ver.gen", "w");
+            if (f) { fputs("abc\n", f); fclose(f); }
+        }
+        CHECK(!lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv), "gen-read-alpha-rejected");
+        {
+            FILE *f = fopen("/tmp/m17-revoked-ver.gen", "w");
+            if (f) { fputs("12x\n", f); fclose(f); }
+        }
+        CHECK(!lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv), "gen-read-trailing-junk-rejected");
+        {
+            FILE *f = fopen("/tmp/m17-revoked-ver.gen", "w");
+            if (f) { fputs("7\nEXTRA\n", f); fclose(f); }
+        }
+        CHECK(!lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv), "gen-read-extra-line-rejected");
+        {
+            FILE *f = fopen("/tmp/m17-revoked-ver.gen", "w");
+            if (f) fclose(f);
+        }
+        CHECK(!lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv), "gen-read-empty-rejected");
+        /* 只向前推进：更小即无操作成功，世代不动；更大才写盘。 */
+        CHECK(lea_revoked_generation_write("/tmp/m17-revoked-ver.gen", 5), "gen-advance-setup");
+        CHECK(lea_revoked_generation_advance("/tmp/m17-revoked-ver.gen", 3), "gen-advance-older-ok");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 5, "gen-advance-older-no-regress");
+        CHECK(lea_revoked_generation_advance("/tmp/m17-revoked-ver.gen", 9), "gen-advance-newer-ok");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 9, "gen-advance-newer-writes");
+        /* 新 generation 接受：合并＋推进世代。 */
+        const char *vinit[] = { "k_aaa1111111", "k_bbb2222222" };
+        CHECK(lea_revoked_write(vpath, vinit, 2), "gen-merge-setup");
+        CHECK(lea_revoked_generation_write("/tmp/m17-revoked-ver.gen", 5), "gen-merge-setup-gen");
+        const char *vinc[] = { "k_ccc3333333" };
+        int vstale = -1;
+        CHECK(lea_revoked_merge_with_generation(vpath, vinc, 1, 6, &vstale), "gen-merge-new-ok");
+        CHECK(vstale == 0, "gen-merge-new-not-stale");
+        {
+            FILE *f = fopen(vpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen-merge-new-table");
+        }
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 6, "gen-merge-new-gen");
+        /* 旧 generation 直写拒绝：不写盘、世代不动、*out_stale 置 1。 */
+        const char *vold[] = { "k_ddd4444444" };
+        vstale = 0;
+        CHECK(!lea_revoked_merge_with_generation(vpath, vold, 1, 3, &vstale), "gen-merge-stale-rejected");
+        CHECK(vstale == 1, "gen-merge-stale-flag");
+        {
+            FILE *f = fopen(vpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "gen-merge-stale-keeps-file");
+        }
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 6, "gen-merge-stale-keeps-gen");
+        /* 等值 generation 是幂等重发：接受，世代不动。 */
+        CHECK(lea_revoked_merge_with_generation(vpath, vold, 1, 6, &vstale), "gen-merge-equal-ok");
+        CHECK(vstale == 0, "gen-merge-equal-not-stale");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 6, "gen-merge-equal-keeps-gen");
+        /* 缺失 generation（-1）走无版本合并：表照常合并，世代文件不动。 */
+        const char *vmiss[] = { "k_eee5555555" };
+        CHECK(lea_revoked_merge_with_generation(vpath, vmiss, 1, -1, NULL), "gen-merge-missing-ok");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 6, "gen-merge-missing-keeps-gen");
+        /* 世代文件损坏即整单拒绝、表不动。 */
+        {
+            FILE *f = fopen("/tmp/m17-revoked-ver.gen", "w");
+            if (f) { fputs("zz\n", f); fclose(f); }
+        }
+        CHECK(!lea_revoked_merge_with_generation(vpath, vinc, 1, 9, NULL), "gen-merge-corrupt-gen-rejected");
+        {
+            FILE *f = fopen(vpath, "r");
+            char content[512] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\nk_ddd4444444\nk_eee5555555\n") == 0, "gen-merge-corrupt-keeps-file");
+        }
+        /* 空集＋世代：只推进世代，不动表。 */
+        CHECK(lea_revoked_generation_write("/tmp/m17-revoked-ver.gen", 6), "gen-merge-empty-setup");
+        CHECK(lea_revoked_merge_with_generation(vpath, NULL, 0, 8, NULL), "gen-merge-empty-ok");
+        CHECK(lea_revoked_generation_read("/tmp/m17-revoked-ver.gen", &gv) && gv == 8, "gen-merge-empty-advances-gen");
+        remove(vpath);
+        remove("/tmp/m17-revoked-ver.gen");
+    }
+
+    /* ---------- #1 版本化：lea_json_top_level_long 三态 ----------
+     * 1=解析成功、0=成员缺失、-1=成员存在但非法（字符串／小数／重复键／
+     * 嵌套／尾部垃圾／溢出）。调用方须区分缺失与非法。 */
+    {
+        long long v = -999;
+        CHECK(lea_json_top_level_long("{\"generation\":7}", "generation", &v) == 1 && v == 7, "top-long-ok");
+        v = -999;
+        CHECK(lea_json_top_level_long("{\"generation\": 7 }", "generation", &v) == 1 && v == 7, "top-long-spaced");
+        v = -999;
+        CHECK(lea_json_top_level_long("{\"generation\":-3}", "generation", &v) == 1 && v == -3, "top-long-negative-parsed");
+        CHECK(lea_json_top_level_long("{\"generation\":\"7\"}", "generation", &v) == -1, "top-long-string-invalid");
+        CHECK(lea_json_top_level_long("{\"generation\":7.5}", "generation", &v) == -1, "top-long-float-invalid");
+        CHECK(lea_json_top_level_long("{\"generation\":7,\"generation\":8}", "generation", &v) == -1, "top-long-duplicate-invalid");
+        CHECK(lea_json_top_level_long("{\"a\":{\"generation\":7}}", "generation", &v) == 0, "top-long-nested-missing");
+        CHECK(lea_json_top_level_long("{\"other\":1}", "generation", &v) == 0, "top-long-missing");
+        CHECK(lea_json_top_level_long("{\"generation\":7} garbage", "generation", &v) == -1, "top-long-trailing-invalid");
+        CHECK(lea_json_top_level_long("{\"generation\":9999999999999999999999}", "generation", &v) == -1, "top-long-overflow-invalid");
+        CHECK(lea_json_top_level_long(NULL, "generation", &v) == -1, "top-long-null-invalid");
+        CHECK(lea_json_top_level_long("{\"generation\":7}", "generation", NULL) == -1, "top-long-null-out-invalid");
     }
 
     /* ---------- execute_item USH 分支 ok 判定：须含 ok 字段才采信 ----------
