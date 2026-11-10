@@ -18,7 +18,10 @@
  *   - 脚本：只允许白名单脚本（初始仅 qf-agent-heal.ps1，hash 见 whitelist.h，
  *     待站长确认完整清单 DESIGN §14 #5）；PowerShell 固定
  *     -NoProfile -NonInteractive -ExecutionPolicy Bypass -File，参数逐个
- *     引用转义，禁 shell 拼接；路径规范化防 .. 越界。
+ *     引用转义，禁 shell 拼接；路径规范化＋最终路径验根防符号链接绕根
+ *     （#21①）；hash 与执行同一批字节——验后复制执行副本（#21②）。
+ *   - 文件读写：只限 work 目录，最终路径验根（#21①）；file.read 的
+ *     size 用实际读到的字节数（#21④）。
  *   - app.open：只允许显式 exe 白名单（H16：名＋SHA-256 双重判定，初版仅
  *     QFUserHelper.exe；安装目录内其他 exe 一律拒绝）。
  *   - UI 类命令：经命名管道 \\.\pipe\QFR\LEA\UserHelper\v1 转发 USH
@@ -618,6 +621,43 @@ done:
     out[o] = '\0';
 }
 
+/* ---------- 最终路径解析（#21①） ---------- */
+/* 对已打开句柄取最终路径（GetFinalPathNameByHandle 解析全部重解析点，
+ * 含符号链接／目录连接／挂载点），去 \\?\ 前缀后返回 UTF-8 路径。
+ * 词法规范化（lea_normalize_path）只认 . 与 ..，目录内一个指向根外的
+ * 符号链接词法上仍在根内——所有“在根内”判定都须对最终路径再验一次。
+ * 失败返回 0（调用方 fail-closed）。 */
+/* 去 GetFinalPathNameByHandle 返回的 \\?\ 前缀
+ *（\\?\UNC\server\share → \\server\share，其余 \\?\C:\... → C:\...）。 */
+static int strip_nt_prefix_w(const WCHAR *wfinal, WCHAR *wnorm, size_t wnorm_size) {
+    if (!wfinal || !wnorm || wnorm_size < 4) return 0;
+    if (wcsncmp(wfinal, L"\\\\?\\UNC\\", 8) == 0) {
+        return _snwprintf(wnorm, wnorm_size, L"\\\\%s", wfinal + 8) >= 0;
+    } else if (wcsncmp(wfinal, L"\\\\?\\", 4) == 0) {
+        return wcscpy_s(wnorm, wnorm_size, wfinal + 4) == 0;
+    }
+    return wcscpy_s(wnorm, wnorm_size, wfinal) == 0;
+}
+
+static int resolve_final_path_utf8(const char *path_utf8, char *out, size_t out_size) {
+    if (!path_utf8 || !out || out_size < 4) return 0;
+    WCHAR wpath[MAX_PATH];
+    utf8_to_utf16(path_utf8, wpath, MAX_PATH);
+    if (wpath[0] == L'\0') return 0;
+    HANDLE h = CreateFileW(wpath, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    WCHAR wfinal[MAX_PATH];
+    DWORD n = GetFinalPathNameByHandleW(h, wfinal, MAX_PATH, FILE_NAME_NORMALIZED);
+    CloseHandle(h);
+    if (n == 0 || n >= MAX_PATH) return 0;
+    WCHAR wnorm[MAX_PATH];
+    if (!strip_nt_prefix_w(wfinal, wnorm, MAX_PATH)) return 0;
+    utf16_to_utf8(wnorm, out, out_size);
+    return out[0] != '\0';
+}
+
 /* ---------- 脚本白名单 ---------- */
 /* 初始清单（DESIGN §5.2，待站长确认完整清单 §14 #5）：仅 qf-agent-heal.ps1。
  * 判定三重门：① 路径规范化后位于安装目录内；② basename 吻合；
@@ -656,6 +696,22 @@ static int script_is_allowed(const char *script_path, char *norm_out, size_t nor
         snprintf(detail, detail_size, "%s", "outside-install-dir");
         return 0;
     }
+    /* #21①：词法在安装目录内 ≠ 实际在安装目录内——目录内一个指向目录
+     * 外的符号链接，词法检查照样通过。对已打开句柄取最终路径再验根；
+     * basename 与 hash 一律对最终路径做（链接目标文件名可能不同）。
+     * 成功时 norm_out 回写最终路径，调用方不再碰原始词法路径。 */
+    char final_path[MAX_PATH] = { 0 };
+    if (!resolve_final_path_utf8(norm_out, final_path, sizeof(final_path))) {
+        snprintf(detail, detail_size, "%s", "final-path-resolve-failed");
+        return 0;
+    }
+    char norm_final[MAX_PATH] = { 0 };
+    if (!lea_normalize_path(final_path, norm_final, sizeof(norm_final)) ||
+        !lea_path_under_root(norm_final, norm_install)) {
+        snprintf(detail, detail_size, "%s", "symlink-outside-install-dir");
+        return 0;
+    }
+    snprintf(norm_out, norm_size, "%s", norm_final);
     const char *base = strrchr(norm_out, '\\');
     const char *base2 = strrchr(norm_out, '/');
     if (base2 && (!base || base2 > base)) base = base2;
@@ -673,6 +729,91 @@ static int script_is_allowed(const char *script_path, char *norm_out, size_t nor
         snprintf(detail, detail_size, "%s", "hash-mismatch");
         return 0;
     }
+    return 1;
+}
+
+/* ---------- 脚本验后复制（#21②） ---------- */
+/* TOCTOU：script_is_allowed 按路径算 hash，PowerShell 再按路径打开执行——
+ * 两次打开之间文件被换，hash 验的是旧文件、执行的是新文件。PowerShell
+ * -File 接不了句柄，唯一能让“hash 的字节 = 执行的字节”的办法是：对同一
+ * 已打开句柄边读边算 hash、边写一份私有副本，执行这份副本（副本在仅
+ * SY/BA 可写的 work 目录；生成后不再碰原文）。残留窗口只剩“攻击者在
+ * hash 完成、执行开始之间改写副本”——改写者须有 work 目录写权限（即
+ * SY/BA，与服务同权），不在本项防御内；服务中途崩溃会留一份副本在
+ * work 目录，内容即白名单脚本本身的逐字节复制、无害。
+ * 失败返回 0（调用方按 SCRIPT_NOT_ALLOWED 报 detail），半成品副本已删。 */
+static int script_prepare_verified_copy(const char *script_final_path,
+                                        char *copy_out, size_t copy_size,
+                                        char *detail, size_t detail_size) {
+    if (!script_final_path || !copy_out || copy_size < 4) return 0;
+    WCHAR wpath[MAX_PATH];
+    utf8_to_utf16(script_final_path, wpath, MAX_PATH);
+    HANDLE h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        snprintf(detail, detail_size, "%s", "script-open-failed");
+        return 0;
+    }
+    /* 同一打开期间再取最终路径，必须与 gate 给的最终路径一致——gate 与
+     * 复制之间文件被换（路径被重定向）即拒。 */
+    WCHAR wfinal[MAX_PATH];
+    DWORD n = GetFinalPathNameByHandleW(h, wfinal, MAX_PATH, FILE_NAME_NORMALIZED);
+    if (n == 0 || n >= MAX_PATH) {
+        CloseHandle(h);
+        snprintf(detail, detail_size, "%s", "final-path-resolve-failed");
+        return 0;
+    }
+    char final_path[MAX_PATH] = { 0 };
+    {
+        WCHAR wnorm[MAX_PATH];
+        if (!strip_nt_prefix_w(wfinal, wnorm, MAX_PATH)) {
+            CloseHandle(h);
+            snprintf(detail, detail_size, "%s", "final-path-resolve-failed");
+            return 0;
+        }
+        utf16_to_utf8(wnorm, final_path, sizeof(final_path));
+    }
+    char norm_final[MAX_PATH] = { 0 };
+    if (!lea_normalize_path(final_path, norm_final, sizeof(norm_final)) ||
+        _stricmp(norm_final, script_final_path) != 0) {
+        CloseHandle(h);
+        snprintf(detail, detail_size, "%s", "final-path-changed");
+        return 0;
+    }
+    char copy_path[MAX_PATH] = { 0 };
+    snprintf(copy_path, sizeof(copy_path), "%s\\script-verified-%lu-%llu.ps1",
+             g_work_dir, (unsigned long)GetCurrentProcessId(),
+             (unsigned long long)GetTickCount64());
+    FILE *cf = fopen(copy_path, "wb");
+    if (!cf) {
+        CloseHandle(h);
+        snprintf(detail, detail_size, "%s", "verified-copy-create-failed");
+        return 0;
+    }
+    lea_sha256_ctx_t ctx;
+    lea_sha256_init(&ctx);
+    unsigned char buf[8192];
+    int ok = 1;
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(h, buf, sizeof(buf), &got, NULL)) { ok = 0; break; }
+        if (got == 0) break;
+        lea_sha256_update(&ctx, buf, got);
+        if (fwrite(buf, 1, got, cf) != got) { ok = 0; break; }
+    }
+    CloseHandle(h);
+    fclose(cf);
+    char hex[65] = { 0 };
+    if (ok) {
+        lea_sha256_final_hex(&ctx, hex);
+        if (!hash_hex_equal(hex, W_HEAL_PS1_SHA256)) ok = 0;
+    }
+    if (!ok) {
+        remove(copy_path);
+        snprintf(detail, detail_size, "%s", "hash-mismatch");
+        return 0;
+    }
+    snprintf(copy_out, copy_size, "%s", copy_path);
     return 1;
 }
 
@@ -817,6 +958,13 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
 }
 
 /* ---------- 执行：文件读写（白名单目录 %ProgramData%\QFR\LEA\work） ---------- */
+/* #21①：词法在 work 根内 ≠ 实际在根内——中间目录或文件本身可能是符号
+ * 链接。已存在的文件／目录：对已打开句柄取最终路径再验根；不存在的
+ * （file.write 新建）：验父目录最终路径在根内，叶节点本身不存在、无
+ * 链接可言。成功时 norm_out 回写最终路径，调用方不再碰原始词法路径。
+ * 残留竞态：新建文件在“验父目录”与“fopen 创建”之间被第三者预置为
+ * 符号链接——预置者须有 work 目录写权限（即 SY/BA，与服务同权），
+ * 不在本项防御内（见改动清单）。 */
 static int file_in_work_root(const char *path, char *norm_out, size_t norm_size,
                              char *detail, size_t detail_size) {
     if (!lea_normalize_path(path, norm_out, norm_size)) {
@@ -831,6 +979,53 @@ static int file_in_work_root(const char *path, char *norm_out, size_t norm_size,
     if (!lea_path_under_root(norm_out, norm_root)) {
         snprintf(detail, detail_size, "%s", "outside-work-root");
         return 0;
+    }
+    WCHAR wpath[MAX_PATH];
+    utf8_to_utf16(norm_out, wpath, MAX_PATH);
+    DWORD attrs = GetFileAttributesW(wpath);
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        char final_path[MAX_PATH] = { 0 };
+        if (!resolve_final_path_utf8(norm_out, final_path, sizeof(final_path))) {
+            snprintf(detail, detail_size, "%s", "final-path-resolve-failed");
+            return 0;
+        }
+        char norm_final[MAX_PATH] = { 0 };
+        if (!lea_normalize_path(final_path, norm_final, sizeof(norm_final)) ||
+            !lea_path_under_root(norm_final, norm_root)) {
+            snprintf(detail, detail_size, "%s", "symlink-outside-work-root");
+            return 0;
+        }
+        snprintf(norm_out, norm_size, "%s", norm_final);
+    } else {
+        /* 不存在：拆父目录＋叶名，父目录最终路径须在根内。 */
+        char parent[MAX_PATH] = { 0 };
+        const char *leaf = norm_out;
+        for (const char *p = norm_out; *p; p++)
+            if (*p == '\\' || *p == '/') leaf = p + 1;
+        size_t plen = (size_t)(leaf - norm_out);
+        if (plen == 0 || leaf[0] == '\0' || plen >= sizeof(parent)) {
+            snprintf(detail, detail_size, "%s", "path-normalize-failed");
+            return 0;
+        }
+        memcpy(parent, norm_out, plen);
+        parent[plen] = '\0';
+        /* 去掉父目录末尾分隔符（根本身 "C:\..." 末尾已有分隔符时除外，
+         * resolve 前 lea_normalize_path 已处理，此处只去多余的一个）。 */
+        size_t pl = strlen(parent);
+        if (pl > 1 && (parent[pl - 1] == '\\' || parent[pl - 1] == '/'))
+            parent[pl - 1] = '\0';
+        char final_parent[MAX_PATH] = { 0 };
+        if (!resolve_final_path_utf8(parent, final_parent, sizeof(final_parent))) {
+            snprintf(detail, detail_size, "%s", "parent-resolve-failed");
+            return 0;
+        }
+        char norm_parent[MAX_PATH] = { 0 };
+        if (!lea_normalize_path(final_parent, norm_parent, sizeof(norm_parent)) ||
+            !lea_path_under_root(norm_parent, norm_root)) {
+            snprintf(detail, detail_size, "%s", "symlink-outside-work-root");
+            return 0;
+        }
+        snprintf(norm_out, norm_size, "%s\\%s", norm_parent, leaf);
     }
     return 1;
 }
@@ -859,6 +1054,21 @@ static int app_open_allowed(const char *path, char *norm_out, size_t norm_size,
         snprintf(detail, detail_size, "%s", "outside-install-dir");
         return 0;
     }
+    /* #21①：同 script_is_allowed——安装目录内指向目录外的符号链接，
+     * 词法检查照样通过。对已打开句柄取最终路径再验根；basename 与
+     * hash 一律对最终路径做。成功时 norm_out 回写最终路径。 */
+    char final_path[MAX_PATH] = { 0 };
+    if (!resolve_final_path_utf8(norm_out, final_path, sizeof(final_path))) {
+        snprintf(detail, detail_size, "%s", "final-path-resolve-failed");
+        return 0;
+    }
+    char norm_final[MAX_PATH] = { 0 };
+    if (!lea_normalize_path(final_path, norm_final, sizeof(norm_final)) ||
+        !lea_path_under_root(norm_final, norm_install)) {
+        snprintf(detail, detail_size, "%s", "symlink-outside-install-dir");
+        return 0;
+    }
+    snprintf(norm_out, norm_size, "%s", norm_final);
     const char *base = strrchr(norm_out, '\\');
     base = base ? base + 1 : norm_out;
     size_t bl = strlen(base);
@@ -1084,6 +1294,10 @@ static void execute_item(lea_queue_item_t *item) {
     lea_envelope_t *env = &item->env;
     lea_item_ctx_t *ctx = (lea_item_ctx_t *)item->ctx;
     long long t0 = now_unix();
+    /* #19：毫秒单调时钟——now_unix 只有秒精度，(now_unix()-t0)*1000
+     * 对短命令恒为 0（旧实现算出 duration 又 (void) 丢弃、审计传 0）。
+     * t0（秒）仍用于幂等时间戳；耗时一律以 t0_tick 计。 */
+    ULONGLONG t0_tick = GetTickCount64();
     /* H10：执行前复查 expires_at——入队后已过期（已过 30s 时钟偏差容限，
      * 与 lea_check_time_window 的容限一致）的命令不得执行：幂等记
      * EXPIRED（同键重试可重跑，未执行过不算重复），管道调用方收到过期
@@ -1099,7 +1313,8 @@ static void execute_item(lea_queue_item_t *item) {
             idem_persist_locked();
         }
         LeaveCriticalSection(&g_lock);
-        audit_for_envelope(env, "execute", "expired", LEA_ERR_EXPIRED, 0,
+        audit_for_envelope(env, "execute", "expired", LEA_ERR_EXPIRED,
+                           (long)(GetTickCount64() - t0_tick),
                            "expired-before-execution");
         snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
         SetEvent(ctx->done);
@@ -1141,7 +1356,15 @@ static void execute_item(lea_queue_item_t *item) {
                     snprintf(resolved, sizeof(resolved), "%s", script);
                 char norm[MAX_PATH] = { 0 };
                 char sdetail[256] = { 0 };
+                /* #21②：gate 验过的最终路径再做一次“验后复制”——执行的是
+                 * 副本（verified），不再碰原文；副本用完即删（各出口
+                 * 汇合到分支末尾统一删，见下）。 */
+                char verified[MAX_PATH] = { 0 };
                 if (!script_is_allowed(resolved, norm, sizeof(norm), sdetail, sizeof(sdetail))) {
+                    ok = 0; code = LEA_ERR_SCRIPT_NOT_ALLOWED;
+                    snprintf(detail, sizeof(detail), "%s", sdetail);
+                } else if (!script_prepare_verified_copy(norm, verified, sizeof(verified),
+                                                         sdetail, sizeof(sdetail))) {
                     ok = 0; code = LEA_ERR_SCRIPT_NOT_ALLOWED;
                     snprintf(detail, sizeof(detail), "%s", sdetail);
                 } else {
@@ -1157,7 +1380,9 @@ static void execute_item(lea_queue_item_t *item) {
                         DWORD exit_code = 0;
                         /* 脚本输出回传上限 8192 字节（转义后仍可放进一行响应）。 */
                         char output[8192] = { 0 };
-                        int r = run_powershell_script(norm, args, nargs, timeout_ms,
+                        /* #21②：执行验后副本 verified（hash 过的同一批字节），
+                         * 不执行原文 norm。 */
+                        int r = run_powershell_script(verified, args, nargs, timeout_ms,
                                                       &exit_code, output, sizeof(output));
                         if (r == -2) {
                             /* #23：命令行超 8192 宽字符——参数未被截断执行，
@@ -1186,6 +1411,9 @@ static void execute_item(lea_queue_item_t *item) {
                         }
                     }
                 }
+                /* #21②：验后副本用完即删（gate 失败／复制失败时 verified
+                 * 为空串，remove 为空操作；成功执行后也不留副本）。 */
+                if (verified[0]) remove(verified);
             }
         }
     } else if (strcmp(env->command, "file.read") == 0) {
@@ -1205,32 +1433,43 @@ static void execute_item(lea_queue_item_t *item) {
                     ok = 0; code = LEA_ERR_EXEC_FAILED;
                     snprintf(detail, sizeof(detail), "%s", "file-not-found");
                 } else {
-                    fseek(f, 0, SEEK_END);
-                    long sz = ftell(f);
-                    fseek(f, 0, SEEK_SET);
-                    if (sz < 0 || sz > 32768) {
-                        fclose(f);
+                    /* #21④：size 用实际读到的字节数，不用 ftell——文件在
+                     * ftell 与 fread 之间变化时会说谎（变大被截断、变小
+                     * 谎报；旧实现 b64 编 r 字节却报 sz）。循环读到 EOF，
+                     * 上限 32768，超限即拒绝（与旧口径同一码／同一文案）。 */
+                    unsigned char data[32768 + 1];
+                    size_t r = 0;
+                    int over = 0, rd_err = 0;
+                    for (;;) {
+                        if (r >= 32768) {
+                            unsigned char probe;
+                            if (fread(&probe, 1, 1, f) > 0) over = 1;
+                            break;
+                        }
+                        size_t n = fread(data + r, 1, 32768 - r, f);
+                        if (n == 0) break;
+                        r += n;
+                    }
+                    if (ferror(f)) rd_err = 1;
+                    fclose(f);
+                    if (rd_err) {
+                        ok = 0; code = LEA_ERR_EXEC_FAILED;
+                        snprintf(detail, sizeof(detail), "%s", "file-read-failed");
+                    } else if (over) {
                         ok = 0; code = LEA_ERR_EXEC_FAILED;
                         snprintf(detail, sizeof(detail), "%s",
                                  "file-too-large-for-inline-read");
                     } else {
-                        unsigned char *data = (unsigned char *)malloc((size_t)sz + 1);
-                        size_t r = data ? fread(data, 1, (size_t)sz, f) : 0;
-                        fclose(f);
-                        if (!data) {
-                            ok = 0; code = LEA_ERR_INTERNAL;
+                        char *b64 = (char *)malloc((r + 2) / 3 * 4 + 2);
+                        if (b64 && lea_b64_encode(data, r, b64, (r + 2) / 3 * 4 + 2) >= 0) {
+                            snprintf(result_buf, sizeof(result_buf),
+                                     "{\"size\":%lu,\"content_b64\":\"%s\"}",
+                                     (unsigned long)r, b64);
+                            result_json = result_buf;
                         } else {
-                            char *b64 = (char *)malloc(((size_t)sz + 2) / 3 * 4 + 2);
-                            if (b64 && lea_b64_encode(data, r, b64, ((size_t)sz + 2) / 3 * 4 + 2) >= 0) {
-                                snprintf(result_buf, sizeof(result_buf),
-                                         "{\"size\":%ld,\"content_b64\":\"%s\"}", sz, b64);
-                                result_json = result_buf;
-                            } else {
-                                ok = 0; code = LEA_ERR_INTERNAL;
-                            }
-                            free(b64);
+                            ok = 0; code = LEA_ERR_INTERNAL;
                         }
-                        free(data);
+                        free(b64);
                     }
                 }
             }
@@ -1413,8 +1652,8 @@ static void execute_item(lea_queue_item_t *item) {
         snprintf(detail, sizeof(detail), "%s", "unknown-command");
     }
 
-    long duration_ms = (long)((now_unix() - t0) * 1000);
-    (void)duration_ms;
+    /* #19：执行耗时用毫秒单调时钟实测，不再用秒级 now_unix() 相减。 */
+    long duration_ms = (long)(GetTickCount64() - t0_tick);
     build_resp(resp, sizeof(resp), ok, code, env->request_id,
                        lea_error_retryable(code), detail[0] ? detail : "",
                        result_json);
@@ -1428,7 +1667,7 @@ static void execute_item(lea_queue_item_t *item) {
     }
     LeaveCriticalSection(&g_lock);
     audit_for_envelope(env, "execute", ok ? "ok" : "failed", ok ? "" : code,
-                       0, detail);
+                       duration_ms, detail);
     snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
     SetEvent(ctx->done);
     lea_ctx_release(ctx); /* worker 侧引用；管道线程侧引用另行释放 */
@@ -2005,7 +2244,10 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
          * 读行才有总 deadline 可言（同步句柄的 ReadFile 无法设超时）。 */
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            /* #27：PIPE_REJECT_REMOTE_CLIENTS——远程客户端纵有管理员凭据
+             * 也连不上本机管道（旧实现只靠 SY+BA+AU 的 ACL，远程仍可尝试
+             * 建连；USH 管道已设此标志，LEA 补齐）。 */
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_MAX_INSTANCES, LEA_MAX_ENVELOPE, LEA_MAX_ENVELOPE, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             svc_log("ERROR CreateNamedPipe failed %lu", (unsigned long)GetLastError());

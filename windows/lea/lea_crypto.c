@@ -21,14 +21,9 @@ static const uint32_t k_sha256[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-typedef struct {
-    uint32_t h[8];
-    uint64_t len;
-    unsigned char buf[64];
-    size_t buflen;
-} lea_sha256_ctx;
+/* ctx 布局见 lea_crypto.h 的 lea_sha256_ctx_t（同一类型，两处不得分叉）。 */
 
-static void sha256_init(lea_sha256_ctx *c) {
+static void sha256_init(lea_sha256_ctx_t *c) {
     static const uint32_t h0[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
                                     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
     memcpy(c->h, h0, sizeof(h0));
@@ -36,7 +31,7 @@ static void sha256_init(lea_sha256_ctx *c) {
     c->buflen = 0;
 }
 
-static void sha256_block(lea_sha256_ctx *c, const unsigned char *p) {
+static void sha256_block(lea_sha256_ctx_t *c, const unsigned char *p) {
     uint32_t w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
@@ -61,7 +56,7 @@ static void sha256_block(lea_sha256_ctx *c, const unsigned char *p) {
     c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
 }
 
-static void sha256_update(lea_sha256_ctx *c, const unsigned char *data, size_t len) {
+static void sha256_update(lea_sha256_ctx_t *c, const unsigned char *data, size_t len) {
     c->len += len;
     while (len > 0) {
         size_t take = 64 - c->buflen;
@@ -77,7 +72,7 @@ static void sha256_update(lea_sha256_ctx *c, const unsigned char *data, size_t l
     }
 }
 
-static void sha256_final(lea_sha256_ctx *c, unsigned char out[32]) {
+static void sha256_final(lea_sha256_ctx_t *c, unsigned char out[32]) {
     uint64_t bits = c->len * 8;
     unsigned char pad = 0x80;
     sha256_update(c, &pad, 1);
@@ -96,8 +91,29 @@ static void sha256_final(lea_sha256_ctx *c, unsigned char out[32]) {
     }
 }
 
+/* #21②：流式 API 与内部实现共用同一 ctx 布局（见 lea_crypto.h），
+ * 供调用方对已打开句柄逐块喂数据。 */
+void lea_sha256_init(lea_sha256_ctx_t *c) {
+    sha256_init(c);
+}
+
+void lea_sha256_update(lea_sha256_ctx_t *c, const unsigned char *data, size_t len) {
+    sha256_update(c, data, len);
+}
+
+void lea_sha256_final_hex(lea_sha256_ctx_t *c, char out_hex[65]) {
+    unsigned char digest[32];
+    sha256_final(c, digest);
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out_hex[i * 2] = hexd[(digest[i] >> 4) & 0xF];
+        out_hex[i * 2 + 1] = hexd[digest[i] & 0xF];
+    }
+    out_hex[64] = '\0';
+}
+
 void lea_sha256_hex(const unsigned char *data, size_t len, char out_hex[65]) {
-    lea_sha256_ctx c;
+    lea_sha256_ctx_t c;
     unsigned char digest[32];
     sha256_init(&c);
     sha256_update(&c, data, len);
@@ -113,7 +129,7 @@ void lea_sha256_hex(const unsigned char *data, size_t len, char out_hex[65]) {
 int lea_sha256_file_hex(const char *path, char out_hex[65]) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
-    lea_sha256_ctx c;
+    lea_sha256_ctx_t c;
     unsigned char digest[32];
     sha256_init(&c);
     unsigned char buf[8192];

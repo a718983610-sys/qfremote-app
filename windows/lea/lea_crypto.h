@@ -31,6 +31,20 @@ void lea_sha256_hex(const unsigned char *data, size_t len, char out_hex[65]);
 /* 对文件算 SHA-256 hex；失败返回 0。 */
 int lea_sha256_file_hex(const char *path, char out_hex[65]);
 
+/* #21② 流式 SHA-256（FIPS 180-4，与 lea_sha256_hex 同一实现）：调用方
+ * 逐块喂数据、最后取 hex。用途：对已打开句柄边读边算 hash——hash 与
+ * 执行须是同一批字节，不得先按路径算 hash、再按路径重开执行（TOCTOU）。
+ * ctx 须由调用方分配，init 后才能 update；final_hex 后 ctx 不可复用。 */
+typedef struct {
+    uint32_t h[8];
+    uint64_t len;
+    unsigned char buf[64];
+    size_t buflen;
+} lea_sha256_ctx_t;
+void lea_sha256_init(lea_sha256_ctx_t *c);
+void lea_sha256_update(lea_sha256_ctx_t *c, const unsigned char *data, size_t len);
+void lea_sha256_final_hex(lea_sha256_ctx_t *c, char out_hex[65]);
+
 /* Base64 标准解码；返回解出字节数，-1=非法字符/溢出。 */
 long lea_b64_decode(const char *in, unsigned char *out, size_t out_size);
 /* Base64URL 解码（'-'/'_'，可无 padding）；返回字节数，-1=非法。 */

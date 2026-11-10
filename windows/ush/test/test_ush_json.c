@@ -107,6 +107,23 @@ static void test_json_strings(void) {
     CHECK(ush_json_get_bool("{\"d\":1}", "d", &b) == 0, "json: bool rejects number");
 }
 
+/* #11：rel_x/rel_y 的 JSON 数字形式（ush_parse_target 在 ush_uia.c，
+ * Windows 专属，沙箱跑不了；此处验底层取值函数，mingw 编译＋真机验端到端）。 */
+static void test_json_double(void) {
+    double d = 0;
+    CHECK(ush_json_get_double("{\"rel_x\":0.5}", "rel_x", &d) == 1 && d == 0.5, "dbl: 0.5");
+    CHECK(ush_json_get_double("{\"rel_x\":-1.25,\"rel_y\":2}", "rel_x", &d) == 1 && d == -1.25, "dbl: negative");
+    CHECK(ush_json_get_double("{\"rel_x\":1e-1}", "rel_x", &d) == 1 && d > 0.099 && d < 0.101, "dbl: exponent");
+    CHECK(ush_json_get_double("{\"rel_x\":.5}", "rel_x", &d) == 1 && d == 0.5, "dbl: leading dot");
+    CHECK(ush_json_get_double("{\"rel_x\":0}", "rel_x", &d) == 1 && d == 0, "dbl: zero");
+    CHECK(ush_json_get_double("{\"rel_x\":\"0.5\"}", "rel_x", &d) == 0, "dbl: string rejected");
+    CHECK(ush_json_get_double("{\"rel_x\":0.5x}", "rel_x", &d) == 0, "dbl: trailing garbage rejected");
+    CHECK(ush_json_get_double("{\"rel_x\":true}", "rel_x", &d) == 0, "dbl: bool rejected");
+    CHECK(ush_json_get_double("{\"rel_x\":+0.5}", "rel_x", &d) == 0, "dbl: leading plus rejected");
+    CHECK(ush_json_get_double("{\"rel_y\":0.5}", "rel_x", &d) == 0, "dbl: missing key");
+    CHECK(ush_json_get_double("{\"rel_x\":0.5 }", "rel_x", &d) == 1 && d == 0.5, "dbl: trailing space ok");
+}
+
 static void test_response_and_base64(void) {
     char resp[1024];
     CHECK(ush_build_response(resp, sizeof(resp), 1, "done", "req-9", 12,
@@ -187,6 +204,7 @@ int main(void) {
     test_parse_click();
     test_parse_variants();
     test_json_strings();
+    test_json_double();
     test_response_and_base64();
     test_retry_and_strategies();
     test_ush_token();

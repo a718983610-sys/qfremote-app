@@ -1584,6 +1584,116 @@ int main(void) {
         remove(path26);
     }
 
+    /* ---------- 时间窗 #20：接收窗 = TTL 60s（不再是 30s） ---------- */
+    {
+        lea_envelope_t w;
+        memset(&w, 0, sizeof(w));
+        /* 签发 45s 前、TTL 60s：旧实现 skew 45 > 30 即拒，新实现放行。 */
+        w.issued_at = now - 45; w.expires_at = now + 15;
+        CHECK(lea_check_time_window(&w, now, NULL, 0), "tw20-45s-accepted");
+        /* 签发 59s 前、TTL 60s：边界内放行。 */
+        w.issued_at = now - 59; w.expires_at = now + 1;
+        CHECK(lea_check_time_window(&w, now, NULL, 0), "tw20-59s-accepted");
+        /* 签发 30s 后（时钟超前容限内）放行；31s 后拒绝。 */
+        w.issued_at = now + 30; w.expires_at = now + 90;
+        CHECK(lea_check_time_window(&w, now, NULL, 0), "tw20-future-30s-accepted");
+        w.issued_at = now + 31; w.expires_at = now + 91;
+        CHECK(!lea_check_time_window(&w, now, NULL, 0), "tw20-future-31s-rejected");
+        /* 过期 31s（超 expires+30 容限）拒绝；过期 30s 内仍放行（旧口径）。 */
+        w.issued_at = now - 61; w.expires_at = now - 31;
+        CHECK(!lea_check_time_window(&w, now, NULL, 0), "tw20-expired-31s-rejected");
+        w.issued_at = now - 60; w.expires_at = now - 30;
+        CHECK(lea_check_time_window(&w, now, NULL, 0), "tw20-expired-30s-accepted");
+        /* TTL 超 60s／为 0 拒绝。 */
+        w.issued_at = now; w.expires_at = now + 61;
+        CHECK(!lea_check_time_window(&w, now, NULL, 0), "tw20-ttl-61s-rejected");
+        w.issued_at = now; w.expires_at = now;
+        CHECK(!lea_check_time_window(&w, now, NULL, 0), "tw20-ttl-0-rejected");
+        /* 端到端：信封解析层同样放行签发 45s 前的信封（旧实现解析即拒）。 */
+        char env45[8192];
+        make_envelope(env45, sizeof(env45), now - 45, "sys.info", "{}", 3,
+                      "node-1", "alice", "idem-tw20", "nonce-tw20", "req-tw20",
+                      "TEST-UNSIGNED");
+        lea_envelope_t parsed;
+        CHECK(lea_parse_envelope(env45, now, &parsed), "tw20-parse-45s-accepted");
+    }
+
+    /* ---------- 审计 #18：放不下即整行失败，不越界 ---------- */
+    {
+        lea_audit_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "execute";
+        ev.trace_id = "trace-1";
+        ev.request_id = "req-1";
+        ev.account_id = "alice";
+        ev.device_id = "node-1";
+        ev.api_key_id = "key-abc12345";
+        ev.key_prefix_redacted = "";
+        ev.binding_epoch = 3;
+        ev.command = "script.run";
+        ev.params_hash = "deadbeef";
+        ev.idempotency_key = "idem-1";
+        ev.nonce = "nonce-1";
+        ev.result = "ok";
+        ev.error_code = "";
+        ev.duration_ms = 12;
+        ev.detail = "";
+        char line[8192];
+        CHECK(lea_audit_format_line(&ev, "2026-11-10T12:00:00+08:00", line, sizeof(line)),
+              "audit18-normal-line-ok");
+        /* 超长 detail（8000 字节）进 8192 缓冲：放不下，返回 0（旧实现
+         * off 照涨、末尾 out[off] 写越界）。 */
+        static char big_detail[8001];
+        memset(big_detail, 'A', 8000);
+        big_detail[8000] = '\0';
+        ev.detail = big_detail;
+        CHECK(!lea_audit_format_line(&ev, "2026-11-10T12:00:00+08:00", line, sizeof(line)),
+              "audit18-oversize-detail-rejected");
+        /* 小缓冲（256 字节下限）＋长字段：返回 0。 */
+        static char big_account[301];
+        memset(big_account, 'B', 300);
+        big_account[300] = '\0';
+        ev.detail = "";
+        ev.account_id = big_account;
+        char small[256];
+        CHECK(!lea_audit_format_line(&ev, "2026-11-10T12:00:00+08:00", small, sizeof(small)),
+              "audit18-small-buffer-rejected");
+        /* 转义放大：detail 全是 '"'（转义后 2 倍），4096 缓冲放不下也须返回 0。 */
+        static char quotes[4001];
+        memset(quotes, '"', 4000);
+        quotes[4000] = '\0';
+        ev.account_id = "alice";
+        ev.detail = quotes;
+        char mid[4096];
+        CHECK(!lea_audit_format_line(&ev, "2026-11-10T12:00:00+08:00", mid, sizeof(mid)),
+              "audit18-escape-expansion-rejected");
+        /* lea_json_escape_into 入口防线：off 已到顶时直接失败（空串也
+         * 不得走到末尾 buf[o]='\0' 越界写 1 字节）。 */
+        char escbuf[8] = "1234567";
+        size_t eoff = 8;
+        CHECK(!lea_json_escape_into(escbuf, sizeof(escbuf), &eoff, ""), "audit18-escape-off-at-end-rejected");
+        CHECK(eoff == 8, "audit18-escape-off-unchanged");
+    }
+
+    /* ---------- 流式 SHA-256 #21② ---------- */
+    {
+        char hex[65];
+        lea_sha256_ctx_t ctx;
+        lea_sha256_init(&ctx);
+        lea_sha256_update(&ctx, (const unsigned char *)"a", 1);
+        lea_sha256_update(&ctx, (const unsigned char *)"bc", 2);
+        lea_sha256_final_hex(&ctx, hex);
+        CHECK_STR_EQ(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256-stream-abc");
+        lea_sha256_init(&ctx);
+        lea_sha256_final_hex(&ctx, hex);
+        CHECK_STR_EQ(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256-stream-empty");
+        lea_sha256_init(&ctx);
+        lea_sha256_update(&ctx, (const unsigned char *)"abcdbcdecdefdefgefghfghighijhijkijkljklm", 40);
+        lea_sha256_update(&ctx, (const unsigned char *)"klmnlmnomnopnopq", 16);
+        lea_sha256_final_hex(&ctx, hex);
+        CHECK_STR_EQ(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256-stream-56byte");
+    }
+
     printf("\n==== LEA core tests: %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

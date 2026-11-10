@@ -805,6 +805,13 @@ int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size) 
 }
 
 /* ---------------- 时间窗 ---------------- */
+/* #20：DESIGN §4.1 定的是 TTL 60s（expires_at - issued_at ≤ 60s）＋时钟
+ * 偏差 ±30s，两者是不同量：TTL 管“签发后多久内可接收”，偏差管“两端
+ * 时钟差”。旧实现另卡 now - issued_at ≤ +30s，把两者混成一回事，
+ * 有效接收窗只剩 30s——服务端按 ENVELOPE_TTL_S=60 签发（lea-core.js），
+ * 签发 31~60s 后到达的合法信封全被拒。修法：只容“未来签发”（issued_at
+ * 超前 now >30s 即拒，防服务端时钟超前伪造）；过期仍以 expires_at
+ * 为准、另容 +30s 偏差。接收窗恢复为 TTL 60s（＋过期容限）。 */
 int lea_check_time_window(const lea_envelope_t *env, long long now_unix,
                           char *err, size_t err_size) {
     if (env->expires_at <= env->issued_at ||
@@ -812,8 +819,7 @@ int lea_check_time_window(const lea_envelope_t *env, long long now_unix,
         if (err) snprintf(err, err_size, "%s", LEA_ERR_REPLAY);
         return 0;
     }
-    long long skew = now_unix - env->issued_at;
-    if (skew < -LEA_MAX_CLOCK_SKEW_SEC || skew > LEA_MAX_CLOCK_SKEW_SEC) {
+    if (now_unix < env->issued_at - LEA_MAX_CLOCK_SKEW_SEC) {
         if (err) snprintf(err, err_size, "%s", LEA_ERR_REPLAY);
         return 0;
     }
@@ -1073,6 +1079,10 @@ int lea_path_under_root(const char *norm_path, const char *norm_root) {
 /* ---------------- JSON 输出助手 ---------------- */
 int lea_json_escape_into(char *buf, size_t buf_size, size_t *off, const char *s) {
     if (!buf || !off || !s) return 0;
+    /* #18 同根：off 已到顶时直接失败——空串也会走到末尾 buf[o]='\0'，
+     * off >= buf_size 即越界写 1 字节。调用方须保证 off < buf_size，
+     * 此处是最后一道防线。 */
+    if (*off >= buf_size) return 0;
     size_t o = *off;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         const char *esc = NULL;

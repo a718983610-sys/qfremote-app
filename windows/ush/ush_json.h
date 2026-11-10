@@ -75,6 +75,10 @@ int ush_json_get_string(const char *json, const char *key, char *out, size_t out
 /* 取整数 / 布尔字段；找不到或类型不对返回 0。 */
 int ush_json_get_long(const char *json, const char *key, long *out);
 int ush_json_get_bool(const char *json, const char *key, int *out);
+/* #11：取 JSON 数字字段（如 rel_x:0.5）；字符串形式（"0.5"）不认，
+ * 调用方另用 ush_json_get_string 兼容。值后须为 , } 空白或串尾，
+ * 否则 0.5x 之类非法尾巴一律拒绝；inf/nan 不接受。 */
+int ush_json_get_double(const char *json, const char *key, double *out);
 /* 取子对象原文（含花括号），如 "target":{...} / "params":{...}；找不到返回 0。 */
 int ush_json_get_object(const char *json, const char *key, char *out, size_t out_size);
 

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 /* 在 json 文本里找平铺键 "key": ，返回冒号后第一个非空白字符的位置。 */
 static const char *find_key_value(const char *json, const char *key) {
@@ -130,6 +131,26 @@ int ush_json_get_bool(const char *json, const char *key, int *out) {
     if (strncmp(p, "true", 4) == 0) { *out = 1; return 1; }
     if (strncmp(p, "false", 5) == 0) { *out = 0; return 1; }
     return 0;
+}
+
+/* #11：JSON 数字（0.5 / -1.25 / 1e-1）。strtod 会吃掉 "inf"/"nan" 与
+ * 16 进制浮点，首字符白名单（数字/正负号/小数点）先挡掉前者；值后须为
+ * 分隔符，挡掉后者（"0x1p4" 会在 'x' 处被拒）与 "0.5x" 非法尾巴。 */
+int ush_json_get_double(const char *json, const char *key, double *out) {
+    const char *p = find_key_value(json, key);
+    if (!p || !out) return 0;
+    /* JSON 数字无前导 '+'（DS 复查观察 1：旧实现放行 +0.5，略宽松），
+     * 此处不认 '+'。 */
+    if (!((*p >= '0' && *p <= '9') || *p == '-' || *p == '.')) return 0;
+    char *end = NULL;
+    double v = strtod(p, &end);
+    if (end == p) return 0;
+    if (*end != '\0' && *end != ',' && *end != '}' && *end != ' ' &&
+        *end != '\t' && *end != '\r' && *end != '\n')
+        return 0;
+    if (!isfinite(v)) return 0;
+    *out = v;
+    return 1;
 }
 
 int ush_json_get_object(const char *json, const char *key, char *out, size_t out_size) {

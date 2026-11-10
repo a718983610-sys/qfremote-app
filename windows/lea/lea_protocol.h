@@ -114,7 +114,9 @@ int lea_command_is_dangerous(const lea_envelope_t *env);
  * now_unix: 调用方传入当前 unix 秒（便于单测注入时钟）。 */
 int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out);
 
-/* 时间窗判定：expires_at-issued_at ∈ (0,60] 且 issued_at 距 now ≤30s 偏差。 */
+/* 时间窗判定：expires_at-issued_at ∈ (0,60]；issued_at 超前 now ≤30s；
+ * now 超过 expires_at 容 +30s。接收窗 = TTL 60s（#20：旧实现另卡
+ * now-issued ≤ +30s，误把接收窗压成 30s，与 DESIGN §4.1 不符）。 */
 int lea_check_time_window(const lea_envelope_t *env, long long now_unix,
                           char *err, size_t err_size);
 

@@ -219,10 +219,14 @@ void ush_parse_target(const char *params_json, ush_target_t *out) {
     long idx = -1;
     if (ush_json_get_long(src, "index", &idx)) out->index = idx;
     double rx = 0, ry = 0;
-    /* 相对坐标以 rel_x/rel_y（0..1）传；兼容 x/y + relative:true 的旧写法 */
+    /* #11：相对坐标以 rel_x/rel_y（0..1）传；优先取 JSON 数字（0.5），
+     * 字符串形式（"0.5"）仍兼容。旧实现只取字符串，数字形式会被静默
+     * 忽略、has_rel 恒为 0，点击走错分支。 */
     char numbuf[64];
-    if (ush_json_get_string(src, "rel_x", numbuf, sizeof(numbuf))) { rx = atof(numbuf); out->has_rel = 1; }
-    if (ush_json_get_string(src, "rel_y", numbuf, sizeof(numbuf))) { ry = atof(numbuf); out->has_rel = 1; }
+    if (ush_json_get_double(src, "rel_x", &rx)) out->has_rel = 1;
+    else if (ush_json_get_string(src, "rel_x", numbuf, sizeof(numbuf))) { rx = atof(numbuf); out->has_rel = 1; }
+    if (ush_json_get_double(src, "rel_y", &ry)) out->has_rel = 1;
+    else if (ush_json_get_string(src, "rel_y", numbuf, sizeof(numbuf))) { ry = atof(numbuf); out->has_rel = 1; }
     long lx = 0, ly = 0;
     if (ush_json_get_long(src, "x", &lx)) { out->x = lx; out->has_xy = 1; }
     if (ush_json_get_long(src, "y", &ly)) { out->y = ly; out->has_xy = 1; }
