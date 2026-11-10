@@ -83,7 +83,7 @@ typedef struct {
     int version;
     char request_id[64];
     char batch_id[64];
-    long seq;
+    long long seq;
     char device_id[128];
     char account_id[128];
     char api_key_id[64];
@@ -134,6 +134,66 @@ int lea_path_under_root(const char *norm_path, const char *norm_root);
 
 /* idempotency_key / request_id / nonce 字符集：[A-Za-z0-9_-]，长度 8..128。 */
 int lea_validate_token(const char *s);
+
+/* 规范串 v1 身份字段规则（见 CANONICAL-SIGNING-V1.md §1）：
+ * 非空、长度 1..127 字节，不得含 <0x20、0x7F 控制字符（含 \n \r）。
+ * 允许 '"'、'\\'、空格等可打印字符（JSON 重建时转义，见 lea_rebuild_envelope）。
+ * device_id / account_id / api_key_id / batch_id（非空时）/ lease_id（非空时）均用此规则。 */
+int lea_validate_id_field(const char *s);
+
+/* 规范 scopes 字符串格式（CANONICAL-SIGNING-V1.md §3.1）：
+ * 空串表示无 scope；否则为逗号连接的 token（字符集 [A-Za-z0-9_.-]），
+ * 严格字典序升序、无空格、无空 token、无重复。 */
+int lea_validate_scopes_str(const char *s);
+
+/* 信封规范串 v1（CANONICAL-SIGNING-V1.md §2）：16 行 \n 连接串，
+ * 域名行 qfr-lea-envelope-v1，params 只含 stable JSON 的 SHA-256 hex，
+ * timeout_ms 取有效超时（线上值或命令默认值）。字段非法或空间不足返回 0。 */
+int lea_envelope_canonical(const lea_envelope_t *env, char *out, size_t out_size);
+
+/* 票据规范串 v1（CANONICAL-SIGNING-V1.md §3）：9 行 \n 连接串，
+ * 域名行 qfr-lea-ticket-v1，覆盖全部授权字段（grant／scopes／lease_id）。
+ * scopes 须已是规范字符串（见 lea_validate_scopes_str）；lease_id 为 NULL
+ * 或空串时对应行为空行；grant_muse_execute 严格 0/1，非法返回 0。
+ * grant 取 long long：调用点不得 (int) 窄化（Windows 下 4294967297
+ * 会被截成 1 而签名仍通过）。 */
+int lea_ticket_canonical(const char *account_id, const char *device_id,
+                         long long binding_epoch, long long grant_epoch,
+                         long long grant_muse_execute, const char *scopes,
+                         const char *lease_id, long long expires_at,
+                         char *out, size_t out_size);
+
+/* 绑定票据原文（binding.confirm 的 ticket JSON）。scopes 缓冲 257 字节：
+ * v1 定整串上限 256 UTF-8 字节（与 JS ticketSigningBytes 同界），超限即
+ * 解析失败；grant_muse_execute 存解析原值（可为 2／-1 等非法值，入串时
+ * 由 lea_ticket_canonical() 拒绝，调用点不得 truthy 归一化）。 */
+typedef struct {
+    char account_id[128];
+    char device_id[128];
+    long long binding_epoch;
+    long long grant_epoch;
+    long long grant_muse_execute;
+    char scopes[257];
+    char lease_id[128];
+    long long expires_at;
+    char signature[512];
+} lea_ticket_t;
+
+/* 严格解析绑定票据（binding.confirm 用；QFRLEA.c 只保留调用点）。
+ * 基于完整 JSON 对象成员遍历（非子串查找）：跳过全部 JSON 空白，
+ * 重复键即拒绝；字符串值按 JSON 转义解码（含 \u 代理对）。
+ * 全部字段按类型校验，失败返回 0：account_id／device_id 须为字符串且合
+ * id 规则；binding_epoch／grant_epoch／expires_at 须为整数，不得缺失；
+ * grant_muse_execute 须为整数（原值保留，long long）或布尔，缺失即拒绝；
+ * scopes 字段存在时须为字符串且合 §3.1 格式（数组／对象即拒绝，不得当
+ * 空串处理），缺失时按空串；lease_id 存在时须为字符串，非空时合 id 规则；
+ * ticket_signature 须为非空字符串。 */
+int lea_parse_ticket(const char *text, lea_ticket_t *out);
+
+/* 重建信封行（供 LEA→USH 转发；签名等字段原样带回，USH 只信 LEA 不再验签）。
+ * pkg1 #25：全部字符串字段经 JSON 转义后拼接，%s 直拼禁止；
+ * params_raw 原文 verbatim 拼接（签名覆盖同一份字节）。空间不足返回 0。 */
+int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size);
 
 /* JSON 转义后追加到 buf（不含外层引号），返回 0=空间不足。 */
 int lea_json_escape_into(char *buf, size_t buf_size, size_t *off, const char *s);

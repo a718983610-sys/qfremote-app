@@ -26,7 +26,7 @@ typedef struct {
     const char *trace_id;
     const char *request_id;
     const char *batch_id;
-    long seq;
+    long long seq;
     const char *account_id;
     const char *device_id;
     const char *api_key_id;    /* 只记 key_id */

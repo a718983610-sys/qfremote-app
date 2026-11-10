@@ -66,14 +66,21 @@
 
 ## 单测结果
 
-`node server/ext/lea/test/test-lea.js`：**66/66 通过**（2026-11-10 沙箱实跑）。
+`node server/ext/lea/test/test-lea.js`：**184/184 通过**（2026-11-10 沙箱实跑，第五轮）。
 覆盖：Key 生成格式/只存哈希/列表脱敏、认证拒绝各码、换号失效、吊销/一键吊销、
-授权撤销、签名验签占位、幂等去重、防重放、runcommands 下发构造（mock 通道）、
-路由层 execute/batches/jobs 全流程、审计不含 Key 明文。
+授权撤销、签名验签占位、**规范串 v1（信封 16 行／票据 9 行、定稿向量与 C 端字节一致、
+params 归一化（整数键数值序＋`__proto__` 保留）、篡改矩阵、票据签发与 rebind 路由返回票据、
+严格校验（timeout／seq／grant／scopes／lease）、固定密钥跨实例验签、批量 `-` 连接与
+幂等键 400、JSON 安全值（toJSON／函数／Date 拒签）、UTF-8 字节长度、scopes 256 上限、
+显式空 leaseId 拒签、批量后缀留长与非对象 params 400、安全整数、路由 timeout 显式非法 400）**、幂等去重、防重放、
+runcommands 下发构造（mock 通道）、路由层 execute/batches/jobs 全流程、审计不含 Key 明文。
 另验：`node --check` 通过全部新文件与 `server/ext/server.js`；
 ext 服务带 LEA 加载正常（`QFEXT_NO_LISTEN=1` 启动，placeholder 警告符合设计）；
 既有 `server/ext/test-points.js` 11/11 通过；SEC_LEA 的 NSIS 语法经 makensis 3.09
 最小 harness 编译通过（lea/ush 未到货时仅 `/nonfatal` 警告）。
+**兼容性：规范串 v1 与旧串完全不兼容，旧串验签失败是预期行为，不设版本协商、不设 v0 回落；
+LEA 尚未随任何正式版发布（现行版 2.4.4 无 LEA），服务端与 LEA 随同一版本升级，
+不存在滚动混用；发版说明须写死“必须同时升级两端”。**
 
 S3 真客户端单测（2026-11-10 新增，不计入上行 mock 单测）：
 `node server/ext/lea/test/test-lea-realclient.js`：**16/16 通过**（沙箱实跑，

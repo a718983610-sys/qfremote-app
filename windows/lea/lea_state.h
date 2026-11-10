@@ -56,9 +56,10 @@ int lea_binding_has_scope(const lea_binding_t *b, const char *scope);
 /* 登录事件：旧绑定立即作废，epoch+1，进 PENDING。返回新 epoch。 */
 long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
                                const char *device_id, long long now_unix);
-/* 服务端票据确认：epoch 须与 PENDING 态一致且未过期 → ACTIVE。 */
+/* 服务端票据确认：epoch 须与 PENDING 态一致且未过期 → ACTIVE。
+ * grant_muse_execute 收 long long：调用点已验签保证为 0/1，入参不再窄化。 */
 int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
-                        int grant_muse_execute, const char *scopes,
+                        long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
                         long long now_unix);
 /* 登出／撤销：经 REVOKING 回 UNBOUND，epoch+1（旧 epoch 立即作废）。 */

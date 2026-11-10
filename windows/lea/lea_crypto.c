@@ -216,7 +216,9 @@ int lea_sig_format_ok(const char *signature) {
 
 /* TODO(Stage 2)：服务端生成 Ed25519 密钥对后，把公钥 hex 写在这里返回，
  * 并在 lea_verify_* 内实现真正的验签（可引 ed25519/ref10 或系统库）。
- * 在此之前返回 NULL = 未配置 = fail-closed。 */
+ * 在此之前返回 NULL = 未配置 = fail-closed。规范串本身已定稿 v1
+ * （见 ~/workspace/qfremote/local-agent/ds-review-stage2/CANONICAL-SIGNING-V1.md），
+ * 真实验签接入时规范串不再改动。 */
 const char *lea_server_pubkey_hex(void) {
     return NULL;
 }

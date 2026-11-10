@@ -8,7 +8,9 @@
  *   - 一行 JSON 请求 → 一行 JSON 响应。
  *   - 第二层准入（DESIGN §6.2）：Ed25519 服务端签名（占位，见
  *     lea_crypto.c，默认 fail-closed）＋ binding_epoch ＋ scope ＋
- *     API Key 归属（本地吊销表）＋重放表。
+ *     API Key 归属（本地吊销表）＋重放表。签名规范串 v1 唯一规范源：
+ *     ~/workspace/qfremote/local-agent/ds-review-stage2/CANONICAL-SIGNING-V1.md
+ *     （信封 16 行／票据 9 行，两端同一份）。
  *   - 幂等：本地持久化去重表 %ProgramData%\QFR\LEA\state\idempotency.jsonl。
  *   - 队列：同一设备串行 FIFO（worker 单线程），上限 100 条；危险命令单独 lane。
  *   - 脚本：只允许白名单脚本（初始仅 qf-agent-heal.ps1，hash 见 whitelist.h，
@@ -90,8 +92,7 @@ static char g_service_log_path[MAX_PATH];
 /* ---------- 小工具 ---------- */
 static long long now_unix(void) { return (long long)time(NULL); }
 
-/* 前置声明（定义在 execute_item 之后）。 */
-int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size);
+/* lea_rebuild_envelope 已移入 lea_protocol.c（纯协议层，可单测），声明见 lea_protocol.h。 */
 
 static void utf16_to_utf8(const WCHAR *w, char *out, size_t out_size) {
     if (!w || !out || out_size < 1) return;
@@ -1009,25 +1010,6 @@ static void execute_item(lea_queue_item_t *item) {
     lea_ctx_release(ctx); /* worker 侧引用；管道线程侧引用另行释放 */
 }
 
-/* 重建信封行（供 USH 转发；签名等字段原样带回，USH 只信 LEA 不再验签）。 */
-int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size) {
-    if (!env || !out || out_size < 512) return 0;
-    int n = snprintf(out, out_size,
-        "{\"version\":%d,\"request_id\":\"%s\",\"batch_id\":\"%s\",\"seq\":%ld,"
-        "\"device_id\":\"%s\",\"account_id\":\"%s\",\"api_key_id\":\"%s\","
-        "\"binding_epoch\":%lld,\"nonce\":\"%s\",\"issued_at\":%lld,"
-        "\"expires_at\":%lld,\"idempotency_key\":\"%s\",\"command\":\"%s\","
-        "\"params\":%s,\"timeout_ms\":%lld,\"signature\":\"%s\"}",
-        env->version, env->request_id, env->batch_id, env->seq,
-        env->device_id, env->account_id, env->api_key_id,
-        env->binding_epoch, env->nonce, env->issued_at, env->expires_at,
-        env->idempotency_key, env->command,
-        env->params_raw[0] ? env->params_raw : "{}",
-        env->has_timeout ? env->timeout_ms : lea_effective_timeout_ms(env),
-        env->signature);
-    return n > 0 && (size_t)n < out_size;
-}
-
 /* ---------- worker 线程 ---------- */
 static DWORD WINAPI worker_loop(LPVOID unused) {
     (void)unused;
@@ -1148,31 +1130,29 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         return;
     }
     if (strcmp(cmd, "binding.confirm") == 0) {
-        char account[128] = { 0 }, device[128] = { 0 }, scopes[256] = { 0 };
-        char lease[64] = { 0 }, sig[512] = { 0 };
-        long long epoch = 0, grant_epoch = 0, expires_at = 0, grant = 0;
-        if (!lea_json_string(text, "account_id", account, sizeof(account)) ||
-            !lea_json_string(text, "device_id", device, sizeof(device)) ||
-            !lea_json_long(text, "binding_epoch", &epoch) ||
-            !lea_json_long(text, "grant_epoch", &grant_epoch) ||
-            !lea_json_string(text, "ticket_signature", sig, sizeof(sig))) {
-            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "ticket-fields-missing", NULL);
+        /* 票据严格解析（lea_parse_ticket，可单测）：全部字段按类型校验——
+         * 缺失／类型错误一律拒绝；scopes 非字符串不得当空串处理；
+         * grant_muse_execute 取解析原值直接入串（非 0/1 由
+         * lea_ticket_canonical() 拒绝），调用点不得 truthy 归一化。 */
+        lea_ticket_t tk;
+        if (!lea_parse_ticket(text, &tk)) {
+            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "ticket-fields-invalid", NULL);
+            svc_log("binding confirm rejected: ticket-fields-invalid");
             return;
         }
-        /* grant_muse_execute 接受数字 0/1 或布尔 true/false。 */
-        if (!lea_json_long(text, "grant_muse_execute", &grant)) {
-            int gb = 0;
-            if (lea_json_bool(text, "grant_muse_execute", &gb)) grant = gb;
-        }
-        lea_json_string(text, "scopes", scopes, sizeof(scopes));
-        lea_json_long(text, "expires_at", &expires_at);
-        lea_json_string(text, "lease_id", lease, sizeof(lease));
-        /* 票据验签（占位 fail-closed；测试构建可用 TEST-UNSIGNED）。 */
+        /* 票据验签（占位 fail-closed；测试构建可用 TEST-UNSIGNED）。
+         * 规范串 v1（CANONICAL-SIGNING-V1.md §3）：9 行，覆盖全部授权字段
+         * （grant_muse_execute／scopes／lease_id）。 */
         char canonical[1024];
-        snprintf(canonical, sizeof(canonical), "%s\n%s\n%lld\n%lld\n%lld",
-                 account, device, epoch, grant_epoch, expires_at);
+        if (!lea_ticket_canonical(tk.account_id, tk.device_id, tk.binding_epoch, tk.grant_epoch,
+                                  tk.grant_muse_execute, tk.scopes, tk.lease_id, tk.expires_at,
+                                  canonical, sizeof(canonical))) {
+            lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "canonical-build-failed", NULL);
+            svc_log("binding confirm rejected: canonical-build-failed");
+            return;
+        }
         char reason[128] = { 0 };
-        if (!lea_verify_ticket_signature(sig, canonical, reason, sizeof(reason))) {
+        if (!lea_verify_ticket_signature(tk.signature, canonical, reason, sizeof(reason))) {
             const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0
                 ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
             lea_build_response(resp, resp_size, 0, code, "", 0, reason, NULL);
@@ -1180,8 +1160,8 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
             return;
         }
         EnterCriticalSection(&g_lock);
-        int okc = lea_binding_confirm(&g_binding, epoch, grant_epoch, (int)grant,
-                                      scopes, lease, expires_at, now_unix());
+        int okc = lea_binding_confirm(&g_binding, tk.binding_epoch, tk.grant_epoch, tk.grant_muse_execute,
+                                      tk.scopes, tk.lease_id, tk.expires_at, now_unix());
         if (okc) binding_persist_locked();
         long long cur_epoch = g_binding.epoch;
         LeaveCriticalSection(&g_lock);
@@ -1193,14 +1173,14 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         lea_audit_event_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.event = "binding";
-        ev.account_id = account;
-        ev.device_id = device;
+        ev.account_id = tk.account_id;
+        ev.device_id = tk.device_id;
         ev.binding_epoch = cur_epoch;
         ev.command = "binding.confirm";
         ev.result = "active";
         ev.detail = "ticket verified, binding ACTIVE";
         audit_event(&ev);
-        svc_log("binding confirm account=%s epoch=%lld -> ACTIVE", account, cur_epoch);
+        svc_log("binding confirm account=%s epoch=%lld -> ACTIVE", tk.account_id, cur_epoch);
         char result[256];
         snprintf(result, sizeof(result),
                  "{\"binding_state\":\"ACTIVE\",\"binding_epoch\":%lld}", cur_epoch);
@@ -1224,11 +1204,18 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         svc_log("REJECT parse error=%s detail=%s", env.error, env.error_detail);
         return;
     }
-    /* 1. 签名验签（占位 fail-closed）。 */
+    /* 1. 签名验签（占位 fail-closed）。
+     * 规范串 v1（CANONICAL-SIGNING-V1.md §2）：16 行，覆盖全部关键字段
+     * （batch_id／seq／account_id／api_key_id／timeout_ms／params 哈希）。 */
     char canonical[4096];
-    snprintf(canonical, sizeof(canonical), "%d\n%s\n%s\n%lld\n%s\n%lld\n%lld\n%s\n%s",
-             env.version, env.request_id, env.device_id, env.binding_epoch,
-             env.nonce, env.issued_at, env.expires_at, env.idempotency_key, env.command);
+    if (!lea_envelope_canonical(&env, canonical, sizeof(canonical))) {
+        lea_build_response(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env.request_id, 0,
+                           "canonical-build-failed", NULL);
+        audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_BAD_ENVELOPE, 0,
+                           "canonical-build-failed");
+        svc_log("REJECT canonical build failed request=%s", env.request_id);
+        return;
+    }
     char reason[128] = { 0 };
     if (!lea_verify_envelope_signature(env.signature, canonical, reason, sizeof(reason))) {
         const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0

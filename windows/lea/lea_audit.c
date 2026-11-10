@@ -29,7 +29,7 @@ int lea_audit_format_line(const lea_audit_event_t *ev, const char *iso_ts,
     append_esc_str(out, out_size, &off, "trace_id", ev->trace_id, 1);
     append_esc_str(out, out_size, &off, "request_id", ev->request_id, 1);
     append_esc_str(out, out_size, &off, "batch_id", ev->batch_id, 1);
-    off += (size_t)snprintf(out + off, out_size - off, ",\"seq\":%ld", ev->seq);
+    off += (size_t)snprintf(out + off, out_size - off, ",\"seq\":%lld", ev->seq);
     append_esc_str(out, out_size, &off, "account_id", ev->account_id, 1);
     append_esc_str(out, out_size, &off, "device_id", ev->device_id, 1);
     append_esc_str(out, out_size, &off, "api_key_id", ev->api_key_id, 1);

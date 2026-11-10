@@ -1,9 +1,12 @@
 /* 见 lea_protocol.h */
 #include "lea_protocol.h"
+#include "lea_crypto.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <ctype.h>
+#include <errno.h>
 
 /* ---------------- 命令表（DESIGN §4.4；超时见 §4.3） ---------------- */
 static const lea_command_spec_t k_commands[] = {
@@ -91,8 +94,10 @@ int lea_json_long(const char *text, const char *key, long long *out) {
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '"') return 0; /* 数字字段不接受引号包裹 */
     char *end = NULL;
+    errno = 0;
     long long v = strtoll(p, &end, 10);
     if (end == p) return 0;
+    if (errno == ERANGE) return 0; /* 溢出即拒绝，不得静默钳制 */
     *out = v;
     return 1;
 }
@@ -224,6 +229,517 @@ int lea_validate_token(const char *s) {
     return 1;
 }
 
+/* 规范串 v1 身份字段规则：非空、1..127 字节，无 <0x20、0x7F 控制字符。 */
+int lea_validate_id_field(const char *s) {
+    if (!s || s[0] == '\0') return 0;
+    size_t len = strlen(s);
+    if (len > 127) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7F) return 0;
+    }
+    return 1;
+}
+
+/* 规范 scopes 字符串：空或逗号连接的 token，严格字典序升序。
+ * 不设单 token 长度上限（与 JS validateScopesString 一致；整串长度
+ * 受字段／规范串缓冲限制）。 */
+int lea_validate_scopes_str(const char *s) {
+    if (!s) return 0;
+    if (s[0] == '\0') return 1;
+    const char *p = s;
+    const char *prev = NULL;
+    size_t prev_len = 0;
+    while (1) {
+        const char *comma = strchr(p, ',');
+        size_t n = comma ? (size_t)(comma - p) : strlen(p);
+        if (n == 0) return 0;
+        for (size_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)p[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-'))
+                return 0;
+        }
+        if (prev) {
+            size_t m = prev_len < n ? prev_len : n;
+            int cmp = strncmp(prev, p, m);
+            if (cmp > 0) return 0;
+            if (cmp == 0 && prev_len >= n) return 0; /* 相等或 prev 更长 → 非严格升序 */
+        }
+        prev = p;
+        prev_len = n;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return 1;
+}
+
+/* ---------------- 规范串 v1（CANONICAL-SIGNING-V1.md） ---------------- */
+/* 带溢出检查的追加：写不下即返回 0（调用方按失败处理，绝不输出截断串）。 */
+static int append_canonical(char *out, size_t out_size, size_t *off, const char *fmt, ...) {
+    if (*off >= out_size) return 0;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + *off, out_size - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0) return 0;
+    *off += (size_t)n;
+    if (*off >= out_size) return 0;
+    return 1;
+}
+
+int lea_envelope_canonical(const lea_envelope_t *env, char *out, size_t out_size) {
+    if (!env || !out || out_size < 256) return 0;
+    if (env->version != LEA_PROTOCOL_VERSION) return 0;
+    if (!lea_validate_token(env->request_id) ||
+        !lea_validate_token(env->nonce) ||
+        !lea_validate_token(env->idempotency_key)) return 0;
+    if (env->batch_id[0] && !lea_validate_id_field(env->batch_id)) return 0;
+    if (!lea_validate_id_field(env->device_id) ||
+        !lea_validate_id_field(env->account_id) ||
+        !lea_validate_id_field(env->api_key_id)) return 0;
+    if (env->seq < 1) return 0; /* v1：seq 必填且 ≥1（解析层已拒绝缺失／0） */
+    if (!lea_command_spec(env->command)) return 0;
+    if (env->params_raw[0] == '\0') return 0;
+    /* params 只签 stable JSON 的 SHA-256：线上 params 子串即 stable JSON，
+     * 此处对收到的 params_raw 原文算哈希（见规范 §2.1）。 */
+    char params_hash[65];
+    lea_sha256_hex((const unsigned char *)env->params_raw, strlen(env->params_raw), params_hash);
+    long timeout_ms = lea_effective_timeout_ms(env);
+    if (timeout_ms < 1) return 0;
+    size_t off = 0;
+    if (!append_canonical(out, out_size, &off,
+            "qfr-lea-envelope-v1\n%d\n%s\n%s\n%lld\n%s\n%s\n%s\n%lld\n%s\n%lld\n%lld\n%s\n%s\n%s\n%ld",
+            env->version, env->request_id, env->batch_id, env->seq,
+            env->device_id, env->account_id, env->api_key_id,
+            env->binding_epoch, env->nonce, env->issued_at, env->expires_at,
+            env->idempotency_key, env->command, params_hash, timeout_ms))
+        return 0;
+    return 1;
+}
+
+int lea_ticket_canonical(const char *account_id, const char *device_id,
+                         long long binding_epoch, long long grant_epoch,
+                         long long grant_muse_execute, const char *scopes,
+                         const char *lease_id, long long expires_at,
+                         char *out, size_t out_size) {
+    if (!out || out_size < 128) return 0;
+    if (!lea_validate_id_field(account_id) || !lea_validate_id_field(device_id)) return 0;
+    if (!scopes) scopes = "";
+    if (!lea_validate_scopes_str(scopes)) return 0;
+    if (!lease_id) lease_id = "";
+    if (lease_id[0] && !lea_validate_id_field(lease_id)) return 0;
+    /* grant 严格 0/1：不得 truthy 归一化，否则线上的 2 会被归一化为 1
+     * 入串，签名无法绑定线上的实际值。此处收 long long：(int) 窄化会把
+     * 4294967297 截成 1，严格校验形同虚设。 */
+    if (grant_muse_execute != 0 && grant_muse_execute != 1) return 0;
+    size_t off = 0;
+    if (!append_canonical(out, out_size, &off,
+            "qfr-lea-ticket-v1\n%s\n%s\n%lld\n%lld\n%lld\n%s\n%s\n%lld",
+            account_id, device_id, binding_epoch, grant_epoch, grant_muse_execute,
+            scopes, lease_id, expires_at))
+        return 0;
+    return 1;
+}
+
+/* ---- 票据完整 JSON 成员解析（不用子串查找） ----
+ * 下面的严格 JSON 解析器（json_parse_*）定义在本文件后部，此处先声明。 */
+static const char *json_skip_ws(const char *p);
+static const char *json_parse_string(const char *p);
+static const char *json_parse_value(const char *p, int depth);
+
+/* 解码一个 JSON 字符串值（p 指向开引号）：按 JSON 转义解码写入 out
+ *（UTF-8 字节，含 \uXXXX 与代理对），成功返回尾后指针，否则 NULL。
+ * 服务端 JSON.stringify 不产生 \u 转义，但攻击者可构造；正确解码才能
+ * 让规范串绑定解码后的实际值。 */
+static const char *json_decode_string(const char *p, char *out, size_t out_size, size_t *out_len) {
+    if (!p || *p != '"' || !out || out_size < 1) return NULL;
+    size_t n = 0;
+    p++;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {
+            if (n + 1 > out_size) return NULL;
+            out[n] = '\0';
+            if (out_len) *out_len = n;
+            return p + 1;
+        }
+        if (c < 0x20) return NULL;
+        if (c == '\\') {
+            p++;
+            char e = *p;
+            char rep = 0;
+            if (e == '"' || e == '\\' || e == '/') rep = e;
+            else if (e == 'b') rep = '\b';
+            else if (e == 'f') rep = '\f';
+            else if (e == 'n') rep = '\n';
+            else if (e == 'r') rep = '\r';
+            else if (e == 't') rep = '\t';
+            else if (e == 'u') {
+                unsigned int cp = 0;
+                for (int i = 0; i < 4; i++) {
+                    char h = p[1 + i];
+                    unsigned int d;
+                    if (h >= '0' && h <= '9') d = (unsigned int)(h - '0');
+                    else if (h >= 'a' && h <= 'f') d = (unsigned int)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') d = (unsigned int)(h - 'A' + 10);
+                    else return NULL;
+                    cp = cp * 16 + d;
+                }
+                /* 解码出的控制字符（含 \u0000）即拒绝：\u0000 写入 C 字符串
+                 * 会截断后续内容，strlen／%s 只能看到 NUL 前缀。 */
+                if (cp < 0x20 || cp == 0x7F) return NULL;
+                p += 5; /* 跳过 uXXXX */
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    /* 高代理：须紧跟 \uYYYY 低代理 */
+                    if (p[0] != '\\' || p[1] != 'u') return NULL;
+                    unsigned int lo = 0;
+                    for (int i = 0; i < 4; i++) {
+                        char h = p[2 + i];
+                        unsigned int d;
+                        if (h >= '0' && h <= '9') d = (unsigned int)(h - '0');
+                        else if (h >= 'a' && h <= 'f') d = (unsigned int)(h - 'a' + 10);
+                        else if (h >= 'A' && h <= 'F') d = (unsigned int)(h - 'A' + 10);
+                        else return NULL;
+                        lo = lo * 16 + d;
+                    }
+                    if (lo < 0xDC00 || lo > 0xDFFF) return NULL;
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    p += 6;
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    return NULL; /* 孤立低代理 */
+                }
+                /* cp → UTF-8 */
+                char utf8[4];
+                int ulen = 0;
+                if (cp < 0x80) { utf8[0] = (char)cp; ulen = 1; }
+                else if (cp < 0x800) {
+                    utf8[0] = (char)(0xC0 | (cp >> 6));
+                    utf8[1] = (char)(0x80 | (cp & 0x3F));
+                    ulen = 2;
+                } else if (cp < 0x10000) {
+                    utf8[0] = (char)(0xE0 | (cp >> 12));
+                    utf8[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    utf8[2] = (char)(0x80 | (cp & 0x3F));
+                    ulen = 3;
+                } else {
+                    utf8[0] = (char)(0xF0 | (cp >> 18));
+                    utf8[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    utf8[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    utf8[3] = (char)(0x80 | (cp & 0x3F));
+                    ulen = 4;
+                }
+                if (n + (size_t)ulen + 1 > out_size) return NULL;
+                memcpy(out + n, utf8, (size_t)ulen);
+                n += (size_t)ulen;
+                continue;
+            } else {
+                return NULL;
+            }
+            /* 转义产生的控制字符（如 \n）即拒绝：合法票据值不含控制字符，
+             * 下游字段校验本就拒绝，解码层直接拦住更彻底。 */
+            if ((unsigned char)rep < 0x20 || rep == 0x7F) return NULL;
+            if (n + 2 > out_size) return NULL;
+            out[n++] = rep;
+            p++;
+            continue;
+        }
+        if (n + 2 > out_size) return NULL;
+        out[n++] = (char)c;
+        p++;
+    }
+    return NULL;
+}
+
+/* 在顶层 JSON 对象中查找成员 key（原始键字节比较，与 lea_json_string
+ * 同语义——含转义的键不匹配，fail-closed）。
+ * 返回 1=恰好一次（*val／*val_len 为值原文范围），0=不存在，
+ * -1=重复键或对象语法错误（含尾部多余内容）。跳过全部 JSON 空白。 */
+static int json_find_member(const char *text, const char *key, const char **val, size_t *val_len) {
+    if (!text || !key || !val || !val_len) return -1;
+    const char *p = json_skip_ws(text);
+    if (*p != '{') return -1;
+    p = json_skip_ws(p + 1);
+    int found = 0;
+    const char *found_val = NULL;
+    size_t found_len = 0;
+    if (*p == '}') {
+        p = json_skip_ws(p + 1);
+        return *p == '\0' ? 0 : -1;
+    }
+    for (;;) {
+        p = json_skip_ws(p);
+        if (*p != '"') return -1;
+        const char *after_key = json_parse_string(p);
+        if (!after_key) return -1;
+        /* 键须解码后再比较：原始字节比较会把 "sc\u006fpes" 当作不存在，
+         * 攻击者可用转义键绕过“字段存在且非字符串必须拒绝”。 */
+        char kbuf[128];
+        size_t klen = 0;
+        if (!json_decode_string(p, kbuf, sizeof(kbuf), &klen)) return -1;
+        p = json_skip_ws(after_key);
+        if (*p != ':') return -1;
+        const char *vstart = json_skip_ws(p + 1);
+        const char *vend = json_parse_value(vstart, 0);
+        if (!vend) return -1;
+        if (klen == strlen(key) && memcmp(kbuf, key, klen) == 0) {
+            if (found) return -1; /* 重复键 */
+            found = 1;
+            found_val = vstart;
+            found_len = (size_t)(vend - vstart);
+        }
+        p = json_skip_ws(vend);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') {
+            p = json_skip_ws(p + 1);
+            if (*p != '\0') return -1;
+            if (!found) return 0;
+            *val = found_val;
+            *val_len = found_len;
+            return 1;
+        }
+        return -1;
+    }
+}
+
+/* 取字符串成员：存在时须为 JSON 字符串并解码入 out；缺失时 required=1
+ * 即失败，required=0 按空串。返回 1=成功，0=失败。 */
+static int ticket_get_string(const char *text, const char *key, char *out, size_t out_size, int required) {
+    const char *val = NULL;
+    size_t vlen = 0;
+    int r = json_find_member(text, key, &val, &vlen);
+    if (r < 0) return 0;
+    if (r == 0) {
+        if (required) return 0;
+        out[0] = '\0';
+        return 1;
+    }
+    if (vlen < 1 || val[0] != '"') return 0;
+    if (!json_decode_string(val, out, out_size, NULL)) return 0;
+    return 1;
+}
+/* 对 json_find_member 返回的值切片做严格整数解析（-?[0-9]+，溢出即失败）。
+ * 必须用值切片解析，不得对全文做子串查找重取——params 内的嵌套同名键
+ * 会遮蔽顶层值（如 params 含 "timeout_ms":5000 时全文查找会命中嵌套值，
+ * 使顶层显式 null 被洗成 5000）。 */
+static int json_long_from_slice(const char *val, size_t vlen, long long *out) {
+    if (vlen < 1) return 0;
+    size_t i = 0;
+    if (val[0] == '-') { i = 1; if (vlen < 2) return 0; }
+    for (; i < vlen; i++) {
+        if (val[i] < '0' || val[i] > '9') return 0;
+    }
+    char num[32];
+    if (vlen >= sizeof(num)) return 0;
+    memcpy(num, val, vlen);
+    num[vlen] = '\0';
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(num, &end, 10);
+    if (end == num || *end != '\0' || errno == ERANGE) return 0;
+    *out = v;
+    return 1;
+}
+/* 取整数成员：值须为 JSON 整数（-?[0-9]+，无小数／指数），strtoll 溢出即失败。
+ * 返回 1=成功，0=失败（缺失／类型错／溢出）。 */
+static int ticket_get_long(const char *text, const char *key, long long *out) {
+    const char *val = NULL;
+    size_t vlen = 0;
+    int r = json_find_member(text, key, &val, &vlen);
+    if (r != 1) return 0;
+    return json_long_from_slice(val, vlen, out);
+}
+
+int lea_parse_ticket(const char *text, lea_ticket_t *out) {
+    if (!text || !out) return 0;
+    lea_ticket_t t;
+    memset(&t, 0, sizeof(t));
+    if (!ticket_get_string(text, "account_id", t.account_id, sizeof(t.account_id), 1) ||
+        !lea_validate_id_field(t.account_id)) return 0;
+    if (!ticket_get_string(text, "device_id", t.device_id, sizeof(t.device_id), 1) ||
+        !lea_validate_id_field(t.device_id)) return 0;
+    if (!ticket_get_long(text, "binding_epoch", &t.binding_epoch) ||
+        !ticket_get_long(text, "grant_epoch", &t.grant_epoch) ||
+        !ticket_get_long(text, "expires_at", &t.expires_at)) return 0;
+    /* grant：整数原值保留（long long，入串时由 lea_ticket_canonical()
+     * 拒绝非 0/1）；布尔只在解析层接受 true/false → 1/0；缺失即拒绝。 */
+    if (!ticket_get_long(text, "grant_muse_execute", &t.grant_muse_execute)) {
+        const char *val = NULL;
+        size_t vlen = 0;
+        int r = json_find_member(text, "grant_muse_execute", &val, &vlen);
+        if (r != 1) return 0;
+        if (vlen == 4 && memcmp(val, "true", 4) == 0) t.grant_muse_execute = 1;
+        else if (vlen == 5 && memcmp(val, "false", 5) == 0) t.grant_muse_execute = 0;
+        else return 0;
+    }
+    /* scopes：字段存在时须为字符串且合 §3.1 格式；缺失时按空串。 */
+    if (!ticket_get_string(text, "scopes", t.scopes, sizeof(t.scopes), 0) ||
+        !lea_validate_scopes_str(t.scopes)) return 0;
+    /* lease_id：存在时须为字符串，非空时合 id 规则；缺失时按空串。 */
+    if (!ticket_get_string(text, "lease_id", t.lease_id, sizeof(t.lease_id), 0)) return 0;
+    if (t.lease_id[0] && !lea_validate_id_field(t.lease_id)) return 0;
+    if (!ticket_get_string(text, "ticket_signature", t.signature, sizeof(t.signature), 1) ||
+        t.signature[0] == '\0') return 0;
+    *out = t;
+    return 1;
+}
+
+/* 严格 JSON 校验（RFC 8259 子集）：对象／数组／字符串／严格数字／
+ * true／false／null；键须为字符串；无尾随逗号、无非法转义、无多余尾巴。
+ * 深度上限 64 防栈溢出。只做花括号配平不算校验（"{a:1}" 须被拒绝）。 */
+static const char *json_skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+static int json_is_hex4(const char *p) {
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+/* 解析一个 JSON 字符串（p 指向开引号），成功返回尾后指针，否则 NULL。 */
+static const char *json_parse_string(const char *p) {
+    if (*p != '"') return NULL;
+    p++;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') return p + 1;
+        if (c < 0x20) return NULL;
+        if (c == '\\') {
+            p++;
+            char e = *p;
+            if (e == '"' || e == '\\' || e == '/' || e == 'b' || e == 'f' ||
+                e == 'n' || e == 'r' || e == 't') { p++; continue; }
+            if (e == 'u') {
+                if (!json_is_hex4(p + 1)) return NULL;
+                p += 5;
+                continue;
+            }
+            return NULL;
+        }
+        p++;
+    }
+    return NULL;
+}
+/* 严格 JSON 数字：-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)? */
+static const char *json_parse_number(const char *p) {
+    if (*p == '-') p++;
+    if (*p == '0') p++;
+    else if (*p >= '1' && *p <= '9') { while (*p >= '0' && *p <= '9') p++; }
+    else return NULL;
+    if (*p == '.') {
+        p++;
+        if (!(*p >= '0' && *p <= '9')) return NULL;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        if (!(*p >= '0' && *p <= '9')) return NULL;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    return p;
+}
+static const char *json_parse_value(const char *p, int depth);
+static const char *json_parse_object(const char *p, int depth) {
+    if (depth > 64) return NULL;
+    if (*p != '{') return NULL;
+    p = json_skip_ws(p + 1);
+    if (*p == '}') return p + 1;
+    for (;;) {
+        p = json_skip_ws(p);
+        const char *after_key = json_parse_string(p);
+        if (!after_key) return NULL;
+        p = json_skip_ws(after_key);
+        if (*p != ':') return NULL;
+        p = json_parse_value(json_skip_ws(p + 1), depth + 1);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') return p + 1;
+        return NULL;
+    }
+}
+static const char *json_parse_array(const char *p, int depth) {
+    if (depth > 64) return NULL;
+    if (*p != '[') return NULL;
+    p = json_skip_ws(p + 1);
+    if (*p == ']') return p + 1;
+    for (;;) {
+        p = json_parse_value(json_skip_ws(p), depth + 1);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (*p == ',') { p++; continue; }
+        if (*p == ']') return p + 1;
+        return NULL;
+    }
+}
+static const char *json_parse_value(const char *p, int depth) {
+    if (depth > 64) return NULL;
+    p = json_skip_ws(p);
+    if (*p == '{') return json_parse_object(p, depth);
+    if (*p == '[') return json_parse_array(p, depth);
+    if (*p == '"') return json_parse_string(p);
+    if (*p == '-' || (*p >= '0' && *p <= '9')) return json_parse_number(p);
+    if (strncmp(p, "true", 4) == 0) return p + 4;
+    if (strncmp(p, "false", 5) == 0) return p + 5;
+    if (strncmp(p, "null", 4) == 0) return p + 4;
+    return NULL;
+}
+/* params_raw 须为严格 JSON 对象。解析层已保证此点（lea_json_object_raw）；
+ * 此处防未来调用方误传非法原文（如 "{a:1}" 花括号配平但键不是字符串）。 */
+static int params_raw_wellformed(const char *s) {
+    if (!s) return 0;
+    const char *p = json_parse_object(json_skip_ws(s), 0);
+    if (!p) return 0;
+    p = json_skip_ws(p);
+    return *p == '\0';
+}
+
+/* 重建信封行（pkg1 #25）：全部字符串字段经 JSON 转义后拼接，%s 直拼禁止；
+ * params_raw 原文 verbatim 拼接（签名覆盖同一份字节）。 */
+int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size) {
+    if (!env || !out || out_size < 512) return 0;
+    if (!params_raw_wellformed(env->params_raw[0] ? env->params_raw : "{}")) return 0;
+    size_t off = 0;
+#define LEA_RB_APPEND(...) do { \
+        if (off >= out_size) return 0; \
+        int _n = snprintf(out + off, out_size - off, __VA_ARGS__); \
+        if (_n < 0) return 0; \
+        off += (size_t)_n; \
+        if (off >= out_size) return 0; \
+    } while (0)
+#define LEA_RB_STR(s) do { \
+        if (!lea_json_escape_into(out, out_size, &off, (s) ? (s) : "")) return 0; \
+    } while (0)
+    LEA_RB_APPEND("{\"version\":%d,\"request_id\":\"", env->version);
+    LEA_RB_STR(env->request_id);
+    LEA_RB_APPEND("\",\"batch_id\":\"");
+    LEA_RB_STR(env->batch_id);
+    LEA_RB_APPEND("\",\"seq\":%lld,\"device_id\":\"", env->seq);
+    LEA_RB_STR(env->device_id);
+    LEA_RB_APPEND("\",\"account_id\":\"");
+    LEA_RB_STR(env->account_id);
+    LEA_RB_APPEND("\",\"api_key_id\":\"");
+    LEA_RB_STR(env->api_key_id);
+    LEA_RB_APPEND("\",\"binding_epoch\":%lld,\"nonce\":\"", env->binding_epoch);
+    LEA_RB_STR(env->nonce);
+    LEA_RB_APPEND("\",\"issued_at\":%lld,\"expires_at\":%lld,\"idempotency_key\":\"",
+                  env->issued_at, env->expires_at);
+    LEA_RB_STR(env->idempotency_key);
+    LEA_RB_APPEND("\",\"command\":\"");
+    LEA_RB_STR(env->command);
+    LEA_RB_APPEND("\",\"params\":%s,\"timeout_ms\":%lld,\"signature\":\"",
+                  env->params_raw[0] ? env->params_raw : "{}",
+                  env->has_timeout ? env->timeout_ms : lea_effective_timeout_ms(env));
+    LEA_RB_STR(env->signature);
+    LEA_RB_APPEND("\"}");
+#undef LEA_RB_APPEND
+#undef LEA_RB_STR
+    return 1;
+}
+
 /* ---------------- 时间窗 ---------------- */
 int lea_check_time_window(const lea_envelope_t *env, long long now_unix,
                           char *err, size_t err_size) {
@@ -267,22 +783,31 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
         set_err(out, LEA_ERR_BAD_ENVELOPE, "request_id");
         return 0;
     }
-    /* batch_id 可选；seq 可选（默认 0）。 */
+    /* batch_id 可选；seq 必填且 ≥1（v1 语义：单条为 1、批量单调递增；
+     * 缺失或 0 即拒绝，不得缺省为 0 后签名／验签）。 */
     lea_json_string(text, "batch_id", out->batch_id, sizeof(out->batch_id));
+    if (out->batch_id[0] && !lea_validate_id_field(out->batch_id)) {
+        set_err(out, LEA_ERR_BAD_ENVELOPE, "batch_id");
+        return 0;
+    }
     long long seq = 0;
-    if (lea_json_long(text, "seq", &seq)) out->seq = seq;
+    if (!lea_json_long(text, "seq", &seq) || seq < 1) {
+        set_err(out, LEA_ERR_BAD_ENVELOPE, "seq");
+        return 0;
+    }
+    out->seq = seq;
     if (!lea_json_string(text, "device_id", out->device_id, sizeof(out->device_id)) ||
-        out->device_id[0] == '\0') {
+        out->device_id[0] == '\0' || !lea_validate_id_field(out->device_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "device_id");
         return 0;
     }
     if (!lea_json_string(text, "account_id", out->account_id, sizeof(out->account_id)) ||
-        out->account_id[0] == '\0') {
+        out->account_id[0] == '\0' || !lea_validate_id_field(out->account_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "account_id");
         return 0;
     }
     if (!lea_json_string(text, "api_key_id", out->api_key_id, sizeof(out->api_key_id)) ||
-        out->api_key_id[0] == '\0') {
+        out->api_key_id[0] == '\0' || !lea_validate_id_field(out->api_key_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "api_key_id");
         return 0;
     }
@@ -321,13 +846,32 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
         snprintf(out->params_raw, sizeof(out->params_raw), "{}");
     }
     long long tmo = 0;
-    if (lea_json_long(text, "timeout_ms", &tmo)) {
-        out->timeout_ms = tmo;
-        out->has_timeout = 1;
-        const lea_command_spec_t *spec = lea_command_spec(out->command);
-        if (tmo < 1 || tmo > spec->max_timeout_ms) {
+    {
+        /* timeout_ms 显式存在性判定（键存在性，非 lea_json_long 成败）：
+         * 显式存在但非整数（含 null／字符串／小数／溢出）即拒绝，不得当
+         * 缺失回退默认值；缺失时取命令默认值。 */
+        const char *tval = NULL;
+        size_t tvlen = 0;
+        int tr = json_find_member(text, "timeout_ms", &tval, &tvlen);
+        if (tr < 0) {
             set_err(out, LEA_ERR_BAD_ENVELOPE, "timeout_ms");
             return 0;
+        }
+        if (tr == 1) {
+            /* 须用 json_find_member 返回的顶层值切片（tval/tvlen）解析，
+             * 不得再用全文子串查找（lea_json_long）重取——params 内的嵌套
+             * "timeout_ms" 会遮蔽顶层 null，使显式非法值被洗成已签名值。 */
+            if (!json_long_from_slice(tval, tvlen, &tmo)) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "timeout_ms");
+                return 0;
+            }
+            out->timeout_ms = tmo;
+            out->has_timeout = 1;
+            const lea_command_spec_t *spec = lea_command_spec(out->command);
+            if (tmo < 1 || tmo > spec->max_timeout_ms) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "timeout_ms");
+                return 0;
+            }
         }
     }
     if (!lea_json_string(text, "signature", out->signature, sizeof(out->signature)) ||

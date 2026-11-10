@@ -75,10 +75,16 @@ function createLeaRoutes(core, channel, deps) {
     if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
     const deviceId = String(body.device_id || '');
     const command = String(body.command || '');
+    // params 须为 JSON 对象：数组／标量不得签出（C 端只接受对象 params_raw）。
+    if (body.params != null && (typeof body.params !== 'object' || Array.isArray(body.params))) return fail(res, 400, ERR.VALIDATION, 'params 须为 JSON 对象。');
     const params = (body.params && typeof body.params === 'object') ? body.params : {};
     const idemKey = String(req.headers['idempotency-key'] || req.headers['Idempotency-Key'] || body.idempotency_key || '');
     if (!deviceId || !command) return fail(res, 400, ERR.VALIDATION, '缺少 device_id 或 command。');
     if (!idemKey) return fail(res, 400, ERR.VALIDATION, '缺少 Idempotency-Key（每条命令必须带幂等键）。');
+    // 幂等键须合 token 规则（C 端解析层同规则拒绝）：否则签出的信封到 LEA 即被拒。
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(idemKey)) return fail(res, 400, ERR.VALIDATION, 'Idempotency-Key 须为 8..128 位 [A-Za-z0-9_-]。');
+    // request_id（请求头或自动生成）须合 token 规则，否则 buildEnvelope 抛错变 500。
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return fail(res, 400, ERR.VALIDATION, 'X-QFR-Request-Id 须为 8..128 位 [A-Za-z0-9_-]。');
     const spec = core.COMMANDS[command];
     if (!spec) return fail(res, 400, ERR.VALIDATION, '未知命令：' + command);
     const key = auth.key;
@@ -113,7 +119,16 @@ function createLeaRoutes(core, channel, deps) {
       auditCall(Object.assign({}, baseAudit, { result: 'denied', error_code: ERR.NOT_INSTALLED }));
       return fail(res, 503, ERR.NOT_INSTALLED, '下发通道暂时不可达，无法确认设备在线。');
     }
-    const timeoutMs = Number.isFinite(Number(body.timeout_ms)) ? Math.min(Math.max(Number(body.timeout_ms), 1000), 300000) : spec.timeoutMs;
+    // timeout_ms 显式存在但非法（null、非数字、非整数、<1、>上限）即 400，
+    // 不得 clamp 成合法值再签名（规范 §2.2）；缺失时取命令默认值。
+    // 显式存在判定用 !== undefined：null 是显式非法值，不是缺失。
+    let timeoutMs = spec.timeoutMs;
+    if (body.timeout_ms !== undefined) {
+      if (typeof body.timeout_ms !== 'number' || !Number.isInteger(body.timeout_ms) || body.timeout_ms < 1 || body.timeout_ms > spec.maxTimeoutMs) {
+        return fail(res, 400, ERR.VALIDATION, 'timeout_ms 须为 1..' + spec.maxTimeoutMs + ' 的整数。');
+      }
+      timeoutMs = body.timeout_ms;
+    }
     const job = core.createJob({
       account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id,
       command, request_id: requestId, idempotency_key: idemKey, status: 'RUNNING',
@@ -163,6 +178,28 @@ function createLeaRoutes(core, channel, deps) {
     if (!deviceId || !steps.length) return fail(res, 400, ERR.VALIDATION, '缺少 device_id 或 steps。');
     if (steps.length > MAX_BATCH_STEPS) return fail(res, 400, ERR.VALIDATION, '批量步数上限 ' + MAX_BATCH_STEPS + '。');
     if (!idemKey) return fail(res, 400, ERR.VALIDATION, '缺少 Idempotency-Key（批量必须带幂等键）。');
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(idemKey)) return fail(res, 400, ERR.VALIDATION, 'Idempotency-Key 须为 8..128 位 [A-Za-z0-9_-]。');
+    // request_id 须合 token 规则，否则 buildEnvelope 抛错变 500。
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return fail(res, 400, ERR.VALIDATION, 'X-QFR-Request-Id 须为 8..128 位 [A-Za-z0-9_-]。');
+    // 步级 request_id／幂等键为基础值加 '-N' 后缀：基础值须给后缀留出长度，
+    // 否则步级键超 128 字符、buildEnvelope 抛错变 500（如 128 字符基础键 + '-2' = 130）。
+    const batchSuffixLen = 1 + String(steps.length).length;
+    if (idemKey.length + batchSuffixLen > 128 || requestId.length + batchSuffixLen > 128) {
+      return fail(res, 400, ERR.VALIDATION, '批量基础 request_id／Idempotency-Key 过长，步级后缀后须 ≤128 位。');
+    }
+    // 各步 params 须为 JSON 对象（数组／标量不得签出）；timeout_ms 显式
+    // 非法（非数字、非整数、<1、>该命令上限）即 400，不得 clamp 后签名。
+    for (const st of steps) {
+      if (st && st.params != null && (typeof st.params !== 'object' || Array.isArray(st.params))) {
+        return fail(res, 400, ERR.VALIDATION, '批量某步 params 须为 JSON 对象。');
+      }
+      if (st && st.timeout_ms !== undefined) {
+        const sspec = core.COMMANDS[String(st.command || '')];
+        if (sspec && (typeof st.timeout_ms !== 'number' || !Number.isInteger(st.timeout_ms) || st.timeout_ms < 1 || st.timeout_ms > sspec.maxTimeoutMs)) {
+          return fail(res, 400, ERR.VALIDATION, '批量某步 timeout_ms 须为 1..' + sspec.maxTimeoutMs + ' 的整数。');
+        }
+      }
+    }
     const key = auth.key;
     const batchId = 'batch_' + crypto.randomBytes(8).toString('hex');
     const job = core.createJob({
@@ -184,10 +221,12 @@ function createLeaRoutes(core, channel, deps) {
         const adm = core.admit({ key, deviceId, command, requestId, ip: clientIp(req) });
         if (!adm.ok) { results.push({ seq: i + 1, command, ok: false, code: adm.code }); break; }
         const env = core.buildEnvelope({
-          requestId: requestId + ':' + (i + 1), batchId, seq: i + 1, deviceId,
+          // 步级 request_id／幂等键用 '-' 连接步号：':' 不合 token 规则
+          //（C 端解析层拒绝），旧 ':' 形态的批量信封到 LEA 即被拒。
+          requestId: requestId + '-' + (i + 1), batchId, seq: i + 1, deviceId,
           accountId: key.account_id, keyId: key.key_id, bindingEpoch: adm.binding.binding_epoch,
-          idempotencyKey: idemKey + ':' + (i + 1), command, params: st.params || {},
-          timeoutMs: Number.isFinite(Number(st.timeout_ms)) ? Number(st.timeout_ms) : spec.timeoutMs,
+          idempotencyKey: idemKey + '-' + (i + 1), command, params: st.params || {},
+          timeoutMs: st.timeout_ms !== undefined ? st.timeout_ms : spec.timeoutMs,
         });
         let disp;
         try { disp = channel ? await core.dispatchEnvelope(channel, env, { timeoutMs: 5000 }) : { ok: false, error: new Error('no-channel') }; }
@@ -380,7 +419,7 @@ function createLeaRoutes(core, channel, deps) {
       return fail(res, 403, 'FORBIDDEN', '只能绑定自己的账号。');
     }
     const out = core.recordBinding(deviceId, accountId, 'manual-rebind');
-    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys });
+    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, ticket: out.ticket });
   }
 
   // ---- 总入口：server.js 只调这一处 ----

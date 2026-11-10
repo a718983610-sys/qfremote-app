@@ -130,8 +130,8 @@ sh test/run_tests.sh
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 核心单测（测试构建） | **107 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取 |
-| 核心单测（严格构建） | **106 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
+| 核心单测（测试构建） | **218 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）** |
+| 核心单测（严格构建） | **217 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
 | mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，485000 B）、`qf-lea-client.exe`（260528 B） |
 | 生产构建核查 | **通过** | `strings QFRLEA.exe` 不含 `test-only-unsigned-accepted`（0 处），含 `ed25519-pubkey-not-configured`（2 处） |
 | 白名单核查 | **通过** | `gen_whitelist.py --check`：`qf-agent-heal.ps1` sha256 与 `whitelist.h` 一致 |
@@ -169,7 +169,12 @@ sh test/run_tests.sh
 - 危险命令完整清单（DESIGN §14 #4）：当前定义见 §三-11。
 - `app.close` 允许清单：当前仅 `QFRemote.exe`。
 - 服务账户：当前 `LocalSystem`（DESIGN §14 #7 待定；专用低权账户需另评估）。
-- Ed25519 服务端公钥接入与签名规范串冻结（服务端线）。
+- Ed25519 服务端公钥接入（服务端线）；签名规范串已冻结为 v1
+  （`ds-review-stage2/CANONICAL-SIGNING-V1.md`，信封 16 行／票据 9 行，两端同一份）。
+  **兼容性：v1 与旧串完全不兼容，旧串验签失败是预期行为，不设版本协商、不设 v0 回落；
+  LEA 尚未随任何正式版发布（现行版 2.4.4 无 LEA），服务端与 LEA 随同一版本升级，
+  不存在滚动混用；发版说明须写死“必须同时升级两端”。**
+  （`ds-review-stage2/CANONICAL-SIGNING-V1.md`，信封 16 行／票据 9 行，两端同一份）。
 - USH 管道协议细节（USH 线）：当前按一行 JSON 请求 → 一行 JSON 响应假设，
   与 QFSysHelper 同形。
 - `installer.nsi` 的 `SEC_LEA` 段与 `main.js` 登录成功分支调用

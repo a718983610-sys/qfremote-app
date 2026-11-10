@@ -57,14 +57,14 @@ long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
 }
 
 int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
-                        int grant_muse_execute, const char *scopes,
+                        long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
                         long long now_unix) {
     if (b->state != LEA_BIND_PENDING) return 0;
     if (epoch != b->epoch) return 0;
     if (expires_at > 0 && expires_at <= now_unix) return 0;
     b->grant_epoch = grant_epoch;
-    b->grant_muse_execute = grant_muse_execute;
+    b->grant_muse_execute = (int)grant_muse_execute; /* 调用点已验签保证 0/1 */
     snprintf(b->scopes, sizeof(b->scopes), "%s", scopes ? scopes : "");
     snprintf(b->lease_id, sizeof(b->lease_id), "%s", lease_id ? lease_id : "");
     b->expires_at = expires_at;

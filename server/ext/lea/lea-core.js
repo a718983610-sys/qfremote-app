@@ -24,6 +24,13 @@
  *    真实私钥接入点：opts.signingKeyFile（Base64 的 64 字节
  *    seed||pub，与 lock-envelope.loadDispatcherKey 同格式）
  *    或 opts.signingKeyPem（PEM）。
+ *
+ * 签名规范串 v1（S1/S2/S4 定稿）：
+ *   唯一规范源见 ~/workspace/qfremote/local-agent/ds-review-stage2/
+ *   CANONICAL-SIGNING-V1.md。信封与票据的规范串均为固定行数的
+ *   \n 连接串（信封 16 行、票据 9 行），params 只签其规范 JSON
+ *   的 SHA-256，C 端（windows/lea/lea_protocol.c）按同一规范实现，
+ *   两端字节级一致。改规范须升 v2，不得悄悄改 v1。
  */
 const fs = require('fs');
 const path = require('path');
@@ -33,6 +40,7 @@ const crypto = require('crypto');
 const KEY_PREFIX = 'qfr_lea_';
 const KEY_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const ENVELOPE_TTL_S = 60;            // expires_at - issued_at ≤ 60s
+const TICKET_TTL_S = 24 * 3600;       // 绑定票据有效期 24h（规范串 v1 口径）
 const REPLAY_WINDOW_MS = 10 * 60 * 1000; // 服务端 nonce 去重表保留 ≥10 分钟
 const TIMESTAMP_SKEW_S = 60;          // HTTP 头时间戳允许偏差（LEA 端 ±30s，服务端取 60s 上限）
 const DISPATCH_TIMEOUT_MS = 5000;     // 下发 5s（DESIGN §3）
@@ -45,16 +53,16 @@ const NONCE_RETENTION_MS = REPLAY_WINDOW_MS;
 // 命令集（DESIGN §4.4 MVP）与默认超时、所需 scope、是否危险。
 // 危险命令：必须带幂等键、禁自动重试、需 muse.execute.dangerous。
 const COMMANDS = {
-  'app.open':    { scope: 'muse.execute', dangerous: false, timeoutMs: 15000 },
-  'app.close':   { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
-  'ui.click':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
-  'ui.input':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
-  'ui.snapshot': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
-  'ui.tree':     { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
-  'script.run':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 30000 },
-  'file.read':   { scope: 'muse.execute', dangerous: false, timeoutMs: 10000 },
-  'file.write':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 10000 },
-  'sys.info':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000 },
+  'app.open':    { scope: 'muse.execute', dangerous: false, timeoutMs: 15000, maxTimeoutMs: 60000 },
+  'app.close':   { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
+  'ui.click':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
+  'ui.input':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
+  'ui.snapshot': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
+  'ui.tree':     { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
+  'script.run':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 30000, maxTimeoutMs: 300000 },
+  'file.read':   { scope: 'muse.execute', dangerous: false, timeoutMs: 10000, maxTimeoutMs: 30000 },
+  'file.write':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 10000, maxTimeoutMs: 60000 },
+  'sys.info':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000 },
 };
 const DANGEROUS_SCOPE = 'muse.execute.dangerous';
 
@@ -205,17 +213,152 @@ function createLeaCore(opts) {
   function signingInfo() {
     return { mode: signing.mode, publicKeyBase64: signing.publicKeyBase64 };
   }
-  // 签名覆盖全部关键字段（DESIGN §4.1）：按固定字段顺序 JSON 序列化。
+  // ---------- 规范串 v1：stable JSON / 字段校验（见 CANONICAL-SIGNING-V1.md） ----------
+  // 整数索引键：符合 ^(0|[1-9]\d*)$ 且数值 ≤ 4294967294（2^32-2）。
+  // 规范键序：整数索引键在前按数值升序，其余键在后按字典序升序——与
+  // JSON.stringify 的属性输出顺序一致，故归一化后线上 JSON 的 params
+  // 子串恒等于 stable JSON（整数样式键也不例外；旧版只用 .sort() 会错）。
+  function isIntegerIndexKey(k) {
+    if (!/^(0|[1-9]\d*)$/.test(k)) return false;
+    return Number(k) <= 4294967294;
+  }
+  function canonicalKeyOrder(keys) {
+    const ints = [], rest = [];
+    for (const k of keys) (isIntegerIndexKey(k) ? ints : rest).push(k);
+    ints.sort((a, b) => Number(a) - Number(b));
+    rest.sort();
+    return ints.concat(rest);
+  }
+  // stableStringify：键按规范键序、递归、无空白；标量与 JSON.stringify 一致。
+  // 遇非 JSON 安全值（函数／Symbol／undefined／自有 toJSON 函数）即抛错，
+  // 不做静默过滤——否则签名哈希会与线上 JSON.stringify 实际输出脱钩（§2.1）。
+  function stableStringify(v) {
+    if (v === null || typeof v !== 'object') {
+      if (typeof v === 'function' || typeof v === 'symbol' || v === undefined) {
+        throw new Error('LEA params value not JSON-safe');
+      }
+      return JSON.stringify(v);
+    }
+    if (Object.prototype.hasOwnProperty.call(v, 'toJSON') && typeof v.toJSON === 'function') {
+      throw new Error('LEA params value not JSON-safe: toJSON');
+    }
+    if (Array.isArray(v)) {
+      return '[' + v.map((e) => {
+        const s = stableStringify(e);
+        return s === undefined ? 'null' : s;
+      }).join(',') + ']';
+    }
+    const keys = canonicalKeyOrder(Object.keys(v)).filter((k) => {
+      const x = v[k];
+      if (typeof x === 'function' || typeof x === 'symbol' || x === undefined) {
+        throw new Error('LEA params value not JSON-safe');
+      }
+      return true;
+    });
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+  }
+  // normalizeParams：params 深拷贝并把全部对象键排成规范键序，使线上 JSON 的
+  // params 子串就是 stable JSON（C 端对 params_raw 原文算哈希才能对上）。
+  // 用 defineProperty 写入：普通赋值会把 "__proto__" 键吞成原型而丢失。
+  // 非 JSON 安全值（函数／Symbol／undefined／非普通对象如 Date／自有 toJSON
+  // 函数）即抛错：JSON.stringify 会调用 toJSON 改写线上子串，静默过滤会
+  // 让签名哈希与线上字节脱钩。
+  function normalizeParams(v) {
+    if (v === null || typeof v !== 'object') {
+      if (typeof v === 'function' || typeof v === 'symbol' || v === undefined) {
+        throw new Error('LEA params value not JSON-safe');
+      }
+      return v;
+    }
+    if (Object.prototype.hasOwnProperty.call(v, 'toJSON') && typeof v.toJSON === 'function') {
+      throw new Error('LEA params value not JSON-safe: toJSON');
+    }
+    if (Array.isArray(v)) return v.map(normalizeParams);
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new Error('LEA params value not JSON-safe: non-plain object');
+    }
+    const o = {};
+    for (const k of canonicalKeyOrder(Object.keys(v))) {
+      Object.defineProperty(o, k, {
+        value: normalizeParams(v[k]), enumerable: true, writable: true, configurable: true,
+      });
+    }
+    return o;
+  }
+  // 规范串字符串字段规则：须为字符串，不得含控制字符（含 \n \r）与 DEL。
+  function checkCanonicalString(v, name) {
+    if (typeof v !== 'string' || /[\x00-\x1F\x7F]/.test(v)) {
+      throw new Error('LEA canonical field invalid: ' + name);
+    }
+  }
+  // token 规则（与 C lea_validate_token 一致）：[A-Za-z0-9_-]，8..128。
+  // 长度按 UTF-8 字节计（token 字符集为 ASCII，与字符数相同）。
+  function checkToken(v, name) {
+    if (typeof v !== 'string' || Buffer.byteLength(v, 'utf8') < 8 || Buffer.byteLength(v, 'utf8') > 128 || /[^A-Za-z0-9_-]/.test(v)) {
+      throw new Error('LEA canonical field invalid: ' + name);
+    }
+  }
+  // id 字段规则（与 C lea_validate_id_field 一致）：非空、1..127 字节，无控制字符。
+  // 长度按 UTF-8 字节计（JS .length 是 UTF-16 码元数，100 个汉字为 100 码元但 300 字节）。
+  function checkIdField(v, name) {
+    if (typeof v !== 'string' || Buffer.byteLength(v, 'utf8') < 1 || Buffer.byteLength(v, 'utf8') > 127 || /[\x00-\x1F\x7F]/.test(v)) {
+      throw new Error('LEA canonical field invalid: ' + name);
+    }
+  }
+  // 有效超时（与 C lea_effective_timeout_ms 对齐，但非法即抛错）：
+  // 缺失（=== undefined）→ 命令默认值；显式存在但非法（null、非整数、
+  // <1、>命令上限）→ 抛错，不回退默认。null 不是缺失。
+  function effectiveTimeoutMs(env) {
+    const spec = COMMANDS[env.command];
+    if (!spec) throw new Error('LEA canonical field invalid: command');
+    if (env.timeout_ms === undefined) return spec.timeoutMs;
+    if (!Number.isInteger(env.timeout_ms) || env.timeout_ms < 1 || env.timeout_ms > spec.maxTimeoutMs) {
+      throw new Error('LEA canonical field invalid: timeout_ms');
+    }
+    return env.timeout_ms;
+  }
+  // 签名覆盖全部关键字段（DESIGN §4.1；规范串 v1，见 CANONICAL-SIGNING-V1.md §2）：
+  // 16 行 \n 连接串，params 只签 stable JSON 的 SHA-256，timeout 取有效超时。
   function envelopeSigningBytes(env) {
-    const ordered = {
-      version: env.version, request_id: env.request_id, batch_id: env.batch_id || null,
-      seq: env.seq, device_id: env.device_id, account_id: env.account_id,
-      api_key_id: env.api_key_id, binding_epoch: env.binding_epoch,
-      nonce: env.nonce, issued_at: env.issued_at, expires_at: env.expires_at,
-      idempotency_key: env.idempotency_key, command: env.command,
-      params: env.params || {}, timeout_ms: env.timeout_ms,
-    };
-    return JSON.stringify(ordered);
+    if (env.version !== 1) throw new Error('LEA canonical field invalid: version');
+    checkToken(env.request_id, 'request_id');
+    checkToken(env.nonce, 'nonce');
+    checkToken(env.idempotency_key, 'idempotency_key');
+    checkIdField(env.device_id, 'device_id');
+    checkIdField(env.account_id, 'account_id');
+    checkIdField(env.api_key_id, 'api_key_id');
+    if (env.batch_id != null) {
+      if (typeof env.batch_id !== 'string') throw new Error('LEA canonical field invalid: batch_id');
+      if (env.batch_id !== '') checkIdField(env.batch_id, 'batch_id');
+    }
+    checkCanonicalString(env.command, 'command');
+    if (!COMMANDS[env.command]) throw new Error('LEA canonical field invalid: command');
+    // 整数字段须为安全整数：超 2^53 的值在 JS 内已失真，String() 结果与
+    // C 端 long long 解析值不一致，不得签名。
+    if (!Number.isSafeInteger(env.seq) || env.seq < 1) throw new Error('LEA canonical field invalid: seq');
+    for (const [name, v] of [['binding_epoch', env.binding_epoch], ['issued_at', env.issued_at], ['expires_at', env.expires_at]]) {
+      if (!Number.isSafeInteger(v)) throw new Error('LEA canonical field invalid: ' + name);
+    }
+    const paramsHash = sha256Hex(stableStringify(env.params || {}));
+    return [
+      'qfr-lea-envelope-v1',
+      String(env.version),
+      String(env.request_id),
+      env.batch_id || '',
+      String(env.seq),
+      String(env.device_id),
+      String(env.account_id),
+      String(env.api_key_id),
+      String(env.binding_epoch),
+      String(env.nonce),
+      String(env.issued_at),
+      String(env.expires_at),
+      String(env.idempotency_key),
+      String(env.command),
+      paramsHash,
+      String(effectiveTimeoutMs(env)),
+    ].join('\n');
   }
   function signEnvelope(env) {
     const sig = crypto.sign(null, Buffer.from(envelopeSigningBytes(env), 'utf8'), signing.privateKey);
@@ -229,6 +372,95 @@ function createLeaCore(opts) {
       return crypto.verify(null, Buffer.from(envelopeSigningBytes(env), 'utf8'), pub,
         Buffer.from(String(env.signature), 'base64'));
     } catch (e) { return false; }
+  }
+
+  // ---------- 绑定票据签名 v1（S2；规范串见 CANONICAL-SIGNING-V1.md §3） ----------
+  // scope 数组 → 规范字符串：去重＋字典序升序＋逗号连接、无空格。
+  function canonicalScopesString(scopes) {
+    if (typeof scopes === 'string') return scopes;
+    const toks = (Array.isArray(scopes) ? scopes : []).map(String).filter(Boolean);
+    toks.sort();
+    return [...new Set(toks)].join(',');
+  }
+  // 规范 scopes 字符串格式：空或逗号连接的 token，严格升序、无空格、无空 token、无重复。
+  function validateScopesString(s) {
+    if (s === '') return true;
+    if (/[^A-Za-z0-9_.,-]/.test(s)) return false;
+    const toks = s.split(',');
+    for (let i = 0; i < toks.length; i++) {
+      if (!toks[i]) return false;
+      if (i > 0 && toks[i] <= toks[i - 1]) return false;
+    }
+    return true;
+  }
+  // 票据规范串 v1：9 行 \n 连接串，覆盖全部授权字段（grant／scopes／lease_id）。
+  // 严格规则：scopes 必须是规范字符串（非字符串一律拒绝，数组只在签发入口
+  // 归一化）；grant_muse_execute 严格 0/1，不得 truthy 归一化——否则线上的
+  // 2 会被归一化为 1 入串，签名无法绑定线上的实际值。scopes 整串上限 256
+  // UTF-8 字节（v1 定，与 C 端票据解析缓冲一致）；lease_id 非空时合 id 规则。
+  function ticketSigningBytes(t) {
+    checkIdField(t.account_id, 'account_id');
+    checkIdField(t.device_id, 'device_id');
+    if (typeof t.scopes !== 'string') throw new Error('LEA ticket scopes not canonical');
+    checkCanonicalString(t.scopes, 'scopes');
+    if (!validateScopesString(t.scopes)) throw new Error('LEA ticket scopes not canonical');
+    if (Buffer.byteLength(t.scopes, 'utf8') > 256) throw new Error('LEA ticket scopes too long');
+    const leaseId = t.lease_id == null ? '' : t.lease_id;
+    checkCanonicalString(leaseId, 'lease_id');
+    if (leaseId !== '') checkIdField(leaseId, 'lease_id');
+    if (t.grant_muse_execute !== 0 && t.grant_muse_execute !== 1) {
+      throw new Error('LEA ticket field invalid: grant_muse_execute');
+    }
+    for (const [name, v] of [['binding_epoch', t.binding_epoch], ['grant_epoch', t.grant_epoch], ['expires_at', t.expires_at]]) {
+      if (!Number.isSafeInteger(v)) throw new Error('LEA ticket field invalid: ' + name);
+    }
+    return [
+      'qfr-lea-ticket-v1',
+      String(t.account_id),
+      String(t.device_id),
+      String(t.binding_epoch),
+      String(t.grant_epoch),
+      String(t.grant_muse_execute),
+      t.scopes,
+      leaseId,
+      String(t.expires_at),
+    ].join('\n');
+  }
+  function signTicket(ticket) {
+    const sig = crypto.sign(null, Buffer.from(ticketSigningBytes(ticket), 'utf8'), signing.privateKey);
+    return Object.assign({}, ticket, { ticket_signature: sig.toString('base64') });
+  }
+  function verifyTicket(ticket, publicKeyBase64) {
+    try {
+      if (!ticket || !ticket.ticket_signature) return false;
+      const pubJwk = { kty: 'OKP', crv: 'Ed25519', x: publicKeyBase64 || signing.publicKeyBase64 };
+      const pub = crypto.createPublicKey({ key: pubJwk, format: 'jwk' });
+      return crypto.verify(null, Buffer.from(ticketSigningBytes(ticket), 'utf8'), pub,
+        Buffer.from(String(ticket.ticket_signature), 'base64'));
+    } catch (e) { return false; }
+  }
+  // 签发绑定票据：与信封同一 Ed25519 密钥。调用方须原样转发票据全部字段。
+  // 签发入口归一化：scopes 数组 → 规范字符串；grant → 0/1；leaseId 只有
+  // 缺省（== null）时自动生成，显式传入（含空串）时须合 lease-＋16 hex
+  // 格式，不合格式拒绝签发，不得静默改发新租约。
+  function issueBindingTicket(input) {
+    const leaseId = input.leaseId == null
+      ? ('lease-' + crypto.randomBytes(8).toString('hex'))
+      : input.leaseId;
+    if (typeof leaseId !== 'string' || !/^lease-[0-9a-f]{16}$/.test(leaseId)) {
+      throw new Error('LEA ticket lease_id invalid');
+    }
+    const ticket = {
+      account_id: String(input.accountId),
+      device_id: String(input.deviceId),
+      binding_epoch: input.bindingEpoch,
+      grant_epoch: input.grantEpoch,
+      grant_muse_execute: input.grantMuseExecute ? 1 : 0,
+      scopes: canonicalScopesString(input.scopes || []),
+      lease_id: leaseId,
+      expires_at: input.expiresAt,
+    };
+    return signTicket(ticket);
   }
 
   // ---------- 防重放 / 幂等（内存去重表，DESIGN §4.1/§4.2） ----------
@@ -424,7 +656,24 @@ function createLeaCore(opts) {
       old_binding_epoch: oldEpoch, new_binding_epoch: newEpoch,
       trigger_reason: trigger || 'login', revoked_keys: revokedKeys,
     });
-    return { ok: true, device_id: deviceId, account_id: accountId, binding_epoch: newEpoch, revoked_keys: revokedKeys };
+    // 签发绑定票据（S2：服务端此前无签发票据的代码，C 端 binding.confirm
+    // 永远收不到合法票据）。票据 scopes 为账号级授权 scope（v1 口径，
+    // 见 CANONICAL-SIGNING-V1.md §7：危险 scope 为 Key 级，此处无 Key 上下文）。
+    const grant = getGrant(accountId);
+    const ticket = issueBindingTicket({
+      accountId, deviceId,
+      bindingEpoch: newEpoch,
+      grantEpoch: grant ? grant.grant_epoch : 0,
+      grantMuseExecute: hasGrant(accountId) ? 1 : 0,
+      scopes: hasGrant(accountId) ? ['muse.execute'] : [],
+      expiresAt: nowSec() + TICKET_TTL_S,
+    });
+    audit('lea-ticket-issued', {
+      device_id: deviceId, account_id: accountId, binding_epoch: newEpoch,
+      grant_epoch: ticket.grant_epoch, grant_muse_execute: ticket.grant_muse_execute,
+      lease_id: ticket.lease_id,
+    });
+    return { ok: true, device_id: deviceId, account_id: accountId, binding_epoch: newEpoch, revoked_keys: revokedKeys, ticket };
   }
 
   // ---------- 准入：七项校验（DESIGN §6.2），服务端先拦 ----------
@@ -510,9 +759,14 @@ function createLeaCore(opts) {
     return { ok: true, key };
   }
 
-  // ---------- 信封组包（DESIGN §4.1） ----------
+  // ---------- 信封组包（DESIGN §4.1；规范串 v1） ----------
   function buildEnvelope(input) {
     const issued = nowSec();
+    // params 必须是 JSON 对象（顶层数组／标量即拒绝）：C 端只接受 JSON 对象
+    // params_raw，JS 可签、C 拒收的信封不得产生。
+    if (input.params != null && (typeof input.params !== 'object' || Array.isArray(input.params))) {
+      throw new Error('LEA envelope params must be an object');
+    }
     const env = {
       version: 1,
       request_id: input.requestId,
@@ -527,7 +781,9 @@ function createLeaCore(opts) {
       expires_at: issued + ENVELOPE_TTL_S,
       idempotency_key: input.idempotencyKey,
       command: input.command,
-      params: input.params || {},
+      // params 归一化为键已排序的深拷贝：签名与线上传输用同一份对象，
+      // 线上 params 子串即 stable JSON，C 端对原文算哈希才能对上（§2.1）。
+      params: normalizeParams(input.params || {}),
       timeout_ms: input.timeoutMs,
     };
     return signEnvelope(env);
@@ -652,6 +908,7 @@ function createLeaCore(opts) {
     dir, log, audit, pruneAudit, pruneJobs,
     COMMANDS, ERR, KEY_PREFIX,
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
+    ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus,
     grantMuse, revokeGrant, hasGrant, getGrant,
     recordBinding, getBinding,
@@ -659,8 +916,8 @@ function createLeaCore(opts) {
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
     createJob, getJob, updateJob,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
-    _test: { loadKeys, loadGrants, loadBindings, loadJobs, nonceSeen, idemSeen, hashKey, maskKey },
+    _test: { loadKeys, loadGrants, loadBindings, loadJobs, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
   };
 }
 
-module.exports = { createLeaCore, COMMANDS, ERR, KEY_PREFIX, ENVELOPE_TTL_S, DISPATCH_TIMEOUT_MS, SYNC_WAIT_MS };
+module.exports = { createLeaCore, COMMANDS, ERR, KEY_PREFIX, ENVELOPE_TTL_S, TICKET_TTL_S, DISPATCH_TIMEOUT_MS, SYNC_WAIT_MS };
