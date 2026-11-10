@@ -553,6 +553,18 @@ async function runHealLadder(deps) {
   let code = localCode(state);
   log('ladder local code=' + code + ' action=' + (state.action || ''));
   if (code === HEAL_CODES.SERVICE_MISSING) {
+    // DS-7（低，L-C）：本地判服务缺失≠服务端判无 agent。先问一次服务端
+    // presence：服务端仍 fresh/online 说明本机 nodeid 在线，本地检测
+    // 口径（服务名/检测路径）可能有误，此时不下 no_agent 结论，改报
+    // unverified（码仍带 service-missing，供日志与清单定位）；其余
+    // verdict（stale/offline/not-found）与本地缺失一致、或问不到
+    // （null/抛错）无法确认，仍按原口径报 no_agent。
+    let presence = null;
+    try { presence = await queryPresence(); } catch (e) { presence = null; }
+    if (presence && presence.verdict === 'online') {
+      log('ladder service-missing but presence online, hold no_agent');
+      return { outcome: 'unverified', code, rounds };
+    }
     return { outcome: 'no_agent', code, rounds };
   }
   // 本地需修：最多 3 轮，每轮修完重查本地

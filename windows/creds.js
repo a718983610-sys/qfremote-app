@@ -94,8 +94,24 @@ function createCredStore(opts) {
 
   function has() { return load() !== null; }
 
+  // 补-低（L-C）：旧 clear() 把一切异常都吞掉——unlink 真失败（权限/
+  // 占用/磁盘错）时调用方以为凭据已清，旧凭据静默残留，下次启动
+  // 仍能自动登录。现改为：文件本就不存在＝已清，返回 true；删失败
+  // （非 ENOENT）即抛 CLEAR_FAIL（带原错误信息），调用方必须感知；
+  // 删后仍存在也抛（不认“删过了”）。返回 true＝文件确已不在。
+  // 调用方（main.js 三处）catch 后须记 bootLog，不得再 /* ignore */。
   function clear() {
-    try { fs.unlinkSync(file); } catch (e) { /* 本来就没有，忽略 */ }
+    try {
+      if (!fs.existsSync(file)) return true;
+    } catch (e) { /* existsSync 异常按“可能存在”继续走删除 */ }
+    try {
+      fs.unlinkSync(file);
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return true; // 并发已删
+      throw credError('清除记住的账号密码失败，旧凭据可能仍在：' + (e && e.message ? e.message : String(e)), 'CLEAR_FAIL');
+    }
+    if (fs.existsSync(file)) throw credError('清除记住的账号密码失败，旧凭据仍在。', 'CLEAR_FAIL');
+    return true;
   }
 
   return { encryptionAvailable, save, load, has, clear, file };

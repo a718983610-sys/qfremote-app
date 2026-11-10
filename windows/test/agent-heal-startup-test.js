@@ -316,6 +316,21 @@ try {
     checkState: async () => { p8Calls++; return p8Calls === 1 ? staleState : okState; },
     probeConnectivity: probePass, queryPresence: onlinePresence, runRepair: fixRepair, log: logNoop });
   ok('P8-repaired-then-online-is-fixed', rP8.outcome === 'fixed' && rP8.rounds === 1);
+  // ---- DS-7（低，L-C）：SERVICE_MISSING 须先问服务端 presence——
+  // 服务端仍 online 时不下 no_agent，改报 unverified；其余 verdict
+  // 仍按原口径报 no_agent。生产接线（main.js runStartupAgentHeal）
+  // 确有 queryPresence（queryOwnPresence），此分支在真路可达。
+  const missingState = { msh: { found: false, meshServer: null }, service: { exists: false, status: null }, action: 'none' };
+  let ds7Calls = 0;
+  const rP9 = await heal.runHealLadder({ checkState: async () => missingState, probeConnectivity: probePass, queryPresence: async () => { ds7Calls++; return onlinePresence(); }, runRepair: fixRepair, log: logNoop });
+  ok('P9-service-missing-online-unverified', rP9.outcome === 'unverified' && rP9.code === 'service-missing' && rP9.rounds === 0 && ds7Calls === 1);
+  let ds7bCalls = 0;
+  const rP9b = await heal.runHealLadder({ checkState: async () => missingState, probeConnectivity: probePass, queryPresence: async () => { ds7bCalls++; return heal.parsePresenceResponse({ code: 'OFFLINE', fresh: false, online: false, lastAgentPongAgeMs: 400000 }); }, runRepair: fixRepair, log: logNoop });
+  ok('P9b-service-missing-offline-no-agent', rP9b.outcome === 'no_agent' && rP9b.code === 'service-missing' && ds7bCalls === 1);
+  const rP9c = await heal.runHealLadder({ checkState: async () => missingState, probeConnectivity: probePass, queryPresence: async () => null, runRepair: fixRepair, log: logNoop });
+  ok('P9c-service-missing-presence-null-no-agent', rP9c.outcome === 'no_agent' && rP9c.code === 'service-missing');
+  const rP9d = await heal.runHealLadder({ checkState: async () => missingState, probeConnectivity: probePass, queryPresence: async () => { throw new Error('presence boom'); }, runRepair: fixRepair, log: logNoop });
+  ok('P9d-service-missing-presence-throw-no-agent', rP9d.outcome === 'no_agent' && rP9d.code === 'service-missing');
 
   result.pass = Object.values(result.cases).every((c) => c.pass);
 } catch (e) {

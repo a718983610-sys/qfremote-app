@@ -157,5 +157,22 @@ t('pin 再见一致不再重复记首次日志', logged.check('node-55', stAlice
 t('pin 登记后伪造机主被拒', logged.check('node-55', { ownerUsername: 'mallory', devicePublicKey: KEY_A, state: 'Off' }).state === 'owner-mismatch');
 t('pin 登记后伪造公钥被拒', logged.check('node-55', { ownerUsername: 'alice', devicePublicKey: KEY_B, state: 'Off' }).state === 'key-mismatch');
 
+// --- pkg3 #10：readStatus 的 Base64 提取（extractStatusPayload） ---
+const { extractStatusPayload } = B._test;
+const _st10 = { state: 'Locked', version: '2.4.5', ownerUsername: 'alice', devicePublicKey: 'KEYDATA' };
+const _b64_10 = Buffer.from(JSON.stringify(_st10), 'utf8').toString('base64');
+t('#10 干净回包（纯 Base64）解出 status', (() => { const p = extractStatusPayload(_b64_10); return p && p.state === 'Locked' && p.ownerUsername === 'alice'; })());
+t('#10 前后空白/换行不影响提取', (() => { const p = extractStatusPayload('\r\n  ' + _b64_10 + '\r\n'); return p && p.state === 'Locked'; })());
+// 旧写法会取首个 ≥80 串：警告里的长 Base64（解不出 {state}）在前时
+// 旧写法整读判空；新写法跳过诱饵、采信后面的真 Base64。
+const _decoy10 = Buffer.from('x'.repeat(100), 'utf8').toString('base64');
+t('#10 警告长串在前不误抓（跳过诱饵取真值）', (() => { const p = extractStatusPayload('WARNING ' + _decoy10 + ' ' + _b64_10); return p && p.state === 'Locked'; })());
+t('#10 诱饵单独出现即读不到（不采信垃圾）', extractStatusPayload('WARNING ' + _decoy10) === null);
+// 传输中被折行：真 Base64 中间插换行，token 切不开时靠去空白整串兜底。
+const _wrapped10 = _b64_10.slice(0, 40) + '\r\n' + _b64_10.slice(40);
+t('#10 折行 Base64 仍能提取（去空白兜底）', (() => { const p = extractStatusPayload(_wrapped10); return p && p.state === 'Locked'; })());
+t('#10 只有垃圾/空串即 null', extractStatusPayload('') === null && extractStatusPayload('not base64 at all') === null && extractStatusPayload(null) === null);
+t('#10 解出 JSON 但无 state 即 null', extractStatusPayload(Buffer.from(JSON.stringify({ version: '2.4.5', ownerUsername: 'alice', note: 'x'.repeat(60) }), 'utf8').toString('base64')) === null);
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

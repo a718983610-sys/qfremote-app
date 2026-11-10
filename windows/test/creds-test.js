@@ -73,6 +73,17 @@ function fakeSafeStorage(available) {
     const got2 = store.load();
     ok('G_overwrite', !!got2 && got2.username === 'otheruser9' && got2.password === 'OtherPass999');
 
+    // 补-低（L-C）：clear() 失败须可感知——成功返 true；文件本就
+    // 不存在也返 true（幂等，不抛）；真删不掉抛 CLEAR_FAIL 且文件仍在。
+    ok('H_clear_returns_true', store.clear() === true && !fs.existsSync(file));
+    ok('I_clear_missing_returns_true', store.clear() === true);
+    const dirAsFile = path.join(dir, 'as-dir');
+    fs.mkdirSync(dirAsFile);
+    const storeD = createCredStore({ file: dirAsFile, safeStorage: fakeSafeStorage(true) });
+    let jCode = null;
+    try { storeD.clear(); } catch (e) { jCode = e.code; }
+    ok('J_clear_fail_throws_CLEAR_FAIL', jCode === 'CLEAR_FAIL' && fs.existsSync(dirAsFile), { jCode });
+
     result.pass = Object.values(result.cases).every(c => c.pass);
   } catch (e) {
     result.fatal = e.message;

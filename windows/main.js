@@ -19,6 +19,7 @@ const licenseMod = require('./license');
 const deviceCodeMod = require('./device-code');
 const devicesMod = require('./devices');
 const clientVersion = require('./client-version');
+const extRetryMod = require('./ext-retry');
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
 
@@ -291,7 +292,9 @@ function handleManualLogout() {
   settings.auth.manualLogout = true;
   settings.auth.rememberDevice = false;
   pendingManualClear = true;
-  try { credStore.clear(); } catch (e) { /* ignore */ }
+  // 补-低（L-C）：clear() 失败即抛 CLEAR_FAIL，须记 bootLog——旧凭据
+  // 可能仍在，登出流程本身不阻塞，但不得静默当作已清。
+  try { credStore.clear(); } catch (e) { bootLog('creds.clear-failed', e && e.message || String(e)); }
   saveSettings();
   // 子会话级联终止（好友/聊天/论坛/管理）＋保活视图回落到各自起始页；
   // 与「正式退出登录」共用同一条路径，不另造平行退出。
@@ -338,7 +341,7 @@ async function terminateSubSessions() {
   if (FRIENDS_FALLBACK_URL) { try { targets.push(new URL(FRIENDS_FALLBACK_URL).origin + '/api/friends/logout'); } catch (e) { /* ignore */ } }
   try { targets.push(svcUrls.forumApi('logout')); } catch (e) { /* ignore */ }
   try { targets.push(svcUrls.adminApi('logout')); } catch (e) { /* ignore */ }
-  await Promise.all(targets.map((u) => extRequest('POST', u, {}).catch(() => null)));
+  await Promise.all(targets.map((u) => extRequest('POST', u, {}, { retries: 2 }).catch(() => null)));
 }
 function reloadSocialViewsToStart() {
   const starts = { friends: FRIENDS_URL, chat: CHAT_URL, forum: FORUM_URL };
@@ -459,7 +462,9 @@ async function processAuthPage() {
         if (plan.save) {
           try { credStore.save(plan.save.username, plan.save.password); } catch (e) { /* ignore */ }
         } else if (plan.clearVault) {
-          try { credStore.clear(); } catch (e) { /* ignore */ }
+          // 补-低（L-C）：clear() 失败即抛 CLEAR_FAIL，须记 bootLog——
+          // 用户未勾记住密码时旧凭据必须真清掉，不得静默残留。
+          try { credStore.clear(); } catch (e) { bootLog('creds.clear-failed', e && e.message || String(e)); }
         }
         if (plan.rememberDevice !== null) settings.auth.rememberDevice = plan.rememberDevice;
         if (plan.clearManualLogout) settings.auth.manualLogout = false;
@@ -510,7 +515,8 @@ async function processAuthPage() {
       }
 
       if (det.fieldsCleared) {
-        try { credStore.clear(); } catch (e) { /* ignore */ }
+        // 补-低（L-C）：同上，clear 失败须记 bootLog，不得静默当作已清。
+        try { credStore.clear(); } catch (e) { bootLog('creds.clear-failed', e && e.message || String(e)); }
         gateCredsMemory = null;
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
         det = Object.assign({}, det, { fieldsCleared: false, pending: null });
@@ -1309,25 +1315,29 @@ async function getConsoleCookieHeader(urlStr) {
 async function extRequest(method, urlStr, bodyObj, opts) {
   // opts.noCookie：不附会话 cookie（许可领取的无会话核验入口专用——体里
   // 带账号＋密码只核验不签发登录态，契约 §7.5.3；其余调用口径不变）。
+  // opts.retries：显式重试次数（见 ext-retry.js；GET 默认 1、POST 默认 0）。
   const cookie = (opts && opts.noCookie) ? '' : await getConsoleCookieHeader(urlStr);
-  return new Promise((resolve) => {
-    let u;
-    try { u = new URL(urlStr); } catch (e) { resolve({ status: 0, json: null, text: '' }); return; }
-    // 2026-10-29 审计 J-2 定案：本通道承载会话 Cookie 与密钥领取核验，只许
-    // https 且走 Node 默认证书校验，不再关闭校验、不接受 http 目标。
-    if (u.protocol !== 'https:') { resolve({ status: 0, json: null, text: '' }); return; }
-    // W-20：发 cookie 前校验目标主机在白名单内（与 svc-urls 同源表共用）。
-    if (!svcUrlsMod.isAllowedSvcHost(urlStr)) {
-      bootLog('extRequest.rejected-host', u.hostname);
-      resolve({ status: 0, json: null, text: '' });
-      return;
-    }
-    const lib = u.protocol === 'https:' ? https : http;
-    const body = bodyObj ? JSON.stringify(bodyObj) : null;
-    // 2.3.2：自家服务统一版本头（许可/积分/站长/论坛 SSO/子服务登出全走此出口）
-    const headers = clientVersion.clientVersionHeaders();
-    if (cookie) headers.Cookie = cookie;
-    if (body) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
+  let u;
+  try { u = new URL(urlStr); } catch (e) { return { status: 0, json: null, text: '' }; }
+  // 2026-10-29 审计 J-2 定案：本通道承载会话 Cookie 与密钥领取核验，只许
+  // https 且走 Node 默认证书校验，不再关闭校验、不接受 http 目标。
+  if (u.protocol !== 'https:') { return { status: 0, json: null, text: '' }; }
+  // W-20：发 cookie 前校验目标主机在白名单内（与 svc-urls 同源表共用）。
+  if (!svcUrlsMod.isAllowedSvcHost(urlStr)) {
+    bootLog('extRequest.rejected-host', u.hostname);
+    return { status: 0, json: null, text: '' };
+  }
+  const lib = u.protocol === 'https:' ? https : http;
+  const body = bodyObj ? JSON.stringify(bodyObj) : null;
+  // 2.3.2：自家服务统一版本头（许可/积分/站长/论坛 SSO/子服务登出全走此出口）
+  const headers = clientVersion.clientVersionHeaders();
+  if (cookie) headers.Cookie = cookie;
+  if (body) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(body); }
+  // DS-8（低）：单次请求仍是 8 秒超时；无 HTTP 响应（超时/断网）时由
+  // ext-retry.js 做有界重试（GET 默认补 1 次、POST 默认不补、调用方
+  // 按幂等性显式 opt-in）；收到任何 HTTP 状态码即服务器已回答，不重试。
+  const requestOnce = () => new Promise((resolve) => {
+    let timedOut = false;
     const req = lib.request(u, { method, headers, timeout: 8000 }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -1337,13 +1347,14 @@ async function extRequest(method, urlStr, bodyObj, opts) {
         try { json = JSON.parse(text); } catch (e) { /* ignore */ }
         resolve({ status: res.statusCode, json, text });
       });
-      res.on('error', () => resolve({ status: 0, json: null, text: '' }));
+      res.on('error', () => resolve({ status: 0, json: null, text: '', timeout: timedOut }));
     });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve({ status: 0, json: null, text: '' }));
+    req.on('timeout', () => { timedOut = true; req.destroy(); });
+    req.on('error', () => resolve({ status: 0, json: null, text: '', timeout: timedOut }));
     if (body) req.write(body);
     req.end();
   });
+  return extRetryMod.requestWithRetry(requestOnce, opts, method);
 }
 // 积分心跳：每 60 秒一次，只在主窗口在、控制台已加载时发。
 // 2.3.1：心跳响应带 forceLogout 信号（契约 §7.5.7，转赠领取后原主人
@@ -1355,7 +1366,7 @@ function startPointsHeartbeat() {
     try {
       if (!win || win.isDestroyed() || !view || view.webContents.isDestroyed()) return;
       if (!consoleLoaded || !isTargetUrl(view.webContents.getURL())) return;
-      const r = await extRequest('POST', svcUrls.pointsApi('heartbeat'), { client: 'win' });
+      const r = await extRequest('POST', svcUrls.pointsApi('heartbeat'), { client: 'win' }, { retries: 1 });
       if (r && r.json && r.json.forceLogout) {
         await handleForceLogoutSignal(typeof r.json.gateCode === 'string' && r.json.gateCode ? r.json.gateCode : 'G1');
       }
@@ -1409,7 +1420,7 @@ async function fetchLicenseMe() {
 async function reportDevice() {
   const code = deviceCodeStore.ensure();
   if (!code) return null;
-  const r = await extRequest('POST', svcUrls.licenseApi('device-report'), { deviceCode: code, platform: 'pc' });
+  const r = await extRequest('POST', svcUrls.licenseApi('device-report'), { deviceCode: code, platform: 'pc' }, { retries: 1 });
   if (!r || r.status !== 200 || !r.json) return null;
   return licenseMod.parseDeviceReport(r.json);
 }
@@ -1424,6 +1435,9 @@ async function bindLicenseKey(key) {
 // （或保险箱凭据）时带账号＋密码走无会话核验入口（只核验不签发），
 // 否则走已登录入口（会话 cookie）。凭据只进本次请求体，不落盘不进日志。
 async function claimLicenseKey(key) {
+  // DS-8（低）：领取是非幂等写操作，不加 retries——服务端可能已落单、
+  // 只是响应丢了，盲目重发会把成功翻成“已领取”失败；丢响应后的
+  // 正确做法是调用方查许可状态对账（另立项），不在此重发。
   const creds = gateCredsMemory || (credStore.has() ? credStore.load() : null);
   let r = null;
   if (creds && creds.username && creds.password) {

@@ -47,7 +47,7 @@ const RECONCILE_MS = 30000;
 const UPDATE_RECONCILE_MS = 240000; // 下载+替换+重启服务+回滚余量
 const STATUS_TTL_MS = 15000;              // 机主设备状态展示缓存（原 10s；只用于 GET /lock/devices 读路径）
 const STATUS_TTL_NONOWNER_MS = 60000;     // 非机主判定缓存（2.4.5：300s→60s）：只用于「过滤掉别人的设备」，永不下发；
-// 300s 时刚授权/刚改名后 5 分钟内仍判非机主，60s 后变化即生效；过滤仍省读。
+// 旧 300s 时刚授权/刚改名后 5 分钟内仍判非机主，60s 后变化即生效；过滤仍省读。
 const STATUS_MISS_TTL_MS = 5000;          // 读不到（离线/超时）负缓存：短 TTL，尽快重试，不拖死整表
 
 /* 通道快速失败与读路径调参（perf-lockchain 2026-10-26）
@@ -260,6 +260,31 @@ function createDevicePinStore(opts) {
     return { state: 'ok' };
   }
   return { check, loadOpsPins, fingerprintPublicKey };
+}
+
+// pkg3 #10（低，L-C）：从 runcommands 回包里提取 status.json 的 Base64。
+// PS_READ_STATUS 只输出 status.json 的 Base64，但回包可能夹杂 PowerShell
+// 警告/错误文本；旧写法先去全部空白再取首个 ≥80 字符的 Base64 串——
+// 去空白会把相邻词拼成假长串，首个命中也可能是警告里的串，解码失败
+// 即整读判空。现改为逐个候选验证：先按空白切 token（整 token 全 Base64
+// 字符、尾部最多两个 =、长度≥80 且为 4 的倍数），再把去空白后的整串
+// 当作候选（兜住传输中被折行的真 Base64）；每个候选都解码＋JSON.parse，
+// 只采信解出 {state:string} 的那一个，全都不中即返回 null（不猜）。
+function extractStatusPayload(out) {
+  const text = String(out || '');
+  const candidates = [];
+  for (const tok of text.split(/\s+/)) { if (tok) candidates.push(tok); }
+  const stripped = text.replace(/\s+/g, '');
+  const merged = stripped.match(/[A-Za-z0-9+/=]{80,}/g);
+  if (merged) for (const s of merged) { if (candidates.indexOf(s) === -1) candidates.push(s); }
+  for (const cand of candidates) {
+    if (cand.length < 80 || cand.length % 4 !== 0) continue;
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cand)) continue;
+    let parsed = null;
+    try { parsed = JSON.parse(Buffer.from(cand, 'base64').toString('utf8')); } catch (e) { continue; }
+    if (parsed && typeof parsed.state === 'string') return parsed;
+  }
+  return null;
 }
 
 function createLockBridge(deps) {
@@ -589,11 +614,7 @@ function createLockBridge(deps) {
     let status = null;
     try {
       const out = await runCommand(nodeId, PS_READ_STATUS, timeoutMs);
-      const m = out.replace(/\s+/g, '').match(/[A-Za-z0-9+/=]{80,}/);
-      if (m) {
-        const parsed = JSON.parse(Buffer.from(m[0], 'base64').toString('utf8'));
-        if (parsed && typeof parsed.state === 'string') status = parsed;
-      }
+      status = extractStatusPayload(out);
     } catch (e) { status = null; }
     if (status) {
       statusCache.set(nodeId, { at: Date.now(), status });
@@ -607,8 +628,8 @@ function createLockBridge(deps) {
     }
     return status;
   }
-  // 缓存是否对「本请求者」仍然有效：机主设备 15s（展示用），非机主 300s（仅过滤用），
-  // 读不到 5s（尽快重试）。因此归属判定的最长陈旧窗口＝15s（机主）/300s（非机主）。
+  // 缓存是否对「本请求者」仍然有效：机主设备 15s（展示用），非机主 60s（仅过滤用），
+  // 读不到 5s（尽快重试）。因此归属判定的最长陈旧窗口＝15s（机主）/60s（非机主）。
   function statusFresh(entry, me) {
     if (!entry) return false;
     let ttl;
@@ -805,7 +826,7 @@ function createLockBridge(deps) {
 
   /* ---------- /lock/devices 专用读路径 ----------
      B-1 节点清单不再每请求实打（60s 新鲜期 + 旧值先出 + single-flight）；
-     B-2 只对「缓存未命中/过期」的节点实读，非机主节点按 300s 长 TTL 不再每 10s 重读；
+     B-2 只对「缓存未命中/过期」的节点实读，非机主节点按 60s TTL 不再每 10s 重读；
      B-3 并发 6、单台 1200ms、总预算 2400ms，超预算转后台回填；
      B-4 同账号并发请求合并（客户端实测同页 /lock/devices 连发/被取消 ×3）。
      契约不变：仍返回 200 {devices:[{id,name,owner,locked,component,version}]}。 */
@@ -1033,4 +1054,4 @@ function createLockBridge(deps) {
   return { handle, purgeUser };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, extractStatusPayload, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey } };
