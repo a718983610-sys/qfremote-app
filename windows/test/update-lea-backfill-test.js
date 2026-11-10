@@ -9,6 +9,9 @@
  *  E. 补装路径哈希篡改 → fail-closed（hash-mismatch，零拉起）；
  *  F. 锁未装（全新安装）→ 原行为 launched 不变；同版本二次调用 already-tried；
  *     force=true（锁面板手动重试）绕过每版本守门；
+ *  J. F1 打包形态（深查发现）：打包时 -LeaDir 显式传 $INSTDIR\LEA
+ *     （process.execPath 旁），-LeaScriptHash 随行；开发态不传 -LeaDir；
+ *     asar 解包映射 unpackedAppPath／preferUnpackedPath 单元断言。
  *  G. 白名单闭环实盘核对（非门禁探针，只记录）：whitelist.json 内
  *     install-lea.ps1 条目 == 磁盘 install-lea.ps1 实算 SHA-256。漂移时
  *     本组只记录、不判失败——install-lea.ps1 与 whitelist.json 属他线
@@ -58,7 +61,7 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
 (async () => {
   try {
     // ---- 抽取真实函数文本，并做防 stale 断言 ----
-    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices']
+    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath']
       .map((n) => extractFunction(MAIN_SRC, n)).join('\n');
     ok('X0_extract', fns.includes('leaServiceInstalled()') && fns.includes('LEA_DEGRADED')
       && fns.includes('system-services.lea-missing') && fns.includes('lea-backfill-deferred')
@@ -72,8 +75,9 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
     P.helperExe = path.join(tmp, 'syshelper', 'QFSysHelper.exe');
     P.installPs1 = path.join(tmp, 'privacy-lock', 'install.ps1');
     P.leaPs1 = path.join(tmp, 'syshelper', 'LEA', 'install-lea.ps1');
+    P.pkgLeaPs1 = path.join(tmp, 'LEA', 'install-lea.ps1');
     P.wlJson = path.join(tmp, 'syshelper', 'whitelist.json');
-    for (const p of [P.sysPs1, P.helperExe, P.installPs1, P.leaPs1]) {
+    for (const p of [P.sysPs1, P.helperExe, P.installPs1, P.leaPs1, P.pkgLeaPs1]) {
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, 'fixture-' + path.basename(p) + '-v3\n');
     }
@@ -103,10 +107,12 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         lockInstalled: true, leaExe: false, leaClient: false, leaVer: false, leaDegraded: false,
         svcRegistered: true,
         ownerChanged: false, ownerUac: false, prevVersion: '2.4.4', appVersion: '3.0.0',
-        tamperLea: false,
+        tamperLea: false, tamperPkgLea: false, packaged: false, execPath: null, extraPresent: null,
       }, opts || {});
       if (o.tamperLea) fs.writeFileSync(P.leaPs1, 'tampered\n');
       else fs.writeFileSync(P.leaPs1, leaOrig);
+      if (o.tamperPkgLea) fs.writeFileSync(P.pkgLeaPs1, 'tampered\n');
+      else fs.writeFileSync(P.pkgLeaPs1, leaOrig);
       const present = new Set();
       if (o.lockInstalled) present.add(W.lockDevice);
       if (o.leaExe) present.add(W.leaExe);
@@ -114,12 +120,13 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       if (o.leaVer) present.add(W.leaVer);
       if (o.leaDegraded) present.add(W.leaDegraded);
       const fakeFs = {
-        // 夹具四件＋白名单走真磁盘；Windows 落盘态走场景集合；其余一律 false
-        //（尤其 resourcesPath 为空时拼出的相对路径 'QFSysHelper.exe'，不得
-        // 随 cwd 抖动）。
+        // 夹具四件＋白名单＋打包 LEA 载荷走真磁盘；Windows 落盘态走场景集合；
+        // 其余一律 false（尤其 resourcesPath 为空时拼出的相对路径
+        // 'QFSysHelper.exe'，不得随 cwd 抖动）。
         existsSync: (p) => {
           if (present.has(p)) return true;
-          if (p === P.sysPs1 || p === P.helperExe || p === P.installPs1 || p === P.leaPs1 || p === P.wlJson) return true;
+          if (p === P.sysPs1 || p === P.helperExe || p === P.installPs1 || p === P.leaPs1 || p === P.pkgLeaPs1 || p === P.wlJson) return true;
+          if (o.extraPresent && o.extraPresent.has(p)) return true;
           if (p === 'QFSysHelper.exe') return false;
           return false;
         },
@@ -131,8 +138,8 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       let syncCalls = 0;
       const sandbox = {
         __dirname: tmp,
-        process: { platform: 'win32', env: { ProgramFiles: PF, ProgramData: PD }, resourcesPath: '', execPath: 'C:\\QFRemote\\QFRemote.exe' },
-        app: { isPackaged: false, getVersion: () => o.appVersion },
+        process: { platform: 'win32', env: { ProgramFiles: PF, ProgramData: PD }, resourcesPath: '', execPath: o.execPath || 'C:\\QFRemote\\QFRemote.exe' },
+        app: { isPackaged: !!o.packaged, getVersion: () => o.appVersion },
         settings: { systemServicesTriedVersion: o.prevVersion },
         saveSettings: () => {},
         currentGateUsername: () => '718983610',
@@ -230,6 +237,41 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       const r = await run(c);
       ok('B7_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
       ok('B8_spawn_once', c.spawns.length === 1);
+    }
+
+    // ---- J. F1 打包形态：-LeaDir 显式传 $INSTDIR\LEA；开发态不传 ----
+    {
+      const pkgExec = path.join(tmp, 'QFRemote.exe');
+      const pkgLeaDir = path.join(tmp, 'LEA');
+      const c = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false, packaged: true, execPath: pkgExec });
+      const r = await run(c);
+      ok('J1_pkg_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
+      const argStr = c.spawns.length ? c.spawns[0].args.join(' ') : '';
+      ok('J2_pkg_lea_dir', argStr.includes("'-LeaDir'") && argStr.includes(pkgLeaDir));
+      ok('J3_pkg_hash', argStr.includes('-LeaScriptHash') && argStr.includes(leaHash));
+      const cDev = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false });
+      await run(cDev);
+      const devArgs = cDev.spawns.length ? cDev.spawns[0].args.join(' ') : '';
+      ok('J4_dev_no_lea_dir', !devArgs.includes("'-LeaDir'"));
+      const cTam = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false, packaged: true, execPath: pkgExec, tamperPkgLea: true });
+      const rTam = await run(cTam);
+      ok('J5_pkg_tampered', rTam && rTam.ok === false && rTam.reason === 'hash-mismatch', { reason: rTam && rTam.reason });
+      ok('J6_pkg_tampered_no_spawn', cTam.spawns.length === 0);
+      fs.writeFileSync(P.pkgLeaPs1, leaOrig);
+    }
+
+    // ---- J7. asar 解包映射单元断言 ----
+    {
+      const c = makeCtx({ lockInstalled: false });
+      const asarPs1 = path.join(tmp, 'app.asar', 'install-system-services.ps1');
+      const unpPs1 = path.join(tmp, 'app.asar.unpacked', 'install-system-services.ps1');
+      ok('J7a_unpack_transform', vm.runInContext('unpackedAppPath(' + JSON.stringify(asarPs1) + ')', c.sandbox) === unpPs1);
+      ok('J7b_unpack_idempotent', vm.runInContext('unpackedAppPath(' + JSON.stringify(unpPs1) + ')', c.sandbox) === unpPs1);
+      ok('J7c_unpack_passthrough', vm.runInContext('unpackedAppPath(' + JSON.stringify(path.join(tmp, 'x.ps1')) + ')', c.sandbox) === path.join(tmp, 'x.ps1'));
+      const c2 = makeCtx({ lockInstalled: false, extraPresent: new Set([unpPs1]) });
+      ok('J7d_prefer_unpacked', vm.runInContext('preferUnpackedPath(' + JSON.stringify(asarPs1) + ')', c2.sandbox) === unpPs1);
+      const c3 = makeCtx({ lockInstalled: false });
+      ok('J7e_prefer_raw_when_absent', vm.runInContext('preferUnpackedPath(' + JSON.stringify(asarPs1) + ')', c3.sandbox) === asarPs1);
     }
 
     // ---- H. owner UAC 在飞 → 本轮 defer，下次登录收敛补装（Q4 串行化） ----

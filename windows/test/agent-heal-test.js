@@ -264,6 +264,48 @@ try {
      'syshelper/QFSysHelper.exe', 'syshelper/whitelist.json']
       .every((f) => buildFiles.includes(f)) && pkg.version === '2.4.5');
 
+  // ---- H. F1/F2（深查发现）：asar 解包＋unverified 文案 ----
+  const heal = require('../agent-heal');
+  const asarUnpack = (pkg.build && pkg.build.asarUnpack) || [];
+  ok('H1-asar-unpack-native-files',
+    ['syshelper/QFSysHelper.exe', 'install-system-services.ps1', 'qf-agent-heal.ps1']
+      .every((f) => asarUnpack.includes(f)));
+  ok('H2-unverified-service-missing-text',
+    heal.healOutcomeMessage('unverified', 'service-missing').includes('服务器那边显示这台设备在线')
+    && !heal.healOutcomeMessage('unverified', 'service-missing').includes('还没看到'));
+  ok('H3-unverified-other-text-unchanged',
+    heal.healOutcomeMessage('unverified').includes('还没看到这台设备在线')
+    && heal.healOutcomeMessage('unverified', 'server-unconfirmed').includes('还没看到这台设备在线'));
+  ok('H4-unpacked-path-transform',
+    heal.unpackedAppPath('/x/resources/app.asar/qf-agent-heal.ps1') === '/x/resources/app.asar.unpacked/qf-agent-heal.ps1'
+    && heal.unpackedAppPath('/x/resources/app.asar.unpacked/qf-agent-heal.ps1') === '/x/resources/app.asar.unpacked/qf-agent-heal.ps1'
+    && heal.unpackedAppPath('/x/other/qf-agent-heal.ps1') === '/x/other/qf-agent-heal.ps1');
+  {
+    const hbase = fs.mkdtempSync(path.join(os.tmpdir(), 'heal-asar-'));
+    const resDir = path.join(hbase, 'resources');
+    const asarDir = path.join(resDir, 'app.asar');
+    fs.mkdirSync(asarDir, { recursive: true });
+    fs.mkdirSync(path.join(resDir, 'app.asar.unpacked'), { recursive: true });
+    fs.writeFileSync(path.join(asarDir, 'qf-agent-heal.ps1'), 'asar-copy\n');
+    fs.writeFileSync(path.join(resDir, 'app.asar.unpacked', 'qf-agent-heal.ps1'), 'unpacked-copy\n');
+    ok('H5-resolve-prefers-unpacked',
+      heal.resolveHealScriptPath({ resourcesPath: resDir, dirname: asarDir, tempDir: hbase }) ===
+      path.join(resDir, 'app.asar.unpacked', 'qf-agent-heal.ps1'));
+    fs.unlinkSync(path.join(resDir, 'app.asar.unpacked', 'qf-agent-heal.ps1'));
+    ok('H6-resolve-falls-back-to-asar',
+      heal.resolveHealScriptPath({ resourcesPath: resDir, dirname: asarDir, tempDir: hbase }) ===
+      path.join(asarDir, 'qf-agent-heal.ps1'));
+    const tmpOnly = fs.mkdtempSync(path.join(os.tmpdir(), 'heal-temp-'));
+    fs.writeFileSync(path.join(tmpOnly, 'qf-agent-heal.ps1'), 'temp-copy\n');
+    ok('H7-resolve-temp-last-resort',
+      heal.resolveHealScriptPath({ resourcesPath: resDir, dirname: asarDir, tempDir: tmpOnly }) ===
+      path.join(asarDir, 'qf-agent-heal.ps1'));
+    fs.unlinkSync(path.join(asarDir, 'qf-agent-heal.ps1'));
+    ok('H8-resolve-temp-when-no-app-copy',
+      heal.resolveHealScriptPath({ resourcesPath: resDir, dirname: asarDir, tempDir: tmpOnly }) ===
+      path.join(tmpOnly, 'qf-agent-heal.ps1'));
+  }
+
   result.pass = Object.values(result.cases).every((c) => c.pass);
 } catch (e) {
   result.error = String(e && e.stack || e);

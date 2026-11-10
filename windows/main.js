@@ -2858,7 +2858,7 @@ function recordHealOutcome(outcome, detail) {
       updater.fetchManifest(8000).catch(() => {});
     }
   } catch (e) { /* ignore */ }
-  const msg = agentHeal.healOutcomeMessage(outcome);
+  const msg = agentHeal.healOutcomeMessage(outcome, detail && detail.code);
   if (!msg) return;
   const st = settings.agentHeal || {};
   if (outcome === 'denied' && (st.consecutiveFailures || 0) < 2) return;
@@ -2897,6 +2897,31 @@ function lockServiceInstalled() {
   } catch (e) { /* ignore */ }
   return false;
 }
+// 打包形态 asar 解包映射（F1，深查发现）：electron-builder 默认把
+// build.files 打进 resources/app.asar；第一方文件不参与 smartUnpack
+// （只对 node_modules 内二进制生效，见 app-builder-lib 26.18.0
+// unpackDetector.js／AppFileWalker.js），package.json 的 asarUnpack 把
+// 三件原生消费文件（QFSysHelper.exe、install-system-services.ps1、
+// qf-agent-heal.ps1）解到 resources/app.asar.unpacked/（同相对路径）。
+// __dirname 在打包形态下指向 app.asar 内；Electron 的 fs 读得到 asar 内
+// 文件，但原生进程（PowerShell、Copy-Item、sc）读不到 asar 路径，故原生
+// 消费前一律走 preferUnpackedPath() 换到解包路径；开发态无解包目录，
+// 原样返回。纯字符串变换＋existsSync 探针，可单测。
+function unpackedAppPath(p) {
+  if (typeof p !== 'string' || !p) return p;
+  const parts = p.split(path.sep);
+  const i = parts.indexOf('app.asar');
+  if (i < 0) return p;
+  parts[i] = 'app.asar.unpacked';
+  return parts.join(path.sep);
+}
+function preferUnpackedPath(p) {
+  try {
+    const u = unpackedAppPath(p);
+    if (u !== p && fs.existsSync(u)) return u;
+  } catch (e) { /* ignore */ }
+  return p;
+}
 // B-LEA：LEA 已装判据（偏保守：宁可多弹一次 UAC，不可静默跳过补装）。
 // 检查项：%ProgramFiles%\QFR\LEA\ 下 QFRLEA.exe（服务本体）＋
 // qf-lea-client.exe（客户端，与服务本体同在 install-lea.ps1 ②步拷入）＋
@@ -2905,7 +2930,8 @@ function lockServiceInstalled() {
 // （sc.exe query 只读、无需提权——文件齐全≠服务在，卸载残留／中途失败
 // 都可能只剩文件，查不到／查失败一律按未装）。
 // 不检查项：服务是否 Running（起停由 install-lea 自检与自愈管，注册即算
-// 已装）；USH 计划任务（主程序有兜底拉起，任务缺失≠LEA 不可用）。
+// 已装）；USH 计划任务（任务缺失时 UI 命令 fail-closed；主程序兜底拉起
+// 尚未实现——F1 深查发现，见发版后续清单，不在此处谎称已兜底）。
 // 注意：不设开发态目录回退——windows/lea/QFRLEA.exe 本就随包在仓内，
 // 回退会让开发机永远判已装，升级补装分支测不到。
 function leaServiceInstalled() {
@@ -3143,11 +3169,14 @@ async function maybeInstallSystemServices(force) {
   if (!owner) { bootLog('system-services.no-owner'); return { ok: false, reason: 'no-owner' }; }
   const srcDir = lockComponentSourceDir();
   const installPs1 = path.join(srcDir, 'install.ps1');
-  const sysPs1 = path.join(__dirname, 'install-system-services.ps1');
-  // helper 二进制：打包后在 resources/，开发态在 syshelper/。
-  const helperExe = (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'QFSysHelper.exe')))
+  // F1：原生消费的脚本须走解包路径（见 unpackedAppPath 注）——
+  // __dirname 在打包形态下是 app.asar 内路径，PowerShell 读不到。
+  const sysPs1 = preferUnpackedPath(path.join(__dirname, 'install-system-services.ps1'));
+  // helper 二进制：打包后在 resources/（解包后），开发态在 syshelper/。
+  const helperExeRaw = (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'QFSysHelper.exe')))
     ? path.join(process.resourcesPath, 'QFSysHelper.exe')
     : path.join(__dirname, 'syshelper', 'QFSysHelper.exe');
+  const helperExe = preferUnpackedPath(helperExeRaw);
   if (!fs.existsSync(sysPs1)) {
     // DS-6（M-C 中组，DS-REVIEW §3.4）：sysPs1 单独必须存在——旧检查是
     // “两者都不存在才报”，installPs1 在、sysPs1 缺失时仍会拉起引用缺失
@@ -3188,13 +3217,25 @@ async function maybeInstallSystemServices(force) {
   }
   // SHA-256 白名单校验（sys-helper.js）：脚本/二进制被改过就绝不提权拉起。
   // H20：install-lea.ps1 同在白名单（whitelist.json，5 件）；校验路径取
-  // helperExe 旁的 LEA/install-lea.ps1，与将被执行的那一份完全一致。
-  // 不存在时跳过（开发态无 LEA 目录不阻塞）。白名单加载异常即 fail-closed
+  // 下面的 leaPs1，与将被执行的那一份完全一致（F1：打包形态下为
+  // $INSTDIR\LEA\install-lea.ps1，即 -LeaDir 指向的那一份；开发态为
+  // helperExe 旁的 LEA/install-lea.ps1，不存在时跳过、不阻塞）。
+  // 白名单加载异常即 fail-closed
   //（不再只记日志继续拉起——否则一次异常就能绕过本白名单）。
+  // LEA 载荷目录（F1，深查发现）：SEC_LEA 把文件装到 $INSTDIR\LEA（与
+  // QFRemote.exe 同级），与 helperExe 所在目录无关——旧推导
+  // dirname(helperExe)/LEA 在打包形态下恒不存在，LEA 段永被跳过，
+  // -LeaScriptHash 也永不随行（H20 双重门在打包形态下形同虚设）。
+  // 打包形态按 process.execPath 取 $INSTDIR\LEA 并显式传 -LeaDir；
+  // 开发态不传 -LeaDir，沿用旧推导（不存在即跳过 LEA，不误拷开发目录）。
+  const packagedLeaDir = (app && app.isPackaged && process.execPath)
+    ? path.join(path.dirname(process.execPath), 'LEA') : '';
   let leaScriptHash = '';
   try {
     const wl = sysHelper.loadWhitelist({ resourcesPath: process.resourcesPath || '', dirname: path.join(__dirname, 'syshelper') });
-    const leaPs1 = path.join(path.dirname(helperExe), 'LEA', 'install-lea.ps1');
+    const leaPs1 = packagedLeaDir
+      ? path.join(packagedLeaDir, 'install-lea.ps1')
+      : path.join(path.dirname(helperExe), 'LEA', 'install-lea.ps1');
     const bad = [];
     for (const f of [sysPs1, helperExe, installPs1, leaPs1]) {
       if (fs.existsSync(f) && !sysHelper.verifyFileHash(f, wl)) bad.push(path.basename(f));
@@ -3207,6 +3248,7 @@ async function maybeInstallSystemServices(force) {
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
   const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
     q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) +
+    (packagedLeaDir ? ",'-LeaDir'," + q(packagedLeaDir) : '') +
     (leaScriptHash ? ",'-LeaScriptHash'," + q(leaScriptHash) : '') + " -Verb RunAs -WindowStyle Hidden";
   try {
     const childProcess = require('child_process');

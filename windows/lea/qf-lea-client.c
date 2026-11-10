@@ -52,25 +52,137 @@ static void print_error_json(const char *code, const char *detail) {
     fflush(stdout);
 }
 
-static int json_long_field(const char *text, const char *key, long long *out) {
-    char pat[64];
+/* F4：只认顶层对象成员（深度 1）——旧实现用 strstr 全文找键，params 里
+ * 嵌套的同名键（如 "timeout_ms"）会遮蔽顶层值（与 S1/S2/S4 残留同根，
+ * 见 fixclean-REPORT §5 第 4 项）；嵌套 "cmd" 还会把信封误判成内部命令
+ * （等待时间从 30s 错成 10s）。本扫描跳过字符串内容、按结构只认顶层；
+ * 键含 \u 转义时不认（顶层键由服务端生成，fail-closed）。 */
+static const char *json_skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+/* p 指向开引号：跳过一个 JSON 字符串（含 \" \\ \/ \b \f \n \r \t \uXXXX），
+ * 返回尾后指针；不合法返回 NULL。 */
+static const char *json_skip_string(const char *p) {
+    if (*p != '"') return NULL;
+    p++;
+    while (*p) {
+        if (*p == '\\') {
+            if (!p[1]) return NULL;
+            if (p[1] == 'u') {
+                int i;
+                for (i = 0; i < 4; i++) {
+                    char c = p[2 + i];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return NULL;
+                }
+                p += 6;
+            } else {
+                p += 2;
+            }
+        } else if (*p == '"') {
+            return p + 1;
+        } else if ((unsigned char)*p < 0x20) {
+            return NULL;
+        } else {
+            p++;
+        }
+    }
+    return NULL;
+}
+
+/* 跳过一个 JSON 值（对象／数组／字符串／数字／true／false／null），返回尾后指针。 */
+static const char *json_skip_value(const char *p) {
+    p = json_skip_ws(p);
+    if (*p == '"') return json_skip_string(p);
+    if (*p == '{') {
+        p++;
+        p = json_skip_ws(p);
+        if (*p == '}') return p + 1;
+        for (;;) {
+            if (*p != '"') return NULL;
+            p = json_skip_string(p);
+            if (!p) return NULL;
+            p = json_skip_ws(p);
+            if (*p != ':') return NULL;
+            p = json_skip_value(p + 1);
+            if (!p) return NULL;
+            p = json_skip_ws(p);
+            if (*p == ',') { p++; p = json_skip_ws(p); continue; }
+            if (*p == '}') return p + 1;
+            return NULL;
+        }
+    }
+    if (*p == '[') {
+        p++;
+        p = json_skip_ws(p);
+        if (*p == ']') return p + 1;
+        for (;;) {
+            p = json_skip_value(p);
+            if (!p) return NULL;
+            p = json_skip_ws(p);
+            if (*p == ',') { p++; continue; }
+            if (*p == ']') return p + 1;
+            return NULL;
+        }
+    }
+    if (strncmp(p, "true", 4) == 0) return p + 4;
+    if (strncmp(p, "false", 5) == 0) return p + 5;
+    if (strncmp(p, "null", 4) == 0) return p + 4;
+    {
+        const char *s = p;
+        if (*s == '-') s++;
+        if (!(*s >= '0' && *s <= '9')) return NULL;
+        while ((*s >= '0' && *s <= '9') || *s == '.' || *s == 'e' || *s == 'E' || *s == '+' || *s == '-') s++;
+        return s;
+    }
+}
+
+/* 在顶层对象里找成员 key，返回指向值首的指针（已跳过空白），找不到返回 NULL。 */
+static const char *json_top_level_value(const char *text, const char *key) {
+    const char *p = json_skip_ws(text);
     size_t klen = strlen(key);
-    if (klen + 3 >= sizeof(pat)) return 0;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(text, pat);
+    if (*p != '{') return NULL;
+    p++;
+    p = json_skip_ws(p);
+    if (*p == '}') return NULL;
+    for (;;) {
+        const char *kstart;
+        const char *kend;
+        if (*p != '"') return NULL;
+        kstart = p + 1;
+        kend = json_skip_string(p);
+        if (!kend) return NULL;
+        if ((size_t)(kend - 1 - kstart) == klen && memcmp(kstart, key, klen) == 0) {
+            p = json_skip_ws(kend);
+            if (*p != ':') return NULL;
+            return json_skip_ws(p + 1);
+        }
+        p = json_skip_ws(kend);
+        if (*p != ':') return NULL;
+        p = json_skip_value(p + 1);
+        if (!p) return NULL;
+        p = json_skip_ws(p);
+        if (*p == ',') { p++; p = json_skip_ws(p); continue; }
+        if (*p == '}') return NULL;
+        return NULL;
+    }
+}
+
+static int json_long_field(const char *text, const char *key, long long *out) {
+    const char *p = json_top_level_value(text, key);
     if (!p) return 0;
-    p += klen + 3;
-    while (*p == ' ' || *p == '\t') p++;
     if (*p == '"') return 0;
     char *end = NULL;
     long long v = strtoll(p, &end, 10);
     if (end == p) return 0;
     *out = v;
     return 1;
+}
+
+/* 顶层是否存在 key（任意值类型）。 */
+static int json_top_level_has_key(const char *text, const char *key) {
+    return json_top_level_value(text, key) != NULL;
 }
 
 static int read_all_stdin(char *buf, size_t size) {
@@ -175,7 +287,7 @@ int main(int argc, char **argv) {
     long wait_ms = 30000;
     if (json_long_field(envelope, "timeout_ms", &tmo) && tmo >= 1 && tmo <= 300000)
         wait_ms = (long)(tmo + 5000);
-    else if (strstr(envelope, "\"cmd\""))
+    else if (json_top_level_has_key(envelope, "cmd"))
         wait_ms = 10000;
 
     if (!WaitNamedPipeW(PIPE_NAME_W, CONNECT_TIMEOUT_MS)) {

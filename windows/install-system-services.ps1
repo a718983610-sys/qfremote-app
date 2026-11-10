@@ -97,6 +97,17 @@ try {
 # H20 已解决：install-lea.ps1 已纳入 whitelist.json（5 件），main.js
 # 拉起前已验过一次；本段执行前再按 -LeaScriptHash 对一次（双重门）。
 try {
+  # F1（深查发现）：$LeaDir 未传时的旧推导（HelperExe 旁的 LEA 目录）在打
+  # 包形态下恒不存在——SEC_LEA 把载荷装到 $INSTDIR\LEA，与 helperExe
+  # （resources/ 内）无关；主程序打包形态下已显式传 -LeaDir。此处回退
+  # 先读安装位置注册表（InstallLocation，安装目录可改时仍准），最后才
+  # 沿用旧推导（兼容旧版主程序）。
+  if (-not $LeaDir) {
+    try {
+      $instLoc = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote' -ErrorAction Stop).InstallLocation
+      if ($instLoc) { $LeaDir = Join-Path $instLoc 'LEA' }
+    } catch { }
+  }
   if (-not $LeaDir) { $LeaDir = Join-Path (Split-Path -Parent $HelperExe) 'LEA' }
   $leaScript = Join-Path $LeaDir 'install-lea.ps1'
   if (-not (Test-Path -LiteralPath $leaScript)) {

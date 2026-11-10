@@ -268,11 +268,17 @@ function isHealInProgress(logText, now) {
 
 // 人话提示（失败才有文案；成功／无需修复返回 null＝不打扰）。
 // W-13：unknown 不再让用户重启电脑背锅；unverified 给 server 端口径文案。
-function healOutcomeMessage(outcome) {
+function healOutcomeMessage(outcome, code) {
   if (outcome === 'denied') return '远程服务配置没修好：刚才的确认框点了否。下次打开软件时还会再问一次，点“是”就能修好。';
   if (outcome === 'service_restart_failed') return '本机远程服务配置改好了，但服务没重启起来，设备可能仍显示离线。重启一次电脑试试；如果还是离线，请联系客服。';
   if (outcome === 'unknown') return '本机远程服务配置没修好，设备可能仍显示离线。下次打开软件时会再试一次；如果还是离线，请联系客服。';
-  if (outcome === 'unverified') return '本机远程服务看着正常，但服务器那边还没看到这台设备在线。请确认网络正常、稍后再试；如果一直离线，请联系客服。';
+  if (outcome === 'unverified') {
+    // F2（深查发现）：unverified 有两个成因，文案须区分——DS-7 分支
+    // （本地判服务缺失、服务端 presence 却在线）是“本机检测与服务端
+    // 矛盾”，旧文案“服务器那边还没看到这台设备在线”与事实相反。
+    if (code === 'service-missing') return '本机没检测到远程服务，但服务器那边显示这台设备在线，可能是本机检测有误。下次打开软件时会再确认；如果一直这样，请联系客服。';
+    return '本机远程服务看着正常，但服务器那边还没看到这台设备在线。请确认网络正常、稍后再试；如果一直离线，请联系客服。';
+  }
   if (outcome === 'msh_write_failed') return '本机远程服务配置文件写不进去（可能是只读或权限不足），设备可能仍显示离线。请检查后重试，或联系客服。';
   if (outcome === 'dns-fail') return '连不上服务器：域名解析失败，请检查本机网络或 DNS 后重试。';
   if (outcome === 'tcp-fail') return '连不上服务器：网络不通（8443 端口），请检查本机网络或防火墙后重试。';
@@ -282,10 +288,29 @@ function healOutcomeMessage(outcome) {
 
 // 自愈助手脚本的运行时路径：打包后 resources/ 下的松散文件优先，
 // 其次 __dirname（开发态）、最后 %TEMP%（安装器备的那份）。
+// F1：__dirname／resourcesPath 在打包形态下指向 app.asar 内，PowerShell
+// 读不到 asar 路径；package.json 的 asarUnpack 把本脚本解到
+// resources/app.asar.unpacked/（同相对路径），故每个候选先试解包变体，
+// 再试原路径（开发态无解包目录，原样返回）。纯字符串变换＋existsSync
+// 探针，与 main.js 的 unpackedAppPath 同款逻辑（两处各一份，防循环依赖）。
+function unpackedAppPath(p) {
+  if (typeof p !== 'string' || !p) return p;
+  const parts = p.split(path.sep);
+  const i = parts.indexOf('app.asar');
+  if (i < 0) return p;
+  parts[i] = 'app.asar.unpacked';
+  return parts.join(path.sep);
+}
 function resolveHealScriptPath(o) {
   const cands = [];
-  if (o.resourcesPath) cands.push(path.join(o.resourcesPath, HEAL_SCRIPT_NAME));
-  if (o.dirname) cands.push(path.join(o.dirname, HEAL_SCRIPT_NAME));
+  const push = (p) => {
+    if (!p) return;
+    const u = unpackedAppPath(p);
+    if (u !== p) cands.push(u);
+    cands.push(p);
+  };
+  if (o.resourcesPath) push(path.join(o.resourcesPath, HEAL_SCRIPT_NAME));
+  if (o.dirname) push(path.join(o.dirname, HEAL_SCRIPT_NAME));
   if (o.tempDir) cands.push(path.join(o.tempDir, HEAL_SCRIPT_NAME));
   for (const c of cands) {
     try { if (fs.existsSync(c)) return c; } catch (e) { /* ignore */ }
@@ -695,6 +720,7 @@ module.exports = {
   readHealLogText,
   isHealInProgress,
   healOutcomeMessage,
+  unpackedAppPath,
   resolveHealScriptPath,
   healLogPath,
   formatLocalTs,

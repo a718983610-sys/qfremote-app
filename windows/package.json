@@ -64,6 +64,11 @@
       "syshelper/QFSysHelper.exe",
       "syshelper/whitelist.json"
     ],
+    "asarUnpack": [
+      "syshelper/QFSysHelper.exe",
+      "install-system-services.ps1",
+      "qf-agent-heal.ps1"
+    ],
     "nsis": {
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

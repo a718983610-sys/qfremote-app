@@ -34,8 +34,57 @@ def sha256(p):
     return h.hexdigest()
 
 
+def check_whitelist() -> int:
+    """真 --check（F1 深查发现）：旧实现把 --check 当作未知 mode，
+    只打印哈希、写 nothing、exit 0——发版门“gen_whitelist.py --check
+    必过”会静默放行过期白名单。现逐项比对磁盘实算与 whitelist.json
+    登记值：缺失／不一致／多余条目均报错并 exit 1；只读不写。"""
+    import json as _json
+    json_path = os.path.join(HERE, "whitelist.json")
+    if not os.path.exists(json_path):
+        print("whitelist.json 不存在", file=sys.stderr)
+        return 1
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            doc = _json.load(f)
+    except Exception as e:
+        print(f"whitelist.json 读不出: {e}", file=sys.stderr)
+        return 1
+    registered = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(registered, dict):
+        print("whitelist.json 里没有 files 表", file=sys.stderr)
+        return 1
+    bad = 0
+    for name, p in sorted(FILES.items()):
+        if not os.path.exists(p):
+            print(f"MISSING: {p}")
+            bad += 1
+            continue
+        actual = sha256(p)
+        want = registered.get(name)
+        if want != actual:
+            print(f"MISMATCH: {name}: whitelist.json 登记 {want}，磁盘实算 {actual}")
+            bad += 1
+        else:
+            print(f"OK: {name}: {actual}")
+    for name in sorted(registered):
+        if name not in FILES:
+            print(f"EXTRA: whitelist.json 有多余条目 {name}（磁盘无此文件）")
+            bad += 1
+    if bad:
+        print(f"whitelist.json 与磁盘文件不一致（{bad} 项），请用 gen_whitelist.py 刷新", file=sys.stderr)
+        return 1
+    print("whitelist.json OK（全部登记项与磁盘实算一致）")
+    return 0
+
+
 def main():
     mode = sys.argv[1].lstrip("-") if len(sys.argv) > 1 else "all"
+    if mode == "check":
+        return check_whitelist()
+    if mode not in ("all", "header-only", "json-only"):
+        print(f"未知模式: {sys.argv[1]}（可用: all / --header-only / --json-only / --check）", file=sys.stderr)
+        return 2
     hashes = {}
     for name, p in FILES.items():
         if name == "QFSysHelper.exe" and mode == "header-only":
@@ -66,4 +115,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
