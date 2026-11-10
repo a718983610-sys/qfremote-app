@@ -219,29 +219,86 @@ long lea_b64_encode(const unsigned char *in, size_t len, char *out, size_t out_s
     return (long)o;
 }
 
-/* ================= Ed25519 验签（Stage 1 占位） ================= */
-int lea_sig_format_ok(const char *signature) {
-    if (!signature) return 0;
-    size_t len = strlen(signature);
-    /* 64 字节签名 → base64url 88 字符（含 1 个 '='）或 86 字符（无 padding）。 */
+/* ================= Ed25519 验签（真实实现） =================
+ * 实现：vendored Orlp ed25519（见 ed25519/README.md），仅验签路径
+ * （ed25519_verify；LEA 永不签名、不生成密钥）。
+ * 公钥：编译期宏 LEA_SERVER_PUBKEY_HEX（64 字符 hex，32 字节）注入；
+ * 未定义时返回 NULL，验签 fail-closed（与占位行为一致）。
+ * 签名编码：接受标准 base64（88 字符，含 '+'/'/'/'='）与 base64url
+ * （86/88 字符，含 '-''_'）。服务端签发用标准 base64（Node
+ * crypto.sign → .toString('base64')），而旧占位只认 base64url——
+ * 真实服务端签名约 94% 含 '+' 或 '/'，只认 base64url 会全部拒掉。
+ * 规范串本身（CANONICAL-SIGNING-V1.md v1）不受影响。
+ * 验签失败原因：missing-signature / bad-signature-format /
+ * ed25519-pubkey-not-configured / ed25519-pubkey-invalid / bad-signature。
+ * LEA_TEST_UNSIGNED 分支仅测试构建保留，生产构建绝不定义该宏。 */
+#include "ed25519/ed25519.h"
+
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* hex 解码：hex 须为 out_size*2 字符，解出恰好 out_size 字节才返回 1。 */
+static int hex_decode_exact(const char *hex, unsigned char *out, size_t out_size) {
+    if (!hex || !out) return 0;
+    size_t len = strlen(hex);
+    if (len != out_size * 2) return 0;
+    for (size_t i = 0; i < out_size; i++) {
+        int hi = hex_val(hex[2 * i]), lo = hex_val(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 1;
+}
+
+/* 签名解码：接受标准 base64 与 base64url，解出恰好 64 字节才返回 1。
+ * 字符集判定：含 '+' 或 '/' → 标准 base64；含 '-' 或 '_' → base64url；
+ * 两者混用即非法。长度须为 86 或 88（64 字节签名）。 */
+static int sig_decode(const char *in, unsigned char out[64]) {
+    if (!in || !out) return 0;
+    size_t len = strlen(in);
     if (len != 86 && len != 88) return 0;
-    unsigned char buf[64];
-    long n = lea_b64url_decode(signature, buf, sizeof(buf));
+    int has_std = 0, has_url = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = in[i];
+        if (c == '+' || c == '/') has_std = 1;
+        else if (c == '-' || c == '_') has_url = 1;
+        else if (c == '=') { /* padding：解码器会校验位置 */ }
+        else if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9'))) return 0;
+    }
+    if (has_std && has_url) return 0;
+    long n = has_std ? lea_b64_decode(in, out, 64)
+                     : lea_b64url_decode(in, out, 64);
     return n == 64;
 }
 
-/* TODO(Stage 2)：服务端生成 Ed25519 密钥对后，把公钥 hex 写在这里返回，
- * 并在 lea_verify_* 内实现真正的验签（可引 ed25519/ref10 或系统库）。
- * 在此之前返回 NULL = 未配置 = fail-closed。规范串本身已定稿 v1
- * （见 ~/workspace/qfremote/local-agent/ds-review-stage2/CANONICAL-SIGNING-V1.md），
- * 真实验签接入时规范串不再改动。 */
+int lea_sig_format_ok(const char *signature) {
+    unsigned char buf[64];
+    return sig_decode(signature, buf);
+}
+
+/* 服务端公钥（编译期注入）。
+ * 生产构建须以 -DLEA_SERVER_PUBKEY_HEX=<64 字符 hex，不加引号> 编入
+ * 与服务端稳定签名密钥对应的公钥；未定义即返回 NULL = 未配置 =
+ * fail-closed。公钥本身公开，不涉密。 */
+#ifdef LEA_SERVER_PUBKEY_HEX
+#define _LEA_PUBKEY_STR_(x) #x
+#define _LEA_PUBKEY_STR(x) _LEA_PUBKEY_STR_(x)
+const char *lea_server_pubkey_hex(void) {
+    return _LEA_PUBKEY_STR(LEA_SERVER_PUBKEY_HEX);
+}
+#else
 const char *lea_server_pubkey_hex(void) {
     return NULL;
 }
+#endif
 
-static int verify_placeholder(const char *signature, const char *canonical,
-                              char *reason, size_t reason_size) {
-    (void)canonical;
+static int verify_real(const char *signature, const char *canonical,
+                       char *reason, size_t reason_size) {
     if (!signature || signature[0] == '\0') {
         if (reason) snprintf(reason, reason_size, "%s", "missing-signature");
         return 0;
@@ -253,23 +310,42 @@ static int verify_placeholder(const char *signature, const char *canonical,
         return 1;
     }
 #endif
-    if (!lea_sig_format_ok(signature)) {
+    unsigned char sig[64];
+    if (!sig_decode(signature, sig)) {
         if (reason) snprintf(reason, reason_size, "%s", "bad-signature-format");
         return 0;
     }
-    /* 格式合理但无公钥可验 → fail-closed。 */
-    if (reason) snprintf(reason, reason_size, "%s", "ed25519-pubkey-not-configured");
+    const char *pubkey_hex = lea_server_pubkey_hex();
+    if (!pubkey_hex) {
+        if (reason) snprintf(reason, reason_size, "%s", "ed25519-pubkey-not-configured");
+        return 0;
+    }
+    unsigned char pubkey[32];
+    if (!hex_decode_exact(pubkey_hex, pubkey, sizeof(pubkey))) {
+        if (reason) snprintf(reason, reason_size, "%s", "ed25519-pubkey-invalid");
+        return 0;
+    }
+    if (!canonical) {
+        if (reason) snprintf(reason, reason_size, "%s", "bad-signature");
+        return 0;
+    }
+    if (ed25519_verify(sig, (const unsigned char *)canonical,
+                       strlen(canonical), pubkey) == 1) {
+        if (reason) snprintf(reason, reason_size, "%s", "ok");
+        return 1;
+    }
+    if (reason) snprintf(reason, reason_size, "%s", "bad-signature");
     return 0;
 }
 
 int lea_verify_envelope_signature(const char *signature, const char *canonical,
                                   char *reason, size_t reason_size) {
-    return verify_placeholder(signature, canonical, reason, reason_size);
+    return verify_real(signature, canonical, reason, reason_size);
 }
 
 int lea_verify_ticket_signature(const char *signature, const char *canonical,
                                 char *reason, size_t reason_size) {
-    return verify_placeholder(signature, canonical, reason, reason_size);
+    return verify_real(signature, canonical, reason, reason_size);
 }
 
 /* ================= Key 脱敏 ================= */

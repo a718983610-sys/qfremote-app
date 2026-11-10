@@ -259,10 +259,12 @@ int main(void) {
         CHECK(!lea_parse_envelope(bad, now, &env), "parse-missing-idempotency-key");
     }
 
-    /* ---------- 签名验签占位 ---------- */
+    /* ---------- 签名验签（真实 Ed25519；测试向量见
+     * ~/workspace/qfremote/local-agent/evidence-ed25519-20261111/
+     * gen_test_vectors.py，测试密钥种子 bytes(range(32))，仅测试用） ---------- */
     {
         char reason[128] = { 0 };
-        /* 格式错误的签名一律拒绝 */
+        /* 格式错误的签名一律拒绝（与公钥配置无关） */
         CHECK(!lea_verify_envelope_signature("short", "", reason, sizeof(reason)) &&
               strcmp(reason, "bad-signature-format") == 0, "sig-malformed-rejected");
         CHECK(!lea_sig_format_ok("short"), "sig-format-short");
@@ -271,20 +273,82 @@ int main(void) {
         memset(sig86, 'A', 86);
         sig86[86] = '\0';
         CHECK(lea_sig_format_ok(sig86), "sig-format-86-ok");
+        /* 标准 base64（88 字符，含 '/'）格式同样合理：服务端签发即此编码 */
+        CHECK(lea_sig_format_ok("h9REmhvldwQHXzecimBOhiQREyydn6w/U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr/Aeoa8bN4Aw=="),
+              "sig-format-std-b64-ok");
+        /* 混用两种字母表（既含 '/' 又含 '_'）即格式错误 */
+        CHECK(!lea_sig_format_ok("h9REmhvldwQHXzecimBOhiQREyydn6w/U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr_Aeoa8bN4Aw"),
+              "sig-format-mixed-alphabet-rejected");
+#ifdef LEA_SERVER_PUBKEY_HEX
+        /* ---- 真实验签（测试公钥已编入） ---- */
+        CHECK(lea_server_pubkey_hex() != NULL &&
+              strcmp(lea_server_pubkey_hex(),
+                     "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8") == 0,
+              "sig-test-pubkey-configured");
+        /* 信封规范串（CANONICAL-SIGNING-V1.md §2.3 测试向量），测试私钥所签 */
+        const char *env_canonical =
+            "qfr-lea-envelope-v1\n1\nreq-0000001\nbatch-0001\n1\nnode-1\nalice\n"
+            "key-abc12345\n3\nnonce-00001\n1780000000\n1780000060\nidem-key-0001\n"
+            "ui.click\n43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\n5000";
+        /* base64url 形式 */
+        CHECK(lea_verify_envelope_signature("h9REmhvldwQHXzecimBOhiQREyydn6w_U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr_Aeoa8bN4Aw",
+                                            env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "sig-env-valid-b64url");
+        /* 标准 base64 形式（服务端实际签发编码，含 '/'） */
+        CHECK(lea_verify_envelope_signature("h9REmhvldwQHXzecimBOhiQREyydn6w/U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr/Aeoa8bN4Aw==",
+                                            env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "sig-env-valid-std-b64");
+        /* 篡改规范串（timeout 5000→5001）→ 拒绝 */
+        CHECK(!lea_verify_envelope_signature("h9REmhvldwQHXzecimBOhiQREyydn6w_U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr_Aeoa8bN4Aw",
+                                             "qfr-lea-envelope-v1\n1\nreq-0000001\nbatch-0001\n1\nnode-1\nalice\n"
+                                             "key-abc12345\n3\nnonce-00001\n1780000000\n1780000060\nidem-key-0001\n"
+                                             "ui.click\n43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\n5001",
+                                             reason, sizeof(reason)) &&
+              strcmp(reason, "bad-signature") == 0, "sig-env-tampered-canonical-rejected");
+        /* 篡改签名（末字符 w→A：改末字节低 2 位；注意 w→x 只动填充位，字节不变）→ 拒绝 */
+        CHECK(!lea_verify_envelope_signature("h9REmhvldwQHXzecimBOhiQREyydn6w_U2tyQBUB2stjppZLPn6cbnzyDGnQGZKqnrjRcFBGrAr_Aeoa8bN4AA",
+                                             env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "bad-signature") == 0, "sig-env-tampered-sig-rejected");
+        /* 另一把密钥所签 → 拒绝 */
+        CHECK(!lea_verify_envelope_signature("5Mq4ceboaP_WIJ69lSIDLIswsb5ZyWCXawn-zXam68NrKojBvAiyhH4Mju_vDg1DV4C7UlZcduo6aQIzppU1CQ",
+                                             env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "bad-signature") == 0, "sig-env-wrong-key-rejected");
+        /* 格式合理但随机（86 个 'A'）→ 拒绝 */
+        CHECK(!lea_verify_envelope_signature(sig86, env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "bad-signature") == 0, "sig-env-random-rejected");
+        /* 票据签名（CANONICAL-SIGNING-V1.md §3.3 测试向量） */
+        const char *ticket_canonical =
+            "qfr-lea-ticket-v1\nalice\nnode-1\n3\n1\n1\nmuse.execute\n"
+            "lease-0123456789abcdef\n1780086400";
+        CHECK(lea_verify_ticket_signature("eNnL8IF32UOK4dunaNH5rZTIP0D9SpuoL9gxm2U6ZGbSOlw9uQY2W1FXI3PJ3nA0E_rVev3myRxDErIqepBWBg",
+                                          ticket_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "sig-ticket-valid");
+        /* 票据签名用于信封串 → 拒绝（交叉） */
+        CHECK(!lea_verify_ticket_signature("eNnL8IF32UOK4dunaNH5rZTIP0D9SpuoL9gxm2U6ZGbSOlw9uQY2W1FXI3PJ3nA0E_rVev3myRxDErIqepBWBg",
+                                           env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "bad-signature") == 0, "sig-ticket-on-env-rejected");
 #ifdef LEA_TEST_UNSIGNED
+        CHECK(lea_verify_envelope_signature("TEST-UNSIGNED", env_canonical, reason, sizeof(reason)) &&
+              strcmp(reason, "test-only-unsigned-accepted") == 0,
+              "sig-test-unsigned-accepted-in-test-build");
+#else
+        CHECK(!lea_verify_envelope_signature("TEST-UNSIGNED", env_canonical, reason, sizeof(reason)),
+              "sig-test-unsigned-rejected-in-strict-build");
+#endif
+#else
+        /* ---- 占位（未编入公钥，fail-closed） ---- */
         CHECK(lea_server_pubkey_hex() == NULL, "sig-pubkey-not-configured");
         CHECK(!lea_verify_envelope_signature(sig86, "canonical", reason, sizeof(reason)) &&
               strcmp(reason, "ed25519-pubkey-not-configured") == 0,
               "sig-wellformed-but-no-pubkey-fail-closed");
+#ifdef LEA_TEST_UNSIGNED
         CHECK(lea_verify_envelope_signature("TEST-UNSIGNED", "canonical", reason, sizeof(reason)) &&
               strcmp(reason, "test-only-unsigned-accepted") == 0,
               "sig-test-unsigned-accepted-in-test-build");
 #else
-        CHECK(!lea_verify_envelope_signature(sig86, "canonical", reason, sizeof(reason)) &&
-              strcmp(reason, "ed25519-pubkey-not-configured") == 0,
-              "sig-strict-fail-closed");
         CHECK(!lea_verify_envelope_signature("TEST-UNSIGNED", "canonical", reason, sizeof(reason)),
               "sig-test-unsigned-rejected-in-strict-build");
+#endif
 #endif
     }
 

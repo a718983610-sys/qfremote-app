@@ -3,16 +3,19 @@
 * 包含：
 * - SHA-256（FIPS 180-4 标准实现，自写；单测用已知向量＋系统 sha256sum 校验）。
 * - Base64 / Base64URL 编解码。
-* - Ed25519 服务端签名验签 —— Stage 1 为：
-* * 默认（未编译进真实服务端公钥）：一律拒绝，原因
-* "ed25519-pubkey-not-configured"，错误码 QFR_LEA_SIG_NOT_CONFIGURED。
-* 这是故意的 fail-closed：没公钥就不能执行任何命令。
+* - Ed25519 服务端签名验签 —— 真实实现（vendored Orlp ed25519，
+*   仅验签路径，见 ed25519/README.md）：
+* * 公钥由编译期宏 LEA_SERVER_PUBKEY_HEX（64 字符 hex，32 字节）注入；
+*   未定义时 lea_server_pubkey_hex() 返回 NULL，验签一律拒绝，原因
+*   "ed25519-pubkey-not-configured"，错误码 QFR_LEA_SIG_NOT_CONFIGURED。
+*   这是故意的 fail-closed：没公钥就不能执行任何命令。
 * * 仅当编译时定义 LEA_TEST_UNSIGNED=1（单测／真机冒烟专用，build.sh
-* 默认不启用）：signature 字段恰为 "TEST-UNSIGNED" 时放行，并记明
-* reason "test-only-unsigned-accepted"。生产构建绝不启用该宏。
-* * 接入真实公钥时：在此文件内实现 Ed25519 验签（或接系统库），把
-* lea_server_pubkey_hex() 返回的 32 字节公钥作为验签输入，并删除
-* LEA_TEST_UNSIGNED 分支。签名覆盖字段与服务端约定后写入 README。
+*   默认不启用）：signature 字段恰为 "TEST-UNSIGNED" 时放行，并记明
+*   reason "test-only-unsigned-accepted"。生产构建绝不启用该宏。
+* * 签名编码接受标准 base64 与 base64url（服务端签发用标准 base64；
+*   格式合理但验签失败时 reason 为 "bad-signature"）。
+* * 规范串见 ~/workspace/qfremote/local-agent/ds-review-stage2/
+*   CANONICAL-SIGNING-V1.md（v1 定稿）；信封与票据用同一服务端密钥。
 *
 * 红线：本层不存、不记、不输出任何密钥明文；日志只记 key_id 与前缀片段。
 */
@@ -52,21 +55,24 @@ long lea_b64url_decode(const char *in, unsigned char *out, size_t out_size);
 /* Base64 标准编码；返回写入长度（不含 \0），-1=空间不足。 */
 long lea_b64_encode(const unsigned char *in, size_t len, char *out, size_t out_size);
 
-/* Ed25519 签名格式检查：须为 64 字节签名的 base64url（86/88 字符）。
-* 返回 1=格式合理，0=格式错误。注意：格式合理 ≠ 签名有效。 */
+/* Ed25519 签名格式检查：须为 64 字节签名，接受标准 base64（88 字符）
+* 与 base64url（86/88 字符）。返回 1=格式合理，0=格式错误。
+* 注意：格式合理 ≠ 签名有效。 */
 int lea_sig_format_ok(const char *signature);
 
-/* 服务端公钥（Stage 1：未接入，返回 NULL）。
-* 接入时改为返回 64 字符 hex（32 字节），并实现下方验签。 */
+/* 服务端公钥（编译期宏 LEA_SERVER_PUBKEY_HEX 注入的 64 字符 hex，
+* 32 字节；未定义该宏时返回 NULL = 未配置 = fail-closed）。
+* 公钥本身公开，不涉密。 */
 const char *lea_server_pubkey_hex(void);
 
-/* 验签信封签名。canonical 为待签名的规范串（调用方按服务端约定构造；
-* Stage 1 占位不实际使用 canonical，仅检查格式与配置）。
-* 返回 1=验签通过；0=拒绝，reason 写明原因。 */
+/* 验签信封签名。canonical 为待签名的规范串（调用方按服务端约定构造）。
+* 返回 1=验签通过（reason 置 "ok"）；0=拒绝，reason 写明原因：
+* missing-signature / bad-signature-format / ed25519-pubkey-not-configured /
+* ed25519-pubkey-invalid / bad-signature。 */
 int lea_verify_envelope_signature(const char *signature, const char *canonical,
 char *reason, size_t reason_size);
 
-/* 验签绑定票据签名（同占位语义）。 */
+/* 验签绑定票据签名（与信封同一服务端密钥、同语义）。 */
 int lea_verify_ticket_signature(const char *signature, const char *canonical,
 char *reason, size_t reason_size);
 
