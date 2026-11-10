@@ -2,9 +2,11 @@
  * =================================================================
  * Windows 系统服务（服务名 QFRLEA，SYSTEM 身份），参照
  * windows/syshelper/QFSysHelper.c 的结构与安全模型：
- *   - 命名管道 \\.\pipe\QFR\LEA\v1，SDDL 仅 SYSTEM＋Administrators
- *     （QFSysHelper 另含 AU；LEA 收紧为 SY＋BA，因为调用方是经
- *     runcommands 以 SYSTEM 运行的 qf-lea-client.exe，或管理员）。
+ *   - 命名管道 \\.\pipe\QFR\LEA\v1，SDDL 为 SYSTEM＋Administrators＋
+ *     Authenticated Users（H01：主程序以普通用户身份经已安装的
+ *     qf-lea-client.exe 发内部命令，必须能连上管道；业务信封仍须
+ *     服务端 Ed25519 签名，AU 连上管道也做不了业务命令；内部命令
+ *     另有调用方进程鉴别——只认安装目录下的 qf-lea-client.exe）。
  *   - 一行 JSON 请求 → 一行 JSON 响应。
  *   - 第二层准入（DESIGN §6.2）：Ed25519 服务端签名（占位，见
  *     lea_crypto.c，默认 fail-closed）＋ binding_epoch ＋ scope ＋
@@ -23,7 +25,18 @@
  *     （USH 由另一线实现；此处只做转发＋超时＋USH 不可用时明确报错）。
  *   - 日志：%ProgramData%\QFR\LEA\logs\lea-YYYY-MM-DD.jsonl，保留 30 天，
  *     ACL 仅 SYSTEM／Administrators；API Key 只记 key_id 与前缀片段。
- *   - 绑定：DPAPI LocalMachine 加密存 %ProgramData%\QFR\LEA\state\binding.dat。
+ *   - 绑定：DPAPI LocalMachine 加密存 %ProgramData%\QFR\LEA\state\binding.dat，
+ *     内含服务端票据签名原文；加载时重验票据签名（H02），签名缺失／
+ *     不通过即丢弃绑定回 UNBOUND——DPAPI 本机可调不等于可伪造绑定。
+ *   - 内部命令（session.login_changed／logout／binding.confirm）：只认
+ *     已安装的 qf-lea-client.exe 进程（H01，调用方进程镜像全路径校验）
+ *     ＋该进程的父进程须为主程序（QFRemote.exe／开发态 electron.exe，
+ *     且在活动控制台会话内，H01 第二轮——只验镜像不够，任意用户都
+ *     能直接运行合法客户端）。
+ *   - LEA→USH 转发：除管道 ACL 外，另带 USH 每启动一次的随机 token
+ *     （H03，USH 验 token＋验 LEA 进程镜像，不再只信管道 ACL）。
+ *   - 换号：同账号重登不升 epoch（H07，两端 epoch 保持一致，已生成 Key
+ *     继续可用）；换号 epoch+1，旧绑定立即作废。
  *
  * 安全边界（写死，不许放宽）：
  *   - 不做内核驱动、不做进程注入；不存明文密码、不记 API Key 明文；
@@ -38,10 +51,14 @@
  *   加 -DLEA_TEST_UNSIGNED=1 后 signature "TEST-UNSIGNED" 放行。
  */
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 /* GetNamedPipeClientProcessId（H01）须 ≥0x0600 */
+#endif
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>
 #include <dpapi.h>
+#include <wtsapi32.h>
 #include <tlhelp32.h>
 #include <wchar.h>
 #include <stdio.h>
@@ -58,8 +75,15 @@
 #define SERVICE_DISPLAY_W L"QFRemote 本地执行代理"
 #define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
 #define USH_PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1"
-#define PIPE_SDDL_W L"D:(A;;GA;;;SY)(A;;GA;;;BA)"
+#define PIPE_SDDL_W L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)"
 #define DIR_SDDL_W L"D:(A;;FA;;;SY)(A;;FA;;;BA)"
+/* USH token 目录：SY/BA 完全控制，AU 仅 FILE_ADD_FILE（WD）——USH（用户
+ * 身份）只能新建自己的 token 文件，读不到他人 token；token 文件继承此
+ * ACL，WD 在文件上即 FILE_WRITE_DATA，故同机认证用户可覆写他人 token
+ * 文件内容（但删不掉、也建不了同名占位——删文件须文件 DELETE 或目录
+ * FILE_DELETE_CHILD，均未授）。残留：覆写只造成 USH 转发失败（DoS），
+ * 不能伪造通过（USH 只认自己内存里的 token）。 */
+#define USH_TOKENS_SDDL_W L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;WD;;;AU)"
 #define PIPE_MAX_INSTANCES 8
 #define USH_CONNECT_TIMEOUT_MS 2000
 
@@ -90,6 +114,7 @@ static char g_install_dir[MAX_PATH];   /* QFRLEA.exe 所在目录 */
 static char g_idem_path[MAX_PATH];
 static char g_binding_path[MAX_PATH];
 static char g_revoked_path[MAX_PATH];
+static char g_ushtokens_dir[MAX_PATH]; /* %ProgramData%\QFR\LEA\ush-tokens（H03） */
 static char g_service_log_path[MAX_PATH];
 
 /* ---------- 小工具 ---------- */
@@ -161,6 +186,28 @@ static void set_sys_admin_acl(const char *path_utf8) {
     LocalFree(sd);
 }
 
+/* USH token 目录 ACL（H03）：见 USH_TOKENS_SDDL_W。失败静默（调用方不
+ * 检查；失败时目录继承父目录 ACL，token 仍可用，只是隔离弱化——服务
+ * 日志不记，避免启动噪音；该失败不影响业务命令）。 */
+static void set_ushtokens_acl(const char *path_utf8) {
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            USH_TOKENS_SDDL_W, SDDL_REVISION_1, &sd, NULL)) {
+        /* H03 第二轮：ACL 配失败不再静默——目录权限不对时 token 文件
+         * 对同机用户可写，LEA 转发仍 fail-closed，但要留日志可查。 */
+        svc_log("ush-tokens acl: ConvertStringSecurityDescriptor failed %lu", GetLastError());
+        return;
+    }
+    WCHAR w[MAX_PATH];
+    utf8_to_utf16(path_utf8, w, MAX_PATH);
+    DWORD rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
+                          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                          NULL, NULL, ((SECURITY_DESCRIPTOR *)sd)->Dacl, NULL);
+    if (rc != ERROR_SUCCESS)
+        svc_log("ush-tokens acl: SetNamedSecurityInfo failed %lu", rc);
+    LocalFree(sd);
+}
+
 static void ensure_dirs(void) {
     char pd[MAX_PATH] = { 0 };
     WCHAR wpd[MAX_PATH];
@@ -188,6 +235,9 @@ static void ensure_dirs(void) {
     snprintf(g_idem_path, sizeof(g_idem_path), "%s\\idempotency.jsonl", g_state_dir);
     snprintf(g_binding_path, sizeof(g_binding_path), "%s\\binding.dat", g_state_dir);
     snprintf(g_revoked_path, sizeof(g_revoked_path), "%s\\revoked_keys.txt", g_state_dir);
+    snprintf(g_ushtokens_dir, sizeof(g_ushtokens_dir), "%s\\ush-tokens", g_base_dir);
+    mkdir_one(g_ushtokens_dir);
+    set_ushtokens_acl(g_ushtokens_dir);
     snprintf(g_service_log_path, sizeof(g_service_log_path), "%s\\lea-service.log", g_logs_dir);
     /* 安装目录 = 本 exe 所在目录 */
     {
@@ -289,16 +339,20 @@ static void idem_load(void) {
 }
 
 /* ---------- 绑定持久化（DPAPI LocalMachine） ---------- */
+/* H02：binding.dat 内含服务端票据签名原文（ticket_signature）。DPAPI
+ * LocalMachine 本机任意进程可调，只防“看不懂”，不防“伪造”；真正的
+ * 防伪造是票据签名——加载时按规范串 v1 重建 canonical 并重验。 */
 static void binding_persist_locked(void) {
-    char text[1024];
+    char text[2048]; /* 票据签名最长 511 字节，缓冲须留足 */
     snprintf(text, sizeof(text),
              "{\"account_id\":\"%s\",\"device_id\":\"%s\",\"epoch\":%lld,"
              "\"grant_epoch\":%lld,\"grant\":%d,\"scopes\":\"%s\","
-             "\"expires_at\":%lld,\"lease_id\":\"%s\",\"state\":%d}",
+             "\"expires_at\":%lld,\"lease_id\":\"%s\",\"state\":%d,"
+             "\"ticket_signature\":\"%s\"}",
              g_binding.account_id, g_binding.device_id, g_binding.epoch,
              g_binding.grant_epoch, g_binding.grant_muse_execute,
              g_binding.scopes, g_binding.expires_at, g_binding.lease_id,
-             (int)g_binding.state);
+             (int)g_binding.state, g_binding.ticket_signature);
     DATA_BLOB in, out;
     in.pbData = (BYTE *)text;
     in.cbData = (DWORD)strlen(text) + 1;
@@ -351,6 +405,11 @@ static void binding_load(void) {
     lea_json_long(text, "expires_at", &expires_at);
     lea_json_string(text, "lease_id", g_binding.lease_id, sizeof(g_binding.lease_id));
     lea_json_long(text, "state", &state);
+    /* H02：旧版 binding.dat 无 ticket_signature 字段时取不到即为空串，
+     * 下方 ACTIVE 态重验必失败 → 丢弃绑定（fail-closed；旧文件本就
+     * 可伪造，不可采信，用户重登后由新票据重建绑定）。 */
+    lea_json_string(text, "ticket_signature", g_binding.ticket_signature,
+                    sizeof(g_binding.ticket_signature));
     g_binding.epoch = epoch;
     g_binding.grant_epoch = grant_epoch;
     g_binding.grant_muse_execute = (int)grant;
@@ -358,8 +417,112 @@ static void binding_load(void) {
     g_binding.state = (state >= 0 && state <= 3) ? (lea_bind_state_t)state : LEA_BIND_UNBOUND;
     g_binding.updated_at = now_unix();
     LocalFree(out.pbData);
+    if (g_binding.state == LEA_BIND_ACTIVE && !lea_binding_verify_ticket(&g_binding)) {
+        svc_log("WARN binding ticket signature verify failed, dropping to UNBOUND");
+        lea_binding_init(&g_binding);
+        return;
+    }
     svc_log("binding loaded state=%s account=%s epoch=%lld",
             lea_bind_state_name(g_binding.state), g_binding.account_id, g_binding.epoch);
+}
+
+/* ---------- 内部命令调用方鉴别（H01） ---------- */
+/* 只认安装目录下的 qf-lea-client.exe（全路径大小写不敏感比对）。任意
+ * 其他进程（含 MeshCentral agent、任意 SYSTEM/管理员进程）即使连上
+ * 管道也发不了内部命令。防的是“随手发一行 JSON 就废掉绑定”的低成本
+ * DoS；能覆写安装目录下客户端二进制的攻击者本来就已完全控制本机，
+ * 不在本项防御内。 */
+/* 父进程校验（H01 第二轮）：内部命令的合法发起方只有主程序
+ * （QFRemote.exe，安装态；electron.exe，开发态）。客户端必须是主程序
+ * 的直接子进程——主程序用 spawnSync 拉起客户端。只验客户端镜像不够：
+ * 任意用户都能直接运行已安装的合法客户端发内部命令。
+ * 边界：同会话用户自己跑一个同名 QFRemote.exe 做父进程可绕过——但
+ * 同会话代码执行已等同会话沦陷（可直接读主程序内存／会话），不在
+ * 本项防御内；本项挡的是跨会话／跨用户／SYSTEM 服务直接拉客户端
+ * 的滥用。 */
+static int parent_is_main_app(DWORD pid) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    DWORD parent = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == pid) { parent = pe.th32ParentProcessID; break; }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (!parent) return 0;
+    /* 父进程须在当前活动控制台会话里（主程序是交互会话进程；SYSTEM
+     * 服务在 session 0，跨会话拉客户端直接拒）。 */
+    DWORD parent_session = 0;
+    if (!ProcessIdToSessionId(parent, &parent_session)) return 0;
+    if (parent_session != WTSGetActiveConsoleSessionId()) return 0;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
+    if (!h) return 0;
+    WCHAR img[MAX_PATH];
+    DWORD n = MAX_PATH;
+    int ok = 0;
+    if (QueryFullProcessImageNameW(h, 0, img, &n) && n > 0) {
+        WCHAR *base = img;
+        for (WCHAR *p = img; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
+        ok = (_wcsicmp(base, L"QFRemote.exe") == 0 ||
+              _wcsicmp(base, L"electron.exe") == 0);
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+static int internal_caller_allowed(HANDLE pipe) {
+    DWORD pid = 0;
+    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return 0;
+    WCHAR img[MAX_PATH];
+    DWORD n = MAX_PATH;
+    int ok = 0;
+    if (QueryFullProcessImageNameW(h, 0, img, &n) && n > 0) {
+        char img_u8[MAX_PATH];
+        utf16_to_utf8(img, img_u8, sizeof(img_u8));
+        char expect[MAX_PATH];
+        snprintf(expect, sizeof(expect), "%s\\qf-lea-client.exe", g_install_dir);
+        for (char *p = img_u8; *p; p++) if (*p == '/') *p = '\\';
+        for (char *p = expect; *p; p++) if (*p == '/') *p = '\\';
+        ok = (_stricmp(img_u8, expect) == 0);
+    }
+    CloseHandle(h);
+    /* 镜像对上还不够：客户端须是主程序的直接子进程（见 parent_is_main_app）。 */
+    if (ok) ok = parent_is_main_app(pid);
+    return ok;
+}
+
+/* ---------- USH 鉴权 token（H03） ---------- */
+/* 读当前控制台会话 USH 的每启动随机 token（USH 启动时生成并写入
+ * %ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt）。返回 1=读到
+ * 合法 token（64 位小写 hex）。读不到／格式不对即返回 0，调用方
+ * fail-closed，不裸发 UI 命令。 */
+static int ush_token_read(char *out, size_t out_size) {
+    DWORD sid = WTSGetActiveConsoleSessionId();
+    if (sid == 0xFFFFFFFF) return 0;
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s\\%lu.txt", g_ushtokens_dir, (unsigned long)sid);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char buf[128] = { 0 };
+    size_t r = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[r] = '\0';
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+                     buf[n - 1] == ' ' || buf[n - 1] == '\t'))
+        buf[--n] = '\0';
+    if (n != 64) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((buf[i] >= '0' && buf[i] <= '9') || (buf[i] >= 'a' && buf[i] <= 'f')))
+            return 0;
+    if (out_size < 65) return 0;
+    snprintf(out, out_size, "%s", buf);
+    return 1;
 }
 
 /* ---------- 吊销表 ---------- */
@@ -1004,15 +1167,26 @@ static void execute_item(lea_queue_item_t *item) {
             result_json = result_buf;
         }
     } else if (spec && spec->executor == LEA_EXEC_USH) {
-        /* UI 类：worker 用 item->env 重建信封行转发给 USH（USH 由另一线实现；
-         * USH 只信任 LEA，不再验签）。 */
+        /* UI 类：worker 用 item->env 重建信封行转发给 USH。
+         * H03：转发前读当前会话 USH 的每启动随机 token 并插入信封行
+         * （ush_token 字段），USH 验 token＋验 LEA 进程镜像；token
+         * 读不到即 fail-closed，不裸发。 */
         char ush_resp[LEA_MAX_RESPONSE] = { 0 };
         char udetail[256] = { 0 };
         char env_line[LEA_MAX_ENVELOPE] = { 0 };
+        char env_tok[LEA_MAX_ENVELOPE] = { 0 };
+        char ush_token[65] = { 0 };
         if (!lea_rebuild_envelope(env, env_line, sizeof(env_line))) {
             ok = 0; code = LEA_ERR_INTERNAL;
             snprintf(detail, sizeof(detail), "%s", "rebuild-envelope-failed");
-        } else if (!ush_forward(env_line, timeout_ms, ush_resp, sizeof(ush_resp),
+        } else if (!ush_token_read(ush_token, sizeof(ush_token))) {
+            ok = 0; code = LEA_ERR_USH_UNAVAILABLE;
+            snprintf(detail, sizeof(detail), "%s", "ush-token-missing");
+        } else if (!lea_json_insert_string_field(env_line, "ush_token", ush_token,
+                                                 env_tok, sizeof(env_tok))) {
+            ok = 0; code = LEA_ERR_INTERNAL;
+            snprintf(detail, sizeof(detail), "%s", "ush-token-insert-failed");
+        } else if (!ush_forward(env_tok, timeout_ms, ush_resp, sizeof(ush_resp),
                                 udetail, sizeof(udetail))) {
             ok = 0; code = LEA_ERR_USH_UNAVAILABLE;
             snprintf(detail, sizeof(detail), "%s", udetail);
@@ -1164,8 +1338,10 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         audit_event(&ev);
         svc_log("binding login_changed account=%s epoch=%lld -> PENDING", account, epoch);
         char result[256];
-        snprintf(result, sizeof(result),
-                 "{\"binding_state\":\"PENDING\",\"binding_epoch\":%lld}", epoch);
+        if (!lea_binding_login_result(epoch, result, sizeof(result))) {
+            lea_build_response(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "login-result-too-small", NULL);
+            return;
+        }
         lea_build_response(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
@@ -1217,7 +1393,8 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         }
         EnterCriticalSection(&g_lock);
         int okc = lea_binding_confirm(&g_binding, tk.binding_epoch, tk.grant_epoch, tk.grant_muse_execute,
-                                      tk.scopes, tk.lease_id, tk.expires_at, now_unix());
+                                      tk.scopes, tk.lease_id, tk.expires_at, tk.signature,
+                                      now_unix());
         if (okc) binding_persist_locked();
         long long cur_epoch = g_binding.epoch;
         LeaveCriticalSection(&g_lock);
@@ -1473,7 +1650,22 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
          * handle_internal、绕过信封验签；无顶层 "cmd" 即走信封处理。 */
         char cmd[64] = { 0 };
         if (lea_json_top_level_string(buf, "cmd", cmd, sizeof(cmd)) && cmd[0]) {
-            handle_internal(buf, resp, sizeof(resp));
+            /* H01：内部命令先验调用方身份——不是已安装的客户端一律拒绝，
+             * 含 session.logout 这类可废掉绑定的命令。 */
+            if (!internal_caller_allowed(pipe)) {
+                svc_log("REJECT internal cmd=%s caller-not-allowed", cmd);
+                lea_audit_event_t ev;
+                memset(&ev, 0, sizeof(ev));
+                ev.event = "admit-reject";
+                ev.command = cmd;
+                ev.result = "rejected";
+                ev.detail = "internal-caller-not-allowed";
+                audit_event(&ev);
+                lea_build_response(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
+                                   "internal-caller-not-allowed", NULL);
+            } else {
+                handle_internal(buf, resp, sizeof(resp));
+            }
         } else {
             handle_envelope(buf, resp, sizeof(resp));
         }

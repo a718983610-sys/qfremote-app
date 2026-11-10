@@ -8,8 +8,15 @@
  * QFSysHelper 要接用户态 Electron 应用的调用故放行 AU（认证用户），
  * USH 只接 LEA 服务，不需要 AU。另加 PIPE_REJECT_REMOTE_CLIENTS 拒绝远程连入。
  * 安全边界（写死，不许放宽）：
- *   - 只信 LEA 转来的已校验指令，不做准入、不存密钥、不做签名校验
- *     （准入在服务端 + LEA 两层；USH 收到的已是校验过的命令）；
+ *   - 只接已校验指令：调用方须是已安装的 QFRLEA.exe（进程镜像校验，
+ *     H03），且须带 USH 每启动一次的随机 token（H03）；两者缺一即
+ *     拒绝——USH 不再只信管道 ACL（本机任意 SYSTEM／管理员进程、
+ *     含 MeshCentral agent 本身，从此发不了 ui.click／ui.input）。
+ *     自探活 ui.ping 例外：只允许 USH 自身进程（QFUserHelper.exe）
+ *     发起，无 token 也放行。
+ *   - 不做准入、不存密钥、不做签名校验
+ *     （业务准入在服务端 + LEA 两层；USH 收到的已是校验过的命令，
+ *      再加调用方＋token 两道本地鉴别）；
  *   - 只收 5 个固定命令（ui.ping/ui.click/ui.input/ui.snapshot/ui.tree），
  *     命令名之外只采信白名单字段；输入文本只进 UIA，不进日志（日志只记
  *     params 的 SHA-256 哈希）；不执行任意脚本/命令、不做进程注入；
@@ -22,8 +29,13 @@
  * 调试：QFUserHelper.exe debug —— 前台跑管道循环（不注册 SCM，USH 不是服务）。
  */
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 /* GetNamedPipeClientProcessId（H03）须 ≥0x0600 */
+#endif
 #include <windows.h>
 #include <sddl.h>
+#include <bcrypt.h>
+#include <wtsapi32.h> /* WTSGetActiveConsoleSessionId（H03 第二轮：与 LEA 同源） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +50,81 @@
 
 static volatile LONG g_running = 1;
 static HANDLE g_stop_event = NULL;
+
+/* ---------- H03：每启动随机 token ＋ 调用方鉴别 ---------- */
+/* token：32 字节 BCryptGenRandom → 64 位小写 hex，存在内存（g_ush_token），
+ * 同时写入 %ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt 供 LEA 读取
+ * 后随信封带回验。LEA 读不到 token 即不转发 UI 命令（fail-closed）。
+ * 生成失败返回 0：此时 g_ush_token 为空，全部 LEA 命令都会因 token
+ * 不匹配被拒（fail-closed），只记日志继续跑，等下次启动重试。 */
+static char g_ush_token[65] = { 0 };
+
+static int ush_token_init(void) {
+    unsigned char raw[32];
+    if (BCryptGenRandom(NULL, raw, sizeof(raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        return 0;
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        g_ush_token[i * 2] = hexd[(raw[i] >> 4) & 0xF];
+        g_ush_token[i * 2 + 1] = hexd[raw[i] & 0xF];
+    }
+    g_ush_token[64] = '\0';
+    /* 文件名用活动控制台会话 id（H03 第二轮）：与 LEA 的 ush_token_read
+     * 用同一来源，RDP／多会话下不错配。旧版用自身会话 id
+     * （ProcessIdToSessionId），RDP 会话里的 USH 与 LEA 读的控制台会
+     * 话文件对不上，token 永远读不到。多会话各跑一个 USH 时同名文件
+     * 后写者胜——UI 命令本就只面向控制台桌面，残留 DoS 接受。
+     * DS 第二轮 #6：无活动控制台会话时不回退自身会话 id——LEA 的
+     * ush_token_read 同样用 WTSGetActiveConsoleSessionId，取不到直接
+     * 失败；两端不一致只会让日志难定位。RDP-only（无控制台会话）下
+     * token 文件不写，LEA 读不到 token，UI 命令 fail-closed（见 README）。 */
+    DWORD session_id = WTSGetActiveConsoleSessionId();
+    if (session_id == 0xFFFFFFFF) {
+        ush_log_event("ush-token-no-console-session", "no active console session; token file not written, LEA forwards will fail closed (RDP-only: UI commands unavailable)");
+        return 1; /* token 在内存，文件没写 */
+    }
+    WCHAR wpd[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 1; /* token 在内存，文件写失败只记日志 */
+    WCHAR wpath[MAX_PATH];
+    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu.txt",
+               wpd, (unsigned long)session_id);
+    FILE *f = _wfopen(wpath, L"wb");
+    if (!f) {
+        ush_log_event("ush-token-file-failed", "cannot write ush token file; LEA forwards will fail closed");
+        return 1;
+    }
+    fwrite(g_ush_token, 1, 64, f);
+    fputc('\n', f);
+    fclose(f);
+    return 1;
+}
+
+/* 管道调用方鉴别：返回 0=拒绝，1=LEA 服务（QFRLEA.exe，可发全部命令，
+ * 另须验 token），2=USH 自身（QFUserHelper.exe，仅 ui.ping 自探活）。
+ * 安装目录取 USH 自身 exe 所在目录；其他进程一律拒绝。 */
+static int ush_caller_kind(HANDLE pipe) {
+    DWORD pid = 0;
+    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return 0;
+    WCHAR img[MAX_PATH];
+    DWORD n = MAX_PATH;
+    int kind = 0;
+    if (QueryFullProcessImageNameW(h, 0, img, &n) && n > 0) {
+        WCHAR self[MAX_PATH];
+        GetModuleFileNameW(NULL, self, MAX_PATH);
+        WCHAR *slash = wcsrchr(self, L'\\');
+        if (slash) *slash = L'\0';
+        WCHAR expect_lea[MAX_PATH], expect_self[MAX_PATH];
+        _snwprintf(expect_lea, MAX_PATH, L"%s\\QFRLEA.exe", self);
+        _snwprintf(expect_self, MAX_PATH, L"%s\\QFUserHelper.exe", self);
+        if (_wcsicmp(img, expect_lea) == 0) kind = 1;
+        else if (_wcsicmp(img, expect_self) == 0) kind = 2;
+    }
+    CloseHandle(h);
+    return kind;
+}
 
 /* ---------- DPI awareness（PerMonitorV2；失败则降级，不阻塞启动） ---------- */
 static void enable_dpi_awareness(void) {
@@ -117,8 +204,11 @@ static int read_request_line(HANDLE pipe, char *buf, size_t buf_size) {
 }
 
 /* ---------- 单次请求处理 ---------- */
+/* caller_kind：ush_caller_kind 的返回值（1=LEA，2=USH 自身自探活）。
+ * H03：LEA 来的请求须带与本进程 token 一致的 ush_token，否则拒绝；
+ * 自身来的只放行 ui.ping。 */
 static void handle_request(const char *req_text, char *resp, size_t resp_size,
-                           DWORD *out_duration_ms) {
+                           DWORD *out_duration_ms, int caller_kind) {
     DWORD start = GetTickCount();
     ush_request_t rq;
     /* data_buf 必须放堆上：handle_request 跑在管道工作线程（默认 1MB 栈），
@@ -141,6 +231,42 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size,
     if (!ush_parse_request(req_text, &rq)) {
         code = rq.error;
         snprintf(err_text, sizeof(err_text), "request parse failed: %s", rq.error);
+        ush_build_response(resp, resp_size, 0, code, rq.request_id,
+                           (long)(GetTickCount() - start), NULL, err_text);
+        ush_log_command(&rq, "error", code, (long)(GetTickCount() - start), NULL, 0);
+        if (out_duration_ms) *out_duration_ms = GetTickCount() - start;
+        free(data_buf);
+        return;
+    }
+
+    /* H03 鉴权门（解析通过后、执行前）：LEA 来的请求必须带与本进程
+     * token 一致的 ush_token；自身来的只放行 ui.ping；其他 caller_kind
+     * （含 0）一律拒绝。token 缺失／不匹配返回明确错误码，不执行。 */
+    if (caller_kind == 1) {
+        if (!ush_token_matches(g_ush_token, rq.ush_token)) {
+            code = USH_ERR_UNAUTHORIZED;
+            snprintf(err_text, sizeof(err_text), "ush token missing or mismatch");
+            ush_build_response(resp, resp_size, 0, code, rq.request_id,
+                               (long)(GetTickCount() - start), NULL, err_text);
+            ush_log_command(&rq, "error", code, (long)(GetTickCount() - start), NULL, 0);
+            if (out_duration_ms) *out_duration_ms = GetTickCount() - start;
+            free(data_buf);
+            return;
+        }
+    } else if (caller_kind == 2) {
+        if (rq.cmd != USH_CMD_PING) {
+            code = USH_ERR_CALLER_NOT_ALLOWED;
+            snprintf(err_text, sizeof(err_text), "self-probe may only send ui.ping");
+            ush_build_response(resp, resp_size, 0, code, rq.request_id,
+                               (long)(GetTickCount() - start), NULL, err_text);
+            ush_log_command(&rq, "error", code, (long)(GetTickCount() - start), NULL, 0);
+            if (out_duration_ms) *out_duration_ms = GetTickCount() - start;
+            free(data_buf);
+            return;
+        }
+    } else {
+        code = USH_ERR_CALLER_NOT_ALLOWED;
+        snprintf(err_text, sizeof(err_text), "pipe caller not allowed");
         ush_build_response(resp, resp_size, 0, code, rq.request_id,
                            (long)(GetTickCount() - start), NULL, err_text);
         ush_log_command(&rq, "error", code, (long)(GetTickCount() - start), NULL, 0);
@@ -251,9 +377,24 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             CloseHandle(pipe);
             continue;
         }
+        /* H03：先验调用方身份，不是 QFRLEA.exe／QFUserHelper.exe 直接拒，
+         * 不读请求、不执行。 */
+        int caller = ush_caller_kind(pipe);
+        if (caller == 0) {
+            char deny[512];
+            ush_build_response(deny, sizeof(deny), 0, USH_ERR_CALLER_NOT_ALLOWED, "", 0,
+                               NULL, "pipe caller is not QFRLEA.exe or QFUserHelper.exe");
+            DWORD written = 0;
+            WriteFile(pipe, deny, (DWORD)strlen(deny), &written, NULL);
+            FlushFileBuffers(pipe);
+            DisconnectNamedPipe(pipe);
+            CloseHandle(pipe);
+            ush_log_event("caller-rejected", "non-LEA process attempted USH pipe");
+            continue;
+        }
         if (read_request_line(pipe, req_buf, sizeof(req_buf))) {
             DWORD dur = 0;
-            handle_request(req_buf, resp_buf, USH_MAX_RESPONSE, &dur);
+            handle_request(req_buf, resp_buf, USH_MAX_RESPONSE, &dur, caller);
             DWORD written = 0;
             WriteFile(pipe, resp_buf, (DWORD)strlen(resp_buf), &written, NULL);
         }
@@ -280,6 +421,10 @@ int main(int argc, char **argv) {
     int debug = (argc > 1 && strcmp(argv[1], "debug") == 0);
     enable_dpi_awareness();
     ush_log_init();
+    /* H03：启动即生成每启动随机 token 并落盘供 LEA 读取；生成失败只记
+     * 日志继续跑（token 为空时全部 LEA 命令都会被拒，fail-closed）。 */
+    if (!ush_token_init())
+        ush_log_event("ush-token-init-failed", "token generation failed; LEA commands will be refused");
     if (debug) {
         fprintf(stderr, "QFUserHelper %s debug mode: pipe %s\n", USH_VERSION,
             "\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");

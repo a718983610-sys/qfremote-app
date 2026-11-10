@@ -50,6 +50,7 @@ extern "C" {
 #define LEA_ERR_DUPLICATE "QFR_LEA_DUPLICATE_IN_PROGRESS"
 #define LEA_ERR_UNKNOWN "QFR_LEA_EXECUTION_UNKNOWN"
 #define LEA_ERR_QUEUE_FULL "QFR_QUEUE_FULL"
+#define LEA_ERR_CALLER_NOT_ALLOWED "QFR_LEA_CALLER_NOT_ALLOWED" /* * 内部命令调用方不是已安装的 qf-lea-client.exe（H01） */
 #define LEA_ERR_USH_UNAVAILABLE "QFR_LEA_USH_UNAVAILABLE"      /* * USH 未运行/连不上 */
 #define LEA_ERR_SCRIPT_NOT_ALLOWED "QFR_LEA_SCRIPT_NOT_ALLOWED" /* * 白名单外脚本 */
 #define LEA_ERR_PATH_NOT_ALLOWED "QFR_LEA_PATH_NOT_ALLOWED"     /* * 目录越界 */
@@ -205,6 +206,17 @@ int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size);
 
 /* JSON 转义后追加到 buf（不含外层引号），返回 0=空间不足。 */
 int lea_json_escape_into(char *buf, size_t buf_size, size_t *off, const char *s);
+
+/* 在一行 JSON 对象末尾插入一个字符串字段（H03：LEA→USH 转发时插入
+ * ush_token）。在最后一个 '}' 前插入 ,"key":"<转义后 value>"；原串须为
+ * 以 '}' 结尾的单行 JSON 对象，空间不足或形状不对返回 0，原串不动。 */
+int lea_json_insert_string_field(const char *line, const char *key, const char *value,
+                                 char *out, size_t out_size);
+
+/* H07 契约：session.login_changed 的 result 字段格式（见 lea_protocol.c）。
+ * main.js 钩子从 result.binding_epoch 取 epoch 去调 rebind；格式一旦
+ * 变了钩子就空转，故抽成可单测的纯函数并锁死。 */
+int lea_binding_login_result(long long epoch, char *out, size_t out_size);
 
 /* 构造一行 JSON 响应：{"ok":bool,"code":"...","request_id":"...",
  * "retryable":bool,"detail":"...","result":{...}|"result":null}。

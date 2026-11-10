@@ -47,8 +47,13 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
 
 1. **服务与管道**：服务名 `QFRLEA`，显示名“QFRemote 本地执行代理”，SYSTEM 身份；
    管道 `\\.\pipe\QFR\LEA\v1`，多实例（8 路），每连接独立线程；SDDL
-   `D:(A;;GA;;;SY)(A;;GA;;;BA)`（仅 SYSTEM＋Administrators，比 QFSysHelper 的
-   AU+SY+BA 更严——调用方是经 `runcommands` 以 SYSTEM 运行的客户端或管理员）。
+   `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)`（H01：主程序以普通用户身份
+   经已安装的 `qf-lea-client.exe` 发内部命令，必须能连上管道；业务信封
+   仍须服务端 Ed25519 签名，内部命令另验调用方进程镜像全路径——只认
+   安装目录下的 `qf-lea-client.exe`，**且父进程须为主程序
+   （QFRemote.exe／开发态 electron.exe，在活动控制台会话内，H01 第二
+   轮：只验镜像不够，任意用户都能直接运行合法客户端）**，不通过回
+   `QFR_LEA_CALLER_NOT_ALLOWED`）。
    `QFRLEA.exe debug` 前台跑管道循环（同 QFSysHelper 的 debug 模式）。
 2. **协议**：一行 JSON 请求 → 一行 JSON 响应；信封字段按 DESIGN §4.1 全量解析
    （version/request_id/batch_id/seq/device_id/account_id/api_key_id/
@@ -95,7 +100,10 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    经 `\\.\pipe\QFR\LEA\UserHelper\v1` 转发（连接超时 2s，执行按
    `timeout_ms`）；USH 不可用时明确报 `QFR_LEA_USH_UNAVAILABLE`
    （MVP 补充码）。USH 响应透传其 `ok`／`code`。**USH 由另一线实现；
-   本线不假设 USH 已存在。**
+   本线不假设 USH 已存在。**（H03：转发前 LEA 读
+   `%ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt` 的当次随机 token，
+   以 `ush_token` 字段插进信封行末；读不到 token 即 `ush-token-missing`，
+   不裸发。USH 侧另验调用方镜像＋token，见 `windows/ush/README.md`。）
 9. **日志与审计**：`%ProgramData%\QFR\LEA\logs\lea-YYYY-MM-DD.jsonl`，
    结构化 JSONL 按天滚动保留 30 天（每小时清理一次）；字段按 DESIGN §11.1
    （trace_id/request_id/batch_id/seq/account_id/device_id/api_key_id/
@@ -105,12 +113,23 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    目录与文件 ACL 仅 SYSTEM／Administrators（SDDL＋安装脚本双重设置）。
 10. **绑定**：DPAPI `LocalMachine` 加密存 `%ProgramData%\QFR\LEA\state\binding.dat`
     （ACL 仅 SYSTEM／Administrators）；状态机
-    UNBOUND→PENDING→ACTIVE→REVOKING→UNBOUND；登录事件（内部命令
-    `session.login_changed`）使旧绑定立即作废（epoch+1）进 PENDING；
+    UNBOUND→PENDING→ACTIVE→REVOKING→UNBOUND。binding.dat 另存票据签名
+    `ticket_signature`（H02）：加载 ACTIVE 态时重验签名，不通过即丢弃回
+    UNBOUND（fail-closed；旧版无签名字段的文件同样丢弃，用户重登后由新
+    票据重建）。登录事件（内部命令 `session.login_changed`）：
+    **同账号重登（应用重启／静默重登）不升 epoch**，已生成 Key 继续可用；
+    换号／未绑定时 epoch+1；两种情况都进 PENDING、清空授权等票据确认重填
+    （H07 epoch 协调；服务端同账号换绑同样不升，两端一致）。
     票据确认（内部命令 `binding.confirm`，验票据签名）后进 ACTIVE；
     登出／撤销进 UNBOUND 且 epoch+1，**不回滚旧绑定**。
-    内部命令走同一管道（ACL 限 SYSTEM／管理员），不走信封验签——
-    与 QFSysHelper 的 `{cmd,…}` 模式一致。
+    内部命令走同一管道（ACL 含 AU，见第 1 条），不走信封验签——
+    但先验调用方进程镜像＋父进程为主程序（H01），与 QFSysHelper 的 `{cmd,…}` 模式一致。
+    登录／登出／换号通知由主程序 `windows/main.js` 发起
+    （`notifyLeaLogin`／`notifyLeaLogout`，H07；登出后同账号重登会使
+    LEA epoch 跳前，旧 Key 因 epoch 不符失效，须重新生成 Key）。
+    `session.login_changed` 的 result 格式由 `lea_binding_login_result`
+    锁死并单测覆盖（H07 第二轮：main.js 从 `result.binding_epoch` 取
+    epoch 去调 rebind，格式一变钩子就空转）。
 11. **危险命令初始定义**（待站长确认完整清单，DESIGN §14 #4）：`script.run`、
     `file.write`，以及 `params.dangerous=true` 的 `ui.click`／`ui.input`。
     危险命令禁自动重试、进单独 lane、幂等保留 30 天。
@@ -124,7 +143,7 @@ LEA_TEST_UNSIGNED=1 ./build.sh  # 仅冒烟测试用，生产绝不启用
 python3 gen_whitelist.py --check  # 校验 whitelist.h 与当前脚本一致
 ```
 
-## 五、单测结果（本机 Linux 沙箱，2026-11-10 实跑）
+## 五、单测结果（本机 Linux 沙箱，2026-11-10 实跑；数字为干净基线 ad506e2＋本补丁实跑，与主树一致）
 
 ```sh
 sh test/run_tests.sh
@@ -132,9 +151,9 @@ sh test/run_tests.sh
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 核心单测（测试构建） | **220 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、app.open 白名单 hash 钉死（H16）、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）** |
-| 核心单测（严格构建） | **219 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
-| mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，485000 B）、`qf-lea-client.exe`（260528 B） |
+| 核心单测（测试构建） | **294 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）**、**H02 票据签名存取与加载重验、H03 信封行末 `ush_token` 插入、H07 同账号重登不升 epoch／换号升 epoch 且清签名、H07 第二轮 `lea_binding_login_result` 格式锁死** |
+| 核心单测（严格构建） | **289 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
+| mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，503003 B）、`qf-lea-client.exe`（266641 B） |
 | 生产构建核查 | **通过** | `strings QFRLEA.exe` 不含 `test-only-unsigned-accepted`（0 处），含 `ed25519-pubkey-not-configured`（2 处） |
 | 白名单核查 | **通过** | `gen_whitelist.py --check`：`qf-agent-heal.ps1` sha256 与 `whitelist.h` 一致 |
 
@@ -161,7 +180,8 @@ sh test/run_tests.sh
    仍须真机（ECS／笔记本）验证 runcommands 通道本身与 SYSTEM 身份下的管道连通。
 6. DPAPI 绑定落盘与重启恢复；幂等表重启恢复（RUNNING→UNKNOWN）；日志滚动与 30 天清理。
 7. 队列满、超时、USH 崩溃、换绑竞态等故障注入（DESIGN §13.2）。
-8. 命名管道 ACL 实测：普通用户连接应被拒绝；SYSTEM／管理员可连。
+8. 命名管道 ACL 实测：普通用户（AU）经已安装客户端可连；SYSTEM／管理员可连；
+   非安装目录客户端冒充发内部命令应被拒（`QFR_LEA_CALLER_NOT_ALLOWED`）。
 9. 安装目录位置确认：`qf-agent-heal.ps1` 在包内的实际路径（当前假设为
    安装根目录；若实际在子目录，需调整白名单根目录判定）。
 

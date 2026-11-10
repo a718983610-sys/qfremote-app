@@ -49,6 +49,9 @@ typedef struct {
     char scopes[256];       /* 逗号分隔，如 "muse.execute,muse.execute.dangerous" */
     long long expires_at;   /* 绑定票据过期（unix 秒，0=不过期） */
     char lease_id[64];
+    char ticket_signature[512]; /* H02：服务端票据签名原文；binding.dat 持久化
+                                 * 并在加载时重验（lea_binding_verify_ticket），
+                                 * 签名缺失／不通过即丢弃绑定（UNBOUND）。 */
     long long updated_at;
 } lea_binding_t;
 
@@ -58,13 +61,22 @@ int lea_binding_has_scope(const lea_binding_t *b, const char *scope);
 long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
                                const char *device_id, long long now_unix);
 /* 服务端票据确认：epoch 须与 PENDING 态一致且未过期 → ACTIVE。
- * grant_muse_execute 收 long long：调用点已验签保证为 0/1，入参不再窄化。 */
+ * grant_muse_execute 收 long long：调用点已验签保证为 0/1，入参不再窄化。
+ * ticket_signature 为验签通过的票据签名原文，原样存入绑定态，随
+ * binding.dat 持久化（H02：加载时重验，见 lea_binding_verify_ticket）。 */
 int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
                         long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
+                        const char *ticket_signature,
                         long long now_unix);
 /* 登出／撤销：经 REVOKING 回 UNBOUND，epoch+1（旧 epoch 立即作废）。 */
 void lea_binding_revoke(lea_binding_t *b, long long now_unix);
+/* H02：重验内存绑定态的票据签名。按票据规范串 v1（9 行）从绑定态字段
+ * 重建 canonical 并验签；签名缺失／规范串非法／验签失败一律返回 0。
+ * 调用方（QFRLEA.c binding_load）在 state==ACTIVE 时用：不通过即丢弃
+ * 绑定。注意：未接入真实公钥的严格构建下验签恒失败——与 binding.confirm
+ * 的 fail-closed 口径一致（无公钥时本就建不成 ACTIVE 绑定）。 */
+int lea_binding_verify_ticket(const lea_binding_t *b);
 /* 绑定票据过期检查：ACTIVE 且 expires_at 已过 → 降级为 PENDING（需续租）。 */
 int lea_binding_expired(const lea_binding_t *b, long long now_unix);
 

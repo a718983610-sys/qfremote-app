@@ -38,8 +38,18 @@
 ACL 仅 SYSTEM＋Administrators（`D:(A;;GA;;;SY)(A;;GA;;;BA)`）＋拒绝远程连入：
 只有 QFRLEA 服务（SYSTEM 身份）能连。比 QFSysHelper 更严是故意的——
 QFSysHelper 要接用户态 Electron 应用故放行 AU，USH 只接 LEA 服务。
+（H03：除管道 ACL 外，USH 另设两道本地鉴别——调用方进程镜像只认
+安装目录下的 `QFRLEA.exe`（LEA 服务）与自身 `QFUserHelper.exe`
+（仅 `ui.ping` 自探活），其余一律拒绝；LEA 来的请求须带与 USH 内存
+token 一致的 `ush_token`（USH 每启动随机生成 32 字节 hex，写
+`%ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt` 供 LEA 读取，
+`<sessionid>` 为活动控制台会话 id，H03 第二轮与 LEA 同源，RDP／多
+会话下不错配；无活动控制台会话时（RDP-only）USH 不写 token 文件，
+LEA 读不到 token，UI 命令 fail-closed），
+定长比对，不符回 `QFR_USH_UNAUTHORIZED`。）
 
-请求（LEA 转来的已校验信封；USH 不做准入、不验签名、不存密钥）：
+请求（LEA 转来的已校验信封；USH 不做准入、不验签名、不存密钥——
+但先验调用方身份与 ush_token，见上）：
 
 ```json
 {"version":1,"request_id":"<uuid>","trace_id":"...","batch_id":"...","seq":1,
@@ -100,7 +110,8 @@ QFSysHelper 要接用户态 Electron 应用故放行 AU，USH 只接 LEA 服务�
 - **单实例／崩溃恢复**：每会话一个互斥体＋启动时 `ui.ping` 探活旧实例，活着就退出，
   死了就接管；无持久状态，进程死则管道句柄由系统回收，不留僵尸管道；计划任务
   失败自动重启（1 分钟间隔，最多 3 次）。
-- **红线**：不做内核驱动、不做进程注入；不执行任意脚本／命令；USH 只信 LEA。
+- **红线**：不做内核驱动、不做进程注入；不执行任意脚本／命令；USH 只信 LEA
+  （H03：调用方镜像＋ush_token 两道鉴别，不只信管道 ACL）。
 
 ## 构建
 

@@ -208,6 +208,9 @@ int ush_parse_request(const char *text, ush_request_t *out) {
     ush_json_get_string(text, "device_id", out->device_id, sizeof(out->device_id));
     ush_json_get_string(text, "api_key_id", out->api_key_id, sizeof(out->api_key_id));
     ush_json_get_string(text, "nonce", out->nonce, sizeof(out->nonce));
+    /* H03：LEA 转发的鉴权 token（缺失即空串，调用点按未授权拒绝，
+     * 自探活 ui.ping 除外）。 */
+    ush_json_get_string(text, "ush_token", out->ush_token, sizeof(out->ush_token));
     long be = 0;
     if (ush_json_get_long(text, "binding_epoch", &be)) out->binding_epoch = be;
     long seq = 0;
@@ -322,6 +325,15 @@ int ush_base64_decode(const char *in, unsigned char *out, size_t out_size, size_
     }
     *out_len = o;
     return 1;
+}
+
+int ush_token_matches(const char *expected, const char *provided) {
+    if (!expected || !provided) return 0;
+    size_t el = strlen(expected), pl = strlen(provided);
+    if (el == 0 || pl == 0 || el != pl) return 0;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < el; i++) diff |= (unsigned char)(expected[i] ^ provided[i]);
+    return diff == 0;
 }
 
 int ush_click_retry_delay_ms(int dangerous, int attempt) {

@@ -35,6 +35,8 @@
 /* 错误码（与 DESIGN.md §4.5 同前缀风格；LEA 侧按 code 透传） */
 #define USH_ERR_BAD_REQUEST "bad-request"
 #define USH_ERR_UNKNOWN_COMMAND "unknown-command"
+#define USH_ERR_UNAUTHORIZED "QFR_USH_UNAUTHORIZED" /* H03：LEA→USH token 缺失／不匹配 */
+#define USH_ERR_CALLER_NOT_ALLOWED "QFR_USH_CALLER_NOT_ALLOWED" /* H03：管道调用方不是已安装的 QFRLEA.exe／QFUserHelper.exe */
 #define USH_ERR_SESSION_LOCKED "QFR_USH_SESSION_LOCKED"
 #define USH_ERR_NO_SESSION "QFR_USH_NO_INTERACTIVE_SESSION"
 #define USH_ERR_NOT_FOUND "QFR_USH_ELEMENT_NOT_FOUND"
@@ -60,6 +62,9 @@ typedef struct {
     long timeout_ms;         /* 已夹取到 [1, USH_MAX_TIMEOUT_MS]，缺省 5000 */
     int dangerous;           /* 1=危险按钮：禁止自动重试 */
     char params_json[USH_MAX_PARAMS]; /* params 对象原文（含花括号），可能为空对象 */
+    char ush_token[128];     /* H03：LEA 转发的每启动随机 token（LEA 读 USH
+                              * 启动时写的 token 文件后随信封带来）；USH 验
+                              * token，不匹配即拒绝（ui.ping 自探活除外）。 */
     char error[64];          /* valid=0 时的错误码 */
 } ush_request_t;
 
@@ -78,6 +83,11 @@ int ush_json_escape(const char *in, char *out, size_t out_size);
 
 /* 解析一行请求；失败时 out->error 为错误码，valid=0。 */
 int ush_parse_request(const char *text, ush_request_t *out);
+
+/* H03：LEA→USH token 比对。expected 与 provided 都须非空且等长、逐字节
+ * 相等（定长比对，不因首字节不同提前返回）；任一为空、长度不等、
+ * 内容不等一律返回 0。 */
+int ush_token_matches(const char *expected, const char *provided);
 
 /* 构造一行响应。data_json 为已构造好的 JSON 片段（对象原文或 NULL）。
  * 成功：{"ok":true,"code":"done","request_id":"...","duration_ms":N,"data":{...}}

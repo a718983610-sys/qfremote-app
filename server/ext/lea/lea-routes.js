@@ -15,6 +15,9 @@
  *   deps.resolveConsoleAuth(req) -> Promise<{user, siteadmin}|null>
  *     （控制台会话校验，复用 validateConsoleCookie）
  *   deps.isSiteAdmin(auth) -> boolean（复用 isAdmin）
+ *   deps.listVisibleDeviceIds(auth) -> Promise<[deviceId]>（可选；H05 换绑
+ *     节点可见性校验：返回该账号在 MeshCentral 可见的设备 id 清单。
+ *     未注入时换绑只做“设备存在＋当前归属”校验，server.js 接入后可补注）
  * deps 缺失时对应接口 fail-closed（503/401），绝不放行。
  *
  * 路由（DESIGN §8.1）：
@@ -35,9 +38,8 @@ const crypto = require('crypto');
 
 const BODY_LIMIT = 1024 * 1024; // 执行请求体上限 1MB（信封 params 含文本时用）
 const MAX_BATCH_STEPS = 50;
-// 危险 scope 常量（与 lea-core.js 的 COMMANDS 表同值）。HEAD 遗留：
-// handleCreateKey 早已引用 DANGEROUS_SCOPE，此处此前无定义，带 scopes
-// 的建 Key 请求恒 500（无 scopes 时短路未触发）；此处补定义。
+// H06 补：危险 scope 常量（与 lea-core.js 同值；此前 handleCreateKey 引用
+// 未定义的 DANGEROUS_SCOPE，生成 Key 的路由一律 500）。
 const DANGEROUS_SCOPE = 'muse.execute.dangerous';
 
 function createLeaRoutes(core, channel, deps) {
@@ -415,12 +417,25 @@ function createLeaRoutes(core, channel, deps) {
     if (!body) return;
     const deviceScope = body.device_id ? String(body.device_id) : null;
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s) => s === 'muse.execute' || s === DANGEROUS_SCOPE) : ['muse.execute'];
-    const out = core.generateKey(a.user, {
-      device_scope: deviceScope, scopes,
-      expires_in_days: Number.isFinite(Number(body.expires_in_days)) ? Number(body.expires_in_days) : undefined,
-      ip: clientIp(req), userAgent: String((req.headers && req.headers['user-agent']) || ''),
-      confirmMethod: typeof deps.verifyMfa === 'function' ? 'password+mfa' : 'password',
-    });
+    // H06：dangerous scope 须站长先授 dangerous 授权（/grants），自助选即
+    // 403；无 muse.execute 授权时生成 Key 亦拒绝（core.generateKey 同拦，
+    // 此处先给明确文案，core 抛错时再按码转 403）。
+    if (scopes.includes(DANGEROUS_SCOPE) && !core.hasDangerousGrant(a.user)) {
+      return fail(res, 403, ERR.SCOPE_DENIED, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+    }
+    let out;
+    try {
+      out = core.generateKey(a.user, {
+        device_scope: deviceScope, scopes,
+        expires_in_days: Number.isFinite(Number(body.expires_in_days)) ? Number(body.expires_in_days) : undefined,
+        ip: clientIp(req), userAgent: String((req.headers && req.headers['user-agent']) || ''),
+        confirmMethod: typeof deps.verifyMfa === 'function' ? 'password+mfa' : 'password',
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_MUSE_NOT_AUTHORIZED') return fail(res, 403, e.code, '该账号未授权 Muse 操作，请先请站长授予 muse.execute。');
+      if (e && e.code === 'QFR_SCOPE_DENIED') return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      throw e;
+    }
     // 明文仅本次响应返回一次；前端只显示一次，关闭后不再明文展示（§7.2）。
     return sendJson(res, 200, { ok: true, key: out.key, record: out.record, msg: '请立即复制保存：关闭后不再明文展示。' });
   }
@@ -458,8 +473,12 @@ function createLeaRoutes(core, channel, deps) {
     const action = String(body.action || '');
     if (!target) return fail(res, 400, ERR.VALIDATION, '缺少 account_id。');
     if (action === 'grant') {
-      const out = core.grantMuse(target, a.user);
-      return sendJson(res, 200, { ok: true, account_id: target, grant_epoch: out.grant_epoch });
+      // H06：站长授予时可带 dangerous: true，一并授予 dangerous 授权
+      // （生成 dangerous scope 的 Key 的前置条件）；不带则只授基础授权，
+      // 既有 dangerous 值保留（见 grantMuse）。
+      const dg = body.dangerous === true ? true : (body.dangerous === false ? false : undefined);
+      const out = core.grantMuse(target, a.user, { dangerous: dg });
+      return sendJson(res, 200, { ok: true, account_id: target, grant_epoch: out.grant_epoch, dangerous: out.dangerous });
     }
     if (action === 'revoke') {
       const out = core.revokeGrant(target, a.user);
@@ -479,7 +498,42 @@ function createLeaRoutes(core, channel, deps) {
     if (accountId !== a.user && !isAdmin) {
       return fail(res, 403, 'FORBIDDEN', '只能绑定自己的账号。');
     }
-    const out = core.recordBinding(deviceId, accountId, 'manual-rebind');
+    // H05：换绑验设备归属／节点可见性（此前只验“绑自己或站长”，任意登录
+    // 用户知道 device_id 就能把他人设备抢到自己名下并吊销原账号全部 Key）：
+    // ① 节点可见性（可选注入 deps.listVisibleDeviceIds(auth)：返回该账号
+    //    在 MeshCentral 可见的设备 id 清单；注入时强制校验；未注入时走
+    //    ②③，server.js 接入后可补注）。
+    if (typeof deps.listVisibleDeviceIds === 'function') {
+      let visible = null;
+      try { visible = await deps.listVisibleDeviceIds(a); } catch (e) { visible = null; }
+      if (!Array.isArray(visible) || !visible.map(String).includes(deviceId)) {
+        try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
+        return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
+      }
+    }
+    // ② 设备须真实存在（svc 通道节点清单里有；未知 id 直接 404，不透露归属）。
+    //    通道不可达（known===null）时存在性校验跳过、归属校验照常，并记审计。
+    let known = null;
+    try {
+      const nodes = channel ? await channel.listNodes() : [];
+      known = (nodes || []).some((x) => x && (x._id === deviceId || x.nodeid === deviceId));
+    } catch (e) { known = null; }
+    if (known === false) {
+      return fail(res, 404, 'NOT_FOUND', '设备不存在。');
+    }
+    // ③ 设备归属：当前已绑定他人账号时，非站长不得换绑（DESIGN §6.1
+    //    “不一致则进入待站长授权，防冒领”）；未绑定／绑自己时放行。
+    const cur = core.getBinding(deviceId);
+    if (cur && cur.account_id !== accountId && !isAdmin) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, current_account_id: cur.account_id, reason: 'bound-to-other' }); } catch (e) {}
+      return fail(res, 403, 'FORBIDDEN', '该设备已绑定其他账号，只有站长可以换绑。');
+    }
+    if (known === null) {
+      try { core.audit('lea-rebind', { device_id: deviceId, account_id: accountId, by: a.user, note: 'node-existence-unchecked-channel-down' }); } catch (e) {}
+    }
+    // H07：hook 传回 LEA 的 PENDING epoch（binding_epoch），服务端只许向前。
+    const clientEpoch = Number.isSafeInteger(body.binding_epoch) ? body.binding_epoch : undefined;
+    const out = core.recordBinding(deviceId, accountId, 'manual-rebind', { bindingEpoch: clientEpoch });
     // H21：换绑响应带本次吊销的 key_id 与本机吊销表应有的全集快照
     // （调用方／客户端据此核对本机 revoked_keys.txt 是否已同步）。
     return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations: core.getRevocations(deviceId), ticket: out.ticket });

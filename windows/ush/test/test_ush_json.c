@@ -151,12 +151,35 @@ static void test_retry_and_strategies(void) {
     CHECK(ush_locator_strategy_name(5) == NULL, "locator: out of range NULL");
 }
 
+/* H03：LEA→USH token 解析与比对 */
+static void test_ush_token(void) {
+    ush_request_t r;
+    const char *tok = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    char req[512];
+    snprintf(req, sizeof(req),
+             "{\"command\":\"ui.click\",\"request_id\":\"req-t1\",\"ush_token\":\"%s\",\"params\":{}}", tok);
+    CHECK(ush_parse_request(req, &r) == 1 && r.valid, "token: parse ok");
+    CHECK(strcmp(r.ush_token, tok) == 0, "token: parsed value");
+    CHECK(ush_parse_request("{\"command\":\"ui.click\",\"params\":{}}", &r) == 1 && r.valid,
+          "token: missing parses ok");
+    CHECK(r.ush_token[0] == '\0', "token: missing is empty");
+    CHECK(ush_token_matches(tok, tok), "token: equal matches");
+    CHECK(!ush_token_matches(tok, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde0"),
+          "token: one-char diff rejects");
+    CHECK(!ush_token_matches(tok, "0123456789abcdef"), "token: short rejects");
+    CHECK(!ush_token_matches(tok, ""), "token: empty provided rejects");
+    CHECK(!ush_token_matches("", tok), "token: empty expected rejects");
+    CHECK(!ush_token_matches(NULL, tok), "token: null expected rejects");
+    CHECK(!ush_token_matches(tok, NULL), "token: null provided rejects");
+}
+
 int main(void) {
     test_parse_click();
     test_parse_variants();
     test_json_strings();
     test_response_and_base64();
     test_retry_and_strategies();
+    test_ush_token();
     printf("----\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -24,7 +24,7 @@ else
 fi
 
 # shellcheck disable=SC2086
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c $TEST_FLAG -ladvapi32 -lcrypt32
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c $TEST_FLAG -ladvapi32 -lcrypt32 -lwtsapi32
 # shellcheck disable=SC2086
 # S3：客户端用 lea_crypto.c 的 lea_b64_decode 解析 dispatch <base64>（纯 C，无需额外库）。
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o qf-lea-client.exe qf-lea-client.c lea_crypto.c $TEST_FLAG

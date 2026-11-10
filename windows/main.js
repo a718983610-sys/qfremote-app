@@ -286,6 +286,8 @@ function scheduleCookieFlush() {
 // 记住标记，会话 cookie 在回到登录页时清干净（见 processAuthPage）。
 function handleManualLogout() {
   viewMgr.noteLogout();
+  // H07：登出通知 LEA，撤销当前绑定（best-effort，不阻塞登出）。
+  notifyLeaLogout().catch(() => {});
   settings.auth.manualLogout = true;
   settings.auth.rememberDevice = false;
   pendingManualClear = true;
@@ -484,6 +486,8 @@ async function processAuthPage() {
       runLicenseGateCheck().catch(() => {});
       // W-11：登录成功后触发锁组件＋SYSTEM helper 首装（每版本一次 UAC）。
       maybeInstallSystemServices().catch(() => {});
+      // H07：登录／换号通知 LEA，绑定跟随当前账号（best-effort，不阻塞登录）。
+      notifyLeaLogin(currentGateUsername()).catch(() => {});
       flushConsoleCookies();
       try { await wc.executeJavaScript(autologinMod.GUARD_JS, true); } catch (e) { /* ignore */ }
     } else if (det.state === 'login') {
@@ -2870,6 +2874,155 @@ function lockServiceInstalled() {
   } catch (e) { /* ignore */ }
   return false;
 }
+// ---------- LEA 本地代理：登录／登出／换号通知（H07／pkg4 DS-2） ----------
+// 绑定跟随当前登录账号：登录成功（processAuthPage 的 console 分支）调
+// notifyLeaLogin()，登出（handleManualLogout）调 notifyLeaLogout()。
+// 内部命令经已安装的 qf-lea-client.exe --internal 发给 QFRLEA 服务
+// （服务只认安装目录下的客户端二进制，见 QFRLEA.c internal_caller_allowed）。
+// 全程 best-effort：LEA 未装／服务未起／服务端拒绝都不阻塞登录登出，
+// 只记 bootLog；换号后绑定留在 PENDING，等站长授权或下次登录重取票据。
+let leaLastNotifiedAccount = '';
+function leaClientExePath() {
+  try {
+    const pf = process.env.ProgramFiles || '';
+    const cands = [];
+    if (pf) cands.push(path.join(pf, 'QFR', 'LEA', 'qf-lea-client.exe'));
+    try { cands.push(path.join(path.dirname(process.execPath), 'LEA', 'qf-lea-client.exe')); } catch (e) { /* ignore */ }
+    cands.push(path.join(__dirname, 'lea', 'qf-lea-client.exe'));
+    for (const c of cands) { if (fs.existsSync(c)) return c; }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+function leaNotifyInternal(obj) {
+  const exe = leaClientExePath();
+  if (!exe) return { ok: false, reason: 'lea-client-missing' };
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync(exe, ['--internal', JSON.stringify(obj)], { windowsHide: true, timeout: 10000, encoding: 'utf8' });
+    if (r.error) return { ok: false, reason: 'spawn-failed' };
+    const lines = String(r.stdout || '').trim().split(/\r?\n/).filter(Boolean);
+    if (!lines.length) return { ok: false, reason: 'empty-stdout' };
+    try { return JSON.parse(lines[lines.length - 1]); } catch (e) { return { ok: false, reason: 'bad-json' }; }
+  } catch (e) { return { ok: false, reason: 'throw' }; }
+}
+async function notifyLeaLogin(account) {
+  try {
+    if (!account || account === leaLastNotifiedAccount) return { ok: false, reason: 'skip' };
+    let deviceId = null;
+    try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
+    const r = leaNotifyInternal({ cmd: 'session.login_changed', account_id: String(account), device_id: deviceId || '' });
+    if (!r || r.ok !== true) { bootLog('lea.login-notify-failed', (r && (r.code || r.reason)) || 'unknown'); return { ok: false, reason: 'notify-failed' }; }
+    leaLastNotifiedAccount = String(account);
+    // DS 第二轮 #1：result.binding_epoch 正常是 JSON number（C 端 %lld 裸整数），
+    // 但 stdout 万一被重序列化成字符串也不静默跳过——归一化后再验 isSafeInteger。
+    // 缺失／非数字时 Number 得 NaN，仍走下面的 lea.login-no-epoch 分支。
+    const rawEpoch = r.result && r.result.binding_epoch;
+    const epoch = (typeof rawEpoch === 'number' || typeof rawEpoch === 'string') ? Number(rawEpoch) : NaN;
+    if (deviceId && Number.isSafeInteger(epoch)) {
+      // 取服务端票据并确认绑定（H07 全流程）：rebind 带回客户端 epoch，
+      // 只许向前；票据原样送 binding.confirm（字段在顶层）。
+      const rb = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/devices/' + encodeURIComponent(deviceId) + '/rebind', { account_id: String(account), binding_epoch: epoch });
+      if (rb && rb.status === 200 && rb.json && rb.json.ticket) {
+        const cf = leaNotifyInternal(Object.assign({ cmd: 'binding.confirm' }, rb.json.ticket));
+        if (!cf || cf.ok !== true) bootLog('lea.binding-confirm-failed', (cf && (cf.code || cf.reason)) || 'unknown');
+      } else {
+        // rebind 失败（如他人已绑设备上非站长换号 → 403）：只记日志，
+        // 绑定留 PENDING（fail-closed），等站长授权或下次登录。
+        bootLog('lea.rebind-failed', rb ? String(rb.status) : 'no-response');
+      }
+    } else if (deviceId) {
+      // 有 deviceId 但 LEA 响应里没有 binding_epoch：rebind/confirm 全
+      // 跳过，绑定留 PENDING。正常不应发生（C 端 login_changed 的
+      // result 格式由 lea_binding_login_result 锁死并单测覆盖），只记
+      // 日志不静默。
+      bootLog('lea.login-no-epoch', JSON.stringify(r && r.result));
+    }
+    // H25：锁组件 device.json 跟随新账号（见 syncLockOwner）。
+    try { await syncLockOwner(String(account)); } catch (e) { /* ignore */ }
+    return { ok: true };
+  } catch (e) { bootLog('lea.login-notify-throw', (e && e.message) || String(e)); return { ok: false, reason: 'throw' }; }
+}
+async function notifyLeaLogout() {
+  try {
+    leaLastNotifiedAccount = '';
+    const r = leaNotifyInternal({ cmd: 'session.logout' });
+    if (!r || r.ok !== true) bootLog('lea.logout-notify-failed', (r && (r.code || r.reason)) || 'unknown');
+    return { ok: !!(r && r.ok) };
+  } catch (e) { bootLog('lea.logout-notify-throw', (e && e.message) || String(e)); return { ok: false }; }
+}
+
+// H25／pkg4 DS-1：锁组件 device.json 的 ownerUsername 跟随当前登录账号。
+// 两处 device.json：%ProgramFiles%\QFRemote\Lock\device.json 与组件源目录
+// device.json。已是新账号则无事；否则先试直接写（保留其他字段），写不动
+// （ProgramFiles 需提权）则走一次 UAC 的 PowerShell 改写并重启锁服务
+// （QFLockSvc）。直接写成功的路径不主动碰服务——新机主在锁服务下次启
+// 动时生效，避免停服务后起不来的窗口。
+function lockDeviceJsonPaths() {
+  const out = [];
+  try {
+    const pf = process.env.ProgramFiles || '';
+    if (pf) out.push(path.join(pf, 'QFRemote', 'Lock', 'device.json'));
+  } catch (e) { /* ignore */ }
+  try { out.push(path.join(lockComponentSourceDir(), 'device.json')); } catch (e) { /* ignore */ }
+  return out;
+}
+async function syncLockOwner(account) {
+  if (!account) return { ok: false, reason: 'no-account' };
+  let changed = false;
+  const needUac = [];
+  for (const p of lockDeviceJsonPaths()) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      let obj;
+      try { obj = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { continue; }
+      if (!obj || typeof obj !== 'object' || obj.ownerUsername === account) continue;
+      obj.ownerUsername = account;
+      try {
+        fs.writeFileSync(p, JSON.stringify(obj, null, 2), 'utf8');
+        changed = true;
+      } catch (e) {
+        // 直接写不动：记下来，最后一次 UAC 统一改写（H25 第二轮：两处
+        // 路径只弹一次提权，且只重启一次锁服务）。
+        needUac.push(p);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  if (needUac.length) {
+    try {
+      const cp = require('child_process');
+      const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+      // 一条 PowerShell 改全部路径，最后重启一次锁服务。
+      // DS 第二轮 #2：锁安装器写 device.json 用无 BOM 的 [IO.File]::WriteAllText
+      //（windows/privacy-lock/install.ps1:69）；Set-Content -Encoding UTF8 在
+      // PS5.1 下带 BOM，锁组件读到 BOM 可能拒解析，故 UAC 路径沿用同一写法。
+      const perFile = needUac.map((p) =>
+        "$j = Get-Content " + q(p) + " -Raw | ConvertFrom-Json; $j.ownerUsername = " + q(account) + "; [IO.File]::WriteAllText(" + q(p) + ", ($j | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)));").join(' ');
+      const inner = perFile + " Restart-Service -Name 'QFLockSvc' -ErrorAction SilentlyContinue";
+      cp.spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command'," + q(inner) + " -Verb RunAs -WindowStyle Hidden"], { windowsHide: true });
+      bootLog('lea.lock-owner-uac', needUac.join(';'));
+      // UAC 是异步的（用户要点允许），这里不阻塞登录；8 秒后重读校验，
+      // 写上了记 uac-done，没写上记 uac-unconfirmed——下次登录再试一次。
+      setTimeout(() => {
+        try {
+          let done = true;
+          for (const p of needUac) {
+            try {
+              const obj = JSON.parse(fs.readFileSync(p, 'utf8'));
+              if (!obj || obj.ownerUsername !== account) done = false;
+            } catch (e) { done = false; }
+          }
+          bootLog(done ? 'lea.lock-owner-uac-done' : 'lea.lock-owner-uac-unconfirmed', account);
+        } catch (e) { /* ignore */ }
+      }, 8000);
+      // DS 第二轮 #3：UAC 只是已发起，不算“已更新”——changed 只记直接写成功；
+      // 提权结果见 8 秒后校验日志（uac-done／uac-unconfirmed），下次登录再试。
+    } catch (e2) { bootLog('lea.lock-owner-uac-failed', (e2 && e2.message) || String(e2)); }
+  }
+  if (changed) bootLog('lea.lock-owner-updated', account);
+  return { ok: true, changed, uacDispatched: needUac.length > 0 };
+}
+
 async function maybeInstallSystemServices(force) {
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
@@ -2891,7 +3044,15 @@ async function maybeInstallSystemServices(force) {
     bootLog('system-services.no-component');
     return { ok: false, reason: 'no-component' };
   }
-  if (lockServiceInstalled()) { bootLog('system-services.already-installed'); return { ok: true, reason: 'already-installed' }; }
+  if (lockServiceInstalled()) {
+    // H25：锁组件已装也不盲返——ownerUsername 须跟随当前登录账号。
+    const sync = await syncLockOwner(owner);
+    // DS 第二轮 #3：直接写成功报 owner-updated；只发起了 UAC 报
+    // owner-uac-pending（结果见 8 秒后校验日志），不谎报已更新。
+    const reason = sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : 'already-installed');
+    bootLog('system-services.already-installed', sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : undefined));
+    return { ok: true, reason };
+  }
   // SHA-256 白名单校验（sys-helper.js）：脚本/二进制被改过就绝不提权拉起。
   // H20：install-lea.ps1 同在白名单（whitelist.json，5 件）；校验路径取
   // helperExe 旁的 LEA/install-lea.ps1，与将被执行的那一份完全一致。

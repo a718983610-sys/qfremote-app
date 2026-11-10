@@ -86,6 +86,7 @@ const ERR = {
   DUPLICATE: 'QFR_LEA_DUPLICATE_IN_PROGRESS', // 409：同一幂等键正在执行
   UNKNOWN: 'QFR_LEA_EXECUTION_UNKNOWN', // 202/200：执行结果未知，须人工/快照确认
   NOT_INSTALLED: 'QFR_LEA_NOT_INSTALLED', // 503：设备未装 LEA 或通道不可达
+  NOT_WHITELISTED: 'QFR_DEVICE_NOT_WHITELISTED', // 403：设备不在白名单（H04，DESIGN §6.2 第 ② 项）
   QUEUE_FULL: 'QFR_QUEUE_FULL', // 503：队列满（本版服务端不排队，仅透传 LEA 端此码）
   VALIDATION: 'VALIDATION', // 400
 };
@@ -559,6 +560,27 @@ function createLeaCore(opts) {
     persistIdem();
   }
 
+  // ---------- 设备白名单（DESIGN §6.2 第 ② 项，H04） ----------
+  // 来源（按优先）：opts.whitelist（数组，单测／调用方注入）→
+  // whitelist.json（数据目录，{"devices": ["node//..."]}，每次 admit 重读，
+  // 改文件即生效，无须重启）。两者都未配置时 fail-closed：无设备在白名单，
+  // 全部准入拒绝。发版口径（DESIGN §14 #2 选 A）：白名单只开站长设备；
+  // 其他用户装接入口开放时把设备 id 追加进本文件。
+  const WHITELIST_FILE = path.join(dir, 'whitelist.json');
+  function loadWhitelist() {
+    if (Array.isArray(opts.whitelist)) return opts.whitelist.map(String);
+    try {
+      const v = JSON.parse(fs.readFileSync(WHITELIST_FILE, 'utf8'));
+      if (v && Array.isArray(v.devices)) return v.devices.map(String);
+    } catch (e) {}
+    return null; // 未配置
+  }
+  function isWhitelisted(deviceId) {
+    const wl = loadWhitelist();
+    if (!wl) return false;
+    return wl.includes(String(deviceId));
+  }
+
   // ---------- API Key（DESIGN §7） ----------
   function hashKey(plain, saltHex) {
     return sha256Hex(saltHex + ':' + plain);
@@ -593,6 +615,19 @@ function createLeaCore(opts) {
   }
   function generateKey(accountId, optsGen) {
     optsGen = optsGen || {};
+    // H06：生成 Key 须已有 muse.execute 授权；dangerous scope 须站长另授
+    // dangerous 授权，不许自助选。抛带 code 的错，路由层转 403（core 层
+    // 也拦，防路由层漏检）。无授权账号生成 Key 一律拒绝，不留“先建 Key
+    // 后授权”的窗口。
+    if (!hasGrant(accountId)) {
+      const e = new Error('LEA key generation requires muse.execute grant');
+      e.code = 'QFR_MUSE_NOT_AUTHORIZED'; throw e;
+    }
+    const wantScopes = Array.isArray(optsGen.scopes) && optsGen.scopes.length ? optsGen.scopes : ['muse.execute'];
+    if (wantScopes.includes(DANGEROUS_SCOPE) && !hasDangerousGrant(accountId)) {
+      const e = new Error('LEA dangerous scope requires station-admin approval');
+      e.code = 'QFR_SCOPE_DENIED'; throw e;
+    }
     const plain = KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
     const salt = crypto.randomBytes(16).toString('hex');
     const keyId = 'k_' + randId(10);
@@ -602,11 +637,11 @@ function createLeaCore(opts) {
       salt, hash: hashKey(plain, salt),
       account_id: String(accountId),
       device_scope: optsGen.device_scope || null, // null = 该账号已绑定设备（由绑定态定）
-      scopes: Array.isArray(optsGen.scopes) && optsGen.scopes.length ? optsGen.scopes : ['muse.execute'],
+      scopes: wantScopes,
       binding_epoch: currentBindingEpoch(optsGen.device_scope, String(accountId)),
       // T07/D1：Key 盖上生成时账号授权的 grant_epoch；admit 比对，授权撤销
-      // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。无授权记录时
-      // grant_epoch 为 0，admit 按授权撤销拒绝（须先授权再建 Key）。
+      // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。H06 已保证生成
+      // 时必有在效授权，故此处 grant_epoch 恒 ≥1。
       grant_epoch: currentGrantEpoch(String(accountId)),
       key_epoch: 1,
       created_at: now(), last_used_at: null, expires_at: null,
@@ -676,7 +711,7 @@ function createLeaCore(opts) {
     const g = loadGrants().grants[String(accountId)];
     return g || null;
   }
-  function grantMuse(accountId, by) {
+  function grantMuse(accountId, by, optsGrant) {
     const st = loadGrants();
     const isFirst = !st.grants[String(accountId)];
     const cur = st.grants[String(accountId)] || { account_id: String(accountId), grant_epoch: 0 };
@@ -688,16 +723,22 @@ function createLeaCore(opts) {
     // Key 生成时盖上当时 epoch（见 generateKey），admit 比对——撤销后重授予
     // epoch 已变，旧 Key 永不复活。
     if (isFirst || wasRevoked) cur.grant_epoch = (cur.grant_epoch || 0) + 1;
+    // H06 dangerous 授权：仅站长经 /grants 显式授予（optsGrant.dangerous
+    // === true）；重授未带该标志时保留既有值（不静默收回），显式 false
+    // 则收回。撤销授权时一并失效（见 revokeGrant）。
+    if (optsGrant && optsGrant.dangerous === true) cur.dangerous = true;
+    else if (optsGrant && optsGrant.dangerous === false) cur.dangerous = false;
     st.grants[String(accountId)] = cur;
     saveGrants(st);
-    audit('lea-grant-changed', { account_id: String(accountId), action: 'grant', grant_epoch: cur.grant_epoch, by: by || null });
-    return { ok: true, grant_epoch: cur.grant_epoch };
+    audit('lea-grant-changed', { account_id: String(accountId), action: 'grant', grant_epoch: cur.grant_epoch, dangerous: !!cur.dangerous, by: by || null });
+    return { ok: true, grant_epoch: cur.grant_epoch, dangerous: !!cur.dangerous };
   }
   function revokeGrant(accountId, by) {
     const st = loadGrants();
     const cur = st.grants[String(accountId)];
     if (!cur || cur.revoked_at) return { ok: false, code: 'NOT_FOUND' };
     cur.revoked_at = now(); cur.revoked_by = by || null;
+    cur.dangerous = false; // H06：撤销授权时 dangerous 授权一并失效，重授须站长重新显式授予
     cur.grant_epoch = (cur.grant_epoch || 0) + 1;
     saveGrants(st);
     audit('lea-grant-changed', { account_id: String(accountId), action: 'revoke', grant_epoch: cur.grant_epoch, by: by || null });
@@ -718,6 +759,11 @@ function createLeaCore(opts) {
     const g = getGrant(accountId);
     return !!(g && g.scope === 'muse.execute' && !g.revoked_at);
   }
+  // H06：dangerous 授权是否在效（站长显式授予且未撤销）。
+  function hasDangerousGrant(accountId) {
+    const g = getGrant(accountId);
+    return !!(g && g.scope === 'muse.execute' && !g.revoked_at && g.dangerous === true);
+  }
 
   // ---------- 绑定（DESIGN §6.1：跟随当前登录账号） ----------
   function getBinding(deviceId) {
@@ -735,13 +781,20 @@ function createLeaCore(opts) {
   }
   // 换绑：新账号绑定即递增 epoch；旧账号在该设备上的全部 Key 标记
   // revoked_by_rebind 立即失效（§7.4）。失败不回滚旧绑定（§6.1）。
-  function recordBinding(deviceId, accountId, trigger) {
+  // optsBind.bindingEpoch（H07）：主程序 hook 在 login_changed 响应里拿到
+  // LEA 的 PENDING epoch 后经 rebind 传回；LEA 侧登出会先升 epoch（旧
+  // epoch 作废），服务端同账号换绑不升 epoch，两端会漂移。服务端只许
+  // epoch 向前（取 max），永不倒退——向前只会使旧 Key 失效，不会复活
+  // 旧绑定；调用方须先过路由层的归属／可见性校验（H05）才能传此值。
+  function recordBinding(deviceId, accountId, trigger, optsBind) {
     deviceId = String(deviceId); accountId = String(accountId);
     const st = loadBindings();
     const old = st.bindings[deviceId] || null;
     const oldAccount = old ? old.account_id : null;
     const oldEpoch = old ? old.binding_epoch : 0;
-    const newEpoch = (old && old.account_id === accountId) ? old.binding_epoch : oldEpoch + 1;
+    let newEpoch = (old && old.account_id === accountId) ? old.binding_epoch : oldEpoch + 1;
+    const clientEpoch = optsBind && optsBind.bindingEpoch;
+    if (Number.isSafeInteger(clientEpoch) && clientEpoch > newEpoch) newEpoch = clientEpoch;
     st.bindings[deviceId] = {
       device_id: deviceId, account_id: accountId, binding_epoch: newEpoch,
       state: 'ACTIVE', updated_at: now(), trigger: trigger || 'login',
@@ -764,6 +817,7 @@ function createLeaCore(opts) {
     audit('lea-rebind', {
       device_id: deviceId, old_account_id: oldAccount, new_account_id: accountId,
       old_binding_epoch: oldEpoch, new_binding_epoch: newEpoch,
+      client_binding_epoch: Number.isSafeInteger(clientEpoch) ? clientEpoch : null,
       trigger_reason: trigger || 'login', revoked_keys: revokedKeys,
     });
     // 签发绑定票据（S2：服务端此前无签发票据的代码，C 端 binding.confirm
@@ -884,6 +938,12 @@ function createLeaCore(opts) {
     // ⑤ Key 归属与状态（已在 authenticate 中验过，此处复核吊销/过期）
     if (!k || keyStatus(k) !== 'active') {
       return { ok: false, status: 401, code: ERR.BAD_KEY, msg: 'API Key 已吊销或已过期。' };
+    }
+    // ② 白名单（H04；DESIGN §6.2 第 ② 项）：设备须在白名单内。顺序上
+    // ⑤ 先于 ②是故意的——先验 Key 有效，避免用白名单有无给无效 Key
+    // 做存在性预言；② 仍在 ③④⑥ 之前。
+    if (!isWhitelisted(deviceId)) {
+      return { ok: false, status: 403, code: ERR.NOT_WHITELISTED, msg: '设备不在 Muse 操作白名单内。' };
     }
     // ⑥ scope：device_id 必须与 Key 绑定一致，否则 403
     if (k.device_scope && k.device_scope !== deviceId) {
@@ -1149,7 +1209,7 @@ function createLeaCore(opts) {
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus,
-    grantMuse, revokeGrant, hasGrant, getGrant,
+    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted,
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,

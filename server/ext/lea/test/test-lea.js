@@ -24,7 +24,10 @@ function t(name, cond, extra) {
 function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-'));
-const core = createLeaCore({ dir: tmpDir, enableSweeps: false });
+const core = createLeaCore({ dir: tmpDir, enableSweeps: false, whitelist: ['node//test-device-1', 'node//test-device-2', 'node//test-device-3', 'node//never-bound', 'node//other'] });
+// 注：never-bound／other 须在白名单内，§3／§11 的断言才能走到绑定／scope
+// 分支（白名单检查在 ③⑥ 之前，否则先报 NOT_WHITELISTED）。
+core.grantMuse('alice', 'owner'); // H06：生成 Key 须先有授权；§1 的生成依赖此授权
 const DEV = 'node//test-device-1';
 const USER = 'alice';
 const OTHER = 'bob';
@@ -38,8 +41,8 @@ function bearerHeaders(plain, extra) {
 }
 
 // ---------- 1) Key 生成：格式 / 只存哈希 / 列表脱敏 ----------
-// T07：Key 生成时盖上当时的 grant_epoch——先建立绑定＋授权再建 Key；
-// §3 会再次确认同一状态（同账号重复绑定／重复 grant 不动 epoch）。
+// H06（并行线已落地）：生成 Key 须先有 muse.execute 授权——先建立绑定＋
+// 授权再建 Key；§3 会再次确认同一状态（同账号重复绑定／重复 grant 不动 epoch）。
 core.recordBinding(DEV, USER, 'test-login');
 core.grantMuse(USER, 'owner');
 const gen = core.generateKey(USER, { device_scope: DEV });
@@ -76,8 +79,8 @@ t('缺 nonce → 401 QFR_REPLAY_DETECTED', a.ok === false && a.code === 'QFR_REP
 core.recordBinding(DEV, USER, 'test-login');
 core.grantMuse(USER, 'owner');
 // T07/H22：Key 必须在绑定＋授权建立之后生成——生成时盖上当时的 binding_epoch
-// 与 grant_epoch；绑定前生成的 Key（binding_epoch 0）准入时按不匹配拒绝；
-// 授权前生成的 Key 盖上的 grant_epoch 为 0，准入时按授权撤销拒绝。
+// 与 grant_epoch；绑定前生成的 Key（binding_epoch 0）准入时按不匹配拒绝。
+// （授权前生成的 Key 已由 H06 在生成时直接拒绝，此处不再单列。）
 const genBound = core.generateKey(USER, { device_scope: DEV });
 let adm = core.admit({ key: core.findKeyById(genBound.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('绑定+授权齐全 → 准入通过', adm.ok === true);
@@ -85,8 +88,9 @@ t('绑定+授权齐全 → 准入通过', adm.ok === true);
 const genOther = core.generateKey(USER, { device_scope: 'node//other-device' });
 adm = core.admit({ key: core.findKeyById(genOther.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('device_id 与 Key 绑定不一致 → 403 QFR_SCOPE_DENIED', adm.ok === false && adm.status === 403 && adm.code === 'QFR_SCOPE_DENIED');
-// 未授权账号：先授 carol、换绑、建 Key，再撤销授权，准入应报授权已撤销
-// （T07：revokeGrant 递增 grant_epoch，旧 Key 的 epoch 再也对不上）。
+// 未授权账号：H06 之后无授权建不出 Key——先授 carol、换绑、建 Key，再撤销
+// 授权，准入应报授权已撤销（NOT_AUTHORIZED 分支只对“从无授权记录”的手工
+// Key 可达，generateKey 建不出来，见 H06）。
 core.grantMuse('carol', 'owner');
 core.recordBinding(DEV, 'carol', 'test-login-carol'); // 换绑到 carol：alice 的旧 Key 应随之失效（见 §7.4，下组断言）
 const genNoGrant = core.generateKey('carol', { device_scope: DEV });
@@ -142,6 +146,60 @@ core.revokeGrant(USER, 'owner');
 adm = core.admit({ key: core.findKeyById(g5.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('撤销授权后 → 403 QFR_GRANT_REVOKED', adm.ok === false && adm.code === 'QFR_GRANT_REVOKED');
 core.grantMuse(USER, 'owner'); // 恢复供路由测试
+
+// ---------- 6b) H04 白名单 + H06 Key 生成门 ----------
+adm = core.admit({ key: core.findKeyById(g5.record.key_id), deviceId: 'node//not-whitelisted', command: 'ui.click' });
+t('H04 白名单外设备 → 403 QFR_DEVICE_NOT_WHITELISTED', adm.ok === false && adm.status === 403 && adm.code === 'QFR_DEVICE_NOT_WHITELISTED');
+{
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-wl-'));
+  fs.writeFileSync(path.join(dir2, 'whitelist.json'), JSON.stringify({ devices: [DEV] }));
+  const coreWl = createLeaCore({ dir: dir2, enableSweeps: false });
+  coreWl.grantMuse(USER, 'owner');
+  coreWl.recordBinding(DEV, USER, 'test');
+  const gWl = coreWl.generateKey(USER, { device_scope: DEV });
+  const admWl = coreWl.admit({ key: coreWl.findKeyById(gWl.record.key_id), deviceId: DEV, command: 'ui.click' });
+  t('H04 whitelist.json 内设备准入通过', admWl.ok === true);
+  const admWl2 = coreWl.admit({ key: coreWl.findKeyById(gWl.record.key_id), deviceId: 'node//other', command: 'ui.click' });
+  t('H04 whitelist.json 外设备 → 403 QFR_DEVICE_NOT_WHITELISTED', admWl2.ok === false && admWl2.code === 'QFR_DEVICE_NOT_WHITELISTED');
+  const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-wl2-'));
+  const coreNoWl = createLeaCore({ dir: dir3, enableSweeps: false });
+  coreNoWl.grantMuse(USER, 'owner');
+  coreNoWl.recordBinding(DEV, USER, 'test');
+  const gNoWl = coreNoWl.generateKey(USER, { device_scope: DEV });
+  const admNoWl = coreNoWl.admit({ key: coreNoWl.findKeyById(gNoWl.record.key_id), deviceId: DEV, command: 'ui.click' });
+  t('H04 无白名单配置时 admit 拒绝（fail-closed）', admNoWl.ok === false && admNoWl.code === 'QFR_DEVICE_NOT_WHITELISTED');
+}
+// H06：无授权账号生成 Key 拒绝
+let threwNoGrant = null;
+try { core.generateKey('nobody-no-grant', { device_scope: DEV }); } catch (e) { threwNoGrant = e; }
+t('H06 无 muse.execute 授权生成 Key → 抛 QFR_MUSE_NOT_AUTHORIZED', !!threwNoGrant && threwNoGrant.code === 'QFR_MUSE_NOT_AUTHORIZED');
+// H06：自助选 dangerous scope 拒绝
+let threwDg = null;
+try { core.generateKey(USER, { device_scope: DEV, scopes: ['muse.execute', 'muse.execute.dangerous'] }); } catch (e) { threwDg = e; }
+t('H06 无 dangerous 授权自选 dangerous scope → 抛 QFR_SCOPE_DENIED', !!threwDg && threwDg.code === 'QFR_SCOPE_DENIED');
+// H06：站长授 dangerous 后可生成；撤销授权后 dangerous 一并失效
+core.grantMuse(USER, 'owner', { dangerous: true });
+t('H06 站长授 dangerous 后 hasDangerousGrant 为真', core.hasDangerousGrant(USER) === true);
+const gDg = core.generateKey(USER, { device_scope: DEV, scopes: ['muse.execute', 'muse.execute.dangerous'] });
+t('H06 有 dangerous 授权可生成 dangerous scope Key', gDg.record.scopes.includes('muse.execute.dangerous'));
+core.revokeGrant(USER, 'owner');
+t('H06 撤销授权后 dangerous 授权失效', core.hasDangerousGrant(USER) === false);
+core.grantMuse(USER, 'owner'); // 恢复（不带 dangerous）供后续测试
+t('H06 重授（不带 dangerous）后 dangerous 仍无', core.hasDangerousGrant(USER) === false);
+// H07 第二轮（DS #8）：admit 要求绑定 state==='ACTIVE'，PENDING 时报
+// BINDING_PENDING；服务端侧同账号重绑直接置 ACTIVE、epoch 不变，故服务端
+// 侧旧 Key 无中断窗口；PENDING 只存在于 C 端本地（login_changed 后至
+// binding.confirm 前），其间本地不执行，confirm 后恢复 ACTIVE，旧 Key
+// 无须重新生成。以下三断言锁死该契约（新 Key 在重授后生成，防旧 epoch 干扰）。
+const gRelogin = core.generateKey(USER, { device_scope: DEV });
+let admRelogin = core.admit({ key: core.findKeyById(gRelogin.record.key_id), deviceId: DEV, command: 'ui.click' });
+t('H07 同账号重登前旧 Key 准入通过', admRelogin.ok === true);
+const bBeforeRelogin = core.getBinding(DEV);
+const bRelogin = core.recordBinding(DEV, USER, 'test-h07-relogin');
+t('H07 同账号重登服务端绑定仍 ACTIVE 且 epoch 不变',
+  bRelogin.binding_epoch === bBeforeRelogin.binding_epoch && core.getBinding(DEV).state === 'ACTIVE');
+admRelogin = core.admit({ key: core.findKeyById(gRelogin.record.key_id), deviceId: DEV, command: 'ui.click' });
+t('H07 同账号重登后旧 Key 准入仍通过', admRelogin.ok === true);
 
 // ---------- 7) 签名验签（占位实现，明确标注） ----------
 t('未配真实私钥时 signing 模式为 placeholder-ephemeral', core.signingInfo().mode === 'placeholder-ephemeral');
@@ -759,7 +817,7 @@ const mockChannel = {
   const jobId = r.obj.job_id;
   r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(g6.key));
   t('路由查 job 200', r.code === 200 && r.obj.job.job_id === jobId);
-  core.grantMuse(OTHER, 'owner'); // T07：bob 建 Key 前先授权，否则盖上的 grant_epoch 为 0
+  core.grantMuse(OTHER, 'owner'); // H06：bob 建 Key 须先有授权
   r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(core.generateKey(OTHER, { device_scope: DEV }).key));
   t('他人 job 查不到 → 404（不泄露存在性）', r.code === 404);
   // 设备状态
@@ -809,6 +867,9 @@ const mockChannel = {
     && rb.ticket.expires_at - Math.floor(Date.now() / 1000) <= 24 * 3600);
   r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
   t('路由 rebind 200 且返回可验签票据', r.code === 200 && !!r.obj.ticket && core.verifyTicket(r.obj.ticket) === true);
+  // H07 第二轮：票据九字段锁死——C 端 binding.confirm 经 lea_parse_ticket
+  // 读的正是这九个顶层字段，服务端少一个字段钩子就送不出有效票据。
+  t('H07 rebind 票据含全部九字段', !!r.obj.ticket && ['account_id', 'device_id', 'binding_epoch', 'grant_epoch', 'grant_muse_execute', 'scopes', 'lease_id', 'expires_at', 'ticket_signature'].every((k) => k in r.obj.ticket));
 
   // ---------- 14) C 组：T07 Key 绑 grant_epoch／H22 epoch 不跳 0／H21 吊销推送 ----------
   // 用独立账号/设备，避免干扰前面的共享状态。
@@ -817,8 +878,8 @@ const mockChannel = {
   core.recordBinding(DEV2, USER2, 'test-t07');
   core.grantMuse(USER2, 'owner');
   // T07：授权后生成的 Key 可用；撤销授权 → 拒绝；重授予后旧 Key 仍拒绝
-  // （不复活），新 Key 可用。（授权前生成的 Key 盖上的 grant_epoch 为 0，
-  // admit 按授权撤销拒绝。）
+  // （不复活），新 Key 可用。（授权前生成 Key 的情形已由 H06 在生成时
+  // 直接拒绝，此处不再单列。）
   const postGrant = core.generateKey(USER2, { device_scope: DEV2 });
   let adm14 = core.admit({ key: core.findKeyById(postGrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
   t('T07 授权后生成的 Key 准入通过', adm14.ok === true);
@@ -885,7 +946,8 @@ const mockChannel = {
   // H21：路由 GET revocations 返回台账快照；换绑响应带 revocations 快照
   r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV2) + '/revocations', bearerHeaders(postRegrant.key));
   t('H21 路由 GET revocations 200 且含已吊销 key_id', r.code === 200 && Array.isArray(r.obj.revoked_key_ids) && r.obj.revoked_key_ids.includes(rvKey.record.key_id));
-  // 用 alice 自己的 DEV（其台账含 §6 撤销授权时记入的 g5），断言快照在位。
+  // H05 之后非站长只能换绑自己的设备：用 alice 自己的 DEV（其台账含 §6
+  // 撤销授权时记入的 g5），断言快照在位。
   r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
   t('H21 路由 rebind 200 且带 revocations 快照', r.code === 200 && r.obj.revocations && Array.isArray(r.obj.revocations.revoked_key_ids) && r.obj.revocations.revoked_key_ids.includes(g5.record.key_id));
 
@@ -894,6 +956,49 @@ const mockChannel = {
     .map((f) => fs.readFileSync(path.join(tmpDir, f), 'utf8')).join('\n');
   t('审计日志不含任何已生成 Key 的明文', ![gen.key, gen2.key, g5.key, g6.key].some((k) => auditText.includes(k)));
   t('审计文件已生成', auditText.includes('lea-key-generated'));
+
+  // ---------- 14) H05 换绑归属／可见性 + H06 路由层 Key 门 + H07 epoch 协调 ----------
+  // H05：未知设备换绑 → 404
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent('node//ghost') + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 未知设备 → 404', r.code === 404);
+  // H05：设备已绑他人时非站长换绑 → 403
+  core.recordBinding(DEV, OTHER, 'test-h05-setup');
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 他人设备 → 403', r.code === 403);
+  // H05：站长可换绑
+  const adminRoutes = createLeaRoutes(core, mockChannel, {
+    sendJson: (res, code, obj) => { sent.push({ code, obj }); res._code = code; res._obj = obj; },
+    readJsonBody: async (req) => req._body || {},
+    log: () => {},
+    verifyPassword: async (u, p) => p === 'correct-password',
+    resolveConsoleAuth: async () => ({ user: '718983610', siteadmin: 1 }),
+    isSiteAdmin: (a) => a.user === '718983610',
+  });
+  async function callAdminRoute(method, url, headers, body) {
+    sent.length = 0;
+    const req = mkReq(method, url, headers, body);
+    const res = mkRes();
+    const matched = await adminRoutes.handle(req, res);
+    return { matched, code: sent.length ? sent[sent.length - 1].code : null, obj: sent.length ? sent[sent.length - 1].obj : null };
+  }
+  r = await callAdminRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 站长换绑他人设备 → 200', r.code === 200 && r.obj.account_id === USER);
+  // H05：换绑回自己（已绑自己）→ 200
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 已绑自己的设备 → 200', r.code === 200);
+  // H07：rebind 传回 LEA epoch 只许向前
+  const rbEpoch = core.recordBinding('node//epoch-dev', USER, 'test-h07-epoch', { bindingEpoch: 99 });
+  t('H07 recordBinding 接受 LEA epoch（向前）', rbEpoch.binding_epoch === 99);
+  const rbEpoch2 = core.recordBinding('node//epoch-dev', USER, 'test-h07-epoch2', { bindingEpoch: 5 });
+  t('H07 recordBinding epoch 永不倒退', rbEpoch2.binding_epoch === 99);
+  // H06 路由：自选 dangerous scope → 403
+  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', scopes: ['muse.execute', 'muse.execute.dangerous'] });
+  t('H06 路由生成 dangerous scope Key（无审批）→ 403', r.code === 403 && r.obj.code === 'QFR_SCOPE_DENIED');
+  // H06 路由：站长授 dangerous 后可生成
+  r = await callAdminRoute('POST', '/api/lea/v1/grants', {}, { account_id: USER, action: 'grant', dangerous: true });
+  t('H06 路由站长授 dangerous → 200 且带 dangerous', r.code === 200 && r.obj.dangerous === true);
+  r = await callRoute('POST', '/api/lea/v1/keys', {}, { password: 'correct-password', scopes: ['muse.execute', 'muse.execute.dangerous'] });
+  t('H06 路由生成 dangerous scope Key（已审批）→ 200', r.code === 200 && !!r.obj.key && r.obj.record.scopes.includes('muse.execute.dangerous'));
 
   console.log('\n通过 ' + pass + ' / ' + (pass + fail) + '；失败 ' + fail + (failures.length ? '：' + failures.join('；') : ''));
   process.exit(fail ? 1 : 0);

@@ -42,8 +42,15 @@ int lea_binding_has_scope(const lea_binding_t *b, const char *scope) {
 
 long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
                                const char *device_id, long long now_unix) {
-    /* 旧绑定立即作废：epoch+1，不回滚；授权与 scope 清空，等票据确认重填。 */
-    b->epoch += 1;
+    /* H07  epoch 协调：同账号重登（ACTIVE/PENDING 态下同一 account_id，
+     * 如应用重启／静默重登）不升 epoch——服务端同账号换绑同样不升 epoch，
+     * 两端 epoch 保持一致，已生成的 Key 继续可用。换号／未绑定时 epoch+1，
+     * 旧绑定立即作废。两种情况都进 PENDING、清空授权等票据确认重填。 */
+    int same_account = (b->state == LEA_BIND_ACTIVE || b->state == LEA_BIND_PENDING) &&
+        account_id && account_id[0] && b->account_id[0] &&
+        strcmp(b->account_id, account_id) == 0;
+    if (!same_account)
+        b->epoch += 1;
     b->state = LEA_BIND_PENDING;
     snprintf(b->account_id, sizeof(b->account_id), "%s", account_id ? account_id : "");
     snprintf(b->device_id, sizeof(b->device_id), "%s", device_id ? device_id : "");
@@ -52,6 +59,7 @@ long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
     b->scopes[0] = '\0';
     b->expires_at = 0;
     b->lease_id[0] = '\0';
+    b->ticket_signature[0] = '\0';
     b->updated_at = now_unix;
     return b->epoch;
 }
@@ -59,6 +67,7 @@ long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
 int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
                         long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
+                        const char *ticket_signature,
                         long long now_unix) {
     if (b->state != LEA_BIND_PENDING) return 0;
     if (epoch != b->epoch) return 0;
@@ -67,10 +76,23 @@ int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch
     b->grant_muse_execute = (int)grant_muse_execute; /* 调用点已验签保证 0/1 */
     snprintf(b->scopes, sizeof(b->scopes), "%s", scopes ? scopes : "");
     snprintf(b->lease_id, sizeof(b->lease_id), "%s", lease_id ? lease_id : "");
+    snprintf(b->ticket_signature, sizeof(b->ticket_signature), "%s",
+             ticket_signature ? ticket_signature : "");
     b->expires_at = expires_at;
     b->state = LEA_BIND_ACTIVE;
     b->updated_at = now_unix;
     return 1;
+}
+
+int lea_binding_verify_ticket(const lea_binding_t *b) {
+    if (!b || b->ticket_signature[0] == '\0') return 0;
+    char canonical[1024];
+    if (!lea_ticket_canonical(b->account_id, b->device_id, b->epoch, b->grant_epoch,
+                              b->grant_muse_execute, b->scopes, b->lease_id, b->expires_at,
+                              canonical, sizeof(canonical)))
+        return 0;
+    char reason[128] = { 0 };
+    return lea_verify_ticket_signature(b->ticket_signature, canonical, reason, sizeof(reason));
 }
 
 void lea_binding_revoke(lea_binding_t *b, long long now_unix) {
@@ -80,6 +102,7 @@ void lea_binding_revoke(lea_binding_t *b, long long now_unix) {
     b->grant_muse_execute = 0;
     b->scopes[0] = '\0';
     b->lease_id[0] = '\0';
+    b->ticket_signature[0] = '\0';
     b->expires_at = 0;
     b->state = LEA_BIND_UNBOUND;
     b->updated_at = now_unix;

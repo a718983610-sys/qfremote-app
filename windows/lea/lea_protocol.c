@@ -1049,6 +1049,47 @@ int lea_json_escape_into(char *buf, size_t buf_size, size_t *off, const char *s)
     return 1;
 }
 
+int lea_json_insert_string_field(const char *line, const char *key, const char *value,
+                                 char *out, size_t out_size) {
+    if (!line || !key || !value || !out || out_size < 8) return 0;
+    if (key[0] == '\0') return 0;
+    size_t len = strlen(line);
+    /* 去掉行尾空白，找到最后一个 '}'；须为单行 JSON 对象。 */
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t' ||
+                       line[len - 1] == '\n' || line[len - 1] == '\r'))
+        len--;
+    if (len < 2 || line[0] != '{' || line[len - 1] != '}') return 0;
+    /* 先算转义后长度：key 与 value 都须完整放下。 */
+    char esc_key[256], esc_val[4096];
+    size_t ko = 0, vo = 0;
+    if (!lea_json_escape_into(esc_key, sizeof(esc_key), &ko, key)) return 0;
+    if (!lea_json_escape_into(esc_val, sizeof(esc_val), &vo, value)) return 0;
+    /* 需要：原串(去尾空白后，去掉 '}') + ',"k":"v"}' + '\0'。 */
+    size_t need = (len - 1) + ko + vo + 8;
+    if (need > out_size) return 0;
+    memcpy(out, line, len - 1);
+    size_t off = len - 1;
+    /* DS 第三轮 #2：snprintf 返回值防御性校验——need 预留已排除截断
+     * （需 ko+vo+7，留了 8），此处只是多一道防线，永不触发也须正确。 */
+    int w = snprintf(out + off, out_size - off, ",\"%s\":\"%s\"}", esc_key, esc_val);
+    if (w < 0 || (size_t)w >= out_size - off) return 0;
+    off += (size_t)w;
+    out[off] = '\0';
+    return 1;
+}
+
+/* H07 契约：session.login_changed 的 result 字段格式。C 端与 main.js
+ * 钩子的约定：main.js 从 result.binding_epoch 取 epoch 去调服务端
+ * rebind；格式一旦变了钩子就空转。故抽成纯函数并由单测锁死格式，
+ * QFRLEA.c 的 login_changed 分支直接调它，不再内联 snprintf。 */
+int lea_binding_login_result(long long epoch, char *out, size_t out_size) {
+    if (!out || out_size == 0) return 0;
+    int n = snprintf(out, out_size,
+                     "{\"binding_state\":\"PENDING\",\"binding_epoch\":%lld}",
+                     epoch);
+    return (n > 0 && (size_t)n < out_size) ? 1 : 0;
+}
+
 int lea_build_response(char *out, size_t out_size, int ok, const char *code,
                        const char *request_id, int retryable,
                        const char *detail, const char *result_json) {

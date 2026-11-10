@@ -51,7 +51,33 @@
   不走裸 JSON argv：裸 JSON 含 `"` 且 params 可含用户输入的 shell 元字符，经 runcommands／cmd.exe 有截断或注入风险。
 - **幂等/防重放**：服务端记每 Key 的 nonce（10 分钟）与幂等键结果（7 天，危险 30 天）；
   时间窗 `expires_at - issued_at = 60s`，HTTP 时间戳偏差 ≤60s。
-- **数据落盘**：`$QFEXT_LEA_DIR`（默认 `/opt/qfremote-ext/data/lea`）下 `keys.json` /
+- **准入白名单（H04，DESIGN §6.2 第 ② 项）**：`admit()` 在 Key 有效检查后、
+  scope 检查前查白名单，不在白名单 → 403 `QFR_DEVICE_NOT_WHITELISTED`。
+  来源优先 `createLeaCore({ whitelist: [...] })` → 数据目录 `whitelist.json`
+  （`{"devices": ["node//..."]}`，每次 admit 重读，改文件即生效）；两者都
+  未配置时 fail-closed。发版口径 DESIGN §14 #2 选 A：白名单只开站长设备。
+- **换绑归属校验（H05）**：`rebind` 在原“只能绑自己或站长”检查后加三项——
+  ① 可选注入 `deps.listVisibleDeviceIds(auth)`（该账号在 MeshCentral 可见的
+  设备清单；注入时强制校验，不在清单内 → 403＋审计 `lea-rebind-denied/not-visible`；
+  未注入时走 ②③）；② `channel.listNodes()` 须含该设备，否则 404（不透露归属）；
+  通道不可达时存在性校验跳过、归属校验照常；③ 当前已绑定他人账号且请求方
+  非站长 → 403＋审计 `lea-rebind-denied/bound-to-other`。`server.js` 尚未注入
+  `listVisibleDeviceIds`（可选 dep，留待接入）。
+- **Key 生成门（H06）**：`generateKey` 要求已有 `muse.execute` 授权，否则
+  抛 `QFR_MUSE_NOT_AUTHORIZED`（路由层转 403）；`muse.execute.dangerous`
+  scope 须站长另授 dangerous 授权，否则抛 `QFR_SCOPE_DENIED`（路由层转
+  403）；`POST /grants` 可由站长显式授／收 dangerous（`dangerous: true/false`，
+  未带保留既有值）；撤销授权时 dangerous 一并失效，重授须站长重新显式授予。
+- **epoch 协调（H07）**：`recordBinding` 接受 `opts.bindingEpoch`（客户端
+  PENDING epoch），只许向前取 max，永不倒退；主程序 `windows/main.js`
+  登录成功调 `notifyLeaLogin()` 发 `session.login_changed`，从响应
+  `result.binding_epoch` 取 epoch 后调 rebind 取票据、发 `binding.confirm`；
+  登出调 `notifyLeaLogout()` 发 `session.logout`。同账号重登服务端同样
+  不升 epoch（与 C 端一致）。admit 要求绑定 state==='ACTIVE'（PENDING 报
+  `BINDING_PENDING`）；服务端侧同账号重绑直接置 ACTIVE、epoch 不变，故
+  服务端侧旧 Key 无中断窗口；PENDING 只存在于 C 端本地（login_changed 后
+  至 binding.confirm 前），其间本地不执行，confirm 后恢复 ACTIVE，旧 Key
+  无须重新生成（DS 第二轮 #8，单测锁死）。
   `grants.json` / `bindings.json` / `jobs.json`（0600，原子 tmp+rename）与
   `audit-YYYY-MM-DD.jsonl`（保留 ≥180 天，模块内每小时清扫一次）。
 - **通道凭据**：只读既有 `/opt/qfremote-lock/bridge-config.json` 的 svcUser/svcPass/mcUrl
@@ -66,7 +92,7 @@
 
 ## 单测结果
 
-`node server/ext/lea/test/test-lea.js`：**203/203 通过**（2026-11-10 沙箱实跑；200 例为 C 组，另 3 例为 febd53e 已合入的 D 组 H26 吊销立即生效测试）。
+`node server/ext/lea/test/test-lea.js`：**248/248 通过**（2026-11-10 干净基线 ad506e2＋本补丁实跑，与主树一致。含 H07 第二轮 rebind 票据九字段断言与第三轮同账号重登契约断言）。
 覆盖：Key 生成格式/只存哈希/列表脱敏、认证拒绝各码、换号失效、吊销/一键吊销、
 授权撤销、签名验签占位、**规范串 v1（信封 16 行／票据 9 行、定稿向量与 C 端字节一致、
 params 归一化（整数键数值序＋`__proto__` 保留）、篡改矩阵、票据签发与 rebind 路由返回票据、
@@ -123,6 +149,12 @@ wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch�
    `lea/*.c` 源码与 `ush/QFUserHelper.exe`，本线只读核对、未改动）。
    客户端 `qf-lea-client.exe` 另一线已出包（2026-11-10 当日），SEC_LEA
    对其已改 fatal（H19）。
+4. **H07/H25 主程序钩子未在真机验**：`windows/main.js` 的 `notifyLeaLogin`／
+   `notifyLeaLogout`／`syncLockOwner` 只有 `node --check` 语法通过，无单测
+   （Electron 主进程）。须真机实测：登录后 LEA 绑定进 ACTIVE、换号后旧 Key
+   失效且新绑定建立、登出后 UNBOUND、锁 `device.json` 的 ownerUsername
+   跟随新账号；另须 `server.js` 注入 `listVisibleDeviceIds`（H05 可选 dep，
+   未注入时只做存在性＋归属校验）。
    文件名已按另一线实际产物对齐：服务本体 `QFRLEA.exe`、USH `QFUserHelper.exe`；
    客户端 `qf-lea-client.exe` 已到货，`SEC_LEA` 对其已改 fatal（H19）。
 4. **安装脚本未在 Windows 上跑过**：两份 PS1 仅做了括号平衡检查与人工复核，

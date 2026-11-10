@@ -260,9 +260,9 @@ int main(void) {
         CHECK(b.state == LEA_BIND_UNBOUND, "bind-init-unbound");
         long long e1 = lea_binding_on_login(&b, "alice", "node-1", now);
         CHECK(b.state == LEA_BIND_PENDING && e1 == 1, "bind-login-pending-epoch1");
-        CHECK(!lea_binding_confirm(&b, 99, 1, 1, "muse.execute", "lease-1", now + 3600, now),
+        CHECK(!lea_binding_confirm(&b, 99, 1, 1, "muse.execute", "lease-1", now + 3600, "TEST-UNSIGNED", now),
               "bind-confirm-wrong-epoch");
-        CHECK(lea_binding_confirm(&b, 1, 1, 1, "muse.execute", "lease-1", now + 3600, now) &&
+        CHECK(lea_binding_confirm(&b, 1, 1, 1, "muse.execute", "lease-1", now + 3600, "TEST-UNSIGNED", now) &&
               b.state == LEA_BIND_ACTIVE, "bind-confirm-active");
         CHECK(lea_binding_has_scope(&b, "muse.execute"), "bind-scope-hit");
         CHECK(!lea_binding_has_scope(&b, "muse.execute.dangerous"), "bind-scope-miss");
@@ -271,6 +271,79 @@ int main(void) {
               "bind-relogin-revokes-old-epoch-plus-1");
         lea_binding_revoke(&b, now);
         CHECK(b.state == LEA_BIND_UNBOUND && b.epoch == 3, "bind-revoke-unbound-epoch-plus-1");
+    }
+
+    /* ---------- H07：同账号重登不升 epoch；H02：票据签名存取与重验 ---------- */
+    {
+        lea_binding_t b;
+        lea_binding_init(&b);
+        long long e1 = lea_binding_on_login(&b, "alice", "node-1", now);
+        CHECK(lea_binding_confirm(&b, 1, 1, 1, "muse.execute", "lease-0123456789abcdef",
+                                  now + 3600, "TEST-UNSIGNED", now) &&
+              b.state == LEA_BIND_ACTIVE, "h07-same-account-setup-active");
+        CHECK(strcmp(b.ticket_signature, "TEST-UNSIGNED") == 0, "h02-confirm-stores-signature");
+        long long e2 = lea_binding_on_login(&b, "alice", "node-1", now);
+        CHECK(e2 == e1 && b.state == LEA_BIND_PENDING, "h07-same-account-relogin-keeps-epoch");
+        /* 同账号重登后仍可用同一票据确认（epoch 未变） */
+        CHECK(lea_binding_confirm(&b, 1, 1, 1, "muse.execute", "lease-0123456789abcdef",
+                                  now + 3600, "TEST-UNSIGNED", now) &&
+              b.state == LEA_BIND_ACTIVE, "h07-same-account-reconfirm-active");
+#ifdef LEA_TEST_UNSIGNED
+        CHECK(lea_binding_verify_ticket(&b), "h02-verify-ticket-ok-test-build");
+        /* 占位验签（TEST-UNSIGNED）不看规范串内容，篡改字段测不断言
+         * verify——断言规范串本身随授权字段变化（真公钥下验签必失败，
+         * 见 canonical-ticket-changes-on-grant-flip）。 */
+        {
+            char c_before[1024], c_after[1024];
+            CHECK(lea_ticket_canonical(b.account_id, b.device_id, b.epoch, b.grant_epoch,
+                                       b.grant_muse_execute, b.scopes, b.lease_id, b.expires_at,
+                                       c_before, sizeof(c_before)), "h02-canonical-before-builds");
+            b.grant_muse_execute = 0; /* 篡改授权字段 */
+            CHECK(lea_ticket_canonical(b.account_id, b.device_id, b.epoch, b.grant_epoch,
+                                       b.grant_muse_execute, b.scopes, b.lease_id, b.expires_at,
+                                       c_after, sizeof(c_after)) &&
+                  strcmp(c_before, c_after) != 0, "h02-canonical-changes-on-tampered-grant");
+            b.grant_muse_execute = 1;
+        }
+        CHECK(lea_binding_verify_ticket(&b), "h02-verify-ticket-ok-after-restore");
+        b.ticket_signature[0] = '\0'; /* 签名缺失 */
+        CHECK(!lea_binding_verify_ticket(&b), "h02-verify-ticket-fails-on-missing-sig");
+#else
+        CHECK(!lea_binding_verify_ticket(&b), "h02-verify-ticket-fail-closed-strict-build");
+#endif
+        /* 换号仍升 epoch；登出清签名 */
+        lea_binding_on_login(&b, "bob", "node-1", now);
+        CHECK(b.epoch == 2 && b.ticket_signature[0] == '\0', "h07-switch-account-bumps-epoch-clears-sig");
+        lea_binding_revoke(&b, now);
+        CHECK(b.ticket_signature[0] == '\0', "h02-revoke-clears-signature");
+    }
+
+    /* ---------- H03：信封插 token 字段 ---------- */
+    {
+        char out[256];
+        CHECK(lea_json_insert_string_field("{\"a\":1}", "ush_token", "abcdef0123456789", out, sizeof(out)) &&
+              strcmp(out, "{\"a\":1,\"ush_token\":\"abcdef0123456789\"}") == 0, "insert-field-basic");
+        CHECK(lea_json_insert_string_field("{\"a\":\"x\\\"y\"}", "k", "v\"w", out, sizeof(out)) &&
+              strcmp(out, "{\"a\":\"x\\\"y\",\"k\":\"v\\\"w\"}") == 0, "insert-field-escapes");
+        CHECK(!lea_json_insert_string_field("not json", "k", "v", out, sizeof(out)), "insert-field-rejects-non-object");
+        CHECK(!lea_json_insert_string_field("{\"a\":1}", "k", "v", out, 10), "insert-field-rejects-tiny-buffer");
+        CHECK(!lea_json_insert_string_field("", "k", "v", out, sizeof(out)), "insert-field-rejects-empty");
+    }
+
+    /* ---------- H07 第二轮：login_changed 的 result 格式锁死 ----------
+     * main.js 钩子从 result.binding_epoch 取 epoch 去调 rebind；格式一变
+     * 钩子就空转。QFRLEA.c 的 login_changed 分支直接调本函数，不再内联
+     * snprintf——格式由这里的断言守住。 */
+    {
+        char out[256];
+        CHECK(lea_binding_login_result(42, out, sizeof(out)) &&
+              strcmp(out, "{\"binding_state\":\"PENDING\",\"binding_epoch\":42}") == 0,
+              "h07-login-result-format");
+        CHECK(lea_binding_login_result(0, out, sizeof(out)) &&
+              strcmp(out, "{\"binding_state\":\"PENDING\",\"binding_epoch\":0}") == 0,
+              "h07-login-result-epoch-zero");
+        CHECK(!lea_binding_login_result(1, out, 10), "h07-login-result-rejects-tiny-buffer");
+        CHECK(!lea_binding_login_result(1, NULL, sizeof(out)), "h07-login-result-rejects-null");
     }
 
     /* ---------- 准入各码 ---------- */
