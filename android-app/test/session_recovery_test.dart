@@ -191,6 +191,21 @@ void main() {
       await store.clearCredentials();
       expect(kv.map, isEmpty);
     });
+
+    test('DC-C：clearAll 单步删除失败不中断后续清除（退出不留快照）', () async {
+      // 旧版 clearAll：第一删抛错即中断，后面的 key 全残留——退出登录时
+      // 若会话快照残留，下次冷启恢复链会拿它自动恢复。修后各删尽力而为。
+      final kv = _DeleteFirstKeyFailingKv();
+      final store = CredentialStore(kv);
+      await store.saveCredentials('alice', 'secret-1');
+      await store.saveSession(SessionSnapshot(
+          cookies: {'xid': 'x1', 'xid.sig': 's1'},
+          savedAt: DateTime(2026, 11, 10)));
+      await store.clearAll();
+      expect(await store.loadCredentials(), isNull);
+      expect(await store.loadSession(), isNull);
+      expect(kv.map, isEmpty);
+    });
   });
 
   group('登录桥脚本', () {
@@ -252,5 +267,25 @@ class _DeleteFailingKv implements SecureKvStore {
   @override
   Future<void> delete(String key) async {
     throw StateError('delete failed (test double)');
+  }
+}
+
+/// DC-C 测试替身：只删第一个 key（qf_saved_creds）时抛错，其余正常删
+/// ——模拟退出清库中途一次 Keystore 瞬时失败，验证后续清除不中断。
+class _DeleteFirstKeyFailingKv implements SecureKvStore {
+  final MemorySecureKvStore _inner = MemorySecureKvStore();
+
+  @override
+  Future<String?> read(String key) => _inner.read(key);
+
+  @override
+  Future<void> write(String key, String value) => _inner.write(key, value);
+
+  @override
+  Future<void> delete(String key) async {
+    if (key == 'qf_saved_creds') {
+      throw StateError('delete failed (test double)');
+    }
+    await _inner.delete(key);
   }
 }

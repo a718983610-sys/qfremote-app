@@ -102,6 +102,33 @@ class UpdateService {
     final ref = now ?? DateTime.now();
     return ref.difference(modified) > const Duration(hours: 24);
   }
+
+  /// 删 updates 目录里的旧版残留：非当前的 *.part 与 *.apk（见 downloadApk
+  /// 调用处注释）。只删这两类后缀、只删本目录一层；目标文件与无关文件不动；
+  /// 单个删失败不中断、不抛错（尽力清）。
+  static Future<void> pruneStaleDownloadFiles(
+    Directory destDir, {
+    required String keepPartName,
+    required String keepDestName,
+  }) async {
+    try {
+      await for (final ent in destDir.list()) {
+        if (ent is! File) continue;
+        final name = ent.path.split(Platform.pathSeparator).last;
+        if (name == keepPartName || name == keepDestName) continue;
+        if (name.endsWith('.part') || name.endsWith('.apk')) {
+          await _quietDeleteStatic(ent);
+        }
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> _quietDeleteStatic(File f) async {
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
   Future<File> downloadApk(
     ReleaseEntry entry,
     Directory destDir,
@@ -126,6 +153,13 @@ class UpdateService {
       debugPrint('QFUPDATE legacy .part removed (renamed scheme)');
     }
     final part = File('${destDir.path}/${partFileName(entry)}');
+    // 残留清理（DC-C 新发现）：旧版 .part 文件名带旧 sha8 前缀，换版本即
+    // 不可续传，且此前只删当前条目的过期 .part，旧版残留永久堆积；APK
+    // 文件名亦带版本号（QFRemote-vX.Y.Z.apk），旧版整包同样堆积（每份约
+    // 144MB）。下载开始时只删本目录下非当前的 *.part 与 *.apk，目标文件
+    // 本身与无关文件不动。
+    await pruneStaleDownloadFiles(destDir,
+        keepPartName: partFileName(entry), keepDestName: entry.fileName);
     // 残留 .part 比清单还大＝换版本/已损坏，从头下；超过 24 小时＝过期，
     // 删掉重下（不续传）。
     var resumed = 0;
@@ -198,6 +232,12 @@ class UpdateService {
         // 本服务自抛的 HTTP 状态中文提示原样保留，只换异常类型以便展示。
         throw FormatException(e.message);
       }
+      // DC-C 新发现（空间误诊）：磁盘写满时抛 FileSystemException，旧版
+      // 统一报成“下载中断，网络不稳定”，用户反复重试也下不完。errno 28
+      // （ENOSPC）即空间不足，单独明示（仍保留 .part 供清理空间后续传）。
+      if (e is FileSystemException && _isNoSpaceLeft(e)) {
+        throw const FormatException('设备剩余空间不足，下载中断，已保留已下载部分，清理空间后重新下载可续传。');
+      }
       if (e is SocketException ||
           e is HttpException ||
           e is TimeoutException ||
@@ -265,4 +305,10 @@ class UpdateService {
       if (await f.exists()) await f.delete();
     } catch (_) {}
   }
+
+  /// 磁盘写满判定：errno 28（ENOSPC）为准，报文含 'No space left on
+  /// device' 作后备（不同平台 OS 错误串写法有别时仍能认出）。
+  static bool _isNoSpaceLeft(FileSystemException e) =>
+      e.osError?.errorCode == 28 ||
+      e.message.contains('No space left on device');
 }

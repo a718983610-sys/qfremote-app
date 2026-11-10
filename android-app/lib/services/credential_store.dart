@@ -144,10 +144,15 @@ class CredentialStore {
     return SavedCredentials(username: u, password: p);
   }
 
+  /// DC-C 新发现（QF-01 同类，清路径）：清理是尽力而为——单步删除失败
+  /// 不许中断后续清除。旧版三删顺序 await，任一步抛错（如 Keystore 瞬时
+  /// 不可用）即中断 clearAll，后面的 key 全残留：退出登录时若会话快照
+  /// 残留，下次冷启恢复链会拿它自动恢复，等同“退了又自动登回来”。
+  /// 各删各自 try/catch（复用 _quietDelete），清不掉的下次读/写时再扫尾。
   Future<void> clearCredentials() async {
-    await _kv.delete(_kCreds);
-    await _kv.delete(_kUsername);
-    await _kv.delete(_kPassword);
+    await _quietDelete(_kCreds);
+    await _quietDelete(_kUsername);
+    await _quietDelete(_kPassword);
   }
 
   Future<void> saveSession(SessionSnapshot snapshot) =>
@@ -159,7 +164,7 @@ class CredentialStore {
     return SessionSnapshot.fromJson(raw);
   }
 
-  Future<void> clearSession() => _kv.delete(_kSession);
+  Future<void> clearSession() => _quietDelete(_kSession);
 
   /// 一次清干净：凭据 + 会话快照全清（手动退出账号专用）。
   Future<void> clearAll() async {

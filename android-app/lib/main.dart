@@ -2832,7 +2832,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<File> _downloadApk(ReleaseEntry entry, void Function(int, int?, int?) onProgress) async {
-    return _updateService.downloadApk(entry, await _updatesDir(), onProgress);
+    final dir = await _updatesDir();
+    // DC-C 新发现（空间预检）：通用下载流有 B23 剩余空间检查，更新流此前
+    // 没有。APK 约 144MB，空间不足时下载中途写满才失败、又被报成“网络不
+    // 稳定”，用户反复重试也下不完。下载前按剩余待下字节（清单 size 减去
+    // 可续传 .part 已收部分，未过期且不超 size 才算）核对一次空间，不足
+    // 即中文明示、不启动下载。取不到空间值或预检本身异常时不拦截（保守
+    // 放行，下载流的校验与 ENOSPC 明示兜底）。
+    try {
+      final part = File('${dir.path}/${UpdateService.partFileName(entry)}');
+      var resumed = 0;
+      if (await part.exists()) {
+        final stat = await part.stat();
+        if (!UpdateService.isPartExpired(stat.modified)) {
+          final len = await part.length();
+          if (len <= entry.size) resumed = len;
+        }
+      }
+      final freeBytes = await NativeChannels.getFreeSpaceBytes(dir.path);
+      if (freeBytes != null && freeBytes < entry.size - resumed) {
+        final needMb =
+            ((entry.size - resumed) / 1048576).toStringAsFixed(1);
+        final freeMb = (freeBytes / 1048576).toStringAsFixed(1);
+        throw FormatException(
+            '设备剩余空间不足（剩余约 $freeMb MB，更新包还需约 $needMb MB），请清理空间后重新下载。');
+      }
+    } on FormatException {
+      rethrow;
+    } catch (_) {
+      // 预检本身失败不挡下载。
+    }
+    return _updateService.downloadApk(entry, dir, onProgress);
   }
 
   Future<void> _openInstaller(File file) async {
