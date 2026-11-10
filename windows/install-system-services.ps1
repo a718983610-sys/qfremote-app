@@ -1,4 +1,4 @@
-# QFRemote 系统服务首装（2.4.5，一次 UAC 装两件系统级活）
+﻿# QFRemote 系统服务首装（2.4.5，一次 UAC 装两件系统级活）
 # ============================================================
 # 由 App 首次登录后提权拉起（Start-Process -Verb RunAs，一次 UAC）：
 #   ① QFSysHelper 服务（SYSTEM helper 最小安全版，见 syshelper/）；
@@ -73,6 +73,10 @@ try {
 }
 
 # ---- ② QFLockSvc（调锁组件 install.ps1） ----
+# 2026-11-11 缺陷③修复：返回码不可单独作为安装成功的判据——
+# Lock\install.ps1 曾 exit 0 但服务实际 1060，主日志却记了 installed。
+# 此处以服务终态为准：必须同时满足“子脚本 exit 0 且服务存在且 Running”
+# 才算装成；任一不满足即记失败并 exit 1（helper 保留，可独立重试）。
 try {
   $lockInstall = Join-Path $LockDir 'install.ps1'
   if (-not (Test-Path -LiteralPath $lockInstall)) {
@@ -81,11 +85,19 @@ try {
   }
   Write-InstallLog 'installing QFLockSvc'
   & $lockInstall -Owner $Owner
-  if ($LASTEXITCODE -ne 0) {
-    Write-InstallLog ('lock install failed, exit=' + $LASTEXITCODE + ' (helper kept)')
+  $lockExit = $LASTEXITCODE
+  $lockSvc = Get-Service -Name 'QFLockSvc' -ErrorAction SilentlyContinue
+  $lockRunning = ($null -ne $lockSvc) -and ($lockSvc.Status -eq 'Running')
+  if (-not $lockRunning) {
+    $lockState = 'missing'
+    if ($null -ne $lockSvc) { $lockState = [string]$lockSvc.Status }
+    Write-InstallLog ('lock install FAILED: QFLockSvc not running (state=' + $lockState + ', install.ps1 exit=' + $lockExit + ') (helper kept)')
     exit 1
   }
-  Write-InstallLog 'QFLockSvc installed'
+  if ($lockExit -ne 0) {
+    Write-InstallLog ('lock install warning: QFLockSvc is Running but install.ps1 exit=' + $lockExit + ' (diagnostic quirk, install itself OK)')
+  }
+  Write-InstallLog 'QFLockSvc installed and running'
 } catch {
   Write-InstallLog ('lock install threw: ' + $_.Exception.Message + ' (helper kept)')
   exit 1
@@ -148,7 +160,10 @@ try {
         }
       } catch { }
       if ($leaFailed) {
-        Write-InstallLog ('LEA install FAILED (degraded marker/report; install-lea exit=' + $leaExit + ($leaDetail ? ' detail=' + $leaDetail : '') + ')')
+        # WinPS 5.1 不支持 PS7 三元运算符，改用 if/else。
+        $leaDetailSuffix = ''
+        if ($leaDetail) { $leaDetailSuffix = ' detail=' + $leaDetail }
+        Write-InstallLog ('LEA install FAILED (degraded marker/report; install-lea exit=' + $leaExit + $leaDetailSuffix + ')')
       } else {
         Write-InstallLog ('LEA install script exit=' + $leaExit + ' (non-blocking; no LEA_DEGRADED marker, report ok)')
       }

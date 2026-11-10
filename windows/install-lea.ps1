@@ -1,4 +1,4 @@
-# QFRemote LEA 本地代理安装脚本（Stage 1 MVP，DESIGN.md §9/§10）
+﻿# QFRemote LEA 本地代理安装脚本（Stage 1 MVP，DESIGN.md §9/§10）
 # ============================================================
 # 由 install-system-services.ps1 在应用首次登录后的一次 UAC 内调用
 # （与 QFSysHelper / QFLockSvc 同一次提权，不另弹 UAC）：
@@ -67,9 +67,9 @@ $retryDelays = @(5, 15, 45)             # 重试退避 5s/15s/45s（DESIGN §9.2
 # windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
 # BEGIN LEA-EXPECTED-HASHES (gen_whitelist.py --update-installer)
 $expectedHashes = @{
-  'QFRLEA.exe' = '315538594c54fb001abe7d7088694ab93ff3c6128d5f2d1aaf271f9d40b3f0ef'
-  'QFUserHelper.exe' = 'b7568d15d17e665c9b007b7accf3ec713c29545b82a4ef9db0db5dca4ea0301f'
-  'qf-lea-client.exe' = '81cc1b0aeb4f62aabb154cae45f939a72eb2c7dd89b8f9ad19289658665c1c07'
+  'QFRLEA.exe' = '22926c275f16d5964fa0c714614aaa6498af03843879c3ee371c7137a070fb5c'
+  'QFUserHelper.exe' = 'a223647347a00befa4d9725e492adb13c1b1f8254555e97542f6e8f0c05d5f1a'
+  'qf-lea-client.exe' = '98139a61dc2ba02a915fc6471016f6db803e7f696055f1c5f66a39fafee77e32'
 }
 # END LEA-EXPECTED-HASHES
 

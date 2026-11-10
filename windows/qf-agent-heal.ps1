@@ -1,4 +1,4 @@
-# QFRemote 本机 agent 自愈助手（2.4.5）
+﻿# QFRemote 本机 agent 自愈助手（2.4.5）
 # ============================================================
 # 由三处共用同一脚本（W-09）：① Windows 安装器（installer.nsi）装后段；
 # ② 客户端启动时自检（main.js agent-heal.js）；③ SYSTEM helper

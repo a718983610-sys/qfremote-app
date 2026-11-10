@@ -141,12 +141,13 @@ int main(void) {
         CHECK_STR_EQ(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256-abc");
         lea_sha256_hex((const unsigned char *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, hex);
         CHECK_STR_EQ(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256-56byte");
-        /* 文件 hash：qf-agent-heal.ps1（与 whitelist.h 一致）。 */
+        /* 文件 hash：qf-agent-heal.ps1（与 whitelist.h 一致；用宏钉死，
+         * 脚本改动后 hash 变也不用再改测试，与下面的 USH 测试同款）。 */
         char fhex[65] = { 0 };
         const char *heal = "../../qf-agent-heal.ps1";
         if (access(heal, R_OK) == 0) {
             CHECK(lea_sha256_file_hex(heal, fhex), "sha256-file-readable");
-            CHECK_STR_EQ(fhex, "96b4efbe9685ff1998dc80c8c59acdce32af4325611a6edd1cc3cf8896641257",
+            CHECK_STR_EQ(fhex, W_HEAL_PS1_SHA256,
                          "sha256-heal-ps1-matches-whitelist");
         } else {
             printf("SKIP sha256-file tests (qf-agent-heal.ps1 not found at %s)\n", heal);
