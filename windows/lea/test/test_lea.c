@@ -81,6 +81,16 @@ static void active_binding(lea_binding_t *b, long long epoch, int grant,
     b->expires_at = 0;
 }
 
+/* CAS 测试钩子：第一次调用时把文件全量替换为 [A,D]（模拟 H21 直写
+ * 落在 merge 基线读之后、写前重读之前），之后不再触发。 */
+static int g_cas_hook_fired = 0;
+static void cas_hook(const char *path) {
+    if (g_cas_hook_fired) return;
+    g_cas_hook_fired = 1;
+    const char *hd[] = { "k_aaa1111111", "k_ddd4444444" };
+    lea_revoked_write(path, hd, 2);
+}
+
 int main(void) {
     long long now = (long long)time(NULL);
     char env_buf[8192];
@@ -1511,6 +1521,204 @@ int main(void) {
             CHECK(c == EOF, "m17-revoked-empty-after-clear");
         }
         remove(path);
+    }
+
+    /* ---------- #17 第二轮：lea_revoked_merge 并集合并 ----------
+     * keys.sync-revoked 有两个全量替换写入方（H21 推送与 rebind 快照），
+     * 到达顺序无保证；合并写入使陈旧快照／空集至多无操作、永不缩表。
+     * lea_revoked_write 全量替换语义本身不动（上块用例仍覆盖）。 */
+    {
+        const char *mpath = "/tmp/m17-revoked-merge.txt";
+        remove(mpath);
+        const char *mset1[] = { "k_bbb2222222", "k_aaa1111111", "k_bbb2222222" };
+        CHECK(lea_revoked_merge(mpath, mset1, 3), "m17-merge-missing-file");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\n") == 0, "m17-merge-sorted-dedup");
+        }
+        const char *mset2[] = { "k_ccc3333333" };
+        CHECK(lea_revoked_merge(mpath, mset2, 1), "m17-merge-adds");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-union");
+        }
+        /* 陈旧快照（缺 k_bbb/k_ccc）不得缩表。 */
+        const char *mstale[] = { "k_aaa1111111" };
+        CHECK(lea_revoked_merge(mpath, mstale, 1), "m17-merge-stale-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-stale-no-shrink");
+        }
+        /* 空集即无操作。 */
+        CHECK(lea_revoked_merge(mpath, NULL, 0), "m17-merge-empty-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-empty-noop");
+        }
+        /* 传入非法 id 整单拒绝、文件不变。 */
+        const char *mbad[] = { "k_ddd4444444", "bad id!" };
+        CHECK(!lea_revoked_merge(mpath, mbad, 2), "m17-merge-bad-id-rejected");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-reject-keeps-file");
+        }
+        /* 空集真 no-op：缺失文件也不创建。 */
+        remove(mpath);
+        CHECK(lea_revoked_merge(mpath, NULL, 0) && access(mpath, F_OK) != 0, "m17-merge-empty-missing-noop");
+        /* 路径是目录即整单拒绝（读盘失败非 ENOENT）。 */
+        CHECK(!lea_revoked_merge("/tmp", mset2, 1), "m17-merge-dir-rejected");
+        /* 末行无换行照常读。 */
+        {
+            FILE *f = fopen(mpath, "w");
+            if (f) { fputs("k_aaa1111111\nk_bbb2222222", f); fclose(f); }
+        }
+        CHECK(lea_revoked_merge(mpath, mset2, 1), "m17-merge-no-trailing-newline-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-no-trailing-newline-union");
+        }
+        /* 600 行重复行：去重后不超上限，合并成功。 */
+        {
+            FILE *f = fopen(mpath, "w");
+            if (f) { for (int i = 0; i < 600; i++) fputs("k_aaa1111111\n", f); fclose(f); }
+        }
+        CHECK(lea_revoked_merge(mpath, mset2, 1), "m17-merge-dup-lines-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_ccc3333333\n") == 0, "m17-merge-dup-lines-dedup");
+        }
+        /* 传入 key_ids 为 NULL 但 n>0 即拒绝（禁解引用 NULL）。 */
+        CHECK(!lea_revoked_merge(mpath, NULL, 1), "m17-merge-null-ids-rejected");
+        /* 行尾 tab／大量空格：整行读＋先 trim 再校验，不误拒。 */
+        {
+            FILE *f = fopen(mpath, "w");
+            if (f) { fputs("k_aaa1111111\t\nk_bbb2222222", f); for (int i = 0; i < 2000; i++) fputc(' ', f); fputc('\n', f); fclose(f); }
+        }
+        CHECK(lea_revoked_merge(mpath, mset2, 1), "m17-merge-trailing-ws-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\n") == 0, "m17-merge-trailing-ws-union");
+        }
+        /* 上限边界（自证式）：511 个唯一 id＋1 个新 id＝512，合并成功；
+         * 再加 1 个即 513，去重后超上限整单拒绝、文件不变（512 行）。
+         * 先证 511 行可读，再证超限拒绝，拒绝原因不可能是“行非法”。 */
+        {
+            FILE *f = fopen(mpath, "w");
+            if (f) {
+                for (int i = 0; i < 511; i++) fprintf(f, "k_%08d\n", i);
+                fclose(f);
+            }
+        }
+        const char *mcap1[] = { "k_bbb2222222" };
+        CHECK(lea_revoked_merge(mpath, mcap1, 1), "m17-merge-cap-512-ok");
+        {
+            FILE *f = fopen(mpath, "r");
+            int lines = 0;
+            char lb[256];
+            while (f && fgets(lb, sizeof(lb), f)) lines++;
+            if (f) fclose(f);
+            CHECK(lines == 512, "m17-merge-cap-512-lines");
+        }
+        CHECK(!lea_revoked_merge(mpath, mset2, 1), "m17-merge-over-cap-rejected");
+        {
+            FILE *f = fopen(mpath, "r");
+            int lines = 0;
+            char lb[256];
+            while (f && fgets(lb, sizeof(lb), f)) lines++;
+            if (f) fclose(f);
+            CHECK(lines == 512, "m17-merge-over-cap-keeps-file");
+        }
+        remove(mpath);
+    }
+
+    /* ---------- #17 R6：写前 CAS——H21 直写落在读-写之间不得丢项 ----------
+     * 钩子在 merge 基线读后、写前重读前把文件全量替换为 [A,D]（H21 直写
+     * 形态）。无 CAS 时 merge 会以 [A,B,C] 覆盖丢 D，且只验传入 id 的
+     * 写后校验照常通过；有 CAS 时应检测到文件已变、重合并，最终表含 D。 */
+    {
+        const char *cpath = "/tmp/m17-revoked-cas.txt";
+        remove(cpath);
+        const char *cinit[] = { "k_aaa1111111", "k_bbb2222222" };
+        CHECK(lea_revoked_write(cpath, cinit, 2), "m17-cas-setup");
+        g_cas_hook_fired = 0;
+        lea_revoked_merge_set_pre_write_hook(cas_hook);
+        const char *cinc[] = { "k_ccc3333333" };
+        CHECK(lea_revoked_merge(cpath, cinc, 1), "m17-cas-merge-ok");
+        lea_revoked_merge_set_pre_write_hook(NULL);
+        {
+            FILE *f = fopen(cpath, "r");
+            char content[256] = { 0 };
+            size_t r = f ? fread(content, 1, sizeof(content) - 1, f) : 0;
+            if (f) fclose(f);
+            content[r] = '\0';
+            CHECK(strcmp(content, "k_aaa1111111\nk_bbb2222222\nk_ccc3333333\nk_ddd4444444\n") == 0, "m17-cas-keeps-h21-item");
+        }
+        remove(cpath);
+    }
+
+    /* ---------- execute_item USH 分支 ok 判定：须含 ok 字段才采信 ----------
+     * execute_item 本体在 QFRLEA.c（Windows 服务，Linux 沙箱跑不到），
+     * 判定规则抽为 lea_ush_response_ok（lea_protocol.c，H08
+     * json_find_member 严格顶层解析）后在此覆盖：垃圾／截断（含无闭合
+     * {"ok":true）／无 ok 字段／ok 为字符串／嵌套 ok／字符串值内伪装
+     * "ok":true／重复 ok 键／尾部垃圾均不采信（判失败），ok:true／
+     * ok:false 各判对；末尾换行（USH 行响应可能带 \n）照常采信。 */
+    {
+        int v = -1;
+        CHECK(!lea_ush_response_ok("garbage-not-json", &v) && v == -1, "ush-ok-garbage-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":tr", &v) && v == -1, "ush-ok-truncated-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":true", &v) && v == -1, "ush-ok-unclosed-true-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":false", &v) && v == -1, "ush-ok-unclosed-false-fails");
+        CHECK(!lea_ush_response_ok("{\"code\":\"QFR_OK\",\"result\":\"done\"}", &v) && v == -1, "ush-ok-missing-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":\"true\",\"code\":\"QFR_OK\"}", &v) && v == -1, "ush-ok-string-fails");
+        CHECK(!lea_ush_response_ok("{\"code\":\"x\",\"params\":{\"ok\":true}}", &v) && v == -1, "ush-ok-nested-fails");
+        CHECK(!lea_ush_response_ok("{\"msg\":\"\\\"ok\\\":true\"}", &v) && v == -1, "ush-ok-in-string-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":true,\"ok\":false}", &v) && v == -1, "ush-ok-duplicate-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":true} garbage", &v) && v == -1, "ush-ok-trailing-garbage-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":true,}", &v) && v == -1, "ush-ok-trailing-comma-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":truex}", &v) && v == -1, "ush-ok-bad-literal-fails");
+        CHECK(!lea_ush_response_ok(NULL, &v) && v == -1, "ush-ok-null-fails");
+        CHECK(!lea_ush_response_ok("{\"ok\":true}", NULL), "ush-ok-null-out-fails");
+        v = -1;
+        CHECK(lea_ush_response_ok("{\"ok\": true }", &v) && v == 1, "ush-ok-true-spaced");
+        v = -1;
+        CHECK(lea_ush_response_ok("{\"ok\":true,\"code\":\"QFR_OK\"}", &v) && v == 1, "ush-ok-true");
+        v = -1;
+        CHECK(lea_ush_response_ok("{\"ok\":false,\"code\":\"QFR_LEA_EXEC_FAILED\"}", &v) && v == 0, "ush-ok-false");
+        v = -1;
+        CHECK(lea_ush_response_ok("{\"ok\":true}\n", &v) && v == 1, "ush-ok-true-trailing-newline");
     }
 
     /* ---------- #26 幂等表超 4MB 仍持久化（流式写盘＋逐行加载） ---------- */

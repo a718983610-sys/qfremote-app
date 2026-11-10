@@ -260,6 +260,13 @@ function downloadToFile(u, part, manifest, onProgress, opts2) {
 // 下载安装包到 destDir：回调 onProgress({received, total, percent})；
 // 下完自动核对大小（清单给了才核）与 SHA256：对不上删文件并抛错。
 async function downloadUpdate(manifest, destDir, onProgress, opts) {
+  // 空值守卫：调用方传了 null／缺 url 的清单时，以前在这里读 manifest.url
+  // 直接抛 TypeError（client-version-test 既有 fatal 即源于此：清单验签
+  // 不过时 checkForUpdate 返 manifest:null）。清单无效一律明言拒绝，
+  // 不读空值、不静默。sha256 同理（后文调 manifest.sha256.toLowerCase()）。
+  if (!manifest || typeof manifest !== 'object') throw new Error('更新清单为空，无法下载');
+  if (typeof manifest.url !== 'string' || !manifest.url) throw new Error('更新清单缺少下载地址，无法下载');
+  if (typeof manifest.sha256 !== 'string' || !manifest.sha256) throw new Error('更新清单缺少 SHA256 校验码，无法下载');
   if (!isTrustedUrl(manifest.url)) throw new Error('下载地址不在信任范围内');
   const u = new URL(manifest.url);
   const name = path.basename(u.pathname).replace(/[^\w.\- ]/g, '_') || 'QFRemote-Setup.exe';

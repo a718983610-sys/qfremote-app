@@ -1616,20 +1616,27 @@ static void execute_item(lea_queue_item_t *item) {
             ok = 0; code = LEA_ERR_USH_UNAVAILABLE;
             snprintf(detail, sizeof(detail), "%s", udetail);
         } else {
-            /* USH 响应形如 {"ok":...,"code":"..."}：透传其 ok/code。 */
+            /* USH 响应形如 {"ok":...,"code":"..."}：透传其 ok/code。
+             * 须含布尔 ok 字段才采信：lea_ush_response_ok 返回 0（垃圾／
+             * 截断／无 ok 字段响应）即判失败，ok 不得沿用初值 1；此时不
+             * 采信响应里的 code（不可信），一律报 EXEC_FAILED。 */
             char ush_code[64] = { 0 };
             int uok = 0;
-            if (lea_json_bool(ush_resp, "ok", &uok))
+            if (!lea_ush_response_ok(ush_resp, &uok)) {
+                ok = 0; code = LEA_ERR_EXEC_FAILED;
+                snprintf(detail, sizeof(detail), "%s", "ush-response-no-ok");
+            } else {
                 ok = uok;
-            if (lea_json_string(ush_resp, "code", ush_code, sizeof(ush_code)) &&
-                ush_code[0]) {
-                /* 把 USH 的 code 作为最终 code（ok 已透传）。 */
-                snprintf(ush_code_buf, sizeof(ush_code_buf), "%s", ush_code);
-                code = ush_code_buf;
-                if (!uok) snprintf(detail, sizeof(detail), "ush-%s", ush_code);
-            } else if (!uok) {
-                code = LEA_ERR_EXEC_FAILED;
-                snprintf(detail, sizeof(detail), "%s", "ush-failed-no-code");
+                if (lea_json_string(ush_resp, "code", ush_code, sizeof(ush_code)) &&
+                    ush_code[0]) {
+                    /* 把 USH 的 code 作为最终 code（ok 已透传）。 */
+                    snprintf(ush_code_buf, sizeof(ush_code_buf), "%s", ush_code);
+                    code = ush_code_buf;
+                    if (!uok) snprintf(detail, sizeof(detail), "ush-%s", ush_code);
+                } else if (!uok) {
+                    code = LEA_ERR_EXEC_FAILED;
+                    snprintf(detail, sizeof(detail), "%s", "ush-failed-no-code");
+                }
             }
             /* #7：ush_resp 最长近 64KB，转义后可能超 64KB。转义失败即
              * 丢弃 result、明言 ush-response-too-large，绝不把截断半行
@@ -1855,15 +1862,18 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         return;
     }
     if (strcmp(cmd, "keys.sync-revoked") == 0) {
-        /* #17：C 侧吊销表写入方。主程序在 rebind 拿到 revoked_key_ids 后
-         * 经 qf-lea-client.exe --internal 发
-         * {"cmd":"keys.sync-revoked","key_ids":["k_...","k_..."]}，
-         * 全量替换本机 revoked_keys.txt（与服务端下发前推送 H21 同格式，
-         * 一行一个 id）。调用方已由 pipe_client_thread 按 H01 验过
-         * （安装目录客户端＋主程序父进程），此处不再另验。
+        /* #17：C 侧吊销表写入方。主程序在 rebind 拿到服务端吊销全集快照
+         * （rb.json.revocations.revoked_key_ids）后经 qf-lea-client.exe
+         * --internal 发 {"cmd":"keys.sync-revoked","key_ids":[...]}。
+         * 写入语义是并集合并（lea_revoked_merge），不是全量替换：本机表
+         * 另有 H21 下发前推送这一全量替换写入方，两方到达顺序无保证，
+         * 陈旧快照全量替换会缩表（丢新吊销项，陈旧空集还会清表）；服务
+         * 端台账只增不减，并集合并下陈旧快照／空集至多无操作，永不缩表。
          * key_ids 缺失／非数组／元素非法即拒绝，不写残集；写盘失败
          * （含 ACL 失败删文件）即报 INTERNAL，调用方下次下发前服务端
-         * 推送会重新同步（H21 pushed_epoch 未追上即重推）。 */
+         * 推送会重新同步（H21 pushed_epoch 未追上即重推）。调用方已由
+         * pipe_client_thread 按 H01 验过（安装目录客户端＋主程序父进程），
+         * 此处不再另验。 */
         char ids[LEA_REVOKED_MAX_IDS][128];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
@@ -1872,7 +1882,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         }
         const char *ptrs[LEA_REVOKED_MAX_IDS];
         for (int i = 0; i < n; i++) ptrs[i] = ids[i];
-        if (!lea_revoked_write(g_revoked_path, ptrs, n)) {
+        if (!lea_revoked_merge(g_revoked_path, ptrs, n)) {
             build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoked-write-failed", NULL);
             svc_log("ERROR keys.sync-revoked write failed count=%d", n);
             return;
@@ -1886,7 +1896,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.event = "keys";
         ev.command = "keys.sync-revoked";
         ev.result = "ok";
-        ev.detail = "revoked_keys.txt replaced from rebind";
+        ev.detail = "revoked_keys.txt merged from rebind";
         audit_event(&ev);
         char result[128];
         snprintf(result, sizeof(result), "{\"revoked_count\":%d}", n);

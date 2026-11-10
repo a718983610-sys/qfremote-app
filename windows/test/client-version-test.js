@@ -58,6 +58,13 @@ const pkg = require('../package.json');
     const EXPECT = pkg.version;
 
     // ---------- B1/B2 update.js ----------
+    // H26：清单须带 Ed25519 签名才放行（febd53e 起 update.js 必验签）；
+    // 此前假清单无签名，checkForUpdate 返 manifest:null，downloadUpdate
+    // 读 null.url 直接 fatal。夹具现签：沿用 update-test.js 同款范式
+    // （现生密钥对＋QFREMOTE_RELEASE_SIGN_PUBLIC_KEY 覆盖验签公钥，
+    // updater.canonicalReleaseJson 作规范串）。
+    const _signKp = crypto.generateKeyPairSync('ed25519');
+    process.env.QFREMOTE_RELEASE_SIGN_PUBLIC_KEY = _signKp.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
     const seenUpd = [];
     const payload = crypto.randomBytes(64 * 1024 + 7);
     const payloadSha = crypto.createHash('sha256').update(payload).digest('hex');
@@ -65,7 +72,7 @@ const pkg = require('../package.json');
       seenUpd.push({ url: req.url, v: req.headers['x-qf-client-version'] || null });
       if (req.url === '/release.json') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ version: '9.9.9', notes: 't', url: 'http://127.0.0.1:' + updServer.address().port + '/QFRemote-Setup-v9.9.9.exe', sha256: payloadSha, size: payload.length }));
+        res.end(JSON.stringify(signManifest({ version: '9.9.9', notes: 't', url: 'http://127.0.0.1:' + updServer.address().port + '/QFRemote-Setup-v9.9.9.exe', sha256: payloadSha, size: payload.length })));
       } else if (req.url === '/QFRemote-Setup-v9.9.9.exe') {
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length });
         res.end(payload);
@@ -78,7 +85,17 @@ const pkg = require('../package.json');
     const updater = require('../update');
     const cv2 = require('../client-version');
     cv2.setClientVersion(EXPECT);
+    // H26 夹具签名（handler 在请求到达时才调，此时 updater 已加载）。
+    const signManifest = (m) => {
+      const d = Object.assign({}, m);
+      const sig = crypto.sign(null, Buffer.from(updater.canonicalReleaseJson(d), 'utf8'), _signKp.privateKey);
+      d.signature = { alg: 'ed25519', key_id: 'test', sig: sig.toString('base64url') };
+      return d;
+    };
     const chk = await updater.checkForUpdate('1.0.0');
+    // 清单须验签通过才有 manifest：验签不过时 chk.manifest 为 null，
+    // 此处先断言、不把 null 传进 downloadUpdate（旧 fatal 的根因）。
+    ok('B0_manifest_signed_ok', chk.error === null && !!chk.manifest, { error: chk.error || null });
     const destDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qfr232-upd-'));
     await updater.downloadUpdate(chk.manifest, destDir, () => {});
     const mSeen = seenUpd.find(s => s.url === '/release.json');

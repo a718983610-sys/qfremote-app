@@ -128,6 +128,23 @@ int lea_json_bool(const char *text, const char *key, int *out) {
     return 0;
 }
 
+/* USH 响应 ok 判定：严格顶层解析，只认顶层对象中唯一一个布尔 "ok"。
+ * 复用 H08 的 json_find_member（完整顶层对象遍历：重复键／对象语法
+ * 错误／尾部多余内容即失败；嵌套对象内的同名键与字符串值里的字面量
+ * 均不命中）。值切片须恰为 true/false。缺失／非布尔／未闭合／重复键
+ * 一律返回 0，调用方（execute_item USH 分支）判失败；*out_ok 只在
+ * 返回 1 时写入。绝不用 lea_json_bool 的 strstr 全文查找——
+ * {"ok":true（未闭合）与嵌套 {"ok":true} 都会被它误采信。 */
+int lea_ush_response_ok(const char *resp, int *out_ok) {
+    const char *val = NULL;
+    size_t vlen = 0;
+    if (!resp || !out_ok) return 0;
+    if (json_find_member(resp, "ok", &val, &vlen) != 1) return 0;
+    if (vlen == 4 && memcmp(val, "true", 4) == 0) { *out_ok = 1; return 1; }
+    if (vlen == 5 && memcmp(val, "false", 5) == 0) { *out_ok = 0; return 1; }
+    return 0;
+}
+
 /* 只认顶层对象成员的字符串值（H08）。json_find_member 做完整顶层对象
  * 遍历：跳过全部 JSON 空白、重复键即失败、尾部多余内容即失败；值须为
  * JSON 字符串并按转义解码。嵌套对象内的同名键（如 params {"cmd":...}）

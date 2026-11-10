@@ -182,6 +182,18 @@ int lea_idem_load_line(lea_idem_t *t, const char *line);
  * 上限 LEA_REVOKED_MAX_IDS 条；path 为空或 n_key_ids < 0 返回 0。 */
 #define LEA_REVOKED_MAX_IDS 512
 int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_ids);
+/* 吊销表并集合并（#17 第二轮）：keys.sync-revoked 的实际写入方。读出现有
+ * 表，与传入 id 取并集后经 lea_revoked_write 原子写回；陈旧快照至多无
+ * 操作，永不缩表（见 lea_state.c 注释：两个全量替换写入方无序到达时
+ * 全量替换会丢新吊销项）。空集真 no-op（短路成功，不读盘不写盘）。
+ * 读盘失败只认确证不存在（ENOENT）为空表，其他失败整单拒绝；写前
+ * 重读比对基线（CAS），不一致即重合并；写后校验期望集（传入＋各轮
+ * 读到的现有表，累积只增）全在表内，缺失则有界重试（最多 3 次）。
+ * 现有行非法／并集超上限即整单拒绝、原文件不动。 */
+int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_ids);
+/* 测试钩子（仅单测用）：merge 每轮基线读后、写前重读前调用一次（若已
+ * 设置），用于确定性模拟 H21 直写落在读-写之间。生产代码永不设置。 */
+void lea_revoked_merge_set_pre_write_hook(void (*hook)(const char *path));
 typedef struct lea_queue_item lea_queue_item_t;
 struct lea_queue_item {
     lea_envelope_t env;

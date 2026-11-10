@@ -2975,6 +2975,22 @@ async function notifyLeaLogin(account) {
       // 只许向前；票据原样送 binding.confirm（字段在顶层）。
       const rb = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/devices/' + encodeURIComponent(deviceId) + '/rebind', { account_id: String(account), binding_epoch: epoch });
       if (rb && rb.status === 200 && rb.json && rb.json.ticket) {
+        // #17：rebind 后把服务端吊销全集快照写入本机吊销表（C 侧第二写入方，
+        // keys.sync-revoked 经 lea_revoked_merge 并集合并写入——陈旧快照／
+        // 空集至多无操作、永不缩表；服务端 H21 下发前推送仍是主路径）。
+        // （lea-routes handleRebind 带的 H21 快照，recordBinding 刚把本次
+        // 吊销并入 revocations.json 全集后取的）；只发本次增量
+        // rb.json.revoked_key_ids 会缩表（全量替换语义下增量≠全集），故
+        // 不用它。快照缺失／非数组／元素非字符串时不发（H21 下次下发会
+        // 重推），不拿增量凑合。空全集照发——并集合并下空集即无操作。
+        const snap = rb.json.revocations;
+        const fullIds = (snap && Array.isArray(snap.revoked_key_ids)) ? snap.revoked_key_ids : null;
+        if (fullIds && fullIds.every((x) => typeof x === 'string' && x)) {
+          const sr = leaNotifyInternal({ cmd: 'keys.sync-revoked', key_ids: fullIds });
+          if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
+        } else {
+          bootLog('lea.sync-revoked-no-snapshot', snap === undefined ? 'missing' : 'invalid');
+        }
         const cf = leaNotifyInternal(Object.assign({ cmd: 'binding.confirm' }, rb.json.ticket));
         if (!cf || cf.ok !== true) bootLog('lea.binding-confirm-failed', (cf && (cf.code || cf.reason)) || 'unknown');
       } else {

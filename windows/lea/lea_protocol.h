@@ -127,6 +127,10 @@ long lea_effective_timeout_ms(const lea_envelope_t *env);
 int lea_json_string(const char *text, const char *key, char *out, size_t out_size);
 int lea_json_long(const char *text, const char *key, long long *out);
 int lea_json_bool(const char *text, const char *key, int *out);
+/* USH 响应 ok 判定（execute_item USH 分支用）：严格顶层解析，只认顶层
+ * 对象中唯一一个布尔 "ok"（*out_ok=true/false）；缺失／非布尔／未闭合／
+ * 重复键／嵌套 ok／尾部垃圾一律返回 0，调用方须判失败——ok 不得沿用初值 1。 */
+int lea_ush_response_ok(const char *resp, int *out_ok);
 /* 只认顶层对象成员的字符串值（H08）：全文查找会命中 params 内嵌套的
  * 同名键（如 params {"cmd":...}），导致信封被误判进内部命令处理、绕过
  * 信封验签。顶层须为单个 JSON 对象且成员恰好出现一次；值须为 JSON

@@ -1,6 +1,7 @@
 /* 见 lea_state.h */
 #include "lea_state.h"
 #include "lea_crypto.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -253,6 +254,162 @@ int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_id
     free(tmp);
     free(sorted);
     return ok;
+}
+
+/* 吊销表并集合并（#17 第二轮，R4 修订）：keys.sync-revoked 的实际写入方。
+ * 背景：revoked_keys.txt 有两个全量替换写入方——服务端 H21 下发前推送
+ * （直接写文件）与本命令（rebind 快照）。两方到达顺序无保证，陈旧
+ * 快照全量替换会缩表（丢新吊销项，陈旧空集还会清表）。服务端台账
+ * revocations.json 只增不减，故本命令改为并集合并：读出现有表，与
+ * 传入 id 取并集后经 lea_revoked_write 原子写回；陈旧快照至多无操作，
+ * 永不缩表。H21 直写仍是唯一可缩表的路径（它写实时台账全集）。
+ * 空集是真 no-op：n_key_ids == 0 时短路成功，不读盘不写盘。
+ * 读盘失败只认确证不存在（ENOENT）为空表；其他失败（不可读／ACL／
+ * 路径是目录／读中出错）即整单拒绝，不把现有表当空表覆盖。
+ * 写前重读（CAS）＋写后校验＋有界重试（最多 3 次）：写盘前重读文件，
+ * 与本轮基线不一致即不写、下一轮以累积期望集重合并——否则 H21 在
+ * 读-写之间新增的 id 会被本次写回覆盖，而只验期望集的写后校验发现
+ * 不了。写后重读确认期望集（传入＋各轮读到的现有表，累积只增）全在
+ * 表内。仍拦不住重读通过后那一瞬的交错，但窗口已缩到一次重读到写盘
+ * 之间，且失败时诚实报失败（下次 H21 下发会重推，admit 仍是第一层控制）。
+ * 现有行非法／行超长／并集超上限即整单拒绝、原文件不动。 */
+static int revoked_read_ids(const char *path, char out[][129], int *n_out) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (errno == ENOENT) { *n_out = 0; return 1; }
+        return 0;
+    }
+    int n = 0;
+    int rc = 1;
+    for (;;) {
+        /* 整行累积：fgets 分块读，读满缓冲仍无换行且未到 EOF 即扩容续读；
+         * 单行超约 64KB 即拒绝（按原始行长计，尾随空白再多也受此上限约束）。读完先 trim 行尾空白（空格／tab／\r／\n）
+         * 再按 token 校验，合法 token＋再多尾随空白也不误拒。 */
+        size_t cap = 1024, len = 0;
+        char *line = (char *)malloc(cap);
+        if (!line) { rc = 0; break; }
+        int done = 0, toolong = 0;
+        for (;;) {
+            if (len + 1024 > cap) {
+                if (cap >= 65536) { toolong = 1; break; }
+                size_t ncap = cap * 2;
+                char *nl = (char *)realloc(line, ncap);
+                if (!nl) { toolong = 1; break; }
+                line = nl; cap = ncap;
+            }
+            if (!fgets(line + len, (int)(cap - len), f)) { done = 1; break; }
+            len += strlen(line + len);
+            if (len > 0 && line[len - 1] == '\n') { done = 1; break; }
+            if (feof(f)) { done = 1; break; }
+        }
+        if (toolong) { free(line); rc = 0; break; }
+        if (len == 0 && done) { free(line); break; } /* EOF，无更多行 */
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
+                           line[len - 1] == ' ' || line[len - 1] == '\t'))
+            line[--len] = '\0';
+        if (len == 0) { free(line); continue; }
+        if (len > 128 || !lea_validate_token(line)) { free(line); rc = 0; break; }
+        /* 去重后再计上限：重复行不占名额。先拷贝再 free，禁 use-after-free。 */
+        int dup = 0;
+        for (int i = 0; i < n; i++)
+            if (strcmp(out[i], line) == 0) { dup = 1; break; }
+        if (!dup) {
+            if (n >= LEA_REVOKED_MAX_IDS) { free(line); rc = 0; break; }
+            memcpy(out[n], line, len);
+            out[n][len] = '\0';
+            n++;
+        }
+        free(line);
+    }
+    if (rc && ferror(f)) rc = 0;
+    fclose(f);
+    if (!rc) return 0;
+    *n_out = n;
+    return 1;
+}
+
+static int revoked_has_id(const char ids[][129], int n, const char *id) {
+    for (int i = 0; i < n; i++)
+        if (strcmp(ids[i], id) == 0) return 1;
+    return 0;
+}
+
+/* 两组 id 是否同一集合（均已去重；只比成员，不比顺序）。 */
+static int revoked_sets_equal(const char a[][129], int na, const char b[][129], int nb) {
+    if (na != nb) return 0;
+    for (int i = 0; i < na; i++)
+        if (!revoked_has_id(b, nb, a[i])) return 0;
+    return 1;
+}
+
+/* 测试钩子：merge 每轮基线读后、写前重读前调用一次（若已设置）。
+ * 仅单测用——确定性模拟 H21 直写落在读-写之间。生产代码永不设置。 */
+static void (*g_merge_pre_write_hook)(const char *path) = NULL;
+void lea_revoked_merge_set_pre_write_hook(void (*hook)(const char *path)) {
+    g_merge_pre_write_hook = hook;
+}
+
+int lea_revoked_merge(const char *path, const char *const *key_ids, int n_key_ids) {
+    if (!path || path[0] == '\0' || n_key_ids < 0 || n_key_ids > LEA_REVOKED_MAX_IDS) return 0;
+    /* 空集真 no-op：不读盘、不写盘（缺失文件也不创建）。 */
+    if (n_key_ids == 0) return 1;
+    if (!key_ids) return 0;
+    for (int i = 0; i < n_key_ids; i++)
+        if (!key_ids[i] || !lea_validate_token(key_ids[i])) return 0;
+    /* 期望集：本次调用见过的所有 id（传入＋各轮读到的现有表），去重。
+     * 写后校验验整个期望集，不只验传入 id——否则重试时以陈旧表重算
+     * 并集会把上轮见过的 id 丢了还验通过（R4 反例：现有 [A,B]、传入
+     * [C]、H21 直写 [A] 后重试写回 [A,C] 即丢 B）。期望集只增不减，
+     * 与服务端台账只增不减一致；超 512 即整单拒绝。 */
+    char expected[LEA_REVOKED_MAX_IDS][129];
+    int n_expected = 0;
+    for (int i = 0; i < n_key_ids; i++) {
+        if (revoked_has_id(expected, n_expected, key_ids[i])) continue;
+        if (n_expected >= LEA_REVOKED_MAX_IDS) return 0;
+        /* token 已验（≤128），定长拷贝（snprintf 会报截断警告）。 */
+        size_t kl = strlen(key_ids[i]);
+        memcpy(expected[n_expected], key_ids[i], kl);
+        expected[n_expected][kl] = '\0';
+        n_expected++;
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        char existing[LEA_REVOKED_MAX_IDS][129];
+        int n_existing = 0;
+        if (!revoked_read_ids(path, existing, &n_existing)) return 0;
+        for (int i = 0; i < n_existing; i++) {
+            if (revoked_has_id(expected, n_expected, existing[i])) continue;
+            if (n_expected >= LEA_REVOKED_MAX_IDS) return 0;
+            /* 读盘时已验（≤128），定长拷贝。 */
+            size_t el = strlen(existing[i]);
+            memcpy(expected[n_expected], existing[i], el);
+            expected[n_expected][el] = '\0';
+            n_expected++;
+        }
+        /* 测试钩子（仅单测设置）：模拟 H21 直写落在本轮基线读之后。 */
+        if (g_merge_pre_write_hook) g_merge_pre_write_hook(path);
+        /* 写前重读（CAS）：文件若与本轮基线不一致，说明有其他写入方
+         * 在读后写盘（例如 H21 新增了 id），不得直接覆盖——本轮不写，
+         * 下一轮以累积的期望集重合并。只验期望集的写后校验发现不了
+         * 这种“没见过的新 id 被自己覆盖”，故写前必须重读比较。 */
+        char current[LEA_REVOKED_MAX_IDS][129];
+        int n_current = 0;
+        if (!revoked_read_ids(path, current, &n_current)) return 0;
+        if (!revoked_sets_equal(existing, n_existing, current, n_current)) continue;
+        /* 期望集即并集：lea_revoked_write 排序＋去重＋原子写回。 */
+        const char *ptrs[LEA_REVOKED_MAX_IDS];
+        for (int i = 0; i < n_expected; i++) ptrs[i] = expected[i];
+        if (!lea_revoked_write(path, ptrs, n_expected)) return 0;
+        /* 写后校验：重读确认期望集全在表内（H21 直写若落在读-改-写
+         * 之间即在此发现，下一轮以累积的期望集重合并，不丢已见 id）。 */
+        char verify[LEA_REVOKED_MAX_IDS][129];
+        int n_verify = 0;
+        if (!revoked_read_ids(path, verify, &n_verify)) return 0;
+        int missing = 0;
+        for (int i = 0; i < n_expected; i++)
+            if (!revoked_has_id(verify, n_verify, expected[i])) { missing = 1; break; }
+        if (!missing) return 1;
+    }
+    return 0;
 }
 
 /* ---------------- 幂等表 ---------------- */
