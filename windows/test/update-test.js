@@ -18,7 +18,16 @@ const crypto = require('crypto');
 const PORT = 8977;
 const ORIGIN = 'http://127.0.0.1:' + PORT;
 process.env.QFREMOTE_RELEASE_URL = ORIGIN + '/release.json';
+// H26：假清单现签——每次服务时用临时 Ed25519 密钥签名（验签公钥经测试覆盖传入）。
+const _signKp = crypto.generateKeyPairSync('ed25519');
+process.env.QFREMOTE_RELEASE_SIGN_PUBLIC_KEY = _signKp.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
 const updater = require('../update');
+function signManifest(m) {
+  const d = Object.assign({}, m);
+  const sig = crypto.sign(null, Buffer.from(updater.canonicalReleaseJson(d), 'utf8'), _signKp.privateKey);
+  d.signature = { alg: 'ed25519', key_id: 'test', sig: sig.toString('base64url') };
+  return d;
+}
 
 const OUT = process.env.QFTEST_OUT || '/tmp/qfr103/update-result.json';
 const result = { cases: {}, pass: false };
@@ -35,12 +44,22 @@ let manifest = {
 
 let badJson = false, redirectLoop = false, slowMs = 0;
 let lastManifestUrl = '';
+let serveMode = 'signed'; // H26：signed=现签／unsigned=不带签名／bad-sig=签名被篡改
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/release.json')) {
     lastManifestUrl = req.url;
     if (redirectLoop) { res.writeHead(302, { Location: '/release.json' }); res.end(); return; }
     if (badJson) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('not json{'); return; }
-    const send = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(manifest)); };
+    const send = () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (serveMode === 'unsigned') { res.end(JSON.stringify(manifest)); return; }
+      if (serveMode === 'bad-sig') {
+        const d = signManifest(manifest);
+        d.signature = { alg: 'ed25519', key_id: 'test', sig: Buffer.alloc(64).toString('base64url') };
+        res.end(JSON.stringify(d)); return;
+      }
+      res.end(JSON.stringify(signManifest(manifest)));
+    };
     if (slowMs) { setTimeout(send, slowMs); return; }
     send();
   } else if (req.url === '/QFRemote-Setup-v9.9.9.exe') {
@@ -153,6 +172,20 @@ const server = http.createServer((req, res) => {
     const kMs = Date.now() - kT0;
     slowMs = 0;
     result.cases.K_checkTimeout_passthrough = { available: k.available, error: k.error, ms: kMs, pass: k.available === false && !!k.error && k.error.includes('连接超时') && kMs < 2500 };
+
+    // L（H26）：无签名清单 -> fetchManifest 拒绝更新
+    serveMode = 'unsigned';
+    let lErr = null;
+    try { await updater.fetchManifest(); } catch (e) { lErr = e.message; }
+    serveMode = 'signed';
+    result.cases.L_unsignedRejected = { error: lErr, pass: !!lErr && lErr.includes('签名') };
+
+    // M（H26）：签名被篡改 -> fetchManifest 拒绝更新
+    serveMode = 'bad-sig';
+    let mErr = null;
+    try { await updater.fetchManifest(); } catch (e) { mErr = e.message; }
+    serveMode = 'signed';
+    result.cases.M_badSigRejected = { error: mErr, pass: !!mErr && mErr.includes('签名') };
 
     result.pass = Object.values(result.cases).every(c => c.pass);
   } catch (e) {

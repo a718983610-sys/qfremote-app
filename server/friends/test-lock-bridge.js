@@ -52,6 +52,46 @@ const norm = normalizeEvent(raw);
 t('normalizeEvent 补齐 type/time 且保留 ev/ts/fields', norm.type === 'arm' && norm.time === raw.ts && norm.ev === 'arm' && norm.ts === raw.ts && norm.fields.armId === 'x');
 t('normalizeEvent 不改写原对象', raw.type === undefined && raw.time === undefined);
 
+const { createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_LOCK_MS } = B._test;
+
+// --- H28：/lock/reset 验登录密码限流 ---
+// 可控时钟：每步推进 1 分钟，便于测窗口与锁期满释放。
+let _now = 1000000000000;
+const lim = createResetPwLimiter(() => _now);
+const tick = (min) => { _now += min * 60000; };
+t('H28 初始不限流', lim.check('alice').locked === false);
+for (let i = 1; i <= 4; i++) { const r = lim.noteFail('alice'); tick(1); t('H28 第 ' + i + ' 次失败不限流（fails=' + r.fails + '）', r.locked === false && lim.check('alice').locked === false); }
+const fifth = lim.noteFail('alice');
+t('H28 第 5 次失败即上锁', fifth.locked === true && fifth.fails === RESET_PW_MAX_FAILS);
+t('H28 锁内 check 返回 locked', lim.check('alice').locked === true && lim.check('alice').retryAfterSec > 0);
+t('H28 锁内其他账号不受影响', lim.check('bob').locked === false);
+t('H28 账号大小写不敏感（ALICE 同锁）', lim.check('ALICE').locked === true);
+tick(14);
+t('H28 锁期 14 分钟后仍锁', lim.check('alice').locked === true);
+tick(2);
+t('H28 锁期满（15 分钟）后自动释放', lim.check('alice').locked === false);
+lim.noteFail('alice'); lim.noteFail('alice');
+t('H28 释放后重新计数（2 次失败不限流）', lim.check('alice').locked === false);
+lim.clear('alice');
+t('H28 clear 清零（验密成功路径）', lim.check('alice').locked === false && lim.noteFail('alice').fails === 1);
+// 窗口外失败不累积：首次失败 16 分钟后再失败，应从 1 重新计，
+// 同窗口内再失败一次则计为 2（两次返回值分开断言，不只看最后一次）。
+lim.clear('alice');
+const winFirst = lim.noteFail('alice');
+t('H28 窗口内首次失败 fails=1', winFirst.fails === 1 && winFirst.locked === false);
+tick(16);
+const winReset = lim.noteFail('alice');
+t('H28 窗口外失败重新计数（新窗口首个为 1）', winReset.fails === 1 && winReset.locked === false && lim.check('alice').locked === false);
+const winSecond = lim.noteFail('alice');
+t('H28 新窗口内第 2 次失败计为 2', winSecond.fails === 2 && lim.check('alice').locked === false);
+// 并发占位：同一账号同时只验一个密码（DS round 1）。
+t('H28 tryBegin 首次占位成功', lim.tryBegin('carol') === true);
+t('H28 tryBegin 并发同账号占位失败', lim.tryBegin('CAROL') === false);
+t('H28 tryBegin 其他账号不受影响', lim.tryBegin('dave') === true);
+lim.end('carol');
+t('H28 end 释放占位后可再占位', lim.tryBegin('carol') === true);
+lim.end('carol'); lim.end('dave');
+
 // --- 空/坏输入不炸
 t('status 为空时 findRejectedEvent=null、hasEvent=false', findRejectedEvent(null, ENV_ID) === null && hasEvent(null, 'arm', () => true) === false);
 t('lastEvents 缺失时同上', findRejectedEvent({}, ENV_ID) === null && hasEvent({}, 'arm', () => true) === false);

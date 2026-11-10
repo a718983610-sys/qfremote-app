@@ -660,6 +660,18 @@ const mockChannel = {
   t('路由吊销单个 Key 200', r.code === 200 && r.obj.record.status === 'revoked');
   r = await callRoute('POST', '/api/lea/v1/keys/revoke-all', {}, { password: 'correct-password' });
   t('路由一键吊销全部 200', r.code === 200 && r.obj.revoked_count >= 1);
+  // H26/QF-33/三端入口：吊销立即生效——吊销后该 Key 调 execute 一律 401。
+  const doomed = core.generateKey(USER, { device_scope: DEV });
+  r = await callRoute('POST', '/api/lea/v1/execute',
+    Object.assign(bearerHeaders(doomed.key), { 'idempotency-key': 'route-revoked-before' }),
+    { device_id: DEV, command: 'sys.info', params: {} });
+  t('吊销前 Key 可调用 execute', r.code === 200);
+  r = await callRoute('POST', '/api/lea/v1/keys/' + doomed.record.key_id + '/revoke', {}, {});
+  t('路由吊销待验 Key 200', r.code === 200 && r.obj.record.status === 'revoked');
+  r = await callRoute('POST', '/api/lea/v1/execute',
+    Object.assign(bearerHeaders(doomed.key), { 'idempotency-key': 'route-revoked-after' }),
+    { device_id: DEV, command: 'sys.info', params: {} });
+  t('吊销后同一 Key 调 execute → 401 QFR_API_KEY_REVOKED', r.code === 401 && r.obj.code === 'QFR_API_KEY_REVOKED');
   // 授权接口非站长 → 403
   r = await callRoute('POST', '/api/lea/v1/grants', {}, { account_id: USER, action: 'grant' });
   t('路由 grants 非站长 → 403', r.code === 403);

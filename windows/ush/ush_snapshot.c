@@ -1,6 +1,7 @@
 /* 见 ush_snapshot.h。 */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <aclapi.h>
 #include <ole2.h>
 #include <wincodec.h>
 #include <stdio.h>
@@ -9,6 +10,9 @@
 #include "ush_snapshot.h"
 
 #define USH_INLINE_MAX_BYTES (6 * 1024 * 1024) /* 内联 PNG 上限 6MB */
+/* H24：截图落盘上限——目录内最多保留 50 个文件、超过 7 天的删。 */
+#define USH_SNAPSHOT_MAX_FILES 50
+#define USH_SNAPSHOT_MAX_AGE_DAYS 7
 
 /* ---------- 窗口查找（标题子串 + 类名精确） ---------- */
 
@@ -136,6 +140,179 @@ done:
     return ok;
 }
 
+/* ---------- H24：截图目录 ACL 加固＋清理 ---------- *
+ * 背景（DS pkg1 #13）：snapshot_dir 只 CreateDirectoryW(NULL)，目录继承
+ * %ProgramData% 的默认 ACL，普通用户可读；file 模式截图落在
+ * %ProgramData%\QFR\LEA\snapshots，屏幕内容可能敏感，且无限累积。
+ * 修法：
+ *   ① 加固：目录 DACL 只含 SYSTEM／Administrators／当前登录用户（USH 以
+ *      当前登录用户身份运行，写盘须保留该用户；SYSTEM 是读截图的 LEA
+ *      服务；Administrators 运维），并以 PROTECTED_DACL 阻断父目录继承，
+ *      其它普通用户一律不可读。已存在的旧目录每次调用都重设（幂等），
+ *      旧的宽松 ACL 不会残留。加固失败不阻塞截图（best-effort，见下），
+ *      但真机验收须用 icacls 核对（WINDOWS-TESTS.md）。
+ *   ② 清理：每次落盘前剪枝——超 7 天的删；超过 50 个时删最旧的，
+ *      留 50 个。文件名 ush-*.png 由本模块生成，剪枝只认此前缀。
+ * 注意：ACL 加固是 best-effort——非 NTFS 卷／Wine 等环境下
+ * SetNamedSecurityInfo 可能失败，此时仍落盘（LEA 功能不断），
+ * 风险记在 WINDOWS-TESTS.md 真机项里，不静默谎称已加固。 */
+
+static int sid_alloc(PSID *out, BYTE sub_count, DWORD sub0, DWORD sub1) {
+    SID_IDENTIFIER_AUTHORITY auth = SECURITY_NT_AUTHORITY;
+    return AllocateAndInitializeSid(&auth, sub_count, sub0, sub1, 0, 0, 0, 0, 0, 0, out);
+}
+
+/* 当前进程用户 SID（调用方 LocalFree）。失败返回 NULL。 */
+static PSID current_user_sid(void) {
+    HANDLE tok = NULL;
+    DWORD len = 0;
+    TOKEN_USER *tu = NULL;
+    PSID copy = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return NULL;
+    GetTokenInformation(tok, TokenUser, NULL, 0, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) { CloseHandle(tok); return NULL; }
+    tu = (TOKEN_USER *)malloc(len);
+    if (!tu) { CloseHandle(tok); return NULL; }
+    if (!GetTokenInformation(tok, TokenUser, tu, len, &len)) { free(tu); CloseHandle(tok); return NULL; }
+    {
+        DWORD sid_len = GetLengthSid(tu->User.Sid);
+        copy = (PSID)malloc(sid_len);
+        if (copy && !CopySid(sid_len, copy, tu->User.Sid)) { free(copy); copy = NULL; }
+    }
+    free(tu);
+    CloseHandle(tok);
+    return copy;
+}
+
+int ush_snapshot_harden_dir(const WCHAR *dir_w) {
+    PSID sys_sid = NULL, admin_sid = NULL, user_sid = NULL;
+    EXPLICIT_ACCESS_W ea[3];
+    PACL acl = NULL;
+    DWORD rc;
+    int ok = 0;
+    if (!dir_w || !dir_w[0]) return 0;
+    /* S-1-5-18 SYSTEM；S-1-5-32-544 Administrators（authority 均为 NT）。 */
+    if (!sid_alloc(&sys_sid, 1, SECURITY_LOCAL_SYSTEM_RID, 0)) goto done;
+    if (!sid_alloc(&admin_sid, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS)) goto done;
+    user_sid = current_user_sid();
+    if (!user_sid) goto done; /* 拿不到当前用户 SID 即不改 ACL，不留半截 DACL */
+    memset(ea, 0, sizeof(ea));
+    ea[0].grfAccessPermissions = GENERIC_ALL;
+    ea[0].grfAccessMode = SET_ACCESS;
+    ea[0].grfInheritance = NO_INHERITANCE;
+    ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea[0].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea[0].Trustee.ptstrName = (LPWSTR)sys_sid;
+    ea[1] = ea[0];
+    ea[1].Trustee.ptstrName = (LPWSTR)admin_sid;
+    ea[2] = ea[0];
+    ea[2].Trustee.TrusteeType = TRUSTEE_IS_USER;
+    ea[2].Trustee.ptstrName = (LPWSTR)user_sid;
+    rc = SetEntriesInAclW(3, ea, NULL, &acl);
+    if (rc != ERROR_SUCCESS || !acl) goto done;
+    /* PROTECTED_DACL：不继承父目录 ACL，目录只认上面三条 ACE。 */
+    rc = SetNamedSecurityInfoW((LPWSTR)dir_w, SE_FILE_OBJECT,
+                               DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                               NULL, NULL, acl, NULL);
+    ok = (rc == ERROR_SUCCESS);
+done:
+    if (acl) LocalFree(acl);
+    if (sys_sid) FreeSid(sys_sid);
+    if (admin_sid) FreeSid(admin_sid);
+    if (user_sid) free(user_sid);
+    return ok;
+}
+
+typedef struct {
+    WCHAR name[MAX_PATH];
+    FILETIME mtime;
+    int deleted; /* 已删标记：不靠 mtime 猜，避免与真实写入时间撞车 */
+} snap_entry_t;
+
+static int snap_entry_cmp(const void *a, const void *b) {
+    /* 最旧在前（先删最旧的）；mtime 相同按名字 tie-break，保证顺序确定。 */
+    int c = CompareFileTime(&((const snap_entry_t *)a)->mtime, &((const snap_entry_t *)b)->mtime);
+    if (c != 0) return c;
+    return wcscmp(((const snap_entry_t *)a)->name, ((const snap_entry_t *)b)->name);
+}
+
+int ush_snapshot_prune_dir(const char *dir_utf8, int max_files, int max_age_days) {
+    WCHAR dir_w[MAX_PATH];
+    WCHAR pat[MAX_PATH + 16];
+    WIN32_FIND_DATAW fd;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    snap_entry_t *list = NULL;
+    size_t count = 0, cap = 0;
+    int removed = 0;
+    FILETIME now_ft, age_cutoff;
+    ULARGE_INTEGER now_u, cut_u;
+    if (!dir_utf8 || !dir_utf8[0]) return 0;
+    if (max_files <= 0) max_files = USH_SNAPSHOT_MAX_FILES;
+    if (max_age_days <= 0) max_age_days = USH_SNAPSHOT_MAX_AGE_DAYS;
+    if (MultiByteToWideChar(CP_UTF8, 0, dir_utf8, -1, dir_w, MAX_PATH) == 0) return 0;
+    wcscpy_s(pat, MAX_PATH + 16, dir_w);
+    wcscat_s(pat, MAX_PATH + 16, L"\\ush-*.png");
+    GetSystemTimeAsFileTime(&now_ft);
+    now_u.LowPart = now_ft.dwLowDateTime; now_u.HighPart = now_ft.dwHighDateTime;
+    cut_u.QuadPart = now_u.QuadPart - (ULONGLONG)max_age_days * 24ULL * 3600ULL * 10000000ULL;
+    age_cutoff.dwLowDateTime = cut_u.LowPart; age_cutoff.dwHighDateTime = cut_u.HighPart;
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0; /* 无文件即无事可做（不是错） */
+    for (;;) {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (count == cap) {
+                size_t ncap = cap ? cap * 2 : 32;
+                snap_entry_t *nl = (snap_entry_t *)realloc(list, ncap * sizeof(*nl));
+                if (!nl) break;
+                list = nl; cap = ncap;
+            }
+            wcscpy_s(list[count].name, MAX_PATH, fd.cFileName);
+            list[count].mtime = fd.ftLastWriteTime;
+            list[count].deleted = 0;
+            count++;
+        }
+        if (!FindNextFileW(h, &fd)) break;
+    }
+    FindClose(h);
+    if (!list) return 0;
+    /* ① 先删超龄的。 */
+    for (size_t i = 0; i < count; i++) {
+        if (CompareFileTime(&list[i].mtime, &age_cutoff) < 0) {
+            WCHAR full[MAX_PATH + 16];
+            wcscpy_s(full, MAX_PATH + 16, dir_w);
+            wcscat_s(full, MAX_PATH + 16, L"\\");
+            wcscat_s(full, MAX_PATH + 16, list[i].name);
+            if (DeleteFileW(full)) { removed++; list[i].deleted = 1; }
+        }
+    }
+    /* ② 仍超上限：先算保留集——按（时间，名字）从旧到新排，留最新的
+       max_files 个；只删保留集之外的，每项最多尝试一次，删失败的不补删
+       其它文件（下次剪枝再试）。此设计下没有“need 计数器”，不存在
+       删失败导致计数无法归零的路径；同轮内同一文件不会被尝试两次。 */
+    {
+        size_t alive = 0;
+        for (size_t i = 0; i < count; i++) if (!list[i].deleted) alive++;
+        if (alive > (size_t)max_files) {
+            size_t keep = 0;
+            qsort(list, count, sizeof(*list), snap_entry_cmp);
+            for (size_t j = count; j-- > 0;) {
+                if (list[j].deleted) continue; /* 超龄已删，不在保留集里 */
+                if (keep < (size_t)max_files) { keep++; continue; } /* 保留集：最新的若干个 */
+                {
+                    WCHAR full[MAX_PATH + 16];
+                    wcscpy_s(full, MAX_PATH + 16, dir_w);
+                    wcscat_s(full, MAX_PATH + 16, L"\\");
+                    wcscat_s(full, MAX_PATH + 16, list[j].name);
+                    if (DeleteFileW(full)) { removed++; list[j].deleted = 1; }
+                    /* 删失败：不补删，留待下次剪枝（上限是软限，不阻塞截图）。 */
+                }
+            }
+        }
+    }
+    free(list);
+    return removed;
+}
+
 static void snapshot_dir(char *out, size_t out_size) {
     WCHAR dir[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"ProgramData", dir, MAX_PATH);
@@ -148,7 +325,10 @@ static void snapshot_dir(char *out, size_t out_size) {
     CreateDirectoryW(p, NULL);
     wcscat_s(p, MAX_PATH, L"\\snapshots");
     CreateDirectoryW(p, NULL);
+    /* H24：每次落盘前都加固（旧的宽松 ACL 也被重设）＋剪枝（50 个／7 天）。 */
+    ush_snapshot_harden_dir(p);
     WideCharToMultiByte(CP_UTF8, 0, p, -1, out, (int)out_size, NULL, NULL);
+    ush_snapshot_prune_dir(out, USH_SNAPSHOT_MAX_FILES, USH_SNAPSHOT_MAX_AGE_DAYS);
 }
 
 int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,

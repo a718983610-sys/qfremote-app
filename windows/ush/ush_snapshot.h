@@ -4,6 +4,10 @@
  * 两种返回：mode=file（默认，写 %ProgramData%\QFR\LEA\snapshots\*.png，
  * 回路径）或 mode=inline（PNG Base64 进响应，超 6MB 拒绝并提示用 file）。
  * 锁屏时由调用方（ush.c 的会话门）先拦，本模块不重复判断。
+ * H24：snapshots 目录只 SYSTEM／Administrators／当前登录用户可读写
+ * （PROTECTED_DACL，不继承父目录 ACL），每次落盘前剪枝（最多 50 个、
+ * 超 7 天删）。加固失败为 best-effort（非 NTFS 卷等），不阻塞截图，
+ * 真机须用 icacls 核对。
  */
 #ifndef QFR_USH_SNAPSHOT_H
 #define QFR_USH_SNAPSHOT_H
@@ -13,5 +17,10 @@
 int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                     char *err_code, size_t err_code_size,
                     char *err_text, size_t err_text_size);
+
+/* H24：加固截图目录 ACL（成功 1／失败 0）；剪枝目录（返回删除数）。
+ * 供单测与调用方复用；ush_ui_snapshot 的 file 模式每次落盘前自动调。 */
+int ush_snapshot_harden_dir(const WCHAR *dir_w);
+int ush_snapshot_prune_dir(const char *dir_utf8, int max_files, int max_age_days);
 
 #endif /* QFR_USH_SNAPSHOT_H */

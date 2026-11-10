@@ -3816,6 +3816,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           onLogout: _manualLogoutFromMenu,
                           onOpenWebsite: () => _openShellWeb(
                               '官网', SvcUrls.instance.websiteUrl),
+                          // H26/QF-33/三端入口：原生「我的」页 API 密钥入口，
+                          // 点开进控制台 API 生成页（#apikeys，生成／撤销）。
+                          onOpenApiKeys: () =>
+                              _openShellWeb('API 密钥', '${_startUrl}#apikeys'),
                           licenseSection: LicenseSection(
                             palette: _palette,
                             // B7 返修：许可区拉取遇 401/403 时显示「登录已过期，

@@ -16,6 +16,16 @@
  *   - 测试覆盖开关 QFREMOTE_RELEASE_URL 存在时改认那个 origin（仅测试用，
  *     生产环境不要设置这个环境变量），见 README。
  *   （2026-10-29 发版前审计 J-2 定案：更新链自直连自签源收口至正式域名源。）
+ * H26（QF-13）：清单离线签名——release.json 带 Ed25519 签名
+ *   signature={alg:'ed25519',key_id,sig}，sig 为规范串的签名（base64url）；
+ *   规范串 = 去掉 signature 后、key 字典序递归排序的紧凑 JSON（与
+ *   server/ext/make-release-json.js 同一份 spec，两处实现须一致）。
+ *   取清单时验签：无签名／验签不过即抛错、拒绝更新（fail-closed）。
+ *   发版时须用 --sign-key 签名（2.4.5 起的发布流程）；2.4.4 及更早的
+ *   客户端没有验签代码，不受此约束——约束自带新代码的版本起生效。
+ *   验签公钥内嵌（release-1）；仅测试用环境变量
+ *   QFREMOTE_RELEASE_SIGN_PUBLIC_KEY（base64 SPKI）可覆盖，与
+ *   QFREMOTE_RELEASE_URL 测试覆盖同款口径，生产环境不要设置。
  */
 const http = require('http');
 const https = require('https');
@@ -30,6 +40,44 @@ const PROD_RELEASE_URL = PROD_ORIGIN + '/release.json';
 const OVERRIDE_URL = process.env.QFREMOTE_RELEASE_URL || '';
 const RELEASE_URL = OVERRIDE_URL || PROD_RELEASE_URL;
 const TRUSTED_ORIGIN = OVERRIDE_URL ? new URL(OVERRIDE_URL).origin : PROD_ORIGIN;
+// H26：发版签名公钥（release-1，Ed25519 SPKI DER base64）。与
+// server/ext/make-release-json.js 的 RELEASE_SIGN_PUBLIC_KEY_B64 同值；
+// 轮换时两处同改。仅测试用环境变量可覆盖（见文件头）。
+const RELEASE_SIGN_PUBLIC_KEY_B64 = 'MCowBQYDK2VwAyEAmGZlcEEV5U0J9ciAaA69WYkIfG/Og7arHBEuR+PTtnA=';
+
+function releaseVerifyKeyB64() {
+  const ov = process.env.QFREMOTE_RELEASE_SIGN_PUBLIC_KEY || '';
+  return ov || RELEASE_SIGN_PUBLIC_KEY_B64;
+}
+
+function canonicalReleaseJson(doc) {
+  // H26 规范串（与 make-release-json.js 同 spec）：去 signature、key 字典序递归排序、紧凑 JSON。
+  function sort(v) {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object') {
+      const o = {};
+      Object.keys(v).sort().forEach((k) => { o[k] = sort(v[k]); });
+      return o;
+    }
+    return v;
+  }
+  const d = Object.assign({}, doc);
+  delete d.signature;
+  return JSON.stringify(sort(d));
+}
+
+// H26：验 release.json 签名。返回 { ok, reason }；ok=false 时调用方拒绝更新。
+function verifyReleaseSignature(doc) {
+  const sig = doc && doc.signature;
+  if (!sig || typeof sig !== 'object') return { ok: false, reason: '缺少 signature 字段' };
+  if (sig.alg !== 'ed25519') return { ok: false, reason: '未知签名算法：' + String(sig.alg) };
+  if (typeof sig.sig !== 'string' || !/^[A-Za-z0-9_-]+$/.test(sig.sig)) return { ok: false, reason: 'sig 不是 base64url' };
+  let pub;
+  try { pub = crypto.createPublicKey({ key: Buffer.from(releaseVerifyKeyB64(), 'base64'), format: 'der', type: 'spki' }); } catch (e) { return { ok: false, reason: '验签公钥无法加载' }; }
+  let ok = false;
+  try { ok = crypto.verify(null, Buffer.from(canonicalReleaseJson(doc), 'utf8'), pub, Buffer.from(sig.sig, 'base64url')); } catch (e) { ok = false; }
+  return ok ? { ok: true, key_id: sig.key_id || null } : { ok: false, reason: '签名与文档内容不符' };
+}
 
 function compareVersions(a, b) {
   const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
@@ -99,6 +147,10 @@ async function fetchManifest(timeoutMs) {
   if (!isTrustedUrl(absUrl)) throw new Error('清单里的下载地址不在信任范围内');
   const sha = typeof m.sha256 === 'string' ? m.sha256.toLowerCase() : '';
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error('更新清单缺少完整的 SHA256 校验码');
+  // H26：清单签名必验——无签名／验签不过即拒绝更新（fail-closed）。
+  // 2.4.5 起发版流程用 --sign-key 签名；签发方漏签时客户端宁可不更新。
+  const vr = verifyReleaseSignature(m);
+  if (!vr.ok) throw new Error('更新清单签名无效（' + vr.reason + '），拒绝更新');
   // 强更线 minUsable（2026-11-07 站长令）：清单可选字段，本机版本低于它即触发
   // 启动强制更新（见 main.js startupUpdateGate）；缺失/格式不合规按无强更线处理。
   const minUsable = (typeof m.minUsable === 'string' && /^\d+\.\d+\.\d+$/.test(m.minUsable)) ? m.minUsable : null;
@@ -108,7 +160,8 @@ async function fetchManifest(timeoutMs) {
     url: absUrl,
     sha256: sha,
     size: typeof m.size === 'number' ? m.size : null,
-    minUsable
+    minUsable,
+    signatureVerified: true
   };
 }
 
@@ -218,4 +271,4 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   }
 }
 
-module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File, setHealReport };
+module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File, setHealReport, canonicalReleaseJson, verifyReleaseSignature, RELEASE_SIGN_PUBLIC_KEY_B64 };

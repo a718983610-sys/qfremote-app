@@ -43,6 +43,10 @@ class MePage extends StatefulWidget {
   /// 「官网」带字行（收编 P1 补 X-02；为空时整行不出现）。
   final VoidCallback? onOpenWebsite;
 
+  /// H26/QF-33/三端入口（站长 13:34 定）：「API 密钥」带字行，点开进
+  /// 控制台 API 生成页（生成／撤销）；为空时整行不出现。
+  final VoidCallback? onOpenApiKeys;
+
   const MePage({
     super.key,
     required this.palette,
@@ -62,6 +66,7 @@ class MePage extends StatefulWidget {
     required this.onLogout,
     this.licenseSection,
     this.onOpenWebsite,
+    this.onOpenApiKeys,
   });
 
   @override
@@ -270,6 +275,15 @@ class _MePageState extends State<MePage> {
                   onTap: widget.onAccountAction,
                   chevron: true,
                 ),
+                if (widget.onOpenApiKeys != null) ...[
+                  const SizedBox(height: 12),
+                  _rowCard(
+                    title: 'API 密钥',
+                    sub: '生成与吊销 Muse 操作密钥',
+                    onTap: widget.onOpenApiKeys,
+                    chevron: true,
+                  ),
+                ],
                 const SizedBox(height: 12),
                 _rowCard(
                   title: '软件版本 ${widget.currentVersion}',

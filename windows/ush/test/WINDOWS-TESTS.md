@@ -55,6 +55,12 @@ pipe_probe.exe "{\"command\":\"ui.ping\",\"request_id\":\"t1\"}"
       尺寸与虚拟屏一致；多显示器时覆盖全部显示器。
 - [ ] `mode:inline`：返回 `data_base64`，解码后为合法 PNG。
 - [ ] 指定 `window_title`：只截该窗口。
+- [ ] H24 截图目录 ACL：`icacls "%ProgramData%\QFR\LEA\snapshots"` 只含
+      `NT AUTHORITY\SYSTEM`、`BUILTIN\Administrators`、当前登录用户三条
+      允许 ACE，且无继承 ACE（`icacls` 输出不含 `(I)` 继承标记）；
+      换一个普通用户登录后打不开目录内 PNG（拒绝访问）。
+- [ ] H24 截图目录清理：放 60 个 `ush-*.png`（10 个改 10 天前）后触发一次
+      file 截图，旧 10 个被删、总数回到 50 个；再放 5 个后总数仍为 50 个。
 
 ### 7. ui.tree
 - [ ] 记事本窗口 `max_depth:2`：返回树，含菜单／编辑框节点，字段齐全

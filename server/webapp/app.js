@@ -1020,7 +1020,9 @@ const MENU34 = [
   { icon: 'user', label: '我的账户', route: 'profile' },
   { icon: 'folder', label: '我的文件', route: 'files' },
   { icon: 'users', label: '好友', route: 'friends' },
-  { icon: 'forum', label: '论坛', route: 'forum' }
+  { icon: 'forum', label: '论坛', route: 'forum' },
+  // H26/QF-33/三端入口（站长 13:34 定）：API 生成入口放侧边栏，一打开就能看到。
+  { icon: 'key', label: 'API 密钥', route: 'apikeys' }
 ];
 const FUNC = [
   { icon: 'monitor', label: '我的设备', route: 'devices' },
@@ -5051,6 +5053,110 @@ Views.points = async function (view) {
       else { b.disabled = false; b.textContent = '兑换并激活'; toast(apiErrText(rr, '兑换失败，请稍后再试。'), 'err'); }
     };
   });
+};
+
+/* ================= API 密钥（LEA 三端入口，站长 13:34/13:45 定） ================= *
+ * 侧边栏入口（MENU34）一点即进本页；页内两个操作（站长 13:45 定）：
+ *   生成：手动生成 API 密钥（显式授权，须账号密码二次确认；明文只显示一次）；
+ *   撤销：吊销单个或全部密钥，吊销后该密钥后续调用一律 401、立即失效。
+ * 服务端接口：POST /api/lea/v1/keys、GET /api/lea/v1/keys、
+ *   POST /api/lea/v1/keys/{key_id}/revoke、POST /api/lea/v1/keys/revoke-all。
+ * 网页／Windows（Electron 载控制台）／安卓（WebView 槽载控制台）三端共用本页；
+ * 安卓另在原生「我的」页加同名入口（见 android-app/lib/ui/me_page.dart）。 */
+Views.apikeys = async function (view) {
+  view.innerHTML = `<h1 class="pt">API 密钥</h1><p class="psub">API 密钥是 Muse 操作本机设备的凭证。密钥必须由你手动生成——生成就是一次显式授权；吊销后密钥立即失效，Muse 再调用会被拒绝。</p>
+    <div id="akBody"><div class="card"><div class="skel" style="height:60px"></div></div></div>`;
+  const box = $('#akBody', view);
+  const r = await api('/api/lea/v1/keys');
+  if (r.status === 401 || r.status === 403) { box.innerHTML = stateBox('登录状态已失效', '请重新登录后查看 API 密钥。', false); return; }
+  if (r.status !== 200 || !r.json || !r.json.ok) {
+    box.innerHTML = stateBox('API 密钥服务暂时不可用', r.json && r.json.code === 'LEA_UNAVAILABLE' ? 'LEA 服务端模块未加载或密码核验未接入，请稍后再试。' : '请稍后重新加载。', true);
+    bindRetry(box, () => Views.apikeys(view)); return;
+  }
+  const statusText = (s) => ({ active: '使用中', revoked: '已吊销', revoked_by_rebind: '换绑后吊销', expired: '已过期' }[s] || s || '未知');
+  const renderList = (keys) => {
+    if (!keys.length) return '<div class="statebox"><b>暂无 API 密钥</b><p>还没有生成过密钥。生成后把密钥复制给 Muse，它才能操作你的设备。</p></div>';
+    return keys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.prefix || k.key_id)}</b><small>${esc(k.key_id)} · ${esc(statusText(k.status))} · 生成于 ${k.created_at ? fmtDate(k.created_at) : '—'} · ${k.last_used_at ? '最后使用 ' + fmtDate(k.last_used_at) : '未使用过'}${k.device_scope ? ' · 仅限设备 ' + esc(String(k.device_scope).slice(0, 20)) + '…' : ''}</small></span>${k.status === 'active' ? `<span class="ops" style="margin-left:auto"><button class="btn sm" data-revoke="${esc(k.key_id)}">撤销</button></span>` : ''}</div>`).join('');
+  };
+  const keys = Array.isArray(r.json.keys) ? r.json.keys : [];
+  box.innerHTML = `
+    <div class="card"><h3>生成 API 密钥</h3>
+      <p style="color:var(--sub);font-size:13px;margin:6px 0 10px">点“生成”即手动授权 Muse 使用你的设备。生成须重新输入账号密码作二次确认；密钥明文只显示一次，请立即复制保存，关闭后不再明文展示。</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="ak-pw" type="password" placeholder="账号密码（二次确认）" autocomplete="current-password" style="flex:1;min-width:200px;height:38px;border:1px solid var(--btn-line);border-radius:10px;padding:0 12px;font-size:14px;background:var(--card);color:var(--fg)">
+        <button class="btn" id="ak-gen">生成 API 密钥</button>
+      </div>
+      <div id="ak-new" style="margin-top:12px"></div>
+      <div id="ak-out" style="margin-top:10px"></div>
+    </div>
+    <div class="card"><h3>我的密钥</h3><div id="ak-list">${renderList(keys)}</div></div>
+    <div class="card"><h3>吊销全部密钥</h3>
+      <p style="color:var(--sub);font-size:13px;margin:6px 0 10px">怀疑密钥泄露时点这里：该账号全部密钥立即吊销，Muse 再调用一律被拒绝。吊销不可恢复，需要时重新生成。</p>
+      <button class="btn red" id="ak-revoke-all">吊销全部密钥</button>
+      <div id="ak-all-out" style="margin-top:10px"></div>
+    </div>`;
+  const pwEl = $('#ak-pw', box);
+  const outEl = $('#ak-out', box);
+  const newEl = $('#ak-new', box);
+  const genBtn = $('#ak-gen', box);
+  const bindRevoke = (scope) => {
+    scope.querySelectorAll('[data-revoke]').forEach(b => {
+      b.onclick = () => {
+        const keyId = b.getAttribute('data-revoke');
+        confirmModal('撤销密钥', '确定吊销该密钥吗？吊销后它立即失效，Muse 再用它调用会被拒绝。', '撤销', async () => {
+          const rr = await api('/api/lea/v1/keys/' + encodeURIComponent(keyId) + '/revoke', { method: 'POST', json: {} });
+          if (rr.json && rr.json.ok) { toast('密钥已吊销，立即失效。', 'ok'); Views.apikeys(view); }
+          else toast(apiErrText(rr, '吊销失败，请稍后再试。'), 'err');
+        });
+      };
+    });
+  };
+  const refreshList = async () => {
+    const lr = await api('/api/lea/v1/keys');
+    if (lr.json && lr.json.ok) {
+      const listEl = $('#ak-list', box);
+      if (listEl) { listEl.innerHTML = renderList(Array.isArray(lr.json.keys) ? lr.json.keys : []); bindRevoke(listEl); }
+    }
+  };
+  bindRevoke(box);
+  if (genBtn) genBtn.onclick = async () => {
+    const pw = pwEl ? pwEl.value : '';
+    if (!pw) { toast('请先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
+    genBtn.disabled = true; genBtn.textContent = '生成中…';
+    const rr = await api('/api/lea/v1/keys', { method: 'POST', json: { password: pw } });
+    genBtn.disabled = false; genBtn.textContent = '生成 API 密钥';
+    if (pwEl) pwEl.value = '';
+    if (rr.json && rr.json.ok && rr.json.key) {
+      const plain = rr.json.key;
+      newEl.innerHTML = `<div class="note warn" style="margin:0">请立即复制保存：关闭后不再明文展示。</div>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><input id="ak-plain" type="text" readonly value="${esc(plain)}" style="flex:1;min-width:0;height:38px;border:1px solid var(--btn-line);border-radius:10px;padding:0 12px;font-size:13px;background:var(--card);color:var(--fg)"><button class="btn sm" id="ak-copy">复制</button></div>`;
+      const copyBtn = $('#ak-copy', box);
+      if (copyBtn) copyBtn.onclick = async () => {
+        try { await navigator.clipboard.writeText(plain); toast('已复制。', 'ok'); }
+        catch (e) {
+          const input = $('#ak-plain', box);
+          if (input) { input.select(); try { document.execCommand('copy'); toast('已复制。', 'ok'); } catch (e2) { toast('复制失败，请手动选中复制。', 'err'); } }
+        }
+      };
+      if (outEl) outEl.innerHTML = '';
+      toast('API 密钥已生成。', 'ok');
+      // 只刷新列表，不重建整页——明文只显示一次，不能被刷新冲掉。
+      refreshList();
+    } else if (outEl) {
+      outEl.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(rr, '生成失败，请稍后再试。'))}</div>`;
+    }
+  };
+  const allBtn = $('#ak-revoke-all', box);
+  if (allBtn) allBtn.onclick = () => {
+    confirmModal('吊销全部密钥', '确定吊销该账号全部 API 密钥吗？全部密钥立即失效，Muse 立即失权，不可恢复。', '吊销全部', async () => {
+      const pw = pwEl ? pwEl.value : '';
+      if (!pw) { toast('吊销全部须先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
+      const rr = await api('/api/lea/v1/keys/revoke-all', { method: 'POST', json: { password: pw } });
+      const allOut = $('#ak-all-out', box);
+      if (rr.json && rr.json.ok) { toast('全部密钥已吊销（' + (rr.json.revoked_count || 0) + ' 个），Muse 立即失权。', 'ok'); Views.apikeys(view); }
+      else if (allOut) allOut.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(rr, '吊销失败，请稍后再试。'))}</div>`;
+    });
+  };
 };
 
 /* ================= 我的（我的账户） ================= */

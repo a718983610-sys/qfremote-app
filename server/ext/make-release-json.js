@@ -14,13 +14,18 @@
  *           --apk  QFRemote-v2.4.5.apk \
  *           --version 2.4.5 [--min-usable 2.4.5] \
  *           [--notes "……"] [--notes-android "……"] \
+ *           [--sign-key 发版私钥.pem] [--key-id release-1] \
  *           [--out server/meshcentral/public/release.json]
  *         不传 --out 时只打印到 stdout，不写文件（默认安全）。
+ *         生产发布必须传 --sign-key（H26；不签名 Windows 客户端拒绝更新）。
  *   校验：node server/ext/make-release-json.js \
  *           --check server/meshcentral/public/release.json \
+ *           [--require-signature] [--verify-key <base64 SPKI>] \
  *           QFRemote-Setup-v2.4.5.exe QFRemote-v2.4.5.apk
  *         逐项比对 size/sha256/url 文件名/version/minUsable，
  *         全部一致 exit 0，任一不一致 exit 1 并逐项报错。
+ *         带签名时验签（验签不过即失败）；无签名时警告，
+ *         传 --require-signature 时无签名也失败（发版门禁应传）。
  *         minUsable 有意不抬（§5.3 条件不满足、发版时 minUsable 仍为旧版）
  *         时，须显式传 --allow-min-usable，否则 --check 把
  *         minUsable≠version 记为失败；传了该标志时该项不记失败（其余
@@ -29,11 +34,63 @@
  *
  * 注意：本脚本只生成文件内容，不翻线上 release.json、不改 minUsable
  * 的翻牌决策；翻牌由协调人在包建好验过后做。
+ *
+ * H26（QF-13）离线签名：release.json 用 Ed25519 离线签名，Windows 客
+ * 户端（windows/update.js）取清单时验签，无签名／验签不过即拒绝更新
+ * （fail-closed）。规范（与 update.js 同一份，两处实现须一致）：
+ *   规范串 = 去掉 signature 字段后、key 字典序递归排序的紧凑 JSON；
+ *   signature = { alg:'ed25519', key_id, sig }，sig 为规范串的签名
+ *   （base64url）；key_id 标识签名密钥轮换代次（现行 release-1）。
+ * 签名：--sign-key <私钥 PEM 路径> [--key-id release-1]；私钥只存在于
+ * 发版机离线保管，永不入库（仓库 .gitignore 已含 *.pem/*.key）。
+ * 校验：--check 验 size/sha256/url/version 的同时，文档带 signature
+ * 时用内置公钥验签（--verify-key <base64 SPKI> 可覆盖，密钥轮换测试
+ * 用）；验签不过即失败；无签名时警告（--require-signature 时失败）。
+ * 现行发版公钥（release-1，指纹见下行注释；私钥存协调人处）：
+ *   SHA256(SPKI DER) = 0c4458ac3de81358f5f2b3d176390b8de68ce5be008ea00aa0540aeeaca46f9c
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+
+// H26：发版签名公钥（release-1，Ed25519 SPKI DER base64）。与
+// windows/update.js 的 RELEASE_SIGN_PUBLIC_KEY_B64 同值；轮换时两处同改。
+const RELEASE_SIGN_PUBLIC_KEY_B64 = 'MCowBQYDK2VwAyEAmGZlcEEV5U0J9ciAaA69WYkIfG/Og7arHBEuR+PTtnA=';
+const RELEASE_SIGN_KEY_ID = 'release-1';
+
+function canonicalReleaseJson(doc) {
+  // H26 规范串（与 update.js 同 spec）：去 signature、key 字典序递归排序、紧凑 JSON。
+  function sort(v) {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object') {
+      const o = {};
+      Object.keys(v).sort().forEach((k) => { o[k] = sort(v[k]); });
+      return o;
+    }
+    return v;
+  }
+  const d = Object.assign({}, doc);
+  delete d.signature;
+  return JSON.stringify(sort(d));
+}
+
+function loadVerifyKey(b64) {
+  return crypto.createPublicKey({ key: Buffer.from(b64, 'base64'), format: 'der', type: 'spki' });
+}
+
+function verifyReleaseSignature(doc, verifyKeyB64) {
+  // 返回 { ok, reason }：ok=false 时 reason 说明缺失/格式错/验签不过。
+  const sig = doc && doc.signature;
+  if (!sig || typeof sig !== 'object') return { ok: false, reason: '缺少 signature 字段' };
+  if (sig.alg !== 'ed25519') return { ok: false, reason: '未知签名算法：' + String(sig.alg) };
+  if (typeof sig.sig !== 'string' || !/^[A-Za-z0-9_-]+$/.test(sig.sig)) return { ok: false, reason: 'sig 不是 base64url' };
+  let pub;
+  try { pub = loadVerifyKey(verifyKeyB64 || RELEASE_SIGN_PUBLIC_KEY_B64); } catch (e) { return { ok: false, reason: '验签公钥无法加载' }; }
+  let ok = false;
+  try { ok = crypto.verify(null, Buffer.from(canonicalReleaseJson(doc), 'utf8'), pub, Buffer.from(sig.sig, 'base64url')); } catch (e) { ok = false; }
+  return ok ? { ok: true, key_id: sig.key_id || null } : { ok: false, reason: '签名与文档内容不符' };
+}
 
 function fail(msg) { console.error('make-release-json: ' + msg); process.exit(1); }
 
@@ -42,7 +99,7 @@ function sha256File(p) {
 }
 
 function parseArgs(argv) {
-  const a = { exe: null, apk: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [] };
+  const a = { exe: null, apk: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [], signKey: null, keyId: RELEASE_SIGN_KEY_ID, verifyKey: null, requireSignature: false };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     const next = () => { if (i + 1 >= argv.length) fail('参数 ' + t + ' 缺少值'); return argv[++i]; };
@@ -54,7 +111,16 @@ function parseArgs(argv) {
     else if (t === '--notes') a.notes = next();
     else if (t === '--notes-android') a.notesAndroid = next();
     else if (t === '--out') a.out = next();
-    else if (t === '--check') a.check = next();
+    else if (t === '--check') {
+      // --check 的值（release.json 路径）可后置于其它 flag 之后：
+      // 下一 token 是 flag 时不吞，路径改从位置参数首位取（见 checkMode）。
+      if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) a.check = next();
+      else a.check = true;
+    }
+    else if (t === '--sign-key') a.signKey = next();
+    else if (t === '--key-id') a.keyId = next();
+    else if (t === '--verify-key') a.verifyKey = next();
+    else if (t === '--require-signature') a.requireSignature = true;
     else if (t === '--help' || t === '-h') { console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(1, 31).join('\n')); process.exit(0); }
     else if (t.startsWith('-')) fail('未知参数：' + t);
     else a.files.push(t);
@@ -105,8 +171,25 @@ function verifySelf(doc, a) {
   return problems;
 }
 
+function signDoc(doc, a) {
+  // H26：--sign-key 给私钥 PEM（Ed25519 PKCS8）时离线签名；不给则不签
+  //（兼容旧流程，但生产发布必须签；Windows 客户端对无签名清单拒绝更新）。
+  if (!a.signKey) return doc;
+  let priv;
+  try { priv = crypto.createPrivateKey(fs.readFileSync(a.signKey, 'utf8')); } catch (e) { fail('--sign-key 无法加载私钥 PEM：' + a.signKey + '（' + (e && e.message) + '）'); }
+  if (priv.asymmetricKeyType !== 'ed25519') fail('--sign-key 不是 Ed25519 私钥');
+  const sig = crypto.sign(null, Buffer.from(canonicalReleaseJson(doc), 'utf8'), priv);
+  doc.signature = { alg: 'ed25519', key_id: a.keyId || RELEASE_SIGN_KEY_ID, sig: sig.toString('base64url') };
+  return doc;
+}
+
 function checkMode(a) {
   if (!a.check) fail('--check 须给 release.json 路径');
+  if (typeof a.check !== 'string') {
+    // --check 未直接带值：位置参数首位即 release.json 路径。
+    if (a.files.length !== 3) fail('--check 模式须给 release.json 路径＋exe 与 apk 两个文件路径（顺序：release.json exe apk）');
+    a.check = a.files.shift();
+  }
   if (a.files.length !== 2) fail('--check 模式须再给 exe 与 apk 两个文件路径（顺序：exe apk）');
   const doc = JSON.parse(fs.readFileSync(a.check, 'utf8'));
   const [exeP, apkP] = a.files;
@@ -130,19 +213,31 @@ function checkMode(a) {
     problems.forEach(p => console.error('  - ' + p));
     process.exit(1);
   }
+  // H26：带签名时验签（内置公钥，--verify-key 可覆盖）；验签不过即失败。
+  // 无签名时警告，--require-signature 时按失败计（发版门禁应传该标志）。
+  const vr = verifyReleaseSignature(doc, a.verifyKey);
+  if (doc.signature) {
+    if (!vr.ok) { console.error('校验失败：release.json 签名无效（' + vr.reason + '）。'); process.exit(1); }
+    console.log('签名有效（key_id=' + (vr.key_id || '未标') + '）。');
+  } else if (a.requireSignature) {
+    console.error('校验失败：release.json 无签名（已传 --require-signature）。');
+    process.exit(1);
+  } else {
+    console.log('警告：release.json 无签名——生产发布须用 --sign-key 签名，否则 Windows 客户端拒绝更新。');
+  }
   console.log('校验通过：' + a.check + ' 与两个包的 size/sha256/url/version 全部一致（version ' + doc.version + '，minUsable ' + doc.minUsable + '）。');
 }
 
 function main() {
   const a = parseArgs(process.argv.slice(2));
   if (a.check) return checkMode(a);
-  const doc = buildDoc(a);
+  const doc = signDoc(buildDoc(a), a);
   const problems = verifySelf(doc, a);
   if (problems.length) { problems.forEach(p => console.error('自校验失败：' + p)); process.exit(1); }
   const text = JSON.stringify(doc, null, 2) + '\n';
   if (a.out) {
     fs.writeFileSync(a.out, text);
-    console.log('已写入 ' + a.out + '（version ' + doc.version + '，minUsable ' + doc.minUsable + '，exe ' + doc.size + ' B，apk ' + doc.android.size + ' B，自校验通过）。');
+    console.log('已写入 ' + a.out + '（version ' + doc.version + '，minUsable ' + doc.minUsable + '，exe ' + doc.size + ' B，apk ' + doc.android.size + ' B，自校验通过' + (doc.signature ? '，已签名 key_id=' + doc.signature.key_id : '，未签名') + '）。');
   } else {
     process.stdout.write(text);
     console.error('（未写文件：未传 --out。发版时显式传 --out 指向 server/meshcentral/public/release.json。）');

@@ -31,6 +31,7 @@ const ERR = {
   noDevice: '未找到这台设备。',
   badPw: '密码长度须为 4 至 64 位。',
   badLoginPw: '登录密码不正确，请检查后重试。',
+  tooManyAttempts: '登录密码连续输错太多次，请 15 分钟后再试。',
   rejected: '这台电脑拒绝了本次操作，请稍后重试。',
   notReady: '隐私锁服务尚未就绪，请稍后重试。',
   badReq: '请求内容不正确，请重试。',
@@ -99,6 +100,65 @@ function hasEvent(status, type, pred) {
   return status.lastEvents.some((raw) => { const ev = normalizeEvent(raw); return ev && ev.type === type && pred(ev); });
 }
 
+/* ---------- H28：/lock/reset 验登录密码速率限制 ----------
+// 背景：/lock/reset 验登录密码（deps.mcConnect 向 MeshCentral 做一次真登录）
+// 此前无任何限流；持有效会话者可无限次试密码（复审员已降中：持会话已可
+// 直接 disarm，reset 暴力破解的边际收益主要是拿 MC 账号密码——但 MC 账号
+// 密码一旦到手即全站沦陷，故仍须限流）。
+// 策略（进程内内存表，单实例服务适用；多实例部署时各实例独立计数，仍能
+// 把单实例攻击速率压到 5 次/15 分钟）：同一账号连续 5 次验密失败即锁 15 分钟，
+// 锁内再请求一律 429（不调 mcConnect、不消耗 MC 侧认证）；验密成功即清零。
+// 锁的是“该账号的 reset 验密”，不锁账号本身的正常登录/disarm——误锁不扩散。
+// MC 侧结论（2026-11-10，见本文件末尾注释与修净报告）：生产 MC 不在沙箱可达
+// 范围，且以错密码探针生产账号有误锁站长账号的风险，故未做在线探针；公开
+// 资料检索亦未找到 MC 原生登录失败锁定的确切证据——本限流是实际生效的屏障，
+// 不依赖 MC 侧是否存在锁定。
+*/
+const RESET_PW_MAX_FAILS = 5;
+const RESET_PW_WINDOW_MS = 15 * 60 * 1000;
+const RESET_PW_LOCK_MS = 15 * 60 * 1000;
+function createResetPwLimiter(nowFn) {
+  const now = typeof nowFn === 'function' ? nowFn : Date.now;
+  const table = new Map(); // 账号小写 → { fails, firstFailAt, lockedUntil }
+  const inflight = new Set(); // 正在验密的账号小写（防并发多调 mcConnect）
+  function keyOf(account) { return String(account || '').trim().toLowerCase(); }
+  return {
+    // 锁内返回 { locked:true, retryAfterSec }，否则 { locked:false }。
+    check(account) {
+      const rec = table.get(keyOf(account));
+      if (!rec) return { locked: false };
+      if (rec.lockedUntil && now() < rec.lockedUntil) {
+        return { locked: true, retryAfterSec: Math.ceil((rec.lockedUntil - now()) / 1000) };
+      }
+      if (rec.lockedUntil && now() >= rec.lockedUntil) table.delete(keyOf(account));
+      return { locked: false };
+    },
+    // 记一次验密失败；满 5 次即上锁，返回 { locked, fails }。
+    noteFail(account) {
+      const k = keyOf(account);
+      let rec = table.get(k);
+      if (!rec || now() - rec.firstFailAt > RESET_PW_WINDOW_MS) rec = { fails: 0, firstFailAt: now(), lockedUntil: 0 };
+      rec.fails += 1;
+      if (rec.fails >= RESET_PW_MAX_FAILS) rec.lockedUntil = now() + RESET_PW_LOCK_MS;
+      table.set(k, rec);
+      return { locked: !!rec.lockedUntil && now() < rec.lockedUntil, fails: rec.fails };
+    },
+    // 验密成功即清零（不让一次手滑累积成锁）。
+    clear(account) { table.delete(keyOf(account)); },
+    // H28（DS round 1）：同一账号同时只验一个密码。check 与 tryBegin
+    // 之间没有 await（JS 单线程），两者连读即原子占位；并发请求看到
+    // 占位即 429，不会多调一次 mcConnect，5 次/15 分钟上限对并发也成立。
+    // 调用方须在验密结束（成功或失败）后 finally 调 end() 释放占位。
+    tryBegin(account) {
+      const k = keyOf(account);
+      if (inflight.has(k)) return false;
+      inflight.add(k);
+      return true;
+    },
+    end(account) { inflight.delete(keyOf(account)); },
+  };
+}
+
 function createLockBridge(deps) {
   const cfg = deps.cfg;
   const log = typeof deps.log === 'function' ? deps.log : function () {};
@@ -111,6 +171,9 @@ function createLockBridge(deps) {
     log('lock', '桥配置/调度密钥加载失败，/lock 暂不可用：' + e.message);
     bridgeCfg = null;
   }
+
+  // H28：/lock/reset 验登录密码限流（进程内表，见 createResetPwLimiter）。
+  const resetPwLimiter = createResetPwLimiter();
 
   /* ---------- 投递服务账号的 control 通道（持久连接・就绪门・退避重连） ----------
      根因 A：桥配置里的服务账号口令与账号现行口令不一致 → meshauth 被 MC 拒
@@ -786,13 +849,24 @@ function createLockBridge(deps) {
         if (typeof body.loginPassword !== 'string' || !body.loginPassword) { fail(res, 400, ERR.badReq); return true; }
         if (typeof body.newPassword !== 'string' || body.newPassword.length < 4 || body.newPassword.length > 64) { fail(res, 400, ERR.badPw); return true; }
         if (status.state !== 'Locked') { fail(res, 409, ERR.alreadyOff); return true; }
+        // H28：锁内直接 429，不调 mcConnect（不消耗 MC 侧认证、不给重试留口）。
+        const lk = resetPwLimiter.check(me);
+        if (lk.locked) { fail(res, 429, ERR.tooManyAttempts); return true; }
+        // H28（DS round 1）：同一账号同时只验一个密码——并发请求看到
+        // 占位即 429，不多调一次 mcConnect（否则并发可绕过 5 次上限）。
+        if (!resetPwLimiter.tryBegin(me)) { fail(res, 429, ERR.tooManyAttempts); return true; }
         let verified = false;
         try {
           const sess = await deps.mcConnect(cfg, me, body.loginPassword);
           verified = true;
           try { if (sess && sess.ws) sess.ws.close(); } catch (e) {}
-        } catch (e) { verified = false; }
-        if (!verified) { fail(res, 403, ERR.badLoginPw); return true; }
+        } catch (e) { verified = false; } finally { resetPwLimiter.end(me); }
+        if (!verified) {
+          const noted = resetPwLimiter.noteFail(me);
+          log('lock', 'remote-reset 验密失败：' + node.name + ' by ' + me + '（累计 ' + noted.fails + ' 次' + (noted.locked ? '，已锁定 15 分钟' : '') + '）');
+          fail(res, 403, ERR.badLoginPw); return true;
+        }
+        resetPwLimiter.clear(me); // 验密成功即清零
         if (!status.devicePublicKey) { fail(res, 409, ERR.fault); return true; }
         const env = envelope.buildEnvelope(dispatcherKey, { op: 'reset', nodeId: node._id, by: me, password: body.newPassword, devicePublicKeyPem: status.devicePublicKey });
         await deliverEnvelope(node._id, env);
@@ -827,4 +901,4 @@ function createLockBridge(deps) {
   return { handle, purgeUser };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS } };

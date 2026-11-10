@@ -18,7 +18,16 @@ const crypto = require('crypto');
 const PORT = 8979;
 const ORIGIN = 'http://127.0.0.1:' + PORT;
 process.env.QFREMOTE_RELEASE_URL = ORIGIN + '/release.json';
+// H26：假清单现签——每次服务时用临时 Ed25519 密钥签名（验签公钥经测试覆盖传入）。
+const _signKp = crypto.generateKeyPairSync('ed25519');
+process.env.QFREMOTE_RELEASE_SIGN_PUBLIC_KEY = _signKp.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
 const updater = require('../update');
+function signManifest(m) {
+  const d = Object.assign({}, m);
+  const sig = crypto.sign(null, Buffer.from(updater.canonicalReleaseJson(d), 'utf8'), _signKp.privateKey);
+  d.signature = { alg: 'ed25519', key_id: 'test', sig: sig.toString('base64url') };
+  return d;
+}
 
 const OUT = process.env.QFTEST_OUT || '/tmp/qfr200/update-chain-result.json';
 const result = { cases: {}, pass: false };
@@ -36,7 +45,7 @@ let manifest = {
 const server = http.createServer((req, res) => {
   if (req.url === '/release.json') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(manifest));
+    res.end(JSON.stringify(signManifest(manifest)));
   } else if (req.url === '/QFRemote-Setup-v2.0.0.exe') {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length });
     res.end(payload);
