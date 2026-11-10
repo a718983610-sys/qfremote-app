@@ -274,3 +274,68 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--brand);outline-offs
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
 }
+
+/* =========================================================
+   QFRemote 移动端抽屉打开态：顶栏/抽屉层叠重做（2026-11-11）
+   重做线（分支 redesign/drawer-topbar-20261111，单独成线，不进 3.0.0）
+   设计：DeepSeek v4-pro 主导（原文 /tmp/ds-drawer-redesign-reply.md）
+   只影响 <=760px，桌面端不受影响
+   思路：打开态把 .top 提至抽屉之上（z 70001），左侧背景透明透出抽屉深蓝，
+   右侧渐变补蓝到视口右缘；复用现有 #burgerBtn（原位、可点）；品牌右移避让；
+   搜索隐藏但保占位（铃铛/头像不位移）；顶栏负 margin 铺满视口消右角缝。
+   ========================================================= */
+
+:root{
+  /* 和 .drawer 宽度同源，顶栏右侧背景严格从抽屉右缘开始 */
+  --drawer-w:min(300px,84vw);
+}
+
+.drawer{
+  width:var(--drawer-w);
+}
+
+@media (max-width:760px){
+
+  /* 1. 打开态顶栏提升到抽屉之上；
+        左侧透明透出抽屉深蓝，右侧 navy 补齐到视口右缘 */
+  body.drawer-open .top{
+    z-index:calc(var(--z-drawer) + 1); /* 70001，高于抽屉 70000 */
+    margin-left:-16px;
+    margin-right:-16px;
+    padding-left:16px;
+    padding-right:16px;
+
+    background:linear-gradient(
+      to right,
+      transparent 0,
+      transparent var(--drawer-w),
+      var(--navy) var(--drawer-w),
+      var(--navy) 100%
+    );
+
+    /* 顶栏透明区不挡抽屉/遮罩点击；
+       只让真正的操作按钮接住点击 */
+    pointer-events:none;
+  }
+
+  /* 2. 只允许实际控件接受点击（另加 .acctmenu：账户下拉菜单已开时再开抽屉仍可点） */
+  body.drawer-open .top #burgerBtn,
+  body.drawer-open .top #bellBtn,
+  body.drawer-open .top #acctChip,
+  body.drawer-open .top .acctmenu,
+  body.drawer-open .top .acctmenu a{
+    pointer-events:auto;
+  }
+
+  /* 3. 打开态隐藏搜索框，但保留占位，避免右侧元素位移 */
+  body.drawer-open .search,
+  body.drawer-open .search *{
+    visibility:hidden;
+    pointer-events:none;
+  }
+
+  /* 4. 抽屉 brand 右移，避开左侧三条杠，不遮挡 Logo */
+  body.drawer-open .drawer .brand{
+    margin-left:56px;
+  }
+}
