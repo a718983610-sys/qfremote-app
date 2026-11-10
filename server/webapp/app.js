@@ -822,6 +822,11 @@ api = async function (path, opts) {
 };
 
 async function checkSessionInner(silent, opts) {
+  // P1（2026-11-11）：本页内已显式登出（doLogout 置标记）后，心跳/定时器
+  // 不得凭残留会话把 S.auth 翻回 'in'（cookie 若未清干净，/me 仍回 ok，
+  // 致登出后状态回潮；动态桩测已证实）。冷启时本标记为 falsy，不影响
+  // 启动自动恢复；新登录成功时 doLogin 清标记。
+  if (S._manualLogout) return false;
   const o = opts || {};
   const probe = o.probe;
   if (probe) { try { probe.gated = false; } catch (e) {} }
@@ -955,6 +960,11 @@ async function doLogin(username, password, remember) {
   if (me.status === 200 && me.json && me.json.ok) {
     S.sessGen++; // DS-R49：主动登录成功即新身份代数，旧在飞响应作废
     S.auth = 'in'; S.user = me.json.username; S.license = me.json;
+    // P1（2026-11-11）：凭据提交的新登录成功——清本页内登出标记（恢复
+    // 心跳校验），并写 freshLogin 标记供 Electron 主进程识别一次真实
+    // 新登录（仅 doLogin 写；checkSession 冷启恢复与缓存恢复不写）。
+    S._manualLogout = false;
+    try { sessionStorage.setItem('qfShellFreshLogin', '1'); } catch (e) { /* ignore */ }
     const curGen = S.sessGen; // 批A-A1：捕获本次登录代数，stats 回填前比对（处方同 checkSession）
     const st = await api('/home/api/stats');
     if (curGen === S.sessGen && st.status === 200 && st.json && st.json.ok) { S.stats = st.json; S.displayName = st.json.displayName || S.user; S.isAdmin = !!st.json.isAdmin; }
@@ -998,7 +1008,13 @@ async function doLogout() {
     try { teardownSession(); } catch (e) {} // X-01：登出请求发出前先拆会话帧，防旧帧又发心跳类请求
     try {
       BanLock.exit();
-      const lo = await api('/logout');
+      // P1（2026-11-11）：/logout 请求加 8 秒竞速——旧代码 await api('/logout')
+      // 最长约 60 秒（30 秒超时×2 次重试）才放行 showAuth；若请求在 Electron
+      // 拦截层挂起，登录表单迟迟不出。8 秒内无回包即放行本地登出，不再等它。
+      const lo = await Promise.race([
+        api('/logout'),
+        new Promise((res) => setTimeout(() => res(null), 8000))
+      ]);
       // 批A-W1-6：结果要查——失败也照常本地登出（既定口径），仅 console.warn 留痕、用户无感（DS 门一裁定 (a)）。
       // 判失败只认网络失败/HTTP 错误：/logout 成功回的是页面而非 JSON，不能以 json.ok 判成败（偏差 DEV-1，送门二验收）。
       if (!lo || lo.networkError || lo.status === 0 || lo.status >= 400) console.warn('退出登录请求未成功，已按本地退出处理。', lo && lo.status);
@@ -1010,7 +1026,18 @@ async function doLogout() {
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
     try { badgeEpoch++; badgeFlight = null; badgeLastFetch = 0; setFriendBadge(-1); } catch (e) { /* 角标重置异常不得阻断登出 */ }
     S.auth = 'out'; S.user = null; S.displayName = ''; S.isAdmin = false; S.license = null; S.points = null; S.stats = null; clearMyProfile(); // 批A-W1-11：身份字段按 S 默认复位，防换账号残留
+    // P1（2026-11-11）：本页内显式登出标记——后续心跳 checkSession 不得凭
+    // 残留会话把 S.auth 翻回 'in'（见 checkSessionInner 守门）。
+    S._manualLogout = true;
     showAuth('login', { notice: '您已退出登录。' });
+    // P1 兜底：2 秒后若登录表单仍未可见（被后续渲染/异常冲掉），强制再切一次。
+    setTimeout(() => {
+      try {
+        const f = document.getElementById('loginForm');
+        const a = document.getElementById('authRoot');
+        if (!f || !a || a.hidden) showAuth('login', { notice: '您已退出登录。' });
+      } catch (e) { /* ignore */ }
+    }, 2000);
   });
 }
 

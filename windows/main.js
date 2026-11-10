@@ -284,7 +284,12 @@ function scheduleCookieFlush() {
   cookieFlushTimer = setTimeout(flushConsoleCookies, 600);
 }
 // 手动退出（唯一人工终止）：三路检测任一命中都走这里——立刻清保险箱与
-// 记住标记，会话 cookie 在回到登录页时清干净（见 processAuthPage）。
+// 记住标记，并立即清控制台会话 cookie。
+// P1（2026-11-11）：旧注释称“会话 cookie 在回到登录页时清干净（见
+// processAuthPage）”，但 SPA 登出只换 DOM、不导航、不改 hash，
+// processAuthPage 永不跑，cookie 永不清——致登出后重启仍自动登录
+// （03:27/03:33 阿里真机实测）。此处登出即清（与 processAuthPage 登录
+// 分支同函数、同会话），不再押在一次可能永不发生的页面事件上。
 function handleManualLogout() {
   viewMgr.noteLogout();
   // H07：登出通知 LEA，撤销当前绑定（best-effort，不阻塞登出）。
@@ -300,6 +305,15 @@ function handleManualLogout() {
   // 与「正式退出登录」共用同一条路径，不另造平行退出。
   terminateSubSessions().catch(() => {});
   reloadSocialViewsToStart();
+  // P1（2026-11-11）：登出即清控制台会话 cookie（fire-and-forget；
+  // /logout 请求照常放行，服务端会话失效与客户端 cookie 清除互不阻塞；
+  // 旧“回到登录页时清”路径在 SPA 登出下永不跑，见函数头注释）。
+  try {
+    autologinMod.clearConsoleSession(authSession(), CONSOLE_URL).then(
+      () => { try { flushConsoleCookies(); } catch (e) { /* ignore */ } },
+      () => { try { flushConsoleCookies(); } catch (e) { /* ignore */ } }
+    );
+  } catch (e) { /* ignore */ }
   // 许可门复位（2.3.1）：手动退出后内存核验凭据清掉、拦截消解、检查
   // 标记复位，下次登录成功重新按 §3 时机跑门检查；首页视图回空白，
   // 不许残留上一个账号的页面（设备码不清，口径见 device-code.js）。
@@ -476,9 +490,19 @@ async function processAuthPage() {
         if (plan.clearManualLogout) settings.auth.manualLogout = false;
         saveSettings();
         try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
-      } else if (settings.auth.manualLogout) {
-        settings.auth.manualLogout = false;
-        saveSettings();
+      } else if (det.freshLogin) {
+        // P1（2026-11-11）：manualLogout 只在一次真实新登录成功时清。
+        // 旧代码无条件清（页面一认成 console 且无 pending 即清）——冷启时
+        // 凭残留 cookie 恢复成 console 即把标记洗掉，致重启后自动登录
+        // （03:36 实测 auth.manualLogout:false）。freshLogin 由 webapp
+        // doLogin 成功时写 sessionStorage（仅凭据提交的新登录，不含
+        // checkSession 冷启恢复），见 autologin.js pageDetect；消费后
+        // 随 CLEAR_PAGE_STATE_JS 一并清掉，不留残标记。
+        if (settings.auth.manualLogout) {
+          settings.auth.manualLogout = false;
+          saveSettings();
+        }
+        try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
       }
 
       authPolicy.noteSuccess();

@@ -36,10 +36,12 @@ const http = require('http');
 const https = require('https');
 const clientVersion = require('./client-version');
 
-// 页面 sessionStorage 键（注入与检测共用，改名要两处一起改——都在本文件）
+// 页面 sessionStorage 键（注入与检测共用，改名要两处一起改——都在本文件；
+// qfShellFreshLogin 另由 webapp doLogin 成功时写，见 server/webapp/app.js）
 const PENDING_KEY = 'qfShellPendingLogin';
 const LOGOUT_KEY = 'qfShellManualLogout';
 const CLEARED_KEY = 'qfShellFieldsCleared';
+const FRESH_KEY = 'qfShellFreshLogin';
 // ---------- 控制台固定源的证书校验 ----------
 // 2.4.2 起控制台固定源迁至正式域名 app.qfremote.top（公共 CA 签发）：
 // 静默登录与探活一律走系统默认证书校验，不再内置任何信任锚。历史上为
@@ -515,9 +517,12 @@ function pageDetect() {
     var r = el.getBoundingClientRect();
     return r.width > 0 || r.height > 0;
   }
-  var out = { state: 'other', failedBanner: false, failureText: '', manualLogout: false, fieldsCleared: false, pending: null, username: '' };
+  var out = { state: 'other', failedBanner: false, failureText: '', manualLogout: false, fieldsCleared: false, pending: null, username: '', freshLogin: false };
   try { out.manualLogout = sessionStorage.getItem('qfShellManualLogout') === '1'; } catch (e) { /* ignore */ }
   try { out.fieldsCleared = sessionStorage.getItem('qfShellFieldsCleared') === '1'; } catch (e) { /* ignore */ }
+  // P1（2026-11-11）：freshLogin 由 webapp doLogin 成功时写（仅凭据提交的
+  // 新登录；checkSession 冷启恢复不写），供主进程识别一次真实新登录。
+  try { out.freshLogin = sessionStorage.getItem('qfShellFreshLogin') === '1'; } catch (e) { /* ignore */ }
   try {
     var raw = sessionStorage.getItem('qfShellPendingLogin');
     if (raw) out.pending = JSON.parse(raw);
@@ -594,7 +599,8 @@ const DETECT_JS = '(' + pageDetect.toString() + ')()';
 const GUARD_JS = '(' + pageGuard.toString() + ')()';
 const CLEAR_PAGE_STATE_JS = '(function(){try{sessionStorage.removeItem(' +
   JSON.stringify(PENDING_KEY) + ');sessionStorage.removeItem(' + JSON.stringify(LOGOUT_KEY) +
-  ');sessionStorage.removeItem(' + JSON.stringify(CLEARED_KEY) + ');}catch(e){}return true;})()';
+  ');sessionStorage.removeItem(' + JSON.stringify(CLEARED_KEY) +
+  ');sessionStorage.removeItem(' + JSON.stringify(FRESH_KEY) + ');}catch(e){}return true;})()';
 
 // ---------- 聊天静默解锁（2.3.0 H 线） ----------
 // 聊天页经控制台单点登录拿到令牌后，聊天记录还锁在「用登录密码包装的
