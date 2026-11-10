@@ -1096,7 +1096,7 @@ function menu34Html(activeRoute, cls) {
 function renderNavs() {
   const a = S.route.name === 'device' ? 'devices' : (S.route.name === 'remote' ? 'devices' : S.route.name);
   $('#sidebar').innerHTML =
-    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
+    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#0B2B5B" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
     `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
     `<div class="gtitle">主菜单</div>` +
     MENU34.map(i => navBtn(i, a)).join('') +
@@ -1107,7 +1107,7 @@ function renderNavs() {
     `<button class="nav red" data-nav="logout">${ic('logout')}<span>登出</span></button>` +
     `<div class="sidefoot">安全 · 便捷 · 远程连接</div>`;
   $('#drawer').innerHTML =
-    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
+    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#0B2B5B" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
     `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
     `<div class="gtitle">主菜单</div>` + menu34Html(a, 'nav');
   $('#acctMenu').innerHTML = MENU34.map(i =>
