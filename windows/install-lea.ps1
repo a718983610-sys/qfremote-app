@@ -67,9 +67,9 @@ $retryDelays = @(5, 15, 45)             # 重试退避 5s/15s/45s（DESIGN §9.2
 # windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
 # BEGIN LEA-EXPECTED-HASHES (gen_whitelist.py --update-installer)
 $expectedHashes = @{
-  'QFRLEA.exe' = '22926c275f16d5964fa0c714614aaa6498af03843879c3ee371c7137a070fb5c'
+  'QFRLEA.exe' = '624784247779a5b1ae7051deb86d184d39eed4cc4efdcaa31a1dc84c6944430a'
   'QFUserHelper.exe' = 'a223647347a00befa4d9725e492adb13c1b1f8254555e97542f6e8f0c05d5f1a'
-  'qf-lea-client.exe' = '98139a61dc2ba02a915fc6471016f6db803e7f696055f1c5f66a39fafee77e32'
+  'qf-lea-client.exe' = 'b03ffa5b04e709fc3b95bc684d21defd4eba803d662a3a71805fb08f8da4be81'
 }
 # END LEA-EXPECTED-HASHES
 
