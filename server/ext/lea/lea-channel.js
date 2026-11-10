@@ -76,6 +76,17 @@ function createLeaChannel(opts) {
     const w = svc.waiters.splice(0);
     for (const cb of w) { try { cb(); } catch (e) {} }
   }
+  // T28：TLS 证书校验只在回环放宽。部署默认 mcUrl 为 wss://127.0.0.1:8443
+  // （MeshCentral 与 ext 同机，自签证书），此时 rejectUnauthorized:false
+  // 与既有行为一致；mcUrl 一旦被指到非回环地址，即强制校验服务端证书，
+  // 防中间人。URL 解析失败时 fail-closed（校验开启）。
+  function mcUrlIsLoopback(mcUrl) {
+    try {
+      const h = new URL(String(mcUrl)).hostname.toLowerCase();
+      return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+    } catch (e) { return false; }
+  }
+
   function svcConnect() {
     const c = loadCfg();
     if (!c) return;
@@ -90,10 +101,13 @@ function createLeaChannel(opts) {
     }
     svc.connecting = true;
     const xauth = Buffer.from(c.svcUser).toString('base64') + ',' + Buffer.from(c.svcPass).toString('base64');
+    // T28：仅回环 mcUrl 放宽证书校验；非回环强制校验（见 mcUrlIsLoopback）。
+    const loopback = mcUrlIsLoopback(c.mcUrl);
+    if (!loopback) log({ ev: 'lea-channel-tls-verify', msg: 'non-loopback mcUrl: TLS verification enabled' });
     let ws;
     try {
       ws = new WebSocketCtor(String(c.mcUrl).replace(/\/$/, '') + '/control.ashx',
-        { rejectUnauthorized: false, headers: { 'x-meshauth': xauth, Origin: 'https://127.0.0.1:8443' } });
+        { rejectUnauthorized: !loopback, headers: { 'x-meshauth': xauth, Origin: 'https://127.0.0.1:8443' } });
     } catch (e) {
       svc.connecting = false;
       scheduleReconnect('svc-construct-failed');
@@ -196,14 +210,18 @@ function createLeaChannel(opts) {
       if (!n) return false;
       // MeshCentral nodes 回包 conn 位：&1 = agent 在线（与 presence 判定同款）。
       if (typeof n.conn === 'number') return (n.conn & 1) === 1;
-      return true; // 无 conn 字段时只认「在清单里」，不谎称离线
+      // T27：无 conn 字段 = 在线状态未知，不得当在线。返回 null 让调用方
+      // 走 fail-closed 503（handleExecute／handleBatches／deviceStatus
+      // 均已按 null → 未知／503 处理）；此前返回 true 会绕过既定 503 门，
+      // 离线设备下发多一次 5 秒往返且谎称在线。
+      return null;
     } catch (e) { return null; } // 通道不可达 → 未知（调用方 fail-closed）
   }
   function status() {
     return { configured: !!loadCfg(), ready: !!(svc.ready && svc.ws), failStreak: svc.failStreak };
   }
 
-  return { runCommand, listNodes, nodeOnline, status, svcCall, _test: { svc, loadCfg } };
+  return { runCommand, listNodes, nodeOnline, status, svcCall, _test: { svc, loadCfg, mcUrlIsLoopback } };
 }
 
 module.exports = { createLeaChannel };

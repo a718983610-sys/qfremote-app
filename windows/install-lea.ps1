@@ -11,7 +11,9 @@
 #   ③ 建 %ProgramData%\QFR\LEA\（含 inbox\ / logs\ / state\）并配 ACL
 #      （仅 SYSTEM + Administrators）
 #   ④ 创建并启动 QFRLEA 服务（LocalSystem，失败自动重启）
-#   ⑤ 注册用户登录启动 USH（计划任务 "QFRLEA User Helper"，触发器"用户登录"）
+#   ⑤ 注册用户登录启动 USH（计划任务，触发器"用户登录"；T22：枚举本机全部
+#      交互用户逐个注册，安装时用户沿用 "QFRLEA User Helper"，其余用户另建
+#      "QFRLEA User Helper - <DOMAIN_user>" 任务）
 #   ⑥ 写版本绑定（注册表 HKLM\SOFTWARE\QFRemote\LEA + 安装目录 version.json）
 #   ⑦ 运行自检并写报告 %ProgramData%\QFR\LEA\install-report.json
 # 失败处理（DESIGN §9.2/§10.1）：每步重试 3 次，退避 5s/15s/45s；
@@ -128,7 +130,9 @@ function Backup-Rollback([string]$oldVersion) {
   $rbDir = Join-Path $installDir ("rollback\" + $oldVersion)
   if (Test-Path -LiteralPath $rbDir) { return } # 已有该版本备份，不覆盖
   New-Item -ItemType Directory -Force -Path $rbDir | Out-Null
-  Get-ChildItem -LiteralPath $installDir -File | Where-Object { $_.Name -notin @('version.json') } | ForEach-Object {
+  # T19：备份含 version.json（此前排除它，版本绑定回滚无从恢复；回滚时凭
+  # 备份里的 version.json 恢复 lea/main/protocol 三段绑定）。
+  Get-ChildItem -LiteralPath $installDir -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $rbDir $_.Name) -Force
   }
   Write-LeaLog ("rollback backup saved: " + $rbDir)
@@ -141,6 +145,51 @@ function Write-VersionBinding([string]$leaVersion, [string]$mainVersion, [string
   New-ItemProperty -LiteralPath $regPath -Name 'Protocol_Version' -Value $protocolVersion -PropertyType String -Force | Out-Null
   $ver = @{ lea_version = $leaVersion; main_version = $mainVersion; protocol_version = $protocolVersion; installed_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json
   Set-Content -LiteralPath (Join-Path $installDir 'version.json') -Value $ver -Encoding UTF8
+}
+
+function Test-LeaReportUrl([string]$url) {
+  # T20：上报 URL 白名单——只许本站固定 HTTPS 域名，防提权脚本被环境变量
+  # 指到任意地址 POST。须同时满足：绝对地址、https、主机恰为
+  # app.qfremote.top、默认 443 端口、无 userinfo；任一不符即拒收（只记日志，
+  # 不阻塞安装，与上报失败同口径）。
+  try {
+    $u = [System.Uri]$url
+    if (-not $u.IsAbsoluteUri) { return $false }
+    if ($u.Scheme -ne 'https') { return $false }
+    if ($u.Host -ne 'app.qfremote.top') { return $false }
+    if ($u.Port -ne 443) { return $false }
+    if ($u.UserInfo) { return $false }
+    return $true
+  } catch { return $false }
+}
+
+function Get-LeaInteractiveUsers {
+  # T22：枚举本机交互用户（有本地配置文件的非系统用户），供 USH 计划任务
+  # 逐个注册；SYSTEM／服务账号／Default 等特殊配置文件排除。返回形如
+  # 'DOMAIN\user' 的账号名；SID 转账号名失败的跳过并记日志。
+  # 未登录过（尚无配置文件）的新用户不在此列，由主程序登录时补注册兜底。
+  $users = @()
+  try {
+    $profiles = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special }
+    foreach ($p in $profiles) {
+      try {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($p.SID)
+        $name = ([string]($sid.Translate([System.Security.Principal.NTAccount]).Value))
+        if ($name -and $users -notcontains $name) { $users += $name }
+      } catch { Write-LeaLog ('enumerate users: skip SID ' + $p.SID + ' (' + $_.Exception.Message + ')') }
+    }
+  } catch { Write-LeaLog ('enumerate users failed: ' + $_.Exception.Message) }
+  return $users
+}
+
+function Register-UshTaskForUser([string]$userName, [string]$taskName, [string]$ushExe) {
+  # T22：单个用户的 USH 登录任务（触发器"用户登录"）。失败直接抛错，由调用
+  # 方按用户记账（主用户走 Invoke-WithRetry，其余用户单次尝试＋记日志）。
+  $action = New-ScheduledTaskAction -Execute $ushExe
+  $trigger = New-ScheduledTaskTrigger -AtLogOn
+  $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 }
 
 function Test-LeaSelfCheck {
@@ -178,11 +227,15 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
     Write-LeaLog ("install report written: " + $status + " " + $detail)
     $url = $env:QFR_LEA_REPORT_URL
     if ($url) {
-      try {
-        Invoke-RestMethod -Uri $url -Method Post -Body $report -ContentType 'application/json' -TimeoutSec 10 | Out-Null
-        Write-LeaLog 'install report uploaded'
-      } catch {
-        Write-LeaLog ('install report upload failed (non-blocking): ' + $_.Exception.Message)
+      if (-not (Test-LeaReportUrl $url)) {
+        Write-LeaLog 'install report upload skipped: QFR_LEA_REPORT_URL not allow-listed (only https://app.qfremote.top)'
+      } else {
+        try {
+          Invoke-RestMethod -Uri $url -Method Post -Body $report -ContentType 'application/json' -TimeoutSec 10 | Out-Null
+          Write-LeaLog 'install report uploaded'
+        } catch {
+          Write-LeaLog ('install report upload failed (non-blocking): ' + $_.Exception.Message)
+        }
       }
     }
   } catch {
@@ -202,9 +255,27 @@ if ($Rollback) {
   try {
     try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch { }
     Start-Sleep -Seconds 2
-    Get-ChildItem -LiteralPath $rbDir -File | ForEach-Object {
+    $rbFiles = Get-ChildItem -LiteralPath $rbDir -File
+    $rbNames = @($rbFiles | ForEach-Object { $_.Name })
+    $rbFiles | ForEach-Object {
       Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $installDir $_.Name) -Force
     }
+    # T19：清理回滚后新增的文件（备份里没有的顶层文件），不留新版残留；
+    # rollback\ 子目录本身不在顶层文件之列，不受影响。
+    Get-ChildItem -LiteralPath $installDir -File | Where-Object { $_.Name -notin $rbNames } | ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop; Write-LeaLog ("rollback removed added file: " + $_.Name) } catch { Write-LeaLog ("rollback remove added file failed: " + $_.Name + " " + $_.Exception.Message) }
+    }
+    # T19：恢复版本绑定——优先用备份里带回的 version.json（lea/main/protocol
+    # 三段齐全）；旧备份（备份时排除了 version.json）没有该文件时，清理步已
+    # 删掉新版 version.json，此处用回滚目标版本号写绑定，主程序版本沿用本次
+    # 传入值、协议版本沿用本次传入值。
+    $restored = $null
+    try { $restored = Get-Content -LiteralPath (Join-Path $installDir 'version.json') -ErrorAction Stop | ConvertFrom-Json } catch { }
+    $rbLea = if ($restored -and $restored.lea_version) { [string]$restored.lea_version } else { $Rollback }
+    $rbMain = if ($restored -and $restored.main_version) { [string]$restored.main_version } else { $MainVersion }
+    $rbProto = if ($restored -and $restored.protocol_version) { [string]$restored.protocol_version } else { $ProtocolVersion }
+    Write-VersionBinding $rbLea $rbMain $rbProto
+    Write-LeaLog ("rollback version binding restored: lea=" + $rbLea + " main=" + $rbMain + " protocol=" + $rbProto)
     Start-Service -Name $serviceName -ErrorAction Stop
     Start-Sleep -Seconds 2
     $checks = Test-LeaSelfCheck
@@ -295,17 +366,26 @@ try {
   }
   if (-not $ok) { $failedStep = 'create-service'; throw 'create-service failed' }
 
-  # ⑤ 注册用户登录启动 USH（计划任务 "QFRLEA User Helper"，触发器"用户登录"）
+  # ⑤ 注册用户登录启动 USH（计划任务，触发器"用户登录"）
+  # T22：不再只注册安装时用户——枚举本机全部交互用户逐个注册。安装时用户
+  # 沿用原任务名 'QFRLEA User Helper'（兼容旧版），其余用户用
+  # 'QFRLEA User Helper - <DOMAIN_user>'（任务名不含 '\'）。主用户注册失败
+  # 走重试；其余用户单次尝试、失败只记日志不影响其他用户；尚无配置文件的新
+  # 用户由主程序登录时补注册兜底。
   $ushTarget = Join-Path $installDir $ushExeName
   if (Test-Path -LiteralPath $ushTarget) {
-    $ok = Invoke-WithRetry 'register-ush-task' {
-      $action = New-ScheduledTaskAction -Execute $ushTarget
-      $trigger = New-ScheduledTaskTrigger -AtLogOn
-      $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-      $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-      Register-ScheduledTask -TaskName 'QFRLEA User Helper' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    $installUser = $env:USERNAME
+    $ok = Invoke-WithRetry 'register-ush-task' { Register-UshTaskForUser $installUser 'QFRLEA User Helper' $ushTarget }
+    if (-not $ok) { Write-LeaLog 'USH task registration failed for install user (non-blocking, main app will retry on login)' }
+    foreach ($u in (Get-LeaInteractiveUsers)) {
+      $short = ($u -split '\\')[-1]
+      if ($short -eq $installUser) { continue } # 安装时用户已有主任务
+      $taskName = 'QFRLEA User Helper - ' + ($u -replace '\\', '_')
+      try {
+        Register-UshTaskForUser $u $taskName $ushTarget
+        Write-LeaLog ("USH task registered for user: " + $u)
+      } catch { Write-LeaLog ("USH task registration failed for user (non-blocking): " + $u + " " + $_.Exception.Message) }
     }
-    if (-not $ok) { Write-LeaLog 'USH task registration failed (non-blocking, main app will retry on login)' }
   } else {
     Write-LeaLog 'USH exe not in payload yet, skipping task registration (LEA service unaffected)'
   }

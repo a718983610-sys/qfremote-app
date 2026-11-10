@@ -5,10 +5,12 @@
  *   旧 bug 下管道收到的是字面量 "dispatch"／"apply"。
  *
  * 用法（均由 server/ext/lea/test/test-lea-realclient.js 驱动）：
- *   pipe_server.exe <capture 文件 Win 路径> <响应 JSON（一行）> <ready 文件 Win 路径>
+ *   pipe_server.exe <capture 文件 Win 路径> <响应 JSON（一行）> <ready 文件 Win 路径> [chunk 字节数]
  * 建 \\.\pipe\QFR\LEA\v1，建好后先写 ready 文件（调用方以此判定可连接），
  * 接一个客户端，读一行原文写入 capture 文件，回一行响应 JSON，退出 0。
  * 只接一个连接；客户端不来时调用方负责杀掉本进程。
+ * 可选第 4 参 chunk：响应按该字节数分多 WriteFile 写出（chunk 间停
+ * 100ms），逼出管道短读，供 T24（客户端短读截断）回归用；缺省一次写完。
  *
  * 构建（Linux 沙箱交叉编译）：
  *   x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o pipe_server.exe pipe_server.c
@@ -16,6 +18,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int main(int argc, char **argv) {
@@ -58,8 +61,24 @@ int main(int argc, char **argv) {
     fclose(f);
     char resp[4096];
     snprintf(resp, sizeof(resp), "%s\n", argv[2]);
-    DWORD written = 0;
-    WriteFile(pipe, resp, (DWORD)strlen(resp), &written, NULL);
+    size_t resp_len = strlen(resp);
+    size_t chunk = (argc >= 5) ? (size_t)atoi(argv[4]) : 0;
+    if (chunk == 0 || chunk >= resp_len) {
+        DWORD written = 0;
+        WriteFile(pipe, resp, (DWORD)resp_len, &written, NULL);
+    } else {
+        /* T24 回归：分多 chunk 写响应（chunk 间停 100ms），逼出短读；
+         * 旧客户端在首个短读后即判完成，会只收到响应头 16 字节。 */
+        size_t off = 0;
+        while (off < resp_len) {
+            size_t n = resp_len - off < chunk ? resp_len - off : chunk;
+            DWORD w = 0;
+            WriteFile(pipe, resp + off, (DWORD)n, &w, NULL);
+            if (w == 0) break;
+            off += w;
+            if (off < resp_len) Sleep(100);
+        }
+    }
     FlushFileBuffers(pipe);
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);

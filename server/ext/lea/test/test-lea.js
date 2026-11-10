@@ -643,6 +643,52 @@ const mockChannel = {
   const ch = createLeaChannel({ log: () => {}, configPath: path.join(tmpDir, 'no-such-config.json') });
   t('通道无服务账号配置时 status.configured=false', ch.status().configured === false);
 
+  // ---------- T27/T28：nodeOnline 未知态与 TLS 校验 ----------
+  // FakeWS：捕获构造参数（T28），按 FakeWS.nodesReply 回 nodes（T27）。
+  class FakeWS {
+    constructor(url, opts) {
+      FakeWS.lastUrl = url; FakeWS.lastOpts = opts;
+      this.handlers = {};
+      setImmediate(() => this.emit('message', JSON.stringify({ action: 'userinfo' })));
+    }
+    on(ev, cb) { (this.handlers[ev] = this.handlers[ev] || []).push(cb); }
+    emit(ev, d) { for (const cb of (this.handlers[ev] || [])) cb(d); }
+    send(s) {
+      const m = JSON.parse(s);
+      setImmediate(() => this.emit('message', JSON.stringify(
+        { action: 'nodes', responseid: m.responseid, nodes: FakeWS.nodesReply })));
+    }
+    close() {}
+  }
+  FakeWS.nodesReply = [];
+  const _envUser = process.env.QFR_LEA_SVC_USER, _envPass = process.env.QFR_LEA_SVC_PASS, _envUrl = process.env.QFR_LEA_MC_URL;
+  process.env.QFR_LEA_SVC_USER = 'svc'; process.env.QFR_LEA_SVC_PASS = 'pw';
+  async function mkCh(mcUrl) {
+    process.env.QFR_LEA_MC_URL = mcUrl;
+    return createLeaChannel({ log: () => {}, WebSocketCtor: FakeWS });
+  }
+  const ch27 = await mkCh('wss://127.0.0.1:8443');
+  FakeWS.nodesReply = [{ _id: DEV, conn: 1 }];
+  t('T27 nodeOnline conn=1 → true', (await ch27.nodeOnline(DEV)) === true);
+  FakeWS.nodesReply = [{ _id: DEV, conn: 0 }];
+  t('T27 nodeOnline conn=0 → false', (await ch27.nodeOnline(DEV)) === false);
+  FakeWS.nodesReply = [{ _id: DEV }];
+  t('T27 nodeOnline 无 conn → null（未知，不谎称在线）', (await ch27.nodeOnline(DEV)) === null);
+  FakeWS.nodesReply = [{ _id: 'node//other', conn: 1 }];
+  t('T27 nodeOnline 不在清单 → false', (await ch27.nodeOnline(DEV)) === false);
+  t('T28 回环 mcUrl 仍放宽证书校验', !!(FakeWS.lastOpts && FakeWS.lastOpts.rejectUnauthorized === false));
+  t('T28 回环判定 helper：127.0.0.1/localhost 真、公网/非法假',
+    ch27._test.mcUrlIsLoopback('wss://127.0.0.1:8443') === true
+    && ch27._test.mcUrlIsLoopback('wss://localhost:8443') === true
+    && ch27._test.mcUrlIsLoopback('wss://mc.example.com:8443') === false
+    && ch27._test.mcUrlIsLoopback('not-a-url') === false);
+  const ch28 = await mkCh('wss://mc.example.com:8443');
+  try { await ch28.nodeOnline(DEV); } catch (e) {}
+  t('T28 非回环 mcUrl 强制校验证书', !!(FakeWS.lastOpts && FakeWS.lastOpts.rejectUnauthorized === true));
+  if (_envUser === undefined) delete process.env.QFR_LEA_SVC_USER; else process.env.QFR_LEA_SVC_USER = _envUser;
+  if (_envPass === undefined) delete process.env.QFR_LEA_SVC_PASS; else process.env.QFR_LEA_SVC_PASS = _envPass;
+  if (_envUrl === undefined) delete process.env.QFR_LEA_MC_URL; else process.env.QFR_LEA_MC_URL = _envUrl;
+
   // ---------- 11) 路由层全流程（mock 通道 + 桩 deps） ----------
   const g6 = core.generateKey(USER, { device_scope: DEV });
   const sent = [];

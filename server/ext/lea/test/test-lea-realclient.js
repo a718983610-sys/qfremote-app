@@ -113,13 +113,15 @@ async function main() {
   // mock 通道：powershell 写 inbox 按字节等价执行；其余命令真的跑客户端。
   let serverProc = null;
   let captureLinux = null;
-  async function startPipeServer(captureName, responseJson) {
+  async function startPipeServer(captureName, responseJson, chunkBytes) {
     const captureWin = 'C:\\lea-capture\\' + captureName;
     const readyWin = 'C:\\lea-capture\\' + captureName + '.ready';
     captureLinux = path.join(captureWinDir, captureName);
     const readyLinux = path.join(captureWinDir, captureName + '.ready');
     for (const f of [captureLinux, readyLinux]) try { fs.unlinkSync(f); } catch (e) {}
-    serverProc = spawn(wine, [serverExe, captureWin, responseJson, readyWin], { env: wineEnv, stdio: 'ignore' });
+    const args = [serverExe, captureWin, responseJson, readyWin];
+    if (chunkBytes) args.push(String(chunkBytes)); // T24：分 chunk 写响应，逼出短读
+    serverProc = spawn(wine, args, { env: wineEnv, stdio: 'ignore' });
     const t0 = Date.now();
     while (!fs.existsSync(readyLinux)) {
       if (Date.now() - t0 > 90000) throw new Error('pipe server 未就绪（90s）');
@@ -192,7 +194,19 @@ async function main() {
     t('apply：真客户端经管道发出的原文 == 原信封 JSON', got2 === JSON.stringify(bigEnv), got2 ? got2.slice(0, 120) : got2);
     t('apply：客户端 stdout 回传管道响应', d2.ok === true && d2.result.code === 'done');
 
-    // ---------- 3) 负例：dispatch 坏 base64 → exit 2，管道收不到任何东西 ----------
+    // ---------- 3) T24：响应分多 chunk 到达（短读）仍须读全 ----------
+    // 旧客户端在首个短读（16 字节、无换行）后即判完成，只拿到截断 JSON，
+    // dispatchEnvelope 解析失败；修后须读到换行才停，整行回传。
+    calls.length = 0;
+    const env5 = mkEnv('req-real-5', 'sys.info', {});
+    const resp5 = JSON.stringify({ ok: true, code: 'done', request_id: 'req-real-5', pad: 'x'.repeat(60) });
+    const cap5 = await startPipeServer('recv-5.txt', resp5, 16);
+    const d5 = await core.dispatchEnvelope(mockChannel, env5, { timeoutMs: 5000 });
+    stopPipeServer();
+    await sleep(500);
+    t('T24 分 chunk 响应仍读全（request_id 对上）', d5.ok === true && d5.result.request_id === 'req-real-5' && d5.result.code === 'done', JSON.stringify(d5).slice(0, 300));
+
+    // ---------- 4) 负例：dispatch 坏 base64 → exit 2，管道收不到任何东西 ----------
     const cap3 = await startPipeServer('recv-3.txt', JSON.stringify({ ok: true }));
     const bad = runWine([clientExe, 'dispatch', '!!!not-b64!!!'], 120000);
     const cap3Exists = fs.existsSync(cap3);
@@ -202,7 +216,7 @@ async function main() {
     t('负例 dispatch 坏 base64：stdout 报 QFR_LEA_CLIENT_BAD_DISPATCH', bad.stdout.includes('QFR_LEA_CLIENT_BAD_DISPATCH'), bad.stdout);
     t('负例 dispatch 坏 base64：管道未收到任何东西', !cap3Exists);
 
-    // ---------- 4) 负例：dispatch 缺参／apply 缺文件 → exit 2（不连管道） ----------
+    // ---------- 5) 负例：dispatch 缺参／apply 缺文件 → exit 2（不连管道） ----------
     const noArg = runWine([clientExe, 'dispatch'], 120000);
     t('负例 dispatch 缺参：exit 2 且不把动词当信封', noArg.status === 2 && noArg.stdout.includes('QFR_LEA_CLIENT_NO_INPUT'), noArg.stdout);
     const noFile = runWine([clientExe, 'apply', 'C:\\ProgramData\\QFR\\LEA\\inbox\\no-such.json'], 120000);

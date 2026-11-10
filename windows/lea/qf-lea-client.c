@@ -269,14 +269,17 @@ int main(int argc, char **argv) {
             break;
         }
         CloseHandle(ov.hEvent);
-        if (got == 0) break;
+        /* T24：got==0（对端关闭）时，若已收到部分数据即视为本次响应结束
+         * （无换行也以已收内容为准）；尚未收到任何数据则仍判无响应。
+         * 管道短读是常态，不得把 got < sizeof(chunk) 当作完成。 */
+        if (got == 0) { if (total > 0) ok_read = 1; break; }
         size_t take = got;
         if (total + take >= sizeof(resp)) take = sizeof(resp) - total - 1;
         memcpy(resp + total, chunk, take);
         total += take;
         resp[total] = '\0';
         if (memchr(chunk, '\n', got)) { ok_read = 1; break; }
-        if (got < sizeof(chunk)) { ok_read = 1; break; }
+        /* 短读继续读：只有读到换行、对端关闭或超时才算完成。 */
     }
     CloseHandle(pipe);
     if (!ok_read || total == 0) {

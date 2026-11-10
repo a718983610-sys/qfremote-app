@@ -118,9 +118,17 @@ try {
   leaRoutes = _leaRoutesMod.createLeaRoutes(leaCore, leaChannel, {
     sendJson, readJsonBody, log,
     verifyPassword: (u, p) => verifyAccountPassword(u, p),
+    // T31：本站暂无 MFA 校验入口（全仓无 TOTP/MFA 实现；VERIFY-STAGE1 已列
+    // 为已知未完成项），故显式声明 verifyMfa: null，不注入伪造的校验函数——
+    // 恒真会虚构 MFA 校验、恒假会锁死 Key 生成／全部吊销，两者都不可接受。
+    // lea-routes 未注入时只走密码二次确认（confirmMethod='password'，见
+    // server/ext/lea/README.md 未完成项第 5 条）。MFA 上线后在此注入真实
+    // 校验函数即可。
+    verifyMfa: null,
     resolveConsoleAuth: (req) => validateConsoleCookie(req.headers.cookie || '', clientIpFromReq(req)),
     isSiteAdmin: (a) => isAdmin(a),
   });
+  log({ ev: 'lea-mfa-unavailable', msg: 'no MFA verifier configured; LEA key operations use password-only confirmation' });
 } catch (e) { log({ ev: 'lea-unavailable', err: String(e && e.message || e) }); }
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
