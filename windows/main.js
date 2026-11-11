@@ -297,6 +297,9 @@ function handleManualLogout() {
   settings.auth.manualLogout = true;
   settings.auth.rememberDevice = false;
   pendingManualClear = true;
+  // r8 登录 #1：登出即作废此前任何登录 POST 的打戳——守门只认“本次登出之后的新 POST”，
+  // 登录后 15 秒内登出再重载，登录分支仍正常清旧会话（见 processAuthPage 登录分支守门）。
+  lastLoginPostAt = 0;
   // 补-低（L-C）：clear() 失败即抛 CLEAR_FAIL，须记 bootLog——旧凭据
   // 可能仍在，登出流程本身不阻塞，但不得静默当作已清。
   try { credStore.clear(); } catch (e) { bootLog('creds.clear-failed', e && e.message || String(e)); }
@@ -574,12 +577,27 @@ async function processAuthPage() {
         gateCredsMemory = null;
       }
 
+      // r8 登录 #1（2026-11-11，r7 实证）：登出后立即重登时，/qf-login 回包后的
+      // 500ms 补跑恰落在 doLogin 等 /me＋/stats 的窗口里——页面仍是登录表单、
+      // 主进程 manualLogout 仍为真，旧代码在此无条件清掉全站 cookie，把刚下发的
+      // 新会话 xid 一并删掉；随后 doLogin 回 ok 翻壳、立即心跳 401 落 BanLock
+      // 插页，2500ms 补跑撞上插页已画、console 分支永不跑，LEA 全程零记录。
+      // 新登录进行中绝不碰 cookie：旧会话在登出入口已 await 清净（6364abc），
+      // 此处只是纵深防御，不得以新会话为代价。守门两路任一成立即跳过整块
+      // （pendingManualClear 也不消费，留给窗口过期后的下一发；跳过时记
+      // bootLog 供真机复核）：① DETECT 已见 doLogin 写下的 freshLogin 标记；
+      // ② 距最近一次 /qf-login POST 不足 15 秒（覆盖 /me 600ms 重试＋慢网 stats）。
       if (settings.auth.manualLogout || pendingManualClear) {
-        pendingManualClear = false;
-        gateCredsMemory = null;
-        try { await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL); } catch (e) { /* ignore */ }
-        flushConsoleCookies();
-        try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
+        const freshPost = Date.now() - lastLoginPostAt < LOGIN_POST_QUIET_MS;
+        if (!det.freshLogin && !freshPost) {
+          pendingManualClear = false;
+          gateCredsMemory = null;
+          try { await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL); } catch (e) { /* ignore */ }
+          flushConsoleCookies();
+          try { await wc.executeJavaScript(autologinMod.CLEAR_PAGE_STATE_JS, true); } catch (e) { /* ignore */ }
+        } else {
+          bootLog('auth.skip-cookie-clear-fresh-login');
+        }
       }
 
       if (det.fieldsCleared) {
@@ -1193,6 +1211,10 @@ function createWindow() {
     // did-navigate-in-page 时，此路兜底让 processAuthPage 看到登录。
     try {
       ses.webRequest.onHeadersReceived({ urls: ['*://' + ALLOWED_HOST + '/qf-login*'] }, (details, cb) => {
+        // r8 登录 #1（2026-11-11）：任何 /qf-login POST 回包都意味着一次凭据提交，
+        // 其响应头可能刚下发新会话 cookie——打戳供 processAuthPage 登录分支守门，
+        // 500ms/2500ms/8000ms 补跑撞上登录进行中时不得清 cookie（见登录分支守门注释）。
+        try { if (details && details.method === 'POST') lastLoginPostAt = Date.now(); } catch (e) { /* ignore */ }
         try { if (shouldScheduleLoginNotifyCheck(details)) scheduleLoginNotifyCheck(); } catch (e) { /* ignore */ }
         // 只观察不改头：原样透传响应头（部分 Electron 版本上 cb({}) 可能清空头）。
         cb({ responseHeaders: details.responseHeaders });
@@ -3173,8 +3195,10 @@ async function notifyLeaLogout() {
 // （hash 从 '' 变 '#home'，是真实导航）。
 // 补跑口径：/qf-login 响应头一到即判定——POST＋200 且
 // x-qf-login-result 不是 frozen／banned／locked 时，调度
-// processAuthPage 补跑（500ms 首跑、2500ms 补跑；页面翻壳需等 /me＋
-// stats 两轮本地请求，500ms 足够、2500ms 兜底慢网）。processAuthPage
+// processAuthPage 补跑（500ms 首跑、2500ms 补跑、8000ms 兜底慢网翻壳；
+// 页面翻壳需等 /me＋stats 两轮本地请求，r7 登录 #1 实证 500ms 在慢网下
+// 会落在登录进行中，故登录分支另有新登录守门、不得在补跑中清 cookie，
+// 见 processAuthPage 登录分支）。processAuthPage
 // 是状态驱动、幂等：跑到时若页面已是控制台壳即通知 LEA；若仍是登录
 // 表单（密码错等），console 分支不跑、无副作用。
 // 注意：webapp 读完响应头即 cancel 响应体，故不用 onCompleted（取消后
@@ -3200,6 +3224,11 @@ function shouldScheduleLoginNotifyCheck(details) {
   } catch (e) { return false; }
 }
 // ---- end shouldScheduleLoginNotifyCheck ----
+// r8 登录 #1（2026-11-11）：最近一次 /qf-login POST 响应头到达的时刻（毫秒），
+// 供 processAuthPage 登录分支守门——新登录进行中不得清 cookie；登出时归零
+// （见 handleManualLogout），守门只认“本次登出之后的新 POST”。
+let lastLoginPostAt = 0;
+const LOGIN_POST_QUIET_MS = 15000; // 新登录静默窗：POST 回包后 15 秒内登录分支不碰 cookie
 let loginNotifyCheckTimers = [];
 function scheduleLoginNotifyCheck() {
   try {
@@ -3207,6 +3236,10 @@ function scheduleLoginNotifyCheck() {
     loginNotifyCheckTimers = [];
     loginNotifyCheckTimers.push(setTimeout(() => { processAuthPage().catch(() => {}); }, 500));
     loginNotifyCheckTimers.push(setTimeout(() => { processAuthPage().catch(() => {}); }, 2500));
+    // r8：8000ms 第三档——慢网下 /stats 超过 2500ms 时前两档都只看到登录表单；
+    // 有了登录分支守门，登录最终仍能成功翻壳，第三档保证翻壳后仍有一次 console
+    // 分支观测、LEA 通知不漏（notifyLeaLogin 有去重，多跑无害）。
+    loginNotifyCheckTimers.push(setTimeout(() => { processAuthPage().catch(() => {}); }, 8000));
   } catch (e) { /* ignore */ }
 }
 // ---- end scheduleLoginNotifyCheck ----

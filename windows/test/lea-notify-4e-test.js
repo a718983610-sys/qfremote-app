@@ -17,7 +17,8 @@
  *  断言：
  *  Q1 main.js 含 /qf-login onHeadersReceived 接线，调
  *      shouldScheduleLoginNotifyCheck＋scheduleLoginNotifyCheck；
- *  Q2 scheduleLoginNotifyCheck 含 500ms 与 2500ms 两档、调 processAuthPage；
+ *  Q2 scheduleLoginNotifyCheck 含 500ms、2500ms 与 8000ms 三档、调 processAuthPage
+ *      （r8：8000ms 第三档兜底慢网翻壳）；
  *  Q3 shouldScheduleLoginNotifyCheck：POST 200 无头 -> true；
  *  Q4 shouldScheduleLoginNotifyCheck：POST 200 头 'ok' -> true；
  *  Q5 shouldScheduleLoginNotifyCheck：POST 200 头 'frozen' -> false；
@@ -29,8 +30,8 @@
  *      值为 frozen）-> false；
  *  Q11 shouldScheduleLoginNotifyCheck：头值为数组 ['frozen'] -> false；
  *  Q12 shouldScheduleLoginNotifyCheck：null／空对象 -> false；
- *  Q13 scheduleLoginNotifyCheck 行为（vm＋mock 计时器）：两次回调分别在
- *      500ms 与 2500ms，触发后各调一次 processAuthPage；
+ *  Q13 scheduleLoginNotifyCheck 行为（vm＋mock 计时器）：三档回调分别在
+ *      500ms、2500ms 与 8000ms，触发后各调一次 processAuthPage；
  *  Q14 scheduleLoginNotifyCheck 行为：第二次调度清掉第一次的计时器。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。跑法：node windows/test/lea-notify-4e-test.js
  */
@@ -50,7 +51,7 @@ const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const call = mainJs.includes('if (shouldScheduleLoginNotifyCheck(details)) scheduleLoginNotifyCheck();');
   ok('Q1_login_hook_wired', hook && call, { hook, call });
 }
-// Q2：调度器含两档延迟、调 processAuthPage。
+// Q2：调度器含三档延迟、调 processAuthPage。
 {
   const at = mainJs.indexOf('function scheduleLoginNotifyCheck()');
   const endMark = '// ---- end scheduleLoginNotifyCheck ----';
@@ -58,8 +59,9 @@ const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const body = at >= 0 && end > at ? mainJs.slice(at, end) : '';
   const d500 = body.includes('}, 500)');
   const d2500 = body.includes('}, 2500)');
+  const d8000 = body.includes('}, 8000)');
   const calls = body.includes('processAuthPage().catch(() => {})');
-  ok('Q2_scheduler_two_delays', d500 && d2500 && calls, { d500, d2500, calls });
+  ok('Q2_scheduler_two_delays', d500 && d2500 && d8000 && calls, { d500, d2500, d8000, calls });
 }
 
 // 抽取判定函数（vm 行为测试用）。
@@ -116,16 +118,16 @@ function runScheduler(times) {
 {
   const r = runScheduler(1);
   const delays = r.timers.map((t) => t.ms).sort((a, b) => a - b);
-  // 触发两档回调，各调一次 processAuthPage。
+  // 触发三档回调，各调一次 processAuthPage。
   const cbs = r.timers.slice();
   for (const t of cbs) t.cb();
-  ok('Q13_two_delays_call_auth_page', JSON.stringify(delays) === JSON.stringify([500, 2500]) && r.calls === 2, { delays, calls: r.calls });
+  ok('Q13_two_delays_call_auth_page', JSON.stringify(delays) === JSON.stringify([500, 2500, 8000]) && r.calls === 3, { delays, calls: r.calls });
 }
 {
   const r = runScheduler(2);
-  // 第二次调度清掉了第一次的两枚计时器，只剩第二次的两枚。
+  // 第二次调度清掉了第一次的三枚计时器，只剩第二次的三枚。
   const live = r.timers.map((t) => t.ms).sort((a, b) => a - b);
-  ok('Q14_second_schedule_clears_first', r.cleared.length === 2 && JSON.stringify(live) === JSON.stringify([500, 2500]), { cleared: r.cleared, live });
+  ok('Q14_second_schedule_clears_first', r.cleared.length === 3 && JSON.stringify(live) === JSON.stringify([500, 2500, 8000]), { cleared: r.cleared, live });
 }
 
 result.pass = Object.values(result.cases).every((c) => c.pass);
