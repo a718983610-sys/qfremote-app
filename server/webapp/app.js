@@ -1030,14 +1030,28 @@ async function doLogout() {
     // 残留会话把 S.auth 翻回 'in'（见 checkSessionInner 守门）。
     S._manualLogout = true;
     showAuth('login', { notice: '您已退出登录。' });
-    // P1 兜底：2 秒后若登录表单仍未可见（被后续渲染/异常冲掉），强制再切一次。
-    setTimeout(() => {
-      try {
-        const f = document.getElementById('loginForm');
-        const a = document.getElementById('authRoot');
-        if (!f || !a || a.hidden) showAuth('login', { notice: '您已退出登录。' });
-      } catch (e) { /* ignore */ }
-    }, 2000);
+    // P1-4a（2026-11-11）兜底改多轮＋真可见性判定：单次 2 秒兜底在 r4 未生效。
+    // 表单即便在 DOM 内、authRoot 未 hidden，仍可能因视图层问题不可见；仅判
+    // !f/!a/a.hidden 会漏掉“在 DOM 但零尺寸/不可见”的情形。2 秒与 5 秒各查
+    // 一次：仍为已登出（S.auth==='out'，防 5 秒内快速重登被冲回登录页）且
+    // 表单不存在、authRoot 仍 hidden、或表单零尺寸/display:none/
+    // visibility:hidden 即重切一次。
+    [2000, 5000].forEach((ms) => {
+      setTimeout(() => {
+        try {
+          if (S.auth !== 'out') return;
+          const f = document.getElementById('loginForm');
+          const a = document.getElementById('authRoot');
+          let vis = false;
+          if (f && a && !a.hidden) {
+            const r = f.getBoundingClientRect();
+            const cs = window.getComputedStyle ? window.getComputedStyle(f) : null;
+            vis = r.width > 0 && r.height > 0 && (!cs || (cs.display !== 'none' && cs.visibility !== 'hidden'));
+          }
+          if (!vis) showAuth('login', { notice: '您已退出登录。' });
+        } catch (e) { /* ignore */ }
+      }, ms);
+    });
   });
 }
 

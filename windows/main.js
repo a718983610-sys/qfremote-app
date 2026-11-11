@@ -341,7 +341,45 @@ function handleManualLogout() {
   if (devicesView && !devicesView.webContents.isDestroyed()) {
     try { devicesView.webContents.send('qf-devices-reset'); } catch (e) { /* ignore */ }
   }
+  // P1-4a（2026-11-11）：登出后登录表单须立即出现（见 recoverConsoleViewAfterLogout）。
+  recoverConsoleViewAfterLogout();
 }
+// P1-4a（2026-11-11）登出后控制台视图恢复：r4 真机实证——登出后内容区变深蓝
+// 空白（控制台视图底色 contentBg()=#0d2f66，实测像素 #0f2f68），工具栏刷新与
+// 网格切视图均不恢复，只有整应用重启后登录表单才出现；webapp 侧 doLogout→
+// showAuth 在浏览器桩中已证实可用，故根因在 Electron 视图层。防御纵深两层：
+// ① 强制控制台视图回到前台：登出时若控制台视图被其他视图盖住，页内 showAuth
+//    无法让表单可见；showView('console') 只改可见性、不重载、不扰已显表单。
+// ② 3 秒后复核页面状态：manualLogout 仍在位（未重登）且页面检测不到登录态、
+//    无控制台标记（空白文档/渲染失效）时，重载控制台地址——与重启同效，登录
+//    表单必现。只认 state==='other'/检测失败才重载：重登后 state 为 'console'，
+//    不触发；manualLogout 已清时不触发；/logout 慢回包时 state 仍为 'console'，
+//    不触发（等页内 showAuth 自行跑）。重载与否记 bootLog 供真机复核。
+function recoverConsoleViewAfterLogout() {
+  try { showView('console'); } catch (e) { /* ignore */ }
+  setTimeout(() => {
+    try {
+      if (!settings.auth.manualLogout) return;
+      if (!view || view.webContents.isDestroyed()) return;
+      view.webContents.executeJavaScript(autologinMod.DETECT_JS, true).then((det) => {
+        try {
+          if (!settings.auth.manualLogout) return;
+          if (!det || det.state === 'other') {
+            bootLog('logout.recover-reload', 'state=' + (det && det.state));
+            if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL);
+          }
+        } catch (e) { /* ignore */ }
+      }).catch(() => {
+        try {
+          if (!settings.auth.manualLogout) return;
+          bootLog('logout.recover-reload', 'state=detect-failed');
+          if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL);
+        } catch (e) { /* ignore */ }
+      });
+    } catch (e) { /* ignore */ }
+  }, 3000);
+}
+// ---- end recoverConsoleViewAfterLogout ----
 // 子服务会话级联终止：复用 H 线各服务自己的退出端点（服务端会话作废＋
 // 落单点登录抑制标记），请求走 extRequest 的整罐 cookie 转发；5 秒内去重，
 // 避免多路检测命中时重复打。失败一律安静忽略（本地凭据与标记已先清）。
