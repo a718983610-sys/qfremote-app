@@ -81,6 +81,15 @@ int lea_binding_verify_ticket(const lea_binding_t *b);
 /* 绑定票据过期检查：ACTIVE 且 expires_at 已过 → 降级为 PENDING（需续租）。 */
 int lea_binding_expired(const lea_binding_t *b, long long now_unix);
 
+/* 设备 id 归一（与服务端 lea-core.js／lea-channel.js 的 bareNodeId 同口径）：
+ * 去掉且仅去掉一层 "node//" 前缀；NULL 视为空串。
+ * 注意：仅去一层——"node//node//x" 归一为 "node//x"，与服务端单次
+ * slice(6) 一致，两端须同口径，不得多去。 */
+const char *lea_bare_node_id(const char *id);
+/* 归一后比对：裸形相等且非空才命中；空／退化 id（""／"node//"）永不命中
+ *（与服务端 isWhitelisted 的空 want 拒绝口径一致，防空白名单误放行）。 */
+int lea_device_id_matches(const char *a, const char *b);
+
 /* 准入校验（DESIGN §6.2 顺序：绑定态 → 设备 → epoch → 授权 → Key → scope）。
  * 通过返回 1；拒绝返回 0 并在 err_code 写错误码。
  * revoked_key_ids: 本地吊销 Key ID 表（服务端吊销的本地镜像），可为 NULL。 */

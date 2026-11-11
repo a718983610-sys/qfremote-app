@@ -114,6 +114,22 @@ int lea_binding_expired(const lea_binding_t *b, long long now_unix) {
            b->expires_at <= now_unix;
 }
 
+/* ---------------- 设备 id 归一（r9） ---------------- */
+/* 与服务端 bareNodeId（server/ext/lea/lea-core.js、lea-channel.js）同口径：
+ * 去掉且仅去掉一层 "node//" 前缀。服务端信封 device_id 回显调用方原样
+ * （全形），本地绑定存裸形；admit 须归一后比对，否则全形信封恒被拒。 */
+const char *lea_bare_node_id(const char *id) {
+    if (!id) return "";
+    return strncmp(id, "node//", 6) == 0 ? id + 6 : id;
+}
+
+int lea_device_id_matches(const char *a, const char *b) {
+    const char *ba = lea_bare_node_id(a);
+    const char *bb = lea_bare_node_id(b);
+    if (ba[0] == '\0' || bb[0] == '\0') return 0;
+    return strcmp(ba, bb) == 0;
+}
+
 int lea_admit(const lea_envelope_t *env, const lea_binding_t *bind,
               const char *const *revoked_key_ids, int n_revoked,
               char *err_code, size_t err_size) {
@@ -131,8 +147,10 @@ int lea_admit(const lea_envelope_t *env, const lea_binding_t *bind,
         snprintf(err_code, err_size, "%s", LEA_ERR_BINDING_PENDING);
         return 0;
     }
-    /* 2. 设备：信封 device_id 须与本机绑定 device_id 一致（白名单即绑定设备）。 */
-    if (strcmp(env->device_id, bind->device_id) != 0) {
+    /* 2. 设备：信封 device_id 与本机绑定 device_id 归一后比对（r9：
+     * 去 "node//" 前缀再比，与服务端 bareNodeId 同口径；全形与裸形
+     * 双向命中。空／退化 id 永不命中，fail-closed）。 */
+    if (!lea_device_id_matches(env->device_id, bind->device_id)) {
         snprintf(err_code, err_size, "%s", LEA_ERR_DEVICE_NOT_WHITELISTED);
         return 0;
     }

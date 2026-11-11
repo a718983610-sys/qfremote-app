@@ -513,6 +513,65 @@ int main(void) {
               strcmp(err, "QFR_API_KEY_REVOKED") == 0, "admit-key-revoked");
     }
 
+    /* ---------- r9：admit device_id 归一（裸形／全形双向命中） ----------
+     * r8 根因：服务端信封 device_id 回显全形（node//…），本地绑定存裸形，
+     * strcmp 原始比较恒不等 → QFR_DEVICE_NOT_WHITELISTED。归一口径与
+     * 服务端 bareNodeId 一致：仅去一层 "node//" 前缀。 */
+    {
+        lea_binding_t b;
+        char err[64] = { 0 };
+        /* helper 本身：仅去一层前缀；NULL／空／退化 id 归一为空串。 */
+        CHECK(strcmp(lea_bare_node_id("node//abc"), "abc") == 0, "r9-bare-strips-one-prefix");
+        CHECK(strcmp(lea_bare_node_id("abc"), "abc") == 0, "r9-bare-keeps-bare");
+        CHECK(strcmp(lea_bare_node_id(""), "") == 0, "r9-bare-empty");
+        CHECK(strcmp(lea_bare_node_id(NULL), "") == 0, "r9-bare-null");
+        CHECK(strcmp(lea_bare_node_id("node//"), "") == 0, "r9-bare-degenerate-prefix-only");
+        CHECK(strcmp(lea_bare_node_id("node//node//x"), "node//x") == 0,
+              "r9-bare-strips-only-one-layer");
+        CHECK(lea_device_id_matches("node//node-1", "node-1"), "r9-match-full-vs-bare");
+        CHECK(lea_device_id_matches("node-1", "node//node-1"), "r9-match-bare-vs-full");
+        CHECK(!lea_device_id_matches("node//node-1", "node-2"), "r9-match-different-device");
+        CHECK(!lea_device_id_matches("node//", "node//"), "r9-match-degenerate-never");
+        CHECK(!lea_device_id_matches("", ""), "r9-match-empty-never");
+        CHECK(!lea_device_id_matches(NULL, "node-1"), "r9-match-null-never");
+
+        /* 四种组合均放行：裸绑定＋全形信封（r8 真实阻塞形态）、
+         * 全形绑定＋裸形信封、双裸、双全。 */
+        const char *bind_ids[4] = { "node-1", "node//node-1", "node-1", "node//node-1" };
+        const char *env_ids[4] = { "node//node-1", "node-1", "node-1", "node//node-1" };
+        const char *names[4] = { "r9-admit-bare-bind-full-env", "r9-admit-full-bind-bare-env",
+                                 "r9-admit-bare-bare", "r9-admit-full-full" };
+        for (int i = 0; i < 4; i++) {
+            active_binding(&b, 3, 1, "muse.execute,muse.execute.dangerous");
+            snprintf(b.device_id, sizeof(b.device_id), "%s", bind_ids[i]);
+            char idem[32], nonce[32], req[32];
+            snprintf(idem, sizeof(idem), "idem-key-200%d", i);
+            snprintf(nonce, sizeof(nonce), "nonce-2000%d", i);
+            snprintf(req, sizeof(req), "req-200000%d", i);
+            make_envelope(env_buf, sizeof(env_buf), now, "sys.info", "{}", 3, env_ids[i],
+                          "alice", idem, nonce, req, "TEST-UNSIGNED");
+            lea_parse_envelope(env_buf, now, &env);
+            CHECK(lea_admit(&env, &b, NULL, 0, err, sizeof(err)), names[i]);
+        }
+        /* 否定：不同设备（全形信封）仍拒绝。 */
+        active_binding(&b, 3, 1, "muse.execute,muse.execute.dangerous");
+        make_envelope(env_buf, sizeof(env_buf), now, "sys.info", "{}", 3, "node//node-2",
+                      "alice", "idem-key-2010", "nonce-20100", "req-2010000", "TEST-UNSIGNED");
+        lea_parse_envelope(env_buf, now, &env);
+        CHECK(!lea_admit(&env, &b, NULL, 0, err, sizeof(err)) &&
+              strcmp(err, "QFR_DEVICE_NOT_WHITELISTED") == 0,
+              "r9-admit-full-env-different-device-rejected");
+        /* 否定：退化 id（绑定与信封均为 "node//"）永不命中，fail-closed。 */
+        active_binding(&b, 3, 1, "muse.execute,muse.execute.dangerous");
+        snprintf(b.device_id, sizeof(b.device_id), "node//");
+        make_envelope(env_buf, sizeof(env_buf), now, "sys.info", "{}", 3, "node//",
+                      "alice", "idem-key-2011", "nonce-20101", "req-2010001", "TEST-UNSIGNED");
+        lea_parse_envelope(env_buf, now, &env);
+        CHECK(!lea_admit(&env, &b, NULL, 0, err, sizeof(err)) &&
+              strcmp(err, "QFR_DEVICE_NOT_WHITELISTED") == 0,
+              "r9-admit-degenerate-id-rejected");
+    }
+
     /* ---------- 幂等去重＋持久化 ---------- */
     {
         static lea_idem_t t;

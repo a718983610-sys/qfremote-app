@@ -1,7 +1,7 @@
 {
   "files": {
     "QFSysHelper.exe": "aa522257eccf02ce6a6e165c60427254ba93a06c3fb1e09c3dd91ffc1d493b2d",
-    "install-lea.ps1": "155d3174c9c71a4cfad5cc9dc58895712642fe0d370c7520904f4b1cfc430fc7",
+    "install-lea.ps1": "9bdd8c068453f59426cef85041bf679c9b560ce95b473b859918ead68142ee25",
     "install-system-services.ps1": "1b0f137f514fa8bfd982fbae20d38b0e6cd667f8b26816fad5cc97edf07b3cfe",
     "install.ps1": "10945e1f1a98ce3122d679fd8d7f3df63b5cdeb96e55dab4a668c645279e11d3",
     "qf-agent-heal.ps1": "9e02343ea5ccef8c7929f93f949c4e95430b7515a827f50d5583432869c3e7e5"
