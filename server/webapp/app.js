@@ -531,6 +531,17 @@ const Cache = {
   save(v) { try { localStorage.setItem('qf-console-cache', JSON.stringify(v)); } catch (e) {} },
   clear() { try { localStorage.removeItem('qf-console-cache'); } catch (e) {} }
 };
+// P1-4a（2026-11-11）：手动登出的持久标记——登出状态必须活过页面重载。
+// r5 真因：S._manualLogout 只在内存，登出中途页面一重载即丢；缓存仍在，
+// 启动缓存路径按缓存复活壳、S.auth 回 'in'，表单 3 分钟不出（桩测已复现）。
+// 本标记在 doLogout 确认的第一时间写 localStorage；仅凭据提交的新登录
+// 成功（doLogin）才清；启动、showShell、checkSession 均认它。
+const ManualLogout = {
+  KEY: 'qf-console-manual-logout',
+  set() { try { localStorage.setItem(this.KEY, '1'); } catch (e) {} },
+  clear() { try { localStorage.removeItem(this.KEY); } catch (e) {} },
+  is() { try { return localStorage.getItem(this.KEY) === '1'; } catch (e) { return false; } }
+};
 const S = {
   auth: 'unknown',           // unknown | in | out
   user: null, displayName: '', isAdmin: false,
@@ -763,7 +774,9 @@ const BanLock = {
       bind('bn-admin', () => { location.href = '/admin'; });
       bind('bn-logout', () => { doLogout(); });
       bind('bn-relogin', () => {
-        self.exit();
+        // P1-4e（2026-11-11）：exit() 万一抛错也不得吞掉表单——先清锁，
+        // 无论成败都出登录表单。
+        try { self.exit(); } catch (e) {}
         showAuth('login', { notice: '请重新登录。' });
       });
     } catch (e) {
@@ -826,7 +839,8 @@ async function checkSessionInner(silent, opts) {
   // 不得凭残留会话把 S.auth 翻回 'in'（cookie 若未清干净，/me 仍回 ok，
   // 致登出后状态回潮；动态桩测已证实）。冷启时本标记为 falsy，不影响
   // 启动自动恢复；新登录成功时 doLogin 清标记。
-  if (S._manualLogout) return false;
+  // P1-4a（2026-11-11）：重载后内存标记已丢，持久标记同样守门。
+  if (S._manualLogout || ManualLogout.is()) return false;
   const o = opts || {};
   const probe = o.probe;
   if (probe) { try { probe.gated = false; } catch (e) {} }
@@ -964,6 +978,7 @@ async function doLogin(username, password, remember) {
     // 心跳校验），并写 freshLogin 标记供 Electron 主进程识别一次真实
     // 新登录（仅 doLogin 写；checkSession 冷启恢复与缓存恢复不写）。
     S._manualLogout = false;
+    ManualLogout.clear(); // P1-4a：凭据提交的新登录成功才清持久登出标记，壳方可再出
     try { sessionStorage.setItem('qfShellFreshLogin', '1'); } catch (e) { /* ignore */ }
     const curGen = S.sessGen; // 批A-A1：捕获本次登录代数，stats 回填前比对（处方同 checkSession）
     const st = await api('/home/api/stats');
@@ -1006,6 +1021,11 @@ async function doLogout() {
     BanLock.suppress = true;
     S.sessGen++; // DS-R49：登出即身份代数变化，旧在飞响应作废
     try { teardownSession(); } catch (e) {} // X-01：登出请求发出前先拆会话帧，防旧帧又发心跳类请求
+    // P1-4a（2026-11-11）：确认的第一时间即写持久登出标记＋内存标记——
+    // 必须在 /logout 竞速之前；页面若在登出中途重载，标记已落盘，启动
+    // 不复活壳、直接出登录表单。/logout 回来后下面仍会再置一次（幂等）。
+    S._manualLogout = true;
+    ManualLogout.set();
     try {
       BanLock.exit();
       // P1（2026-11-11）：/logout 请求加 8 秒竞速——旧代码 await api('/logout')
@@ -1235,6 +1255,10 @@ window.addEventListener('hashchange', render);
 /* ---------------- 壳与未登录区切换 ---------------- */
 function showShell() {
   if (BanLock.active()) return;   // 防止 showShell 掀掉锁定界面的 authRoot
+  // P1-4a（2026-11-11）：手动登出后（内存或持久标记在），任何路径不得把
+  // 壳翻回来——须等一次真实新登录清标记后才能进壳；此处直接出登录表单，
+  // 不留空白页。
+  if (S._manualLogout || ManualLogout.is()) { showAuth('login', { notice: '您已退出登录。' }); return; }
   $('#authRoot').hidden = true;
   $('#shellRoot').hidden = false;
   var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（内联脚本被拦截时的双保险）
@@ -5623,7 +5647,14 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
     if (hit) navigate(hit.route); else toast('未找到相关功能，请从主菜单进入。', 'info');
   });
   const cache = Cache.load();
-  if (cache && cache.user) {
+  if (ManualLogout.is()) {
+    // P1-4a（2026-11-11）：上次是手动登出（持久标记在）——页面可能在登出
+    // 中途重载过，缓存仍在但内存标记已丢；绝不能按缓存复活壳，直接出登录
+    // 表单。标记留到一次真实新登录再清（doLogin），多次重载仍出表单。
+    Cache.clear();
+    S.auth = 'out'; // 与 doLogout 落点一致：本页即已登出态，不留 'unknown'
+    showAuth('login', { notice: '您已退出登录。' });
+  } else if (cache && cache.user) {
     // 进门不挡：先按缓存渲染壳，校验在后台进行；冷进入恒落首页，不再恢复上次视图（2026-10-26 站长令）
     S.auth = 'in'; S.user = cache.user; S.displayName = cache.displayName || cache.user;
     S.isAdmin = !!cache.isAdmin; S.license = cache.license; S.points = cache.points;
