@@ -16,14 +16,19 @@
 #      "QFRLEA User Helper - <DOMAIN_user>" 任务）
 #   ⑥ 写版本绑定（注册表 HKLM\SOFTWARE\QFRemote\LEA + 安装目录 version.json）
 #   ⑦ 运行自检并写报告 %ProgramData%\QFR\LEA\install-report.json
-# 失败处理（DESIGN §9.2/§10.1）：每步重试 3 次，退避 5s/15s/45s；
-# 仍失败不阻塞主程序——写 LEA_DEGRADED 标记 + 日志，本脚本仍 exit 0，
-# 调用方照常继续；回滚用 -Rollback <版本> 显式触发。
+# 失败处理（DESIGN §9.2/§10.1，P2-02 问题 6 修订）：每步重试 3 次，退避 5s/15s/45s；
+# 仍失败时写 LEA_DEGRADED 标记 + 报告 + 日志，本脚本 exit 1（退出码即失败信号）；
+# 但不阻塞主程序——调用方 install-system-services.ps1 的 LEA 段只读标记/报告、
+# 自身仍 exit 0，主程序照常继续；回滚用 -Rollback <版本> 显式触发。
+# P2-02 问题 4：拷文件前先停 USH（Stop-LeaUsh：taskkill + 等退出并核验），停不掉
+# 即报错退出；成功/失败收尾时把停掉的 USH 经登录任务拉起来（Start-LeaUshTask）。
+# P2-02 问题 5：报告写与标记删失败不再静默吞——先修文件 ACL（takeown + icacls
+# /reset）再重试，仍失败则大声记日志并改判 degraded（成功路径亦然）。
 # 哈希链（H17/H20）：本脚本自身由 main.js 按 whitelist.json 验 SHA-256 后
 # 才被提权拉起（install-system-services.ps1 的 -LeaScriptHash 参数会再验
 # 一次）；本脚本在拷文件前验 $LeaDir 里三件载荷的 SHA-256（$expectedHashes，
 # 由 windows/lea/gen_whitelist.py --update-installer 从发版二进制现算刷新）；
-# 任一文件缺失／哈希不对即拒绝安装、写 LEA_DEGRADED，不阻塞主程序。
+# 任一文件缺失／哈希不对即拒绝安装、写 LEA_DEGRADED，exit 1（调用方仍不阻塞主程序）。
 # version.txt 只作版本标签，不验哈希（改它只改得了显示的版号）。
 # 日志：%TEMP%\qf-lea-install.log（本地时间）。
 # 服务端上报：自检报告写本地 install-report.json；若环境变量
@@ -45,12 +50,160 @@ function Write-LeaLog([string]$s) {
 }
 function Write-Degraded([string]$reason) {
   # LEA_DEGRADED 标记：主程序/服务端据此知 LEA 未就绪，远程控制不受影响。
+  # 返回 $true=标记已写好；写失败时修一次文件 ACL 再重试，仍失败则大声记日志
+  # 并返回 $false（调用方不得把“标记写失败”当作“已留痕”；r3 教训：静默吞掉
+  # 即应用永认未装）。
   try {
     $dataDir = Join-Path $env:ProgramData 'QFR\LEA'
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-    Set-Content -LiteralPath (Join-Path $dataDir 'LEA_DEGRADED') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $reason) -Encoding UTF8
-  } catch { }
-  Write-LeaLog ('LEA_DEGRADED: ' + $reason)
+    Set-Content -LiteralPath (Join-Path $dataDir 'LEA_DEGRADED') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $reason) -Encoding UTF8 -Force
+    Write-LeaLog ('LEA_DEGRADED: ' + $reason)
+    return $true
+  } catch {
+    Write-LeaLog ('LEA_DEGRADED WRITE FAILED: ' + $reason + ' err=' + $_.Exception.Message + ' (trying ACL repair + retry)')
+    try {
+      if (Repair-LeaDataFileAcl (Join-Path $dataDir 'LEA_DEGRADED')) {
+        Set-Content -LiteralPath (Join-Path $dataDir 'LEA_DEGRADED') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $reason) -Encoding UTF8 -Force
+        Write-LeaLog ('LEA_DEGRADED written after ACL repair: ' + $reason)
+        return $true
+      }
+    } catch {
+      Write-LeaLog ('LEA_DEGRADED WRITE FAILED after ACL repair: ' + $_.Exception.Message)
+    }
+    Write-LeaLog ('LEA_DEGRADED WRITE FAILED (marker NOT recorded): ' + $reason)
+    return $false
+  }
+}
+
+function Repair-LeaDataFileAcl([string]$path) {
+  # P2-02 问题 5 自愈：install-report.json / LEA_DEGRADED 的 ACL 损坏（r3：icacls
+  # 输出无 ACE 条目）时 Set-Content / Remove-Item 报 Access denied。本函数只修
+  # 这两个脚本自管文件：takeown 夺回属主 + icacls /reset 恢复自父目录继承的 ACL，
+  # 两步 exit 均为 0 才返回 $true；文件不存在返回 $false（无可修，调用方重试原
+  # 操作时会新建）。
+  if (-not (Test-Path -LiteralPath $path)) { return $false }
+  try {
+    takeown.exe /F $path | Out-Null
+    $takeownExit = $LASTEXITCODE
+    icacls.exe $path /reset | Out-Null
+    $icaclsExit = $LASTEXITCODE
+    Write-LeaLog ("data file ACL repair: " + $path + " takeown exit=" + $takeownExit + " icacls /reset exit=" + $icaclsExit)
+    return ($takeownExit -eq 0 -and $icaclsExit -eq 0)
+  } catch {
+    Write-LeaLog ('data file ACL repair threw: ' + $path + ' ' + $_.Exception.Message)
+    return $false
+  }
+}
+
+function Remove-StaleDegradedMarker {
+  # 成功路径清陈旧标记：删不掉先修 ACL 再重试；仍失败返回 $false（调用方改判
+  # degraded，绝不静默当作已清——r3：标记残留即 leaServiceInstalled() 恒 false）。
+  # 标记本就不存在返回 $true。
+  $marker = Join-Path $dataDir 'LEA_DEGRADED'
+  if (-not (Test-Path -LiteralPath $marker)) { return $true }
+  try {
+    Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
+    Write-LeaLog 'stale LEA_DEGRADED removed'
+    return $true
+  } catch {
+    # DS 评审意见：TOCTOU——文件在 Test-Path 与 Remove-Item 之间被并发安装删掉
+    # 时，Remove-Item 抛 ItemNotFound；此时标记已不存在，应算成功，不改判 degraded。
+    if (-not (Test-Path -LiteralPath $marker)) { Write-LeaLog 'stale LEA_DEGRADED already gone (raced delete)'; return $true }
+    Write-LeaLog ('stale LEA_DEGRADED remove failed: ' + $_.Exception.Message + ' (trying ACL repair + retry)')
+    if (Repair-LeaDataFileAcl $marker) {
+      try {
+        Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
+        Write-LeaLog 'stale LEA_DEGRADED removed after ACL repair'
+        return $true
+      } catch {
+        if (-not (Test-Path -LiteralPath $marker)) { Write-LeaLog 'stale LEA_DEGRADED already gone after ACL repair (raced delete)'; return $true }
+        Write-LeaLog ('stale LEA_DEGRADED remove FAILED after ACL repair: ' + $_.Exception.Message)
+        return $false
+      }
+    }
+    Write-LeaLog 'stale LEA_DEGRADED remove FAILED (ACL repair unavailable/failed)'
+    return $false
+  }
+}
+
+function Stop-LeaUsh([int]$TimeoutSeconds = 30) {
+  # P2-02 问题 4：运行中的 USH（QFUserHelper.exe）锁住安装目录同名文件，copy-files
+  # 必然失败。taskkill 强停全部 USH 实例，等进程退出并核验；$true=已停（或本来就
+  # 没跑），$false=超时仍在跑（调用方报错退出，不许静默继续）。停过任一实例时置
+  # $script:ushWasStopped，供收尾时拉起。
+  $procs = @(Get-Process -Name 'QFUserHelper' -ErrorAction SilentlyContinue)
+  if (-not $procs -or $procs.Count -eq 0) { Write-LeaLog 'ush preflight: not running'; return $true }
+  $pids = ($procs | ForEach-Object { $_.Id }) -join ','
+  Write-LeaLog ("ush preflight: stopping running USH pid=" + $pids)
+  try { taskkill.exe /F /IM QFUserHelper.exe | Out-Null } catch { Write-LeaLog ('ush preflight: taskkill threw: ' + $_.Exception.Message) }
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    $left = @(Get-Process -Name 'QFUserHelper' -ErrorAction SilentlyContinue)
+    if (-not $left -or $left.Count -eq 0) {
+      Write-LeaLog 'ush preflight: stopped'
+      $script:ushWasStopped = $true
+      return $true
+    }
+    Start-Sleep -Seconds 1
+  }
+  $left = @(Get-Process -Name 'QFUserHelper' -ErrorAction SilentlyContinue)
+  $leftCount = 0
+  if ($left) { $leftCount = $left.Count }
+  if ($leftCount -lt $procs.Count) {
+    # 至少杀掉了一部分：置旗，收尾时拉起（剩下的杀不掉，安装仍报错退出）。
+    $script:ushWasStopped = $true
+    Write-LeaLog ("ush preflight: PARTIALLY stopped (" + ($procs.Count - $leftCount) + " stopped, " + $leftCount + " still running)")
+  }
+  Write-LeaLog ("ush preflight: FAILED to stop, still running pid=" + (($left | ForEach-Object { $_.Id }) -join ','))
+  return $false
+}
+
+function Start-LeaUshTask {
+  # 把停掉的 USH 拉起来：逐个跑已注册的登录任务（安装时用户的主任务名
+  # 'QFRLEA User Helper'＋其余枚举用户的后缀任务；r3 实证 schtasks /run 可行，
+  # 新实例与残留实例相遇时按 duplicate-instance 自退，无冲突）。只跑主任务不
+  # 够：主任务在 SYSTEM 安装时可能注册失败（r3 问题 8），实际存在的往往是
+  # 后缀任务；Stop-LeaUsh 杀的是全部会话的 USH，拉起也要覆盖全部任务名。
+  # 尽力而为：单个任务拉不起来（不存在／用户未登录）只记日志；跑完核验进程
+  # 是否真的起来（schtasks exit 0 只代表任务已触发）。不改安装结果（下次
+  # 登录任务触发器仍会拉起）。返回 $true=至少一个任务已触发且进程在跑。
+  $names = @('QFRLEA User Helper')
+  try {
+    foreach ($u in (Get-LeaInteractiveUsers)) {
+      $tn = 'QFRLEA User Helper - ' + ($u -replace '\\', '_')
+      if ($names -notcontains $tn) { $names += $tn }
+    }
+  } catch { Write-LeaLog ('ush relaunch: enumerate users failed (main task only): ' + $_.Exception.Message) }
+  $triggered = $false
+  foreach ($tn in $names) {
+    try {
+      schtasks.exe /run /TN $tn | Out-Null
+      if ($LASTEXITCODE -eq 0) {
+        Write-LeaLog ("ush relaunch: task started (" + $tn + ")")
+        $triggered = $true
+      } else {
+        Write-LeaLog ("ush relaunch: schtasks exit=" + $LASTEXITCODE + " for task (" + $tn + ") (non-fatal)")
+      }
+    } catch {
+      Write-LeaLog ("ush relaunch threw for task (non-fatal): " + $tn + " " + $_.Exception.Message)
+    }
+  }
+  if (-not $triggered) {
+    Write-LeaLog 'ush relaunch: no task could be triggered (non-fatal, USH will start at next logon)'
+    return $false
+  }
+  # 核验：等最多 10 秒看 QFUserHelper 进程是否真的起来。
+  $deadline = (Get-Date).AddSeconds(10)
+  while ((Get-Date) -lt $deadline) {
+    $running = @(Get-Process -Name 'QFUserHelper' -ErrorAction SilentlyContinue)
+    if ($running -and $running.Count -gt 0) {
+      Write-LeaLog ("ush relaunch verified: running pid=" + (($running | ForEach-Object { $_.Id }) -join ','))
+      return $true
+    }
+    Start-Sleep -Seconds 1
+  }
+  Write-LeaLog 'ush relaunch unverified: no QFUserHelper process 10s after task start (non-fatal, USH will start at next logon)'
+  return $false
 }
 
 $serviceName = 'QFRLEA'
@@ -62,6 +215,7 @@ $serviceExeName = 'QFRLEA.exe'        # LEA 服务本体（windows/lea/ 线：QF
 $clientExeName = 'qf-lea-client.exe'    # LEA 客户端（windows/lea/ 线；QFRLEA.c 注释所指的 runcommands 接令程序，尚未出包）
 $ushExeName = 'QFUserHelper.exe'        # USH（windows/ush/ 线：build.sh 产物）
 $retryDelays = @(5, 15, 45)             # 重试退避 5s/15s/45s（DESIGN §9.2）
+$script:ushWasStopped = $false # P2-02 问题 4：本轮是否停过 USH（停过才在收尾经登录任务拉起来）
 
 # 载荷期望哈希（H17）：拷文件前逐件验 SHA-256。块内由
 # windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
@@ -214,6 +368,11 @@ function Test-LeaSelfCheck {
 }
 
 function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detail) {
+  # 写报告；返回 $true=已写好。写失败时先修一次报告文件的 ACL（P2-02 问题 5：r3
+  # 根因为文件 ACL 损坏致 Access denied）再重试一次；仍失败则大声记日志并返回
+  # $false（调用方改判 degraded / exit 1，绝不静默当作已上报——r3：wrapper 的
+  # 报告检查读到的是旧报告）。上报 URL 部分仍是非阻塞口径（失败只记日志）。
+  $report = $null
   try {
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
     $report = @{
@@ -223,8 +382,31 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
       checks = $checks
       at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     } | ConvertTo-Json -Depth 4
-    Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8
+  } catch {
+    Write-LeaLog ('install report build failed: ' + $_.Exception.Message)
+    return $false
+  }
+  try {
+    Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8 -Force
     Write-LeaLog ("install report written: " + $status + " " + $detail)
+  } catch {
+    Write-LeaLog ('install report write failed: ' + $_.Exception.Message + ' (trying ACL repair + retry)')
+    $repaired = $false
+    try { $repaired = Repair-LeaDataFileAcl $reportFile } catch { $repaired = $false }
+    if ($repaired) {
+      try {
+        Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8 -Force
+        Write-LeaLog ("install report written after ACL repair: " + $status + " " + $detail)
+      } catch {
+        Write-LeaLog ('install report write FAILED after ACL repair: ' + $_.Exception.Message)
+        return $false
+      }
+    } else {
+      Write-LeaLog 'install report write FAILED (ACL repair unavailable/failed)'
+      return $false
+    }
+  }
+  try {
     $url = $env:QFR_LEA_REPORT_URL
     if ($url) {
       if (-not (Test-LeaReportUrl $url)) {
@@ -239,13 +421,14 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
       }
     }
   } catch {
-    Write-LeaLog ('install report write failed: ' + $_.Exception.Message)
+    Write-LeaLog ('install report upload check failed (non-blocking): ' + $_.Exception.Message)
   }
+  return $true
 }
 
 Write-LeaLog 'QFRemote LEA install start'
 
-# ---- 回滚模式：停服务 → 恢复上一版 → 启动 → 自检 → 上报（DESIGN §10.2） ----
+# ---- 回滚模式：停服务 → 停 USH → 恢复上一版 → 启动 → 自检 → 上报（DESIGN §10.2） ----
 if ($Rollback) {
   $rbDir = Join-Path $installDir ("rollback\" + $Rollback)
   if (-not (Test-Path -LiteralPath $rbDir)) {
@@ -255,10 +438,24 @@ if ($Rollback) {
   try {
     try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch { }
     Start-Sleep -Seconds 2
+    # P2-02 问题 4：回滚也要拷文件，运行中的 USH 同样会锁住 QFUserHelper.exe。
+    if (-not (Stop-LeaUsh 30)) {
+      Write-LeaLog 'rollback failed: running USH could not be stopped'
+      $null = Write-Degraded 'rollback-ush-stop-failed'
+      exit 1
+    }
     $rbFiles = Get-ChildItem -LiteralPath $rbDir -File
     $rbNames = @($rbFiles | ForEach-Object { $_.Name })
+    # 残留 .lea-tmp 先清（与正常安装 copy 步对称；DS 评审意见）。
+    Get-ChildItem -LiteralPath $installDir -File -Filter '*.lea-tmp' -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
+    }
     $rbFiles | ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $installDir $_.Name) -Force
+      # 拷到临时文件再替换，避免目标文件写一半被中断。
+      $rbDest = Join-Path $installDir $_.Name
+      $rbTmp = $rbDest + '.lea-tmp'
+      Copy-Item -LiteralPath $_.FullName -Destination $rbTmp -Force
+      Move-Item -LiteralPath $rbTmp -Destination $rbDest -Force
     }
     # T19：清理回滚后新增的文件（备份里没有的顶层文件），不留新版残留；
     # rollback\ 子目录本身不在顶层文件之列，不受影响。
@@ -279,29 +476,34 @@ if ($Rollback) {
     Start-Service -Name $serviceName -ErrorAction Stop
     Start-Sleep -Seconds 2
     $checks = Test-LeaSelfCheck
-    Write-InstallReport $checks 'rolled-back' ("restored version " + $Rollback)
-    if ($checks.all_ok) { Write-LeaLog 'rollback ok'; exit 0 } else { Write-Degraded 'rollback self-check failed'; exit 0 }
+    $reportOk = Write-InstallReport $checks 'rolled-back' ("restored version " + $Rollback)
+    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+    if ($checks.all_ok -and $reportOk) { Write-LeaLog 'rollback ok'; exit 0 } else { $null = Write-Degraded 'rollback self-check failed'; exit 1 }
   } catch {
     Write-LeaLog ('rollback failed: ' + $_.Exception.Message)
-    Write-Degraded 'rollback failed'
-    exit 0
+    $null = Write-Degraded 'rollback failed'
+    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+    exit 1
   }
 }
 
 # ---- 正常安装 ----
 if (-not (Test-Path -LiteralPath $LeaDir)) {
-  # LEA 产物尚未随包落地（lea/ush 线未交付）：不阻塞主程序，标记 DEGRADED。
+  # LEA 产物尚未随包落地（lea/ush 线未交付）：标记 DEGRADED，exit 1（问题 6；
+  # 调用方 wrapper 仍不阻塞主程序）。
   Write-LeaLog ("LEA payload not found at " + $LeaDir + ", skipping (LEA_DEGRADED)")
-  Write-Degraded 'payload-missing'
-  Write-InstallReport @{} 'degraded' 'payload-missing'
-  exit 0
+  $degradedOk = Write-Degraded 'payload-missing'
+  $reportOk = Write-InstallReport @{} 'degraded' 'payload-missing'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  exit 1
 }
 $serviceSrc = Join-Path $LeaDir $serviceExeName
 if (-not (Test-Path -LiteralPath $serviceSrc)) {
   Write-LeaLog ("LEA service exe not found: " + $serviceSrc + ", skipping (LEA_DEGRADED)")
-  Write-Degraded 'service-exe-missing'
-  Write-InstallReport @{} 'degraded' 'service-exe-missing'
-  exit 0
+  $degradedOk = Write-Degraded 'service-exe-missing'
+  $reportOk = Write-InstallReport @{} 'degraded' 'service-exe-missing'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  exit 1
 }
 $oldVersion = Get-InstalledLeaVersion
 $leaVersion = $oldVersion
@@ -314,11 +516,21 @@ try {
   if (-not $leaVersion) { $leaVersion = '0.1.0' }
 } catch { if (-not $leaVersion) { $leaVersion = '0.1.0' } }
 
-# H17：拷文件前验三件载荷哈希；缺失／不对即拒绝安装（degraded，不阻塞主程序）。
+# H17：拷文件前验三件载荷哈希；缺失／不对即拒绝安装（degraded，exit 1）。
 if (-not (Test-LeaPayloadHash)) {
-  Write-Degraded 'payload-hash-mismatch'
-  Write-InstallReport @{} 'degraded' 'payload-hash-mismatch'
-  exit 0
+  $degradedOk = Write-Degraded 'payload-hash-mismatch'
+  $reportOk = Write-InstallReport @{} 'degraded' 'payload-hash-mismatch'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  exit 1
+}
+
+# P2-02 问题 4 前置检查：USH 在跑即先停（等退出并核验）；停不掉即报错退出，
+# 不许静默继续（否则 copy-files 必然锁文件失败）。
+if (-not (Stop-LeaUsh 30)) {
+  $degradedOk = Write-Degraded 'ush-stop-failed'
+  $reportOk = Write-InstallReport @{} 'degraded' 'ush-stop-failed'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  exit 1
 }
 
 $failedStep = ''
@@ -331,8 +543,19 @@ try {
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $old = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     if ($old) { try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch { } Start-Sleep -Seconds 2 }
+    # P2-02 问题 4：前置检查后 USH 仍可能被重新拉起（如用户此时登录），拷前再停
+    # 一次；停不掉即抛错进重试（重试 3 次仍停不掉则整步失败，不静默继续）。
+    if (-not (Stop-LeaUsh 15)) { throw 'running USH could not be stopped' }
+    # 拷到临时文件再替换：避免目标文件写一半被中断；重试前先清残留 .lea-tmp。
+    # 后缀用 .lea-tmp 而不用 .tmp：万一载荷里有 .tmp 文件，清残留时不会误删它。
+    Get-ChildItem -LiteralPath $installDir -File -Filter '*.lea-tmp' -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
+    }
     Get-ChildItem -LiteralPath $LeaDir -File | ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $installDir $_.Name) -Force
+      $dest = Join-Path $installDir $_.Name
+      $tmp = $dest + '.lea-tmp'
+      Copy-Item -LiteralPath $_.FullName -Destination $tmp -Force
+      Move-Item -LiteralPath $tmp -Destination $dest -Force
     }
   }
   if (-not $ok) { $failedStep = 'copy-files'; throw 'copy-files failed' }
@@ -348,6 +571,25 @@ try {
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     Set-Acl -LiteralPath $dataDir -AclObject $acl
+    # P2-02 问题 5：ACL 应用完回读核验——SYSTEM 与 Administrators 须有 FullControl，
+    # 否则本步算失败（r3：报告写 Access denied，ACL 损坏必须在此处暴露，不许带病继续）。
+    # DS 评审意见：IdentityReference 字符串比对受 OS 语言本地化影响，一律先转
+    # SID 再比对（转失败回落字符串）；Deny 不算；须带 ContainerInherit+ObjectInherit
+    # （否则新建文件继承不到）。
+    $checkAcl = Get-Acl -LiteralPath $dataDir
+    $sysRule = $false
+    $adminRule = $false
+    foreach ($r in $checkAcl.Access) {
+      $sid = ''
+      try { $sid = [string]($r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value) } catch { $sid = [string]$r.IdentityReference }
+      if ($r.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+      $hasFull = (($r.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)
+      $inherits = (($r.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit') -eq [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit')
+      if (-not $hasFull -or -not $inherits) { continue }
+      if ($sid -eq 'S-1-5-18' -or $sid -eq 'NT AUTHORITY\SYSTEM') { $sysRule = $true }
+      if ($sid -eq 'S-1-5-32-544' -or $sid -eq 'BUILTIN\Administrators') { $adminRule = $true }
+    }
+    if (-not $sysRule -or -not $adminRule) { throw 'data dir ACL verification failed: SYSTEM/Administrators FullControl missing after Set-Acl' }
   }
   if (-not $ok) { $failedStep = 'data-dir-acl'; throw 'data-dir-acl failed' }
 
@@ -396,19 +638,44 @@ try {
   # ⑦ 自检并上报
   $checks = Test-LeaSelfCheck
   if ($checks.all_ok) {
-    try { Remove-Item -LiteralPath (Join-Path $dataDir 'LEA_DEGRADED') -Force -ErrorAction Stop } catch { }
-    Write-InstallReport $checks 'ok' ("lea " + $leaVersion)
-    Write-LeaLog 'QFRemote LEA install done'
-    exit 0
+    # P2-02 问题 5：成功路径必须清掉陈旧标记并重写报告；清不掉／写不进即改判
+    # degraded（标记残留时 leaServiceInstalled() 恒 false，报 ok 是谎报）。
+    # 顺序是先写报告、后删标记（DS 评审意见）：报告写失败时标记还在，
+    # wrapper 凭标记判 degraded，不会因“标记已删＋报告没写成”误判已装。
+    $reportOk = Write-InstallReport $checks 'ok' ("lea " + $leaVersion)
+    if (-not $reportOk) {
+      Write-LeaLog 'install report write failed on success path; LEA_DEGRADED marker left in place (wrapper will see degraded)'
+      if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+      exit 1
+    }
+    $markerOk = Remove-StaleDegradedMarker
+    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+    if ($markerOk) {
+      Write-LeaLog 'QFRemote LEA install done'
+      exit 0
+    }
+    # 标记删不掉：报告已写 ok，但标记残留即应用仍判未装——把报告改写为
+    # degraded（报告通道刚证明是通的），并补写标记原因，再改判 degraded。
+    Write-LeaLog 'LEA install finished but stale marker could not be removed; treating as degraded'
+    $null = Write-InstallReport $checks 'degraded' 'stale-marker-remove-failed'
+    $null = Write-Degraded 'install-ok-but-marker-stuck'
+    exit 1
   } else {
     Write-LeaLog ('self-check failed: ' + (($checks.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) -join ','))
-    Write-Degraded 'self-check-failed'
-    Write-InstallReport $checks 'degraded' 'self-check-failed'
-    exit 0
+    $degradedOk = Write-Degraded 'self-check-failed'
+    $reportOk = Write-InstallReport $checks 'degraded' 'self-check-failed'
+    if (-not $degradedOk) { Write-LeaLog 'WARNING: LEA_DEGRADED marker could not be written; failure evidence is log-only' }
+    if (-not $reportOk) { Write-LeaLog 'WARNING: install-report.json could not be written; wrapper report check will see a stale report' }
+    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+    exit 1
   }
 } catch {
   Write-LeaLog ('LEA install failed at ' + $failedStep + ': ' + $_.Exception.Message)
-  Write-Degraded ('install-failed:' + $failedStep)
-  try { Write-InstallReport @{} 'degraded' ('install-failed:' + $failedStep) } catch { }
-  exit 0 # 失败不阻塞主程序：LEA_DEGRADED + 日志 + 报告已留痕
+  $markerOk = Write-Degraded ('install-failed:' + $failedStep)
+  $reportOk = $false
+  try { $reportOk = Write-InstallReport @{} 'degraded' ('install-failed:' + $failedStep) } catch { }
+  if (-not $markerOk) { Write-LeaLog 'WARNING: LEA_DEGRADED marker could not be written; failure evidence is log-only' }
+  if (-not $reportOk) { Write-LeaLog 'WARNING: install-report.json could not be written; wrapper report check will see a stale report' }
+  if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+  exit 1 # P2-02 问题 6：LEA 段失败返回非零；调用方 wrapper 只读标记/报告、自身仍 exit 0，主程序不阻塞
 }
