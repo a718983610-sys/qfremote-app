@@ -37,6 +37,10 @@
  *  不重载、f det 为 null 重载；
  *  P12 app.js doLogout 兜底为 [2000, 5000] 两轮、真可见性判定
  *  （getBoundingClientRect）、S.auth==='out' 守门。
+ *  P13 main.js 两处登出入口（qf-gate-logout / qf-logout-request）先等
+ *  cookie 清净（await clearConsoleSession）再 loadURL 回登录页
+ *  （P1-4a 第三轮：handleManualLogout 内清 cookie 是 fire-and-forget，
+ *  loadURL 立即走会与重载后 checkSession /me 竞速，r6 真机实测出首页）。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。跑法：node windows/test/logout-p1-test.js
  */
 const fs = require('fs');
@@ -168,6 +172,19 @@ const appJs = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'webapp
   const vis = body.includes('getBoundingClientRect()') && body.includes('r.width > 0') && body.includes('r.height > 0');
   const guard = body.includes("if (S.auth !== 'out') return;");
   ok('P12_doLogout_watchdog_two_rounds_visible_guard', twoRounds && vis && guard, { twoRounds, vis, guard });
+}
+// P13：主进程两处登出入口先等 cookie 清净再回登录页（P1-4a 第三轮）。
+{
+  const check = (name) => {
+    const at = mainJs.indexOf("ipcMain.handle('" + name + "'");
+    const body = at >= 0 ? mainJs.slice(at, at + 5000) : '';
+    const awaitAt = body.indexOf('await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL)');
+    const loadAt = body.indexOf("loadURL(CONSOLE_URL + 'logout')");
+    return awaitAt >= 0 && loadAt > awaitAt;
+  };
+  const gate = check('qf-gate-logout');
+  const req = check('qf-logout-request');
+  ok('P13_logout_awaits_cookie_clear_before_load', gate && req, { gate, req });
 }
 
 // P11：recoverConsoleViewAfterLogout 行为（vm＋mock，不需要 Electron）。

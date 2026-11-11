@@ -1736,6 +1736,18 @@ ipcMain.handle('qf-gate-logout', async () => {
   if (!r || r.response !== 0) return { ok: false, cancelled: true };
   await terminateSubSessions().catch(() => {});
   handleManualLogout();
+  // P1-4a（2026-11-11 第三轮）：登出清 cookie 须在回登录页之前完成。
+  // handleManualLogout 内是 fire-and-forget，loadURL 立即走会与重载后
+  // 页面的 checkSession /me 竞速；cookie 未清净时 /me 仍回 200，
+  // checkSession 把 S.auth 翻回 'in'、出登录态首页（r6 真机实测），
+  // 之后心跳 401 才落 BanLock 插页，表单迟迟不出。主进程登出路径不走
+  // webapp doLogout、不置 S._manualLogout/持久标记，checkSession 守门
+  // 对此路径无效，唯一确定性保障就是清净再 load。此处按
+  // gateTerminateSession 同款口径先等清净再 loadURL。
+  // clearConsoleSession 为本机 Electron cookies 操作、无网络 I/O，
+  // 正常毫秒级完成，不会久挂登出。
+  try { await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL); } catch (e) { /* ignore */ }
+  try { flushConsoleCookies(); } catch (e) { /* ignore */ }
   try { if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL + 'logout'); } catch (e) { /* ignore */ }
   try { showView('console'); } catch (e) { /* ignore */ }
   try { if (aboutWin && !aboutWin.isDestroyed()) aboutWin.close(); } catch (e) { /* ignore */ }
@@ -3641,6 +3653,18 @@ ipcMain.handle('qf-logout-request', async () => {
   if (!r || r.response !== 0) return { ok: false, cancelled: true };
   await terminateSubSessions().catch(() => {});
   handleManualLogout();
+  // P1-4a（2026-11-11 第三轮）：登出清 cookie 须在回登录页之前完成。
+  // handleManualLogout 内是 fire-and-forget，loadURL 立即走会与重载后
+  // 页面的 checkSession /me 竞速；cookie 未清净时 /me 仍回 200，
+  // checkSession 把 S.auth 翻回 'in'、出登录态首页（r6 真机实测），
+  // 之后心跳 401 才落 BanLock 插页，表单迟迟不出。主进程登出路径不走
+  // webapp doLogout、不置 S._manualLogout/持久标记，checkSession 守门
+  // 对此路径无效，唯一确定性保障就是清净再 load。此处按
+  // gateTerminateSession 同款口径先等清净再 loadURL。
+  // clearConsoleSession 为本机 Electron cookies 操作、无网络 I/O，
+  // 正常毫秒级完成，不会久挂登出。
+  try { await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL); } catch (e) { /* ignore */ }
+  try { flushConsoleCookies(); } catch (e) { /* ignore */ }
   try { if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL + 'logout'); } catch (e) { /* ignore */ }
   try { showView('console'); } catch (e) { /* ignore */ }
   try { if (aboutWin && !aboutWin.isDestroyed()) aboutWin.close(); } catch (e) { /* ignore */ }
