@@ -106,12 +106,34 @@ static void capture_free(capture_t *c) {
 
 /* ---------- WIC 编 PNG ---------- */
 
-/* 编到 IStream；成功返回 1。 */
+/* 编到 IStream；成功返回 1。
+ * r9：USH 管道线程（ush.c pipe_loop）从未调 CoInitializeEx——UIA 是
+ * 主线程建的、管道线程直接调虚表才“碰巧”能跑，但本函数调
+ * CoCreateInstance(CLSID_WICImagingFactory) 须调用线程已初始化 COM，
+ * 未初始化即 CO_E_NOTINITIALIZED，截图恒报 "PNG encode failed"
+ * （r8 裸形手动派发 ui.snapshot 47ms 即败，抓屏本身已成功）。
+ * 修法：本函数内按需 CoInitializeEx(COINIT_MULTITHREADED)；只有当
+ * 本次调用真的由我们初始化时才在返回前 CoUninitialize，保证进出
+ * 平衡。绝不在 pipe_loop 入口统一初始化 COM：UIA 对象建在主线程
+ * STA，管道线程一旦进 STA/MTA 就会走跨套间封送，而主线程阻塞在
+ * WaitForSingleObject 上不泵消息，会把现已能跑的 click/tree/input
+ * 全部挂死。MTA 内创建 WIC 工厂是支持的（WIC 组件 apartment-neutral）。
+ * RPC_E_CHANGED_MODE（线程已被别处以另一模式初始化）时不反初始化、
+ * 直接往下走。 */
 static int encode_png_to_stream(const capture_t *cap, IStream *stream) {
+    int com_init_here = 0;
+    HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    /* COM 规则：CoInitializeEx 每次成功调用（含返回 S_FALSE“已按同模
+     * 式初始化”）都会增加引用计数，必须配对一次 CoUninitialize。故用
+     * SUCCEEDED 判定——首轮复核误称 S_FALSE 不应反初始化，已由跟进复
+     * 核纠正并回退为 SUCCEEDED；RPC_E_CHANGED_MODE 等失败不置位。 */
+    if (SUCCEEDED(hr_init)) com_init_here = 1;
+    /* S_FALSE 同样增加引用计数，须配对 CoUninitialize（见上）；失败或
+     * RPC_E_CHANGED_MODE 时 com_init_here 保持 0，往下照常尝试创建。 */
     IWICImagingFactory *factory = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                   &IID_IWICImagingFactory, (void **)&factory);
-    if (FAILED(hr) || !factory) return 0;
+    if (FAILED(hr) || !factory) { if (com_init_here) CoUninitialize(); return 0; }
     int ok = 0;
     IWICBitmapEncoder *enc = NULL;
     IWICBitmapFrameEncode *frame = NULL;
@@ -137,6 +159,7 @@ done:
     if (frame) frame->lpVtbl->Release(frame);
     if (enc) enc->lpVtbl->Release(enc);
     if (factory) factory->lpVtbl->Release(factory);
+    if (com_init_here) CoUninitialize();
     return ok;
 }
 

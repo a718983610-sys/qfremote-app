@@ -656,6 +656,108 @@ const mockChannel = {
   const dF = await core.dispatchEnvelope(failChannel, envF, { timeoutMs: 5000 });
   t('H15 dispatch 回 {ok:false} → 不成功', dF.ok === false);
 
+  // ---------- r9：runcommands transcript 回包解析 ----------
+  // r8 实证：runcommands 回包是整段控制台 transcript（banner＋回显命令
+  // 行＋客户端 JSON 行＋尾部 "C:\...>exit" 提示行），旧 parse 只取末行
+  // 恒为提示行 → API 四条全 502 bad-client-output，而 LEA 侧 click
+  // 78ms 已成功。修法：逐行扫描取首个含布尔 ok 的 JSON 对象行。
+  const TRANSCRIPT_OK = [
+    'Microsoft Windows [Version 10.0.20348.5622]',
+    '(c) Microsoft Corporation. All rights reserved.',
+    '',
+    'C:\\Program Files\\Mesh Agent>"C:\\Program Files\\QFR\\LEA\\qf-lea-client.exe" dispatch <b64>',
+    JSON.stringify({ ok: true, code: 'done', request_id: 'req-r9-1', duration_ms: 78, result: { method: 'coordinate' } }),
+    '',
+    'C:\\Program Files\\Mesh Agent>exit',
+    '',
+  ].join('\r\n');
+  t('r9 transcript 末行是提示行时仍解析出客户端 JSON', core.parseClientOutput(TRANSCRIPT_OK).ok === true);
+  t('r9 transcript 解析结果与客户端 JSON 一致', core.parseClientOutput(TRANSCRIPT_OK).result.code === 'done');
+  const TRANSCRIPT_FAIL = [
+    'Microsoft Windows [Version 10.0.20348.5622]',
+    'C:\\Program Files\\Mesh Agent>"C:\\Program Files\\QFR\\LEA\\qf-lea-client.exe" dispatch <b64>',
+    JSON.stringify({ ok: false, code: 'QFR_USH_FAILED', request_id: 'req-r9-2', detail: 'PNG encode failed' }),
+    'C:\\Program Files\\Mesh Agent>exit',
+  ].join('\r\n');
+  const pf = core.parseClientOutput(TRANSCRIPT_FAIL);
+  t('r9 transcript 里 {ok:false} 判失败且带回真实 code', pf.ok === false && pf.clientResult && pf.clientResult.code === 'QFR_USH_FAILED');
+  t('r9 只有 banner／提示行、无 JSON 行判失败', core.parseClientOutput('Microsoft Windows [Version 10.0.20348.5622]\r\nC:\\Program Files\\Mesh Agent>exit\r\n').ok === false);
+  t('r9 JSON 数组行被跳过、其后对象行仍被解析', core.parseClientOutput('[1,2]\r\n' + JSON.stringify({ ok: true, code: 'done' }) + '\r\n').ok === true);
+  // dispatch 层：transcript 首试即通，不重试
+  const transcriptChannel = { async runCommand() { return TRANSCRIPT_OK; }, async nodeOnline() { return true; } };
+  const envT = core.buildEnvelope({
+    requestId: 'req-r9-1', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-r9-1',
+    command: 'ui.click', params: { x: 500, y: 500 }, timeoutMs: 5000,
+  });
+  const dT = await core.dispatchEnvelope(transcriptChannel, envT, { timeoutMs: 5000 });
+  t('r9 dispatch 解析 transcript 成功且只发 1 次', dT.ok === true && dT.attempts === 1);
+  // dispatch 层：客户端 {ok:false} 不重试、透传真实 code
+  const failTranscriptChannel = { async runCommand() { return TRANSCRIPT_FAIL; }, async nodeOnline() { return true; } };
+  const envTF = core.buildEnvelope({
+    requestId: 'req-r9-2', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-r9-2',
+    command: 'ui.snapshot', params: {}, timeoutMs: 5000,
+  });
+  const dTF = await core.dispatchEnvelope(failTranscriptChannel, envTF, { timeoutMs: 5000 });
+  t('r9 dispatch 回客户端失败不重试且透传 code', dTF.ok === false && dTF.attempts === 1 && dTF.clientResult && dTF.clientResult.code === 'QFR_USH_FAILED');
+  // dispatch 层：传输层异常首次失败，重试换新信封（新 request_id／nonce，复用同一幂等键）后成功
+  const seenDispatch = [];
+  const flakyTranscript = {
+    async runCommand(nodeId, cmd) {
+      if (!cmd.includes(' dispatch ')) return '';
+      seenDispatch.push(cmd);
+      if (seenDispatch.length === 1) throw new Error('svc-down');
+      return TRANSCRIPT_OK;
+    },
+    async nodeOnline() { return true; },
+  };
+  const envR = core.buildEnvelope({
+    requestId: 'req-r9-3', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-r9-3',
+    command: 'ui.tree', params: { max_depth: 2, max_nodes: 50 }, timeoutMs: 5000,
+  });
+  const dR = await core.dispatchEnvelope(flakyTranscript, envR, { timeoutMs: 5000 });
+  const decR1 = JSON.parse(Buffer.from(seenDispatch[0].trim().split(/\s+/).pop(), 'base64').toString('utf8'));
+  const decR2 = JSON.parse(Buffer.from(seenDispatch[1].trim().split(/\s+/).pop(), 'base64').toString('utf8'));
+  t('r9 传输异常重试后成功', dR.ok === true && dR.attempts === 2 && seenDispatch.length === 2);
+  t('r9 重试轮换 request_id／nonce 但复用同一幂等键（旧信封重发必撞 REPLAY_DETECTED；轮换幂等键会重复执行）',
+    decR2.request_id === 'req-r9-3-r2' && decR2.idempotency_key === 'idem-r9-3' && decR2.nonce !== decR1.nonce && decR2.signature !== decR1.signature);
+  // r9（DS 复核）：回包无 JSON 行时是否已执行未知，不自动重试（只发 1 次），防重复执行
+  const seenGarbage = [];
+  const garbageChannel = {
+    async runCommand(nodeId, cmd) {
+      if (!cmd.includes(' dispatch ')) return '';
+      seenGarbage.push(cmd);
+      return 'garbage-no-json\r\nC:\\Program Files\\Mesh Agent>exit\r\n';
+    },
+    async nodeOnline() { return true; },
+  };
+  const envG = core.buildEnvelope({
+    requestId: 'req-r9-5', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-r9-5',
+    command: 'ui.click', params: { x: 1, y: 1 }, timeoutMs: 5000,
+  });
+  const dG = await core.dispatchEnvelope(garbageChannel, envG, { timeoutMs: 5000 });
+  t('r9 回包无 JSON 行不重试（只发 1 次）', dG.ok === false && dG.attempts === 1 && seenGarbage.length === 1);
+  // dispatch 层：批量步不重试（同 seq 重发撞 batch-seq 单调性）
+  const seenBatch = [];
+  const batchFlaky = {
+    async runCommand(nodeId, cmd) {
+      if (!cmd.includes(' dispatch ')) return '';
+      seenBatch.push(cmd);
+      return 'garbage-no-json\r\n';
+    },
+    async nodeOnline() { return true; },
+  };
+  const envB = core.buildEnvelope({
+    requestId: 'req-r9-4-1', batchId: 'batch_r9', seq: 1, deviceId: DEV, accountId: USER,
+    keyId: g5.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-r9-4-1',
+    command: 'ui.click', params: { x: 1, y: 1 }, timeoutMs: 5000,
+  });
+  const dB = await core.dispatchEnvelope(batchFlaky, envB, { timeoutMs: 5000 });
+  t('r9 批量步坏回包不重试（只发 1 次）', dB.ok === false && seenBatch.length === 1);
+
   // ---------- H11：nonce／幂等落盘持久化（重启不丢） ----------
   core.idemRecord(USER, g5.record.key_id, 'idem-persist-1', { status: 'SUCCEEDED', result: { job_id: 'job_p1' } });
   core.nonceCheck(g5.record.key_id, 'persist-nonce-001');

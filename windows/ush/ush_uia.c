@@ -400,6 +400,11 @@ static IUIAutomationElement *find_scope_window(IUIAutomationElement *root,
 static int find_element(IUIAutomationElement *scope, const ush_target_t *t,
                         DWORD deadline_ms, IUIAutomationElement **out) {
     *out = NULL;
+    /* r9：三种元素定位策略（AutomationId／Name／ClassName）一个都没给
+     * 时（如只有 x/y 坐标的 ui.input），旧实现在 while 里空转满整个
+     * deadline 才返回 0——坐标 input 恒以 5000ms 超时收场，且 LEA 侧
+     * 同时报 QFR_LEA_TIMEOUT。无策略即立即返回 0，由调用方走坐标分支。 */
+    if (!t->automation_id[0] && !t->name[0] && !t->class_name[0]) return 0;
     DWORD start = GetTickCount();
     while (GetTickCount() - start < deadline_ms) {
         /* 策略 1：AutomationId */
@@ -774,6 +779,87 @@ static void send_unicode_text(const char *utf8) {
     free(w);
 }
 
+/* r9：坐标换算（与 ui.click 策略 4 同口径）：窗口内相对坐标按 scope
+ * 窗口矩形换算；绝对坐标默认物理像素，coords=logical 时按 scope 窗口
+ * DPI 换算；无窗口句柄的相对坐标用主屏尺寸估算。返回 1 可算出点。 */
+static int target_point(const ush_target_t *t, IUIAutomationElement *scope, POINT *pt) {
+    if (!t || !pt) return 0;
+    HWND hwnd = element_window(scope);
+    if (t->has_rel && hwnd) {
+        RECT wr;
+        if (GetWindowRect(hwnd, &wr)) {
+            pt->x = (LONG)(wr.left + t->rel_x * (wr.right - wr.left));
+            pt->y = (LONG)(wr.top + t->rel_y * (wr.bottom - wr.top));
+            return 1;
+        }
+    }
+    if (t->has_xy) {
+        pt->x = t->x;
+        pt->y = t->y;
+        if (strcmp(t->coords, "logical") == 0 && hwnd) {
+            UINT dpi = GetDpiForWindow(hwnd);
+            if (dpi == 0) dpi = 96;
+            pt->x = (LONG)(pt->x * dpi / 96);
+            pt->y = (LONG)(pt->y * dpi / 96);
+        }
+        return 1;
+    }
+    if (t->has_rel) {
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        pt->x = (LONG)(t->rel_x * sw);
+        pt->y = (LONG)(t->rel_y * sh);
+        return 1;
+    }
+    return 0;
+}
+
+/* r9：坐标打字兜底——ElementFromPoint 取不到元素时（如任务栏搜索框
+ * 这类 UIA 树里难定位的控件），点一下该坐标获焦再 SendInput 打字，
+ * 随后重取该点元素读 Value 确认。返回 1 已处理（调用方直接返回），
+ * data_json 已填；返回 0 未处理（调用方继续走元素路径或报失败）。 */
+static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *scope,
+                                   const char *text, int submit,
+                                   char *data_json, size_t data_size) {
+    POINT pt;
+    if (!target_point(t, scope, &pt)) return 0;
+    HWND hwnd = element_window(scope);
+    bring_window_forward(hwnd);
+    send_mouse_click(pt);
+    Sleep(150); /* 与坐标点击后等属性稳定的 150ms 同口径 */
+    send_unicode_text(text);
+    if (submit) {
+        INPUT in;
+        memset(&in, 0, sizeof(in));
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = VK_RETURN;
+        SendInput(1, &in, sizeof(INPUT));
+        in.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &in, sizeof(INPUT));
+    }
+    /* 确认：重取该点元素读 Value，比对整串。 */
+    int confirmed = 0;
+    IUIAutomationElement *el = NULL;
+    if (g_auto->lpVtbl->ElementFromPoint(g_auto, pt, &el) == S_OK && el) {
+        char cur[4096];
+        get_str_prop(el, UIA_ValueValuePropertyId, cur, sizeof(cur));
+        if (cur[0]) {
+            size_t tl = strlen(text), cl = strlen(cur);
+            confirmed = (cl == tl && strncmp(cur, text, tl) == 0);
+        }
+        el->lpVtbl->Release(el);
+    }
+    if (confirmed) {
+        snprintf(data_json, data_size,
+            "{\"method\":\"coordinate-click-type\",\"confirmed\":true}");
+    } else {
+        snprintf(data_json, data_size,
+            "{\"method\":\"coordinate-click-type\",\"confirmed\":false,"
+            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
+    }
+    return 1;
+}
+
 int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
                  char *err_code, size_t err_code_size,
                  char *err_text, size_t err_text_size,
@@ -815,8 +901,40 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     if (window_title && window_title_size) {
         get_str_prop(scope, UIA_NamePropertyId, window_title, window_title_size);
     }
+    /* r9：定位分三路——① 有元素定位字段时按元素找；② 只有坐标时
+     * （r8 的 {"text":"r8probe","x":200,"y":736} 即此路）先用
+     * ElementFromPoint 取该点元素，取不到则点坐标获焦再打字；③ 两者
+     * 皆无直接报 NOT_FOUND，不再空转满 deadline。 */
     IUIAutomationElement *el = NULL;
-    if (!find_element(scope, &t, deadline, &el)) {
+    int have_locator = (t.automation_id[0] || t.name[0] || t.class_name[0]);
+    if (have_locator) {
+        if (!find_element(scope, &t, deadline, &el)) {
+            scope->lpVtbl->Release(scope);
+            strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
+            snprintf(err_text, err_text_size, "input element not found");
+            return 0;
+        }
+    } else if (t.has_rel || t.has_xy) {
+        POINT pt;
+        if (!target_point(&t, scope, &pt)) {
+            scope->lpVtbl->Release(scope);
+            strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
+            snprintf(err_text, err_text_size, "input coordinate cannot be resolved");
+            return 0;
+        }
+        if (g_auto->lpVtbl->ElementFromPoint(g_auto, pt, &el) != S_OK || !el) {
+            el = NULL;
+            /* 取不到元素：点坐标获焦再打字（任务栏搜索框即此路）。 */
+            if (input_by_click_and_type(&t, scope, text, submit, data_json, data_size)) {
+                scope->lpVtbl->Release(scope);
+                return 1;
+            }
+            scope->lpVtbl->Release(scope);
+            strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
+            snprintf(err_text, err_text_size, "input element not found at point");
+            return 0;
+        }
+    } else {
         scope->lpVtbl->Release(scope);
         strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
         snprintf(err_text, err_text_size, "input element not found");

@@ -1291,57 +1291,114 @@ function createLeaCore(opts) {
     return 'powershell -NoProfile -NonInteractive -Command "[IO.File]::WriteAllBytes(\'' + leaInboxPath(fileName) + '\',[Convert]::FromBase64String(\'' + b64 + '\'))"';
   }
   const ENVELOPE_INLINE_LIMIT = 6000; // 信封 base64 超此长改两步写 inbox
+  // r9：重试须换全新信封——同一信封重发必被 LEA 幂等／重放层以
+  // QFR_REPLAY_DETECTED 拒绝（r8 实证：tree/click 重试档 audit 全为
+  // REPLAY_DETECTED，duration 0），旧“原样重发一次”重试永无成功可能。
+  // 仅单条信封可重试：批量步重发同 seq 会撞 batch-seq 单调性（seq<=
+  // last_seq 即判重放），故 batch_id 非空时不重试。危险命令不重试
+  // （调用方 maxAttempts 已为 1，此处再守一道）。
+  // 新信封：request_id 加 '-r2' 后缀、新 nonce、新签名（buildEnvelope
+  // 重签）；idempotency_key 保持不变——DS 跟进复核纠正：轮换幂等键
+  // 等于发起了新请求，首试若已执行会被重复执行；复用同一幂等键时，
+  // 首试已执行则 LEA 直接回幂等缓存（replayed-cached），不重复执行；
+  // 首试未达 LEA 则正常执行。重放检查认（request_id，nonce），新
+  // request_id＋新 nonce 可过重放关。request_id 加后缀超 128 字符
+  // 即不重试。
+  function freshRetryEnvelope(env) {
+    if (!env || env.batch_id) return null;
+    if (typeof env.request_id !== 'string' || typeof env.idempotency_key !== 'string') return null;
+    if (env.request_id.length + 3 > 128) return null;
+    try {
+      return buildEnvelope({
+        requestId: env.request_id + '-r2', batchId: null, seq: 1,
+        deviceId: env.device_id, accountId: env.account_id, keyId: env.api_key_id,
+        bindingEpoch: env.binding_epoch, idempotencyKey: env.idempotency_key,
+        command: env.command, params: env.params || {}, timeoutMs: env.timeout_ms,
+      });
+    } catch (e) { return null; }
+  }
   async function dispatchEnvelope(channel, env, optsD) {
     optsD = optsD || {};
     // H21：下发前先把本机吊销表推到最新全集（best-effort，不拦本次命令；
     // 同步失败只记日志，下次下发重试；admit 是第一层控制）。
     try { await syncRevocations(channel, env.device_id); } catch (e) { log({ ev: 'lea-revocation-sync-failed', device_id: env.device_id, err: String(e && e.message) }); }
     const spec = COMMANDS[env.command] || { dangerous: false };
-    const b64 = Buffer.from(JSON.stringify(env), 'utf8').toString('base64');
     const timeoutMs = optsD.timeoutMs || DISPATCH_TIMEOUT_MS;
     let attempts = 0;
     const maxAttempts = spec.dangerous ? 1 : 2; // 危险命令禁自动重试
     let lastErr = null;
+    let retryable = false; // 本轮失败是否可重试（见下）
+    let curEnv = env;
     while (attempts < maxAttempts) {
       attempts++;
+      retryable = false;
       try {
+        const b64 = Buffer.from(JSON.stringify(curEnv), 'utf8').toString('base64');
         let out;
         if (b64.length <= ENVELOPE_INLINE_LIMIT) {
-          out = await channel.runCommand(env.device_id, leaClientCmd(b64), timeoutMs);
+          out = await channel.runCommand(curEnv.device_id, leaClientCmd(b64), timeoutMs);
         } else {
-          const fn = env.request_id.replace(/[^A-Za-z0-9_-]/g, '_') + '.json';
-          await channel.runCommand(env.device_id, leaInboxWriteCmd(fn, b64), timeoutMs);
-          out = await channel.runCommand(env.device_id,
+          const fn = curEnv.request_id.replace(/[^A-Za-z0-9_-]/g, '_') + '.json';
+          await channel.runCommand(curEnv.device_id, leaInboxWriteCmd(fn, b64), timeoutMs);
+          out = await channel.runCommand(curEnv.device_id,
             LEA_CLIENT_EXE + ' apply "' + leaInboxPath(fn) + '"', timeoutMs);
         }
-        // 回传：stdout 应为一行 JSON；解析失败即视为回传失败，重试 2 次内
-        // 仍失败则按 UNKNOWN 返回（不谎称成功，见 dispatch 内 timeout 分支）。
+        // 回传：stdout 应含客户端 JSON 行；解析失败（无 JSON 行）即视为
+        // 回传失败（DS 复核：状态未知，不自动重试，见下）。
         const parsed = parseClientOutput(out);
         if (parsed.ok) return { ok: true, result: parsed.result, attempts, raw: out };
+        // r9：客户端已回包且执行失败（ok:false）是终态，不是回传故障：
+        // 不重试（同信封重试撞 REPLAY_DETECTED，新信封重试则会把一次已
+        // 失败的执行再跑一遍），把真实错误带回调用方透传。
+        if (parsed.clientResult) {
+          return { ok: false, error: new Error('client:' + String(parsed.clientResult.code || 'failed')), clientResult: parsed.clientResult, attempts };
+        }
         lastErr = new Error('bad-client-output');
+        // DS v4-pro 复核（r9）：回包无 JSON 行时是否已执行未知——重试会
+        // 把可能已执行过的命令再跑一遍（ui.click/ui.input 重复执行），
+        // 破坏幂等。故解析失败不自动重试，由调用方持新幂等键显式重试。
       } catch (e) {
         lastErr = e;
         if (e && /timeout/i.test(String(e.message || ''))) {
           // 下发超时：不再重试，交由 job 异步（结果 UNKNOWN）。
           return { ok: false, timeout: true, error: e, attempts };
         }
+        // 传输层异常（未收到回包，如 svc-down）：命令大概率未执行，可换
+        // 新信封重试一次。
+        retryable = true;
       }
-      if (attempts < maxAttempts) await sleep(200);
+      // r9：重试须换全新信封（freshRetryEnvelope），原样重发必被判重放。
+      // 换不出新信封（批量步／token 已满长）或本轮失败不可重试即停：
+      // 此处必须 break——否则 while 条件会让同一信封再跑一次。
+      if (attempts >= maxAttempts || !retryable) break;
+      const fresh = freshRetryEnvelope(curEnv);
+      if (!fresh) break;
+      curEnv = fresh;
+      await sleep(200);
     }
     return { ok: false, error: lastErr, attempts };
   }
   function parseClientOutput(out) {
     if (typeof out !== 'string') return { ok: false };
-    const line = out.trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || '';
-    try {
-      const v = JSON.parse(line);
-      // H15：严格判成功——只认顶层 ok===true 的 JSON 对象。{ok:false}、
-      // 非对象、非 JSON 文本一律判失败：此前任意 JSON 对象（含 {ok:false}）
-      // 都当成功，handleExecute 随之把 job 记 SUCCEEDED 且顶层回 ok:true。
-      if (v && typeof v === 'object' && !Array.isArray(v) && v.ok === true) {
-        return { ok: true, result: v };
-      }
-    } catch (e) {}
+    // r9：runcommands 回包是整段控制台 transcript（banner＋回显的命令
+    // 行＋客户端 JSON 行＋尾部 "C:\...>exit" 提示行），旧实现只取最后
+    // 一非空行——恒为提示行，JSON.parse 恒败，API 下发四条全 502
+    // bad-client-output（r8 实证：LEA 侧 click 78ms 已成功执行，服务端
+    // 仍判下发失败；手动派发能通，只因人眼从 transcript 里挑出了 JSON 行）。
+    // 修法：逐行扫描，取首个能解析为含布尔 ok 字段的 JSON 对象行。
+    const lines = out.split(/\r?\n/);
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line[0] !== '{') continue;
+      let v;
+      try { v = JSON.parse(line); } catch (e) { continue; }
+      if (!v || typeof v !== 'object' || Array.isArray(v) || typeof v.ok !== 'boolean') continue;
+      // H15：只认 ok===true 为成功；ok===false 是客户端终态失败，把真实
+      // 错误带回（不再谎报 bad-client-output），由 dispatchEnvelope 不重
+      // 试、handleExecute 按客户端 code 透传。
+      if (v.ok === true) return { ok: true, result: v };
+      return { ok: false, clientResult: v };
+    }
     return { ok: false };
   }
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }

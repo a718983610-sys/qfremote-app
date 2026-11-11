@@ -167,6 +167,17 @@ function createLeaRoutes(core, channel, deps) {
       auditCall(Object.assign({}, baseAudit, { result: 'timeout-async', job_id: job.job_id, error_code: ERR.UNKNOWN, duration_ms: durationMs }));
       return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'UNKNOWN', code: ERR.UNKNOWN, msg: '执行超时，已转异步任务；结果未知，请用 job_id 查询或快照确认，勿直接重试危险操作。' });
     }
+    // r9：客户端已回包且执行失败（ok:false）时透传其真实 code（如
+    // QFR_USH_FAILED），不再一律谎报 bad-client-output；job／幂等记
+    // 该真实码，调用方据此排查而非重查下发通道。
+    if (disp.clientResult && typeof disp.clientResult.code === 'string' && /^QFR_[A-Z0-9_]+$/.test(disp.clientResult.code)) {
+      const ccode = disp.clientResult.code;
+      const cdetail = typeof disp.clientResult.detail === 'string' ? disp.clientResult.detail : '';
+      core.updateJob(job.job_id, { status: 'FAILED', error_code: ccode, result: disp.clientResult });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: ccode, result: disp.clientResult } }, core.IDEM_NS.EXEC);
+      auditCall(Object.assign({}, baseAudit, { result: 'client-failed', job_id: job.job_id, error_code: ccode, duration_ms: durationMs }));
+      return fail(res, 502, ccode, '执行失败：' + ccode + (cdetail ? '（' + cdetail + '）' : ''));
+    }
     core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' });
     core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.EXEC);
     auditCall(Object.assign({}, baseAudit, { result: 'dispatch-failed', job_id: job.job_id, error_code: 'QFR_LEA_DISPATCH_FAILED', duration_ms: durationMs }));
@@ -302,9 +313,12 @@ function createLeaRoutes(core, channel, deps) {
           return;
         }
         if (!disp.ok) {
-          results.push({ seq: i + 1, command, ok: false, code: 'QFR_LEA_DISPATCH_FAILED' });
-          setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED', results, steps_done: i + 1 });
-          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.STEP);
+          // r9：客户端已回包的终态失败透传其真实 code（与单条 handleExecute 同口径）。
+          const bcode = (disp.clientResult && typeof disp.clientResult.code === 'string' && /^QFR_[A-Z0-9_]+$/.test(disp.clientResult.code))
+            ? disp.clientResult.code : 'QFR_LEA_DISPATCH_FAILED';
+          results.push({ seq: i + 1, command, ok: false, code: bcode });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: bcode, results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: bcode } }, core.IDEM_NS.STEP);
           core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
           return;
         }
