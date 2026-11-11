@@ -1224,8 +1224,17 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
                 CancelIo(pipe);
                 break;
             }
-            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) break;
+            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) {
+                /* r10：USH 写完响应即 DisconnectNamedPipe，挂起的读可
+                 * 以 ERROR_BROKEN_PIPE 完成，与 got==0 同款视为帧结束；
+                 * 已收数据以已收内容为准，终判仍由 lea_ush_response_ok
+                 * 做。其它错误仍判失败。 */
+                if (GetLastError() == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+                break;
+            }
         } else if (!r) {
+            /* r10：同上——无挂起读时对端已断开亦为帧结束。 */
+            if (GetLastError() == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
             break;
         }
         /* T24 同款（M-B 修法，同根）：got==0（对端关闭）时，若已收到部分
@@ -1238,8 +1247,17 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
         memcpy(resp + total, chunk, take);
         total += take;
         resp[total] = '\0';
-        if (memchr(chunk, '\n', got)) { ok = 1; break; }
-        /* 短读继续读：只有读到换行、对端关闭或超时才算完成。 */
+        /* r10 tree 修复（方案②改良版，DS v4-pro 复核）：USH 响应是
+         * "<JSON>\n"，但 ui.tree 的 JSON 内含 pretty-print 字面换行，
+         * 旧逻辑见第一个 '\n' 即停，只收到 `"tree":` 前的半行。
+         * 改为帧完整才停：累计内容须为一个完整 JSON 文档且末字节为
+         * 帧尾 '\n'（lea_json_is_valid 为严格解析：未闭合／尾部多余
+         * 内容／串内裸控制符一律判不完整，继续读；块边界恰停在 '}'
+         * 后、无 '\n' 时亦继续读，防前缀完整提前停）。未见帧尾时，
+         * 对端关闭（got==0／ERROR_BROKEN_PIPE）或超时／64KB 上限
+         * 仍可结束，终判由 lea_ush_response_ok 做。 */
+        if (total > 0 && resp[total - 1] == '\n' && lea_json_is_valid(resp)) { ok = 1; break; }
+        /* 短读继续读：只有帧完整、对端关闭或超时才算完成。 */
     }
     CloseHandle(ev);
     CloseHandle(pipe);
@@ -1247,8 +1265,10 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
         snprintf(detail, detail_size, "%s", "ush-read-timeout-or-empty");
         return 0;
     }
-    char *nl = strchr(resp, '\n');
-    if (nl) *nl = '\0';
+    /* r10：只剥末尾帧尾换行，不再截断首个 '\n'（tree 内含换行）。 */
+    while (total > 0 && (resp[total - 1] == '\n' || resp[total - 1] == '\r')) {
+        resp[--total] = '\0';
+    }
     return 1;
 }
 

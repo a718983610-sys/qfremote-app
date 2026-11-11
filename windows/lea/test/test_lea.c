@@ -2322,6 +2322,76 @@ int main(void) {
         CHECK_STR_EQ(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256-stream-56byte");
     }
 
+    /* ---------- r10 ui.tree 帧定界（LEA 侧②改良版） ---------- */
+    /* 判定谓词：ush_forward 新逻辑每收一块即判“累计内容为完整 JSON
+     * 文档且末字节为帧尾 '\n'”才停。以下用 lea_json_is_valid（与
+     * 读循环同一谓词）＋ lea_ush_response_ok（终判）覆盖。 */
+    {
+        /* 忠实于 ush_uia.c 输出形态＋r9 实测头：head 以 "tree":\n 结尾，
+         * 节点间 "\n"＋缩进，末尾 "]}}\n"（根节点闭合＋data 闭合＋外层闭合）。 */
+        const char *tree_multi =
+            "{\"ok\":true,\"code\":\"done\",\"request_id\":\"r9-mwchlw6g9d8c31\","
+            "\"duration_ms\":218,\"data\":{\"truncated\":false,\"nodes\":45,\"tree\":\n"
+            "{\"name\":\"Program Manager\",\"control_type\":\"Pane\",\"control_type_id\":50033,"
+            "\"automation_id\":\"\",\"class_name\":\"Progman\",\"rect\":[0,0,1024,768],"
+            "\"enabled\":true,\"children\":[\n"
+            "  {\"name\":\"Desktop\",\"control_type\":\"Pane\",\"control_type_id\":50033,"
+            "\"automation_id\":\"\",\"class_name\":\"SHELLDLL_DefView\",\"rect\":[0,0,1024,768],"
+            "\"enabled\":true,\"children\":[\n"
+            "    {\"name\":\"Recycle Bin\",\"control_type\":\"ListItem\",\"control_type_id\":50007,"
+            "\"automation_id\":\"\",\"class_name\":\"\",\"rect\":[10,10,80,90],"
+            "\"enabled\":true,\"children\":[]}\n"
+            "  ]},\n"
+            "  {\"name\":\"Taskbar\",\"control_type\":\"ToolBar\",\"control_type_id\":50015,"
+            "\"automation_id\":\"\",\"class_name\":\"Shell_TrayWnd\",\"rect\":[0,728,1024,40],"
+            "\"enabled\":true,\"children\":[]}\n"
+            "]}}}\n";
+        int uok = 0;
+        CHECK(lea_json_is_valid(tree_multi), "r10-tree-multiline-valid");
+        CHECK(lea_ush_response_ok(tree_multi, &uok) && uok == 1, "r10-tree-multiline-ok-true");
+        /* 旧逻辑输出：截断在首个 '\n'（即 "tree": 之后），r9 实测半行。 */
+        const char *tree_trunc =
+            "{\"ok\":true,\"code\":\"done\",\"request_id\":\"r9-mwchlw6g9d8c31\","
+            "\"duration_ms\":218,\"data\":{\"truncated\":false,\"nodes\":45,\"tree\":";
+        CHECK(!lea_json_is_valid(tree_trunc), "r10-tree-truncated-invalid");
+        CHECK(!lea_ush_response_ok(tree_trunc, &uok), "r10-tree-truncated-no-ok");
+        /* 块边界恰停在 '}' 后、无帧尾 '\n'：谓词虽判完整，读循环仍须
+         * 等帧尾（末字节非 '\n' 即继续读），防前缀完整提前停。 */
+        static char tree_noeol[4096];
+        size_t tl = strlen(tree_multi);
+        CHECK(tl > 1 && tl < sizeof(tree_noeol), "r10-tree-fixture-size");
+        memcpy(tree_noeol, tree_multi, tl - 1); /* 去掉末尾 '\n' */
+        tree_noeol[tl - 1] = '\0';
+        CHECK(lea_json_is_valid(tree_noeol), "r10-tree-noeol-still-valid");
+        CHECK(tree_noeol[tl - 2] != '\n', "r10-tree-noeol-last-byte-not-nl");
+        /* 单行快照响应：旧逻辑与新逻辑均一次通过（回归）。 */
+        const char *snap_single =
+            "{\"ok\":true,\"code\":\"done\",\"request_id\":\"r9-snap\","
+            "\"duration_ms\":120,\"data\":{\"path\":\"ush-20261112-030259-681-12028.png\"}}\n";
+        CHECK(lea_json_is_valid(snap_single), "r10-snap-single-valid");
+        CHECK(lea_ush_response_ok(snap_single, &uok) && uok == 1, "r10-snap-single-ok-true");
+        /* 非法输入一律不完整：垃圾／空／串内裸换行（控制符）／
+         * 截断在值中间。 */
+        CHECK(!lea_json_is_valid("not json\n"), "r10-garbage-invalid");
+        CHECK(!lea_json_is_valid(""), "r10-empty-invalid");
+        CHECK(!lea_json_is_valid("{\"ok\":true,\"code\":\"do\nne\"}\n"), "r10-raw-lf-in-string-invalid");
+        CHECK(lea_json_is_valid("{\"ok\":true,\"code\":\"do\\nne\"}\n"), "r10-escaped-lf-in-string-valid");
+        CHECK(!lea_json_is_valid("{\"ok\":true,\"code\":\"done\",\"data\":{\"a\":[1,2,"), "r10-mid-value-truncated-invalid");
+        /* 12 层嵌套 children：tree max_depth 10 的实际嵌套（约 23 层）
+         * 远在解析器 64 层上限内。 */
+        static char deep[4096];
+        size_t doff = 0;
+        doff += (size_t)snprintf(deep + doff, sizeof(deep) - doff, "{\"ok\":true,\"data\":");
+        for (int i = 0; i < 12; i++)
+            doff += (size_t)snprintf(deep + doff, sizeof(deep) - doff, "{\"children\":[");
+        doff += (size_t)snprintf(deep + doff, sizeof(deep) - doff, "{}");
+        for (int i = 0; i < 12; i++)
+            doff += (size_t)snprintf(deep + doff, sizeof(deep) - doff, "]}");
+        doff += (size_t)snprintf(deep + doff, sizeof(deep) - doff, "}\n");
+        CHECK(doff < sizeof(deep), "r10-deep-fixture-size");
+        CHECK(lea_json_is_valid(deep), "r10-deep-12-valid");
+    }
+
     printf("\n==== LEA core tests: %d passed, %d failed ====\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
