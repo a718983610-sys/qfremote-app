@@ -124,11 +124,11 @@ const appJs = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'webapp
   const watch = body.includes("setTimeout(() => {") && body.includes("document.getElementById('loginForm')") && hasWatchdogTimer;
   ok('P6_doLogout_race_flag_watchdog', race && flag && watch, { race, flag, watch });
 }
-// P7：checkSessionInner 守门。
+// P7：checkSessionInner 守门（a1f3d44 后为内存标记或持久标记任一即守门）。
 {
   const at = appJs.indexOf('async function checkSessionInner(');
   const head = at >= 0 ? appJs.slice(at, at + 800) : '';
-  ok('P7_checkSession_guards_manualLogout', head.includes('if (S._manualLogout) return false;'), {});
+  ok('P7_checkSession_guards_manualLogout', head.includes('if (S._manualLogout || ManualLogout.is()) return false;'), {});
 }
 // P8：doLogin 成功路径写 fresh 标记并清标记。
 {

@@ -1188,6 +1188,16 @@ function createWindow() {
         cb({});
       });
     } catch (e) { /* ignore */ }
+    // 登录成功检测（第三路：/qf-login 响应头一到就调度补跑）——见
+    // shouldScheduleLoginNotifyCheck。页内导航登录不产生
+    // did-navigate-in-page 时，此路兜底让 processAuthPage 看到登录。
+    try {
+      ses.webRequest.onHeadersReceived({ urls: ['*://' + ALLOWED_HOST + '/qf-login*'] }, (details, cb) => {
+        try { if (shouldScheduleLoginNotifyCheck(details)) scheduleLoginNotifyCheck(); } catch (e) { /* ignore */ }
+        // 只观察不改头：原样透传响应头（部分 Electron 版本上 cb({}) 可能清空头）。
+        cb({ responseHeaders: details.responseHeaders });
+      });
+    } catch (e) { /* ignore */ }
   }
   // 2.3.2 版本头（网页侧出口）：控制台/好友/聊天/扩展页等经本会话发往
   // 自家服务的页面请求统一带 x-qf-client-version。只认自家主机与
@@ -3143,6 +3153,51 @@ async function notifyLeaLogout() {
     return { ok: !!(r && r.ok) };
   } catch (e) { bootLog('lea.logout-notify-throw', (e && e.message) || String(e)); return { ok: false }; }
 }
+
+// 4e 路径登录不通知 LEA（2026-11-11，r6 实证）：页内导航登录成功时
+// location.hash 已是 '#home'，直接赋值不产生导航，did-navigate-in-page
+// 不触发，processAuthPage 看不到本次登录，notifyLeaLogin 永不跑，绑定
+// 留 UNBOUND、真签名回 QFR_LEA_NOT_BOUND。冷启动表单登录不受影响
+// （hash 从 '' 变 '#home'，是真实导航）。
+// 补跑口径：/qf-login 响应头一到即判定——POST＋200 且
+// x-qf-login-result 不是 frozen／banned／locked 时，调度
+// processAuthPage 补跑（500ms 首跑、2500ms 补跑；页面翻壳需等 /me＋
+// stats 两轮本地请求，500ms 足够、2500ms 兜底慢网）。processAuthPage
+// 是状态驱动、幂等：跑到时若页面已是控制台壳即通知 LEA；若仍是登录
+// 表单（密码错等），console 分支不跑、无副作用。
+// 注意：webapp 读完响应头即 cancel 响应体，故不用 onCompleted（取消后
+// 不保证触发），用 onHeadersReceived。密码错与成功都回 200 且无
+// x-qf-login-result 头，无法在头部区分——无妨，误触发只是一次廉价的
+// processAuthPage 空转（console 分支以页面状态为准）。
+function shouldScheduleLoginNotifyCheck(details) {
+  try {
+    if (!details || details.method !== 'POST' || details.statusCode !== 200) return false;
+    const hdrs = details.responseHeaders || {};
+    let v = '';
+    for (const k of Object.keys(hdrs)) {
+      if (String(k).toLowerCase() === 'x-qf-login-result') {
+        const hv = hdrs[k];
+        // 空数组时 hv[0] 为 undefined——须当作无值（''），不得 String(undefined)
+        // 得 "undefined"（DS flash 复核指出，虽只影响一次无害的多调度，仍修正）。
+        const first = Array.isArray(hv) ? hv[0] : hv;
+        v = String(first === undefined || first === null ? '' : first).toLowerCase();
+        break;
+      }
+    }
+    return v !== 'frozen' && v !== 'banned' && v !== 'locked';
+  } catch (e) { return false; }
+}
+// ---- end shouldScheduleLoginNotifyCheck ----
+let loginNotifyCheckTimers = [];
+function scheduleLoginNotifyCheck() {
+  try {
+    for (const t of loginNotifyCheckTimers) { try { clearTimeout(t); } catch (e) {} }
+    loginNotifyCheckTimers = [];
+    loginNotifyCheckTimers.push(setTimeout(() => { processAuthPage().catch(() => {}); }, 500));
+    loginNotifyCheckTimers.push(setTimeout(() => { processAuthPage().catch(() => {}); }, 2500));
+  } catch (e) { /* ignore */ }
+}
+// ---- end scheduleLoginNotifyCheck ----
 
 // H25／pkg4 DS-1：锁组件 device.json 的 ownerUsername 跟随当前登录账号。
 // 两处 device.json：%ProgramFiles%\QFRemote\Lock\device.json 与组件源目录
