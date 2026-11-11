@@ -107,8 +107,13 @@ LEA 读不到 token，UI 命令 fail-closed），
   account/device/api_key_id/binding_epoch、command、params_hash、idempotency_key、
   nonce、result/error_code、duration_ms、ush_session_id、process_id、window_title
   （截断 80 字符）、retry_count）。params 只记 SHA-256 哈希；输入文本、Key 明文永不入日志。
-- **单实例／崩溃恢复**：每会话一个互斥体＋启动时 `ui.ping` 探活旧实例，活着就退出，
-  死了就接管；无持久状态，进程死则管道句柄由系统回收，不留僵尸管道；计划任务
+- **单实例／崩溃恢复**：每会话一个互斥体，首实例创建即持有所有权直至
+  进程退出；后起实例 3 秒内拿不到所有权即干净退出（不写 token 文件、
+  不建管道）；旧实例崩溃则互斥体被遗弃，后起实例接管（r10 双 USH 修
+  复：旧版先写 token 再查互斥＋靠 pipe 探活裁决，触发器 backfill 与应用
+  登录同秒拉起时双进程并存、token 互串、失败方每秒刷 pipe-create-failed；
+  管道层另有兜底，CreateNamedPipe 报 5／231 且探活成功即停整个进程）。
+  无持久状态，进程死则管道句柄由系统回收，不留僵尸管道；计划任务
   失败自动重启（1 分钟间隔，最多 3 次）。
 - **红线**：不做内核驱动、不做进程注入；不执行任意脚本／命令；USH 只信 LEA
   （H03：调用方镜像＋ush_token 两道鉴别，不只信管道 ACL）。

@@ -22,8 +22,12 @@
  *     params 的 SHA-256 哈希）；不执行任意脚本/命令、不做进程注入；
  *   - 锁屏/休眠/无交互会话时 UI 类指令一律拒绝并返回明确错误码，
  *     绝不谎称已点击；ui.ping 例外（LEA 探活需要，锁屏时也要能回答）。
- * 崩溃恢复：无持久状态；进程死则管道句柄由系统回收，不留僵尸管道；
- * 启动时先探活旧实例（ui.ping），活着就退出，死了就接管；LEA 侧负责重拉。
+ * 崩溃恢复：无持久状态；进程死则管道句柄由系统回收，不留僵尸管道。
+ * 单实例（r10，2026-11-12 双 USH 竞态修复）：每会话一个命名互斥体，
+ * 首实例创建即持有所有权直至进程退出；后起实例 3 秒内拿不到所有权
+ * 即干净退出（不写 token 文件、不建管道）；旧实例崩溃则互斥体被遗
+ * 弃，后起实例接管。管道层另有兜底：CreateNamedPipe 报 5／231 即探活，
+ * 活着就停整个进程，不再每秒重试刷 pipe-create-failed；LEA 侧负责重拉。
  * 构建（Linux 交叉编译，与 QFSysHelper 同链）：
  *   见 build.sh：x86_64-w64-mingw32-gcc … -lole32 -loleaut32 -lwtsapi32
  * 调试：QFUserHelper.exe debug —— 前台跑管道循环（不注册 SCM，USH 不是服务）。
@@ -436,11 +440,17 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             char detail[128];
             snprintf(detail, sizeof(detail), "CreateNamedPipe failed error=%lu", (unsigned long)e);
             ush_log_event("pipe-create-failed", detail);
-            if (e == ERROR_ACCESS_DENIED) {
-                /* 已有实例持有管道（FILE_FLAG_FIRST_PIPE_INSTANCE 拒绝）：
-                 * 探活一次，活着就退出，避免两个 USH 抢管道。 */
+            if (e == ERROR_ACCESS_DENIED || e == ERROR_PIPE_BUSY) {
+                /* r10：管道已被另一实例持有（FILE_FLAG_FIRST_PIPE_INSTANCE
+                 * 拒绝为 5；实测 r9 双 USH 失败方报的是 231 ERROR_PIPE_BUSY，
+                 * 旧代码只认 5，231 落入下方的每秒重试，终身刷
+                 * pipe-create-failed）。探活一次，活着就干净退出整个进程：
+                 * 只 break 断循环线程不够——main 还在等 g_stop_event，进程
+                 * 会僵死残留（持互斥体句柄、token 文件已被它覆写）。 */
                 if (pipe_probe_alive()) {
                     ush_log_event("duplicate-instance", "another USH is alive; exiting");
+                    InterlockedExchange(&g_running, 0);
+                    if (g_stop_event) SetEvent(g_stop_event);
                     break;
                 }
                 Sleep(1000);
@@ -514,6 +524,38 @@ int main(int argc, char **argv) {
     int debug = (argc > 1 && strcmp(argv[1], "debug") == 0);
     enable_dpi_awareness();
     ush_log_init();
+
+    /* r10 单实例互斥（双 USH 竞态根因修复，2026-11-12）：
+     * 互斥体必须在 token 生成之前抢——旧顺序先写 token 文件再查互斥，
+     * 副本会把 token 文件覆写成自己的随机值，LEA 读到副本的 token、
+     * 管道持有方验自己的一份 → 全部 UI 命令 QFR_USH_UNAUTHORIZED。
+     * 裁决不用 pipe 探活：首实例在 token 生成＋UIA 初始化＋起管道线程
+     * 之前有几百毫秒还没建管道，旧代码此时探活必失败，副本误判“旧实例
+     * 已死”继续跑，双进程并存。改用互斥体所有权裁决（原子）：
+     * CreateMutex(bInitialOwner=TRUE) 已存在时等 3 秒抢所有权——旧实例
+     * 活着则超时，干净退出；旧实例正常退出则拿到所有权；旧实例崩溃则
+     * 互斥体被遗弃（WAIT_ABANDONED），接管。退出前不写 token、不建管道。
+     * 互斥体按会话命名（Local\QFRUSHMutex-<session>），多会话各一个。 */
+    DWORD session_id = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session_id);
+    char mutex_name[64];
+    snprintf(mutex_name, sizeof(mutex_name), "Local\\QFRUSHMutex-%lu", (unsigned long)session_id);
+    HANDLE mutex = CreateMutexA(NULL, TRUE, mutex_name);
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        DWORD w = WaitForSingleObject(mutex, 3000);
+        if (w == WAIT_TIMEOUT) {
+            ush_log_event("duplicate-instance", "another USH instance owns the mutex; exiting");
+            CloseHandle(mutex);
+            return 0;
+        }
+        /* WAIT_OBJECT_0（旧实例刚退出）或 WAIT_ABANDONED（旧实例崩溃）：
+         * 已拿到所有权，接管。 */
+        ush_log_event("stale-instance", "previous USH instance is gone; taking over");
+    } else if (!mutex) {
+        ush_log_event("mutex-failed", "CreateMutex failed; continuing without single-instance protection");
+        mutex = NULL;
+    }
+
     /* H03：启动即生成每启动随机 token 并落盘供 LEA 读取；生成失败只记
      * 日志继续跑（token 为空时全部 LEA 命令都会被拒，fail-closed）。 */
     if (!ush_token_init())
@@ -521,22 +563,6 @@ int main(int argc, char **argv) {
     if (debug) {
         fprintf(stderr, "QFUserHelper %s debug mode: pipe %s\n", USH_VERSION,
             "\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");
-    }
-
-    /* 单实例：每会话一个互斥体；已有实例活着就退出 */
-    DWORD session_id = 0;
-    ProcessIdToSessionId(GetCurrentProcessId(), &session_id);
-    char mutex_name[64];
-    snprintf(mutex_name, sizeof(mutex_name), "Local\\QFRUSHMutex-%lu", (unsigned long)session_id);
-    HANDLE mutex = CreateMutexA(NULL, FALSE, mutex_name);
-    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (pipe_probe_alive()) {
-            ush_log_event("duplicate-instance", "another USH is alive; exiting");
-            CloseHandle(mutex);
-            return 0;
-        }
-        /* 管道无响应：旧实例已死但互斥体残留（异常崩溃），继续接管 */
-        ush_log_event("stale-instance", "old instance not responding; taking over");
     }
 
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
