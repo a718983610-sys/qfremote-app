@@ -25,6 +25,22 @@ const BRIDGE_CFG_PATH = '/opt/qfremote-lock/bridge-config.json';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// 节点 id 归一：MeshCentral 节点 _id 为 node// 前缀全形，客户端
+// （windows/devices.js bareNodeId）与绑定台账只认裸 id；凡是拿客户
+// 端送来的 id 去比 _id／nodeid 的地方，比对前必须统一去前缀，否则
+// 裸 id 永远匹配不上全形 _id（r5 rebind 404 的潜伏问题：即使节点可
+// 见，去前缀 id 仍会 404）。
+function bareNodeId(id) {
+  const s = String(id || '');
+  return s.startsWith('node//') ? s.slice(6) : s;
+}
+// 节点是否匹配目标 id（归一后比对；目标为空时永不匹配，防空 _id 误命中）。
+function nodeMatchesId(node, id) {
+  const want = bareNodeId(id);
+  if (!want || !node) return false;
+  return bareNodeId(node._id) === want || (node.nodeid != null && bareNodeId(node.nodeid) === want);
+}
+
 function createLeaChannel(opts) {
   opts = opts || {};
   const log = typeof opts.log === 'function' ? opts.log : function () {};
@@ -206,7 +222,7 @@ function createLeaChannel(opts) {
   async function nodeOnline(nodeId, timeoutMs) {
     try {
       const nodes = await listNodes(timeoutMs);
-      const n = nodes.find((x) => x && (x._id === nodeId || x.nodeid === nodeId));
+      const n = nodes.find((x) => nodeMatchesId(x, nodeId));
       if (!n) return false;
       // MeshCentral nodes 回包 conn 位：&1 = agent 在线（与 presence 判定同款）。
       if (typeof n.conn === 'number') return (n.conn & 1) === 1;
@@ -221,7 +237,7 @@ function createLeaChannel(opts) {
     return { configured: !!loadCfg(), ready: !!(svc.ready && svc.ws), failStreak: svc.failStreak };
   }
 
-  return { runCommand, listNodes, nodeOnline, status, svcCall, _test: { svc, loadCfg, mcUrlIsLoopback } };
+  return { runCommand, listNodes, nodeOnline, status, svcCall, bareNodeId, nodeMatchesId, _test: { svc, loadCfg, mcUrlIsLoopback } };
 }
 
-module.exports = { createLeaChannel };
+module.exports = { createLeaChannel, bareNodeId, nodeMatchesId };

@@ -13,7 +13,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { createLeaCore } = require('../lea-core');
 const { createLeaRoutes } = require('../lea-routes');
-const { createLeaChannel } = require('../lea-channel');
+const { createLeaChannel, bareNodeId, nodeMatchesId } = require('../lea-channel');
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -682,6 +682,15 @@ const mockChannel = {
   t('T27 nodeOnline 无 conn → null（未知，不谎称在线）', (await ch27.nodeOnline(DEV)) === null);
   FakeWS.nodesReply = [{ _id: 'node//other', conn: 1 }];
   t('T27 nodeOnline 不在清单 → false', (await ch27.nodeOnline(DEV)) === false);
+  // r5：裸 id 归一——客户端只认裸 id（windows/devices.js bareNodeId），
+  // 服务端比对前须去 node// 前缀，否则可见节点仍 404。
+  t('bareNodeId 去 node// 前缀', bareNodeId('node//abc') === 'abc' && bareNodeId('abc') === 'abc' && bareNodeId('') === '' && bareNodeId(null) === '');
+  t('nodeMatchesId 全形／裸形均命中', nodeMatchesId({ _id: DEV, conn: 1 }, DEV) === true && nodeMatchesId({ _id: DEV, conn: 1 }, 'test-device-1') === true);
+  t('nodeMatchesId 空目标／空节点永不匹配', nodeMatchesId({ _id: DEV, conn: 1 }, '') === false && nodeMatchesId({}, 'test-device-1') === false && nodeMatchesId(null, DEV) === false);
+  FakeWS.nodesReply = [{ _id: DEV, conn: 1 }];
+  t('T27 nodeOnline 裸 id → true', (await ch27.nodeOnline('test-device-1')) === true);
+  FakeWS.nodesReply = [{ _id: 'node//other', conn: 1 }];
+  t('T27 nodeOnline 裸 id 不在清单 → false', (await ch27.nodeOnline('test-device-1')) === false);
   t('T28 回环 mcUrl 仍放宽证书校验', !!(FakeWS.lastOpts && FakeWS.lastOpts.rejectUnauthorized === false));
   t('T28 回环判定 helper：127.0.0.1/localhost 真、公网/非法假',
     ch27._test.mcUrlIsLoopback('wss://127.0.0.1:8443') === true
@@ -1084,6 +1093,12 @@ const mockChannel = {
   // H05：换绑回自己（已绑自己）→ 200
   r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/rebind', {}, { account_id: USER });
   t('H05 路由 rebind 已绑自己的设备 → 200', r.code === 200);
+  // r5：rebind 用裸 id 也须 200（客户端 resolveOwnNodeId 只给裸 id；
+  // 修前服务端只比全形 _id，裸 id 即使节点可见也 404）。
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent('test-device-1') + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 裸 id → 200', r.code === 200 && r.obj.account_id === USER);
+  r = await callRoute('POST', '/api/lea/v1/devices/' + encodeURIComponent('ghost') + '/rebind', {}, { account_id: USER });
+  t('H05 路由 rebind 裸 id 未知设备 → 404', r.code === 404);
   // H07：rebind 传回 LEA epoch 只许向前
   const rbEpoch = core.recordBinding('node//epoch-dev', USER, 'test-h07-epoch', { bindingEpoch: 99 });
   t('H07 recordBinding 接受 LEA epoch（向前）', rbEpoch.binding_epoch === 99);

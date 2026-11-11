@@ -35,6 +35,7 @@
  *   POST /api/lea/v1/devices/{device_id}/rebind 换绑（触发旧 Key 失效）
  */
 const crypto = require('crypto');
+const { bareNodeId, nodeMatchesId } = require('./lea-channel');
 
 const BODY_LIMIT = 1024 * 1024; // 执行请求体上限 1MB（信封 params 含文本时用）
 const MAX_BATCH_STEPS = 50;
@@ -533,21 +534,24 @@ function createLeaRoutes(core, channel, deps) {
     // 用户知道 device_id 就能把他人设备抢到自己名下并吊销原账号全部 Key）：
     // ① 节点可见性（可选注入 deps.listVisibleDeviceIds(auth)：返回该账号
     //    在 MeshCentral 可见的设备 id 清单；注入时强制校验；未注入时走
-    //    ②③，server.js 接入后可补注）。
+    //    ②③，server.js 接入后可补注）。清单与入参均按裸 id 归一后比对
+    //    （客户端送裸 id，清单可能含全形 _id；r5 潜伏问题）。
     if (typeof deps.listVisibleDeviceIds === 'function') {
       let visible = null;
       try { visible = await deps.listVisibleDeviceIds(a); } catch (e) { visible = null; }
-      if (!Array.isArray(visible) || !visible.map(String).includes(deviceId)) {
+      if (!Array.isArray(visible) || !visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
         try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
         return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
       }
     }
     // ② 设备须真实存在（svc 通道节点清单里有；未知 id 直接 404，不透露归属）。
+    //    比对前统一去 node// 前缀（客户端送裸 id，清单 _id 为全形；修前
+    //    只比全形 _id，裸 id 即使节点可见也 404——r5 潜伏问题）。
     //    通道不可达（known===null）时存在性校验跳过、归属校验照常，并记审计。
     let known = null;
     try {
       const nodes = channel ? await channel.listNodes() : [];
-      known = (nodes || []).some((x) => x && (x._id === deviceId || x.nodeid === deviceId));
+      known = (nodes || []).some((x) => nodeMatchesId(x, deviceId));
     } catch (e) { known = null; }
     if (known === false) {
       return fail(res, 404, 'NOT_FOUND', '设备不存在。');
