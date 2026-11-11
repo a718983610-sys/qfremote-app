@@ -3112,6 +3112,11 @@ async function notifyLeaLogin(account) {
     const r = leaNotifyInternal({ cmd: 'session.login_changed', account_id: String(account), device_id: deviceId || '' });
     if (!r || r.ok !== true) { bootLog('lea.login-notify-failed', (r && (r.code || r.reason)) || 'unknown'); return { ok: false, reason: 'notify-failed' }; }
     leaLastNotifiedAccount = String(account);
+    // r8 副项（2026-11-11）：成功路径 boot log 只记失败项，登录成功在 boot log
+    // 里无行可查（r7 实证：17:25 之后零新行，尽管其间 6 次 LEA 事件）。此处
+    // 成功即记一行——去重保证同一账号一次登录只记一次（登出后重置），无账号、
+    // 令牌、cookie 内容；4a 通过时 boot log 即有可观测的成功行。
+    bootLog('lea.login-notify-ok');
     // DS 第二轮 #1：result.binding_epoch 正常是 JSON number（C 端 %lld 裸整数），
     // 但 stdout 万一被重序列化成字符串也不静默跳过——归一化后再验 isSafeInteger。
     // 缺失／非数字时 Number 得 NaN，仍走下面的 lea.login-no-epoch 分支。

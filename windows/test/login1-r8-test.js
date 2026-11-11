@@ -31,6 +31,8 @@
  *  R8 行为：det.freshLogin=true 且 POST 已过期 → 不清 cookie（freshLogin 臂独立生效）；
  *  R9 行为（vm 抽调度器）：三档 500/2500/8000，各调一次 processAuthPage；
  *      第二次调度清掉第一次的三枚计时器。
+ *  R10（r8 副项）：notifyLeaLogin 成功路径记 bootLog('lea.login-notify-ok')
+ *      （去重保证一次登录只记一次），4a 通过时 boot log 有可观测成功行。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。跑法：node windows/test/login1-r8-test.js
  */
 const fs = require('fs');
@@ -205,6 +207,12 @@ function runScheduler(times) {
   const r2 = runScheduler(2);
   const live = r2.timers.map((t) => t.ms).sort((a, b) => a - b);
   ok('R9b_second_schedule_clears_first', r2.cleared.length === 3 && JSON.stringify(live) === JSON.stringify([500, 2500, 8000]), { cleared: r2.cleared, live });
+}
+// R10（r8 副项）：notifyLeaLogin 成功后记一行 bootLog（去重点之后、无账号内容）。
+{
+  const at = mainJs.indexOf('leaLastNotifiedAccount = String(account);');
+  const body = at >= 0 ? mainJs.slice(at, at + 400) : '';
+  ok('R10_login_notify_ok_bootlog', body.includes("bootLog('lea.login-notify-ok')"), {});
 }
 
 (async () => {
