@@ -814,10 +814,32 @@ static int target_point(const ush_target_t *t, IUIAutomationElement *scope, POIN
     return 0;
 }
 
-/* r9：坐标打字兜底——ElementFromPoint 取不到元素时（如任务栏搜索框
- * 这类 UIA 树里难定位的控件），点一下该坐标获焦再 SendInput 打字，
- * 随后重取该点元素读 Value 确认。返回 1 已处理（调用方直接返回），
- * data_json 已填；返回 0 未处理（调用方继续走元素路径或报失败）。 */
+/* r9b-DS：读元素的 Value（UIA_ValueValuePropertyId）作打字前基线，返回状态：
+ * 0=读不到（属性不可用/非 BSTR），1=读到且不等于 expect（含空串），
+ * 2=读到且等于 expect。空串是有效基线（搜索框打字前即为空），必须与
+ * “读不到”区分，否则焦点确认在搜索框场景下永远无法成立。 */
+static int value_baseline_state(IUIAutomationElement *el, const char *expect) {
+    if (!el) return 0;
+    VARIANT v;
+    VariantInit(&v);
+    int state = 0;
+    if (el->lpVtbl->GetCurrentPropertyValue(el, UIA_ValueValuePropertyId, &v) == S_OK
+        && v.vt == VT_BSTR) {
+        char cur[4096];
+        cur[0] = '\0';
+        if (v.bstrVal) wide_to_utf8(v.bstrVal, cur, sizeof(cur));
+        size_t tl = strlen(expect), cl = strlen(cur);
+        state = (cl == tl && strncmp(cur, expect, tl) == 0) ? 2 : 1;
+    }
+    VariantClear(&v);
+    return state;
+}
+
+/* r9b：坐标打字——真实鼠标点击该坐标获焦再 SendInput 打字，随后重取该点
+ * 元素（读不到时再读焦点元素）读 Value 确认。触发条件：坐标 input 且
+ * 该点无元素，或元素不支持 ValuePattern（如任务栏搜索框容器——SetFocus
+ * 对其静默失效，必须真点）。返回 1 已处理（调用方直接返回），
+ * data_json 已填；返回 0 未处理。 */
 static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *scope,
                                    const char *text, int submit,
                                    char *data_json, size_t data_size) {
@@ -827,6 +849,18 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
     bring_window_forward(hwnd);
     send_mouse_click(pt);
     Sleep(150); /* 与坐标点击后等属性稳定的 150ms 同口径 */
+    /* r9b-DS：打字前读一次焦点元素 Value 作基线——只有基线可读且不等于
+     * 输入文本、事后读回等于输入文本时，才能确认是本次打字填入的；
+     * 基线读不到（焦点未落定/元素无 Value）或基线已等于文本时，焦点
+     * 确认一律判 false（由截图复核），不把旧文本误认作本次填入。 */
+    int focus_pre_state = 0; /* 0=基线未读到，1=基线可读且不等于文本，2=基线已等于文本 */
+    {
+        IUIAutomationElement *pre = NULL;
+        if (g_auto->lpVtbl->GetFocusedElement(g_auto, &pre) == S_OK && pre) {
+            focus_pre_state = value_baseline_state(pre, text);
+            pre->lpVtbl->Release(pre);
+        }
+    }
     send_unicode_text(text);
     if (submit) {
         INPUT in;
@@ -849,6 +883,20 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
         }
         el->lpVtbl->Release(el);
     }
+    if (!confirmed) {
+        /* 该点元素读不到 Value（如搜索框容器）：读当前焦点元素的 Value——
+         * 打字实际落点就是焦点元素（点开搜索面板后焦点在面板编辑框）。 */
+        IUIAutomationElement *focused = NULL;
+        if (g_auto->lpVtbl->GetFocusedElement(g_auto, &focused) == S_OK && focused) {
+            char cur[4096];
+            get_str_prop(focused, UIA_ValueValuePropertyId, cur, sizeof(cur));
+            if (cur[0]) {
+                size_t tl = strlen(text), cl = strlen(cur);
+                confirmed = (cl == tl && strncmp(cur, text, tl) == 0 && focus_pre_state == 1);
+            }
+            focused->lpVtbl->Release(focused);
+        }
+    }
     if (confirmed) {
         snprintf(data_json, data_size,
             "{\"method\":\"coordinate-click-type\",\"confirmed\":true}");
@@ -858,6 +906,30 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
             "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
     }
     return 1;
+}
+
+/* r9b：对已定位的元素试 ValuePattern.SetValue；成功返回 1（调用方即确认），
+ * 否则返回 0（调用方改走点击/聚焦打字）。只读元素不写。 */
+static int try_value_pattern_set(IUIAutomationElement *el, const char *text) {
+    IUnknown *unk = NULL;
+    if (el->lpVtbl->GetCurrentPattern(el, UIA_ValuePatternId, &unk) != S_OK || !unk) return 0;
+    IUIAutomationValuePattern *vp = NULL;
+    HRESULT hr = unk->lpVtbl->QueryInterface(unk, &IID_IUIAutomationValuePattern, (void **)&vp);
+    unk->lpVtbl->Release(unk);
+    if (hr != S_OK || !vp) return 0;
+    int ro = 0;
+    vp->lpVtbl->get_CurrentIsReadOnly(vp, &ro);
+    int ok = 0;
+    if (!ro) {
+        WCHAR *w = utf8_to_wide(text);
+        if (w) {
+            hr = vp->lpVtbl->SetValue(vp, w);
+            free(w);
+            if (SUCCEEDED(hr)) ok = 1;
+        }
+    }
+    vp->lpVtbl->Release(vp);
+    return ok;
 }
 
 int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
@@ -901,11 +973,14 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     if (window_title && window_title_size) {
         get_str_prop(scope, UIA_NamePropertyId, window_title, window_title_size);
     }
-    /* r9：定位分三路——① 有元素定位字段时按元素找；② 只有坐标时
+    /* r9/r9b：定位分三路——① 有元素定位字段时按元素找；② 只有坐标时
      * （r8 的 {"text":"r8probe","x":200,"y":736} 即此路）先用
-     * ElementFromPoint 取该点元素，取不到则点坐标获焦再打字；③ 两者
+     * ElementFromPoint 取该点元素：能 ValuePattern 就后台写入，否则
+     * 点坐标获焦再打字（任务栏搜索框容器不支持 ValuePattern 且 SetFocus
+     * 静默失效，必须真点）；取不到元素同样点坐标获焦再打字；③ 两者
      * 皆无直接报 NOT_FOUND，不再空转满 deadline。 */
     IUIAutomationElement *el = NULL;
+    int coord_vp_done = 0; /* 坐标分支 ValuePattern 已后台写入成功：走公共尾部做 submit＋确认 */
     int have_locator = (t.automation_id[0] || t.name[0] || t.class_name[0]);
     if (have_locator) {
         if (!find_element(scope, &t, deadline, &el)) {
@@ -922,9 +997,23 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
             snprintf(err_text, err_text_size, "input coordinate cannot be resolved");
             return 0;
         }
-        if (g_auto->lpVtbl->ElementFromPoint(g_auto, pt, &el) != S_OK || !el) {
-            el = NULL;
-            /* 取不到元素：点坐标获焦再打字（任务栏搜索框即此路）。 */
+        /* r9b：该点有元素时先试 ValuePattern（真编辑框走此路，后台且无焦点依赖）；
+         * 任务栏搜索框这类容器元素不支持 ValuePattern——旧逻辑随后走 SetFocus 兜底，
+         * 但容器不可聚焦、SetFocus 静默失效，按键发给桌面、文字丢了（真机实证：
+         * r9probe 未填入）。ValuePattern 不可用时改走真实鼠标点击获焦再打字，
+         * 与用户自己点搜索框的行为一致。mode=="type" 时跳过 ValuePattern。
+         * 注意：ValuePattern 成功后不直接 return——须走公共尾部做 submit＋确认，
+         * 否则 submit:true 的回车会被跳过（DS 复核指出）。 */
+        if (g_auto->lpVtbl->ElementFromPoint(g_auto, pt, &el) == S_OK && el) {
+            if (strcmp(mode, "type") != 0 && try_value_pattern_set(el, text)) {
+                coord_vp_done = 1;
+            } else {
+                el->lpVtbl->Release(el);
+                el = NULL;
+            }
+        }
+        if (!coord_vp_done) {
+            /* 取不到元素，或元素不支持 ValuePattern：点坐标获焦再打字。 */
             if (input_by_click_and_type(&t, scope, text, submit, data_json, data_size)) {
                 scope->lpVtbl->Release(scope);
                 return 1;
@@ -945,26 +1034,12 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     /* 优先 ValuePattern.SetValue（后台，无需前置/聚焦） */
     int done = 0;
     const char *method = NULL;
-    if (strcmp(mode, "type") != 0) {
-        IUnknown *unk = NULL;
-        if (el->lpVtbl->GetCurrentPattern(el, UIA_ValuePatternId, &unk) == S_OK && unk) {
-            IUIAutomationValuePattern *vp = NULL;
-            HRESULT hr = unk->lpVtbl->QueryInterface(unk, &IID_IUIAutomationValuePattern, (void **)&vp);
-            unk->lpVtbl->Release(unk);
-            if (hr == S_OK && vp) {
-                int ro = 0;
-                vp->lpVtbl->get_CurrentIsReadOnly(vp, &ro);
-                if (!ro) {
-                    WCHAR *w = utf8_to_wide(text);
-                    if (w) {
-                        hr = vp->lpVtbl->SetValue(vp, w);
-                        free(w);
-                        if (SUCCEEDED(hr)) { done = 1; method = "value-pattern"; }
-                    }
-                }
-                vp->lpVtbl->Release(vp);
-            }
-        }
+    if (coord_vp_done) {
+        done = 1; /* 坐标分支已后台写入；不再重写一遍，直接走 submit＋确认 */
+        method = "value-pattern";
+    } else if (strcmp(mode, "type") != 0 && try_value_pattern_set(el, text)) {
+        done = 1;
+        method = "value-pattern";
     }
     if (!done) {
         /* 兜底：聚焦 + SendInput 打字（须窗口前置，元素需可聚焦） */

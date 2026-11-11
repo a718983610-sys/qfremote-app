@@ -15,6 +15,10 @@
  *     （修前空转满 deadline 才返 0，坐标 input 恒 5000ms 超时）；另验
  *     ush_parse_target 能从顶层 params 读出 r8 原样 {"x":200,"y":736}，
  *     且 target_point 对该坐标算出物理点 (200,736)。
+ *     r9b：try_value_pattern_set 在不支持 ValuePattern 的元素上返 0
+ *     （坐标 input 因此走真实点击打字，而非 SetFocus 兜底）；另验
+ *     input_by_click_and_type 坐标打字全程 prompt 返回、method 为
+ *     coordinate-click-type。UIA 在 wine 下建不出时 SKIP（真机验）。
  * 用法：x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -std=c11
  *   -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -I.. -o /tmp/test_ush_r9.exe
  *   test_ush_r9.c ../ush_json.c
@@ -192,6 +196,42 @@ int main(void) {
         int ok = target_point(&tgt, NULL, &pt);
         printf("  [target_point rel] ok=%d pt=(%ld,%ld)\n", ok, (long)pt.x, (long)pt.y);
         t(ok && pt.x > 0 && pt.y > 0, "r9 input 相对坐标无窗口时主屏估算出点");
+    }
+
+    /* r9b：坐标 input 的 ValuePattern 判定——桌面根元素不支持 ValuePattern，
+     * try_value_pattern_set 必须返 0（修后坐标 input 因此走真实点击打字，
+     * 而非 SetFocus 兜底；真机实证：SetFocus 对搜索框容器静默失效）。
+     * UIA 在 wine 下若建不出则 SKIP（真机验）。 */
+    if (ush_uia_init()) {
+        IUIAutomationElement *root = NULL;
+        if (g_auto->lpVtbl->GetRootElement(g_auto, &root) == S_OK && root) {
+            t(try_value_pattern_set(root, "r9probe") == 0,
+              "r9b input 根元素无 ValuePattern 时 try_value_pattern_set 返 0（走点击分支）");
+            t(value_baseline_state(root, "r9probe") == 0,
+              "r9b-DS 根元素无 Value 时基线状态为 0（读不到，与空串基线区分）");
+            root->lpVtbl->Release(root);
+        } else {
+            printf("SKIP r9b input ValuePattern 判定（wine 下取不到 UIA 根元素，真机验）\n");
+        }
+        /* r9b：input_by_click_and_type 坐标打字全程——wine 下 prompt 返回
+         * 且 data_json 带 coordinate-click-type；确认读不到 Value 时仍
+         * 返 1（confirmed:false 由调用方截图复核，不谎报失败）。 */
+        {
+            ush_target_t tgt;
+            ush_parse_target("{\"text\":\"r9fix\",\"x\":200,\"y\":736}", &tgt);
+            char data[1024] = {0};
+            DWORD t0 = GetTickCount();
+            int r = input_by_click_and_type(&tgt, NULL, "r9fix", 0, data, sizeof(data));
+            DWORD dt = GetTickCount() - t0;
+            printf("  [click-and-type] r=%d elapsed_ms=%lu data=%s\n", r, (unsigned long)dt, data);
+            t(r == 1, "r9b input 坐标点击打字返回 1（已处理）");
+            t(dt < 5000, "r9b input 坐标点击打字不挂起（<5000ms）");
+            t(strstr(data, "coordinate-click-type") != NULL,
+              "r9b input 坐标点击打字 method 为 coordinate-click-type");
+        }
+        ush_uia_shutdown();
+    } else {
+        printf("SKIP r9b input ValuePattern/点击打字（wine 下 UIA 建不出，真机验）\n");
     }
 
     printf("----\n%d passed, %d failed\n", g_pass, g_fail);
