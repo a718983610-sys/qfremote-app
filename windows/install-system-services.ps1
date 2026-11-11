@@ -104,8 +104,9 @@ try {
 }
 
 # ---- ③ QFRLEA（LEA 服务端/安装器线，Stage 1 MVP） ----
-# install-lea.ps1 自行重试 3 次（5s/15s/45s），仍失败标记 LEA_DEGRADED
-# 并 exit 0，绝不阻塞主程序；本段只记日志，不改 exit 码。
+# install-lea.ps1 自行重试 3 次（5s/15s/45s），仍失败写 LEA_DEGRADED 标记
+# 并 exit 1（5ad5bc6 问题 6：退出码即失败信号）；本段只读标记/报告、
+# 只记日志，自身仍 exit 0，主程序照常继续。
 # H20 已解决：install-lea.ps1 已纳入 whitelist.json（5 件），main.js
 # 拉起前已验过一次；本段执行前再按 -LeaScriptHash 对一次（双重门）。
 try {
@@ -144,10 +145,10 @@ try {
       Write-InstallLog 'installing QFRLEA'
       & $leaScript -LeaDir $LeaDir
       $leaExit = $LASTEXITCODE
-      # T21/D2：install-lea.ps1 失败仍 exit 0（DESIGN §9.2，失败不阻塞主程序），
-      # 退出码 0 不代表装成了；调用方须显式读 LEA_DEGRADED 标记与
-      # install-report.json：有标记或报告 status 非 ok 即在安装日志里留一条
-      # 明确的失败行（不只记 "exit=0 (non-blocking)"），仍不改本段非阻塞口径。
+      # T21/D2（5ad5bc6 问题 6 已改口径）：install-lea.ps1 失败 exit 1，
+      # 退出码即失败信号；本段仍显式读 LEA_DEGRADED 标记与 install-report.json
+      # 判定：有标记或报告 status 非 ok 即在安装日志里留一条明确的失败行，
+      # 仍不改本段非阻塞口径（本段自身仍 exit 0，主程序照常继续）。
       $leaDataDir = Join-Path $env:ProgramData 'QFR\LEA'
       $leaFailed = Test-Path -LiteralPath (Join-Path $leaDataDir 'LEA_DEGRADED')
       $leaDetail = ''
