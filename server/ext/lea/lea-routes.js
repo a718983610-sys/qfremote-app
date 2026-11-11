@@ -344,7 +344,8 @@ function createLeaRoutes(core, channel, deps) {
   // 在线态／吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。未绑定设备
   // 一律 403（不以 404 区分“不存在”与“非本人设备”，防存在性预言）。
   function deviceVisibleTo(key, deviceId) {
-    if (key.device_scope && key.device_scope === deviceId) return true;
+    // 归一后比对：Key 的 device_scope 可能为全形，URL 来的 deviceId 可能为裸形。
+    if (key.device_scope && bareNodeId(key.device_scope) === bareNodeId(deviceId)) return true;
     const binding = core.getBinding(deviceId);
     return !!(binding && binding.account_id === key.account_id);
   }

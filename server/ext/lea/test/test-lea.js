@@ -174,6 +174,47 @@ t('H04 白名单外设备 → 403 QFR_DEVICE_NOT_WHITELISTED', adm.ok === false 
   const gNoWl = coreNoWl.generateKey(USER, { device_scope: DEV });
   const admNoWl = coreNoWl.admit({ key: coreNoWl.findKeyById(gNoWl.record.key_id), deviceId: DEV, command: 'ui.click' });
   t('H04 无白名单配置时 admit 拒绝（fail-closed）', admNoWl.ok === false && admNoWl.code === 'QFR_DEVICE_NOT_WHITELISTED');
+  // 归一化：白名单全形条目＋调用方裸形 id（P2-02 真跑 execute 时的形态）
+  {
+    const BARE = 'test-device-1'; // DEV 的裸形
+    // 正向：白名单文件存全形条目，裸形 deviceId＋全形 scope 的 Key 准入通过
+    const dirN = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-wl-norm-'));
+    fs.writeFileSync(path.join(dirN, 'whitelist.json'), JSON.stringify({ devices: [DEV] }));
+    const coreN = createLeaCore({ dir: dirN, enableSweeps: false });
+    coreN.grantMuse(USER, 'owner');
+    coreN.recordBinding(BARE, USER, 'test-norm');
+    const gN = coreN.generateKey(USER, { device_scope: DEV });
+    const admN = coreN.admit({ key: coreN.findKeyById(gN.record.key_id), deviceId: BARE, command: 'ui.click' });
+    t('归一化 白名单全形条目＋裸形 deviceId＋全形 scope → 准入通过', admN.ok === true);
+    // 反向：白名单文件存裸形条目，全形 deviceId＋裸形 scope 的 Key 准入通过
+    const dirN2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-wl-norm2-'));
+    fs.writeFileSync(path.join(dirN2, 'whitelist.json'), JSON.stringify({ devices: [BARE] }));
+    const coreN2 = createLeaCore({ dir: dirN2, enableSweeps: false });
+    coreN2.grantMuse(USER, 'owner');
+    coreN2.recordBinding(BARE, USER, 'test-norm2');
+    const gN2 = coreN2.generateKey(USER, { device_scope: BARE });
+    const admN2 = coreN2.admit({ key: coreN2.findKeyById(gN2.record.key_id), deviceId: DEV, command: 'ui.click' });
+    t('归一化 白名单裸形条目＋全形 deviceId＋裸形 scope → 准入通过', admN2.ok === true);
+    // isWhitelisted 直接比对：双向命中＋空／退化 id 永不命中
+    t('归一化 isWhitelisted 裸形命中全形条目', coreN.isWhitelisted(BARE) === true);
+    t('归一化 isWhitelisted 全形命中裸形条目', coreN2.isWhitelisted(DEV) === true);
+    t('归一化 空 deviceId 永不在白名单', coreN.isWhitelisted('') === false);
+    t('归一化 裸形为空的 node// 永不在白名单', coreN.isWhitelisted('node//') === false);
+    const dirN3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-wl-norm3-'));
+    fs.writeFileSync(path.join(dirN3, 'whitelist.json'), JSON.stringify({ devices: ['node//', ''] }));
+    const coreN3 = createLeaCore({ dir: dirN3, enableSweeps: false });
+    t('归一化 退化白名单条目（node//／空串）不放行真设备', coreN3.isWhitelisted(DEV) === false && coreN3.isWhitelisted(BARE) === false);
+    // getBinding 双向命中：全形查到裸形入账的绑定
+    t('归一化 getBinding 全形查到裸形入账的绑定', coreN.getBinding(DEV) !== null && coreN.getBinding(DEV).account_id === USER);
+    t('归一化 getBinding 裸形查到裸形入账的绑定', coreN.getBinding(BARE) !== null && coreN.getBinding(BARE).account_id === USER);
+    // 换绑吊销横扫双向：全形 scope 旧 Key 在裸形 rebind 时被吊销，反向亦然
+    const gR = coreN.generateKey(USER, { device_scope: DEV });
+    coreN.recordBinding(BARE, OTHER, 'rebind-norm');
+    t('归一化 裸形 rebind 吊销全形 scope 的旧 Key', coreN.keyStatus(coreN.findKeyById(gR.record.key_id)) === 'revoked_by_rebind');
+    const gR2 = coreN2.generateKey(USER, { device_scope: BARE });
+    coreN2.recordBinding(DEV, OTHER, 'rebind-norm2');
+    t('归一化 全形 rebind 吊销裸形 scope 的旧 Key', coreN2.keyStatus(coreN2.findKeyById(gR2.record.key_id)) === 'revoked_by_rebind');
+  }
 }
 // H06：无授权账号生成 Key 拒绝
 let threwNoGrant = null;
@@ -921,7 +962,7 @@ const mockChannel = {
   const rb = core.recordBinding(DEV, USER, 'test-ticket');
   t('recordBinding 返回可验签的票据', !!rb.ticket && core.verifyTicket(rb.ticket) === true);
   t('recordBinding 票据 account/device/epoch 一致',
-    rb.ticket.account_id === USER && rb.ticket.device_id === DEV && rb.ticket.binding_epoch === rb.binding_epoch);
+    rb.ticket.account_id === USER && rb.ticket.device_id === core.bareNodeId(DEV) && rb.ticket.binding_epoch === rb.binding_epoch);
   t('recordBinding 票据 grant 与当前授权一致', rb.ticket.grant_muse_execute === 1 && rb.ticket.scopes === 'muse.execute');
   t('recordBinding 票据 lease_id 形如 lease-+16 hex', /^lease-[0-9a-f]{16}$/.test(rb.ticket.lease_id));
   t('recordBinding 票据 24h 过期', rb.ticket.expires_at - Math.floor(Date.now() / 1000) > 23 * 3600
@@ -1157,7 +1198,7 @@ const mockChannel = {
     t('T21 wrapper 读 LEA_DEGRADED 标记并记明确失败行', sysSvcPs1.includes('LEA_DEGRADED') && sysSvcPs1.includes('LEA install FAILED (degraded marker/report'));
     t('T21 wrapper 读 install-report.json', sysSvcPs1.includes('install-report.json'));
     const leaPs1 = fs.readFileSync(path.join(repoRoot, 'windows', 'install-lea.ps1'), 'utf8');
-    t('T21 install-lea.ps1 失败仍 exit 0（DESIGN §9.2 口径不变）', leaPs1.includes('exit 0 # 失败不阻塞主程序'));
+    t('T21 install-lea.ps1 失败返回 exit 1（5ad5bc6 口径：LEA 段失败非零，wrapper 自身仍 exit 0 不阻塞主程序）', leaPs1.includes('exit 1 # P2-02 问题 6'));
     const mainJs = fs.readFileSync(path.join(repoRoot, 'windows', 'main.js'), 'utf8');
     t('T21 main.js 补装后复核 LEA_DEGRADED（lea-degraded／lea-installed 日志）', mainJs.includes('system-services.lea-degraded') && mainJs.includes('system-services.lea-installed'));
   }
@@ -1170,7 +1211,7 @@ const mockChannel = {
     coreA1.grantMuse(USER, 'owner');
     coreA1.recordBinding(DEV, USER, 'dc-a1');
     const gA1 = coreA1.generateKey(USER, {});
-    t('DC-A-1 无 device_scope 且恰绑 1 台 → 自动取该台', gA1.record.device_scope === DEV);
+    t('DC-A-1 无 device_scope 且恰绑 1 台 → 自动取该台', gA1.record.device_scope === coreA1.bareNodeId(DEV));
     t('DC-A-1 自动取设备后 binding_epoch 与绑定一致', gA1.record.binding_epoch === 1);
     const admA1 = coreA1.admit({ key: coreA1.findKeyById(gA1.record.key_id), deviceId: DEV, command: 'ui.click' });
     t('DC-A-1 自动取设备的 Key 准入通过（不再出生即死）', admA1.ok === true);
@@ -1205,7 +1246,7 @@ const mockChannel = {
     }
     const rA1r = await callRoute1r('POST', '/api/lea/v1/keys', {}, { password: 'correct-password' });
     t('DC-A-1 路由生成 Key 不传 device_id → 200 且自动取唯一绑定设备',
-      rA1r.code === 200 && !!rA1r.obj.key && rA1r.obj.record.device_scope === DEV
+      rA1r.code === 200 && !!rA1r.obj.key && rA1r.obj.record.device_scope === core1r.bareNodeId(DEV)
       && rA1r.obj.record.binding_epoch === core1r.getBinding(DEV).binding_epoch);
     core1r.recordBinding('node//test-device-2', USER, 'dc-a1r-2');
     const rA1m = await callRoute1r('POST', '/api/lea/v1/keys', {}, { password: 'correct-password' });
@@ -1227,6 +1268,12 @@ const mockChannel = {
     t('DC-A-3 归属账号 Key 读设备状态 → 200', r.code === 200 && r.obj.account_id === USER);
     r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent('node//test-device-2') + '/status', bearerHeaders(gCarol.key));
     t('DC-A-3 设备域 Key 读本设备状态 → 200', r.code === 200 && r.obj.device_id === 'node//test-device-2');
+    // 归一化：device_scope 裸形＋URL 全形（及反向）均可见
+    const gCarolBare = core.generateKey('carol', { device_scope: 'test-device-2' });
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent('node//test-device-2') + '/status', bearerHeaders(gCarolBare.key));
+    t('归一化 设备域 Key（裸形 scope）读全形 id 设备状态 → 200', r.code === 200 && r.obj.account_id === 'carol');
+    r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent('test-device-2') + '/status', bearerHeaders(gCarol.key));
+    t('归一化 设备域 Key（全形 scope）读裸形 id 设备状态 → 200', r.code === 200 && r.obj.account_id === 'carol');
   }
   // DC-A-4：幂等命名空间隔离（单条／批量／批量步互不串槽）
   {

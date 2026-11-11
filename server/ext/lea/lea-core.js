@@ -608,6 +608,18 @@ function createLeaCore(opts) {
     persistIdem();
   }
 
+  // 节点 id 归一：MeshCentral 节点 _id 为 node// 前缀全形，客户端
+  // （windows/devices.js bareNodeId）与绑定台账只认裸 id；凡是拿调用方
+  // 送来的 id 去比全形 _id／白名单／device_scope／台账键的地方，比对前
+  // 必须统一去前缀，否则裸 id 永远匹配不上全形（r5 rebind 404 的潜伏
+  // 问题；白名单是同款：白名单文件存全形，execute 调用方送裸 id，
+  // 直接比对即报 NOT_WHITELISTED）。lea-channel.js 有同款
+  // bareNodeId／nodeMatchesId，两处逻辑须保持一致。
+  function bareNodeId(id) {
+    const s = String(id || '');
+    return s.startsWith('node//') ? s.slice(6) : s;
+  }
+
   // ---------- 设备白名单（DESIGN §6.2 第 ② 项，H04） ----------
   // 来源（按优先）：opts.whitelist（数组，单测／调用方注入）→
   // whitelist.json（数据目录，{"devices": ["node//..."]}，每次 admit 重读，
@@ -626,7 +638,9 @@ function createLeaCore(opts) {
   function isWhitelisted(deviceId) {
     const wl = loadWhitelist();
     if (!wl) return false;
-    return wl.includes(String(deviceId));
+    const want = bareNodeId(deviceId);
+    if (!want) return false; // 空／退化 id（''／'node//'）永不命中，防空白名单条目误放行
+    return wl.some((w) => bareNodeId(w) === want);
   }
 
   // ---------- API Key（DESIGN §7） ----------
@@ -838,7 +852,7 @@ function createLeaCore(opts) {
 
   // ---------- 绑定（DESIGN §6.1：跟随当前登录账号） ----------
   function getBinding(deviceId) {
-    return loadBindings().bindings[String(deviceId)] || null;
+    return loadBindings().bindings[bareNodeId(deviceId)] || null;
   }
   function currentBindingEpoch(deviceId, accountId) {
     const b = deviceId ? getBinding(deviceId) : null;
@@ -858,7 +872,9 @@ function createLeaCore(opts) {
   // epoch 向前（取 max），永不倒退——向前只会使旧 Key 失效，不会复活
   // 旧绑定；调用方须先过路由层的归属／可见性校验（H05）才能传此值。
   function recordBinding(deviceId, accountId, trigger, optsBind) {
-    deviceId = String(deviceId); accountId = String(accountId);
+    // 归一：台账键一律存裸形，全形入账也不另起一条（否则同一设备在台账
+    // 里出现两条目、旧绑定 Key 不被新一次换绑吊销）。
+    deviceId = bareNodeId(String(deviceId)); accountId = String(accountId);
     const st = loadBindings();
     const old = st.bindings[deviceId] || null;
     const oldAccount = old ? old.account_id : null;
@@ -876,7 +892,7 @@ function createLeaCore(opts) {
     if (oldAccount && oldAccount !== accountId) {
       const ks = loadKeys();
       for (const k of ks.keys) {
-        if (k.account_id === oldAccount && (!k.device_scope || k.device_scope === deviceId) && !k.revoked_at) {
+        if (k.account_id === oldAccount && (!k.device_scope || bareNodeId(k.device_scope) === deviceId) && !k.revoked_at) {
           k.revoked_at = now(); k.revoked_by_rebind = true; k.revoke_reason = 'rebind';
           k.key_epoch = (k.key_epoch || 1) + 1; revokedKeys++; revokedKeyIds.push(k.key_id);
         }
@@ -963,7 +979,8 @@ function createLeaCore(opts) {
   const revocIssuedGen = {};
   function recordRevocations(deviceIds, keyIds, reason) {
     const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
-    const devs = [...new Set((deviceIds || []).filter((x) => typeof x === 'string' && x))].sort();
+    // 归一：吊销表键一律存裸形，与绑定台账同口径。
+    const devs = [...new Set((deviceIds || []).filter((x) => typeof x === 'string' && x).map(bareNodeId))].filter(Boolean).sort();
     if (!ids.length || !devs.length) return [];
     const st = loadRevocations();
     st.devices = st.devices || {};
@@ -984,17 +1001,18 @@ function createLeaCore(opts) {
     return devs;
   }
   function getRevocations(deviceId) {
-    const cur = (loadRevocations().devices || {})[String(deviceId)];
+    const id = bareNodeId(deviceId); // 归一：查表按裸形，返回的 device_id 仍回显调用方原样
+    const cur = (loadRevocations().devices || {})[id];
     if (!cur) return { device_id: String(deviceId), revoked_key_ids: [], generation: 0, revocation_epoch: 0, pushed_generation: 0, pushed_epoch: 0, updated_at: 0 };
-    const gen = Math.max(revocGeneration(cur), revocIssuedGen[String(deviceId)] || 0);
-    revocIssuedGen[String(deviceId)] = gen;
+    const gen = Math.max(revocGeneration(cur), revocIssuedGen[id] || 0);
+    revocIssuedGen[id] = gen;
     const pushed = revocPushed(cur);
     return { device_id: String(deviceId), revoked_key_ids: [...(cur.revoked_key_ids || [])], generation: gen, revocation_epoch: gen, pushed_generation: pushed, pushed_epoch: pushed, updated_at: cur.updated_at || 0 };
   }
   function markRevocationsPushed(deviceId, generation) {
     try {
       const st = loadRevocations();
-      const cur = st.devices[String(deviceId)];
+      const cur = st.devices[bareNodeId(deviceId)];
       if (!cur) return;
       // 只在 generation 与当前台账一致时才追上：陈旧推送（其 generation
       // 已落后于当前台账）即使写盘命令返回成功，也不得误标已同步。
@@ -1052,7 +1070,8 @@ function createLeaCore(opts) {
   function admit(ctx) {
     // ctx: { key, deviceId, command, requestId, ip }
     const k = ctx.key;
-    const deviceId = String(ctx.deviceId || '');
+    // 归一：调用方可能送全形或裸形 id，准入各门一律按裸形比对。
+    const deviceId = bareNodeId(String(ctx.deviceId || ''));
     const spec = COMMANDS[ctx.command];
     if (!spec) return { ok: false, status: 400, code: ERR.VALIDATION, msg: '未知命令：' + String(ctx.command || '') };
     // ⑤ Key 归属与状态（已在 authenticate 中验过，此处复核吊销/过期）
@@ -1065,8 +1084,9 @@ function createLeaCore(opts) {
     if (!isWhitelisted(deviceId)) {
       return { ok: false, status: 403, code: ERR.NOT_WHITELISTED, msg: '设备不在 Muse 操作白名单内。' };
     }
-    // ⑥ scope：device_id 必须与 Key 绑定一致，否则 403
-    if (k.device_scope && k.device_scope !== deviceId) {
+    // ⑥ scope：device_id 必须与 Key 绑定一致，否则 403（归一后比对：
+    // Key 的 device_scope 可能为全形——控制台生成时按原样存入）。
+    if (k.device_scope && bareNodeId(k.device_scope) !== deviceId) {
       return { ok: false, status: 403, code: ERR.SCOPE_DENIED, msg: '该 Key 不能操作此设备。' };
     }
     if (!k.scopes.includes(spec.scope) && !k.scopes.includes('muse.execute')) {
@@ -1332,7 +1352,7 @@ function createLeaCore(opts) {
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,
-    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted,
+    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId,
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
