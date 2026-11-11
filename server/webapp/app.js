@@ -1196,7 +1196,7 @@ function renderNavs() {
 let drawerOpen = false;
 function setDrawer(open) {
   drawerOpen = open;
-  document.body.classList.toggle('drawer-open', open); // 抽屉打开态顶栏变深蓝（2026-11-10 全改蓝）
+  document.body.classList.toggle('drawer-open', open); // 抽屉打开态挂载（2026-11-11：顶栏已常驻品牌蓝，本类仅保留作抽屉打开态兜底）
   const d = $('#drawer');
   d.classList.toggle('open', open);
   d.setAttribute('aria-hidden', open ? 'false' : 'true');
