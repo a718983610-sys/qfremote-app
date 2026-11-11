@@ -8,7 +8,9 @@
  *     合法 PNG（签名字节＋非空）。用 #include 直接测 static 函数，伪造
  *     4x3 32bpp 抓屏，不依赖真屏幕／BitBlt。r9-diag：encode 失败时经
  *     out 参数带回失败步骤＋HRESULT＋CoInitializeEx 结果；wine 无编码
- *     器时应精确报 CreateEncoder/PNG＋0x88982F50（即原 SKIP 分支）。
+ *     器时应精确报 CoCreateInstance/PNGEncoder＋失败 hr（即原 SKIP 分支）。
+ *     r9-fix2：编码器改直接 CoCreateInstance（绕过工厂 CreateEncoder 的
+ *     元数据校验；真机 WIC 元数据注册不完整，Implemented Categories 缺失）。
  *  ② ui.input 坐标定位：find_element 在无任何元素定位字段时立即返 0
  *     （修前空转满 deadline 才返 0，坐标 input 恒 5000ms 超时）；另验
  *     ush_parse_target 能从顶层 params 读出 r8 原样 {"x":200,"y":736}，
@@ -102,31 +104,32 @@ int main(void) {
         t(hr == (HRESULT)0x800401F0, "r9 snapshot 复现：无 COM 初始化时 WIC 工厂建不出 0x800401F0");
         if (f) f->lpVtbl->Release(f);
     }
-    /* ② 本 wine 前缀若无 PNG 编码器（CreateEncoder 报 COMPONENTNOTFOUND），
+    /* ② 本 wine 前缀若无 PNG 编码器（直接 CoCreateInstance 报失败），
      * 编 PNG 全程断言记 SKIP（wine 缺件，非修复无效；真机验收见
-     * WINDOWS-TESTS.md／r9 真机验证）。有编码器时才跑全程。 */
+     * WINDOWS-TESTS.md／r9 真机验证）。有编码器时才跑全程。r9-fix2：
+     * encode 已改直接 CoCreateInstance 建编码器（绕过工厂 CreateEncoder
+     * 的元数据校验），故探针与诊断断言同步改直接创建。 */
     int skip_encode = 0;
+    HRESULT skip_hr = S_OK;
     {
         HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
         IWICImagingFactory *f = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                       &IID_IWICImagingFactory, (void **)&f);
-        if (SUCCEEDED(hr) && f) {
-            IWICBitmapEncoder *enc = NULL;
-            HRESULT hre = f->lpVtbl->CreateEncoder(f, &CLSID_WICPngEncoder, NULL, &enc);
-            printf("  [probe] with-init factory hr=0x%08lx CreateEncoder PNG hr=0x%08lx\n",
-                   (unsigned long)hr, (unsigned long)hre);
-            t(SUCCEEDED(hr), "r9 snapshot 初始化 COM 后 WIC 工厂能建出");
-            if (hre == (HRESULT)0x88982F50) {
-                skip_encode = 1;
-                printf("SKIP r9 snapshot 编 PNG 全程（本 wine 前缀无 PNG 编码器 0x88982F50，真机验）\n");
-            }
-            if (enc) enc->lpVtbl->Release(enc);
-            f->lpVtbl->Release(f);
-        } else {
-            printf("SKIP r9 snapshot 编 PNG 全程（本 wine 建不出 WIC 工厂，真机验）\n");
+        printf("  [probe] with-init factory hr=0x%08lx\n", (unsigned long)hr);
+        t(SUCCEEDED(hr) && f, "r9 snapshot 初始化 COM 后 WIC 工厂能建出");
+        if (f) f->lpVtbl->Release(f);
+        IWICBitmapEncoder *enc = NULL;
+        HRESULT hre = CoCreateInstance(&CLSID_WICPngEncoder, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_IWICBitmapEncoder, (void **)&enc);
+        printf("  [probe] direct CoCreateInstance PNG encoder hr=0x%08lx\n", (unsigned long)hre);
+        skip_hr = hre;
+        if (FAILED(hre) || !enc) {
             skip_encode = 1;
+            printf("SKIP r9 snapshot 编 PNG 全程（本 wine 前缀无 PNG 编码器 hr=0x%08lx，真机验）\n",
+                   (unsigned long)hre);
         }
+        if (enc) enc->lpVtbl->Release(enc);
         if (SUCCEEDED(hr_init)) CoUninitialize();
     }
     /* ③ encode_png_to_stream 全程（仅当编码器存在）：函数内按需初始化
@@ -143,14 +146,15 @@ int main(void) {
               "r9-diag 编码成功时诊断字段为 ok/S_OK/S_OK");
         }
     } else {
-        /* 无编码器分支：诊断必须精确指到 CreateEncoder/PNG＋0x88982F50，
-         * 且 CoInitializeEx 本身成功（S_OK），证明失败不在 COM 初始化。 */
+        /* 无编码器分支：诊断必须精确指到直接创建步骤，且 hr 与探针直接
+         * 创建一致；CoInitializeEx 本身成功（S_OK），证明失败不在 COM 初始化。 */
         HRESULT dhr = S_OK;
         const char *dstep = "";
         HRESULT dinit = S_OK;
         t(!encode_once(&dhr, &dstep, &dinit), "r9-diag 无 PNG 编码器时 encode 返 0");
-        t(dstep && strcmp(dstep, "CreateEncoder/PNG") == 0 && dhr == (HRESULT)0x88982F50,
-          "r9-diag 无 PNG 编码器时报 CreateEncoder/PNG hr=0x88982F50");
+        t(dstep && strcmp(dstep, "CoCreateInstance/PNGEncoder") == 0 && FAILED(dhr),
+          "r9-diag 无 PNG 编码器时报 CoCreateInstance/PNGEncoder");
+        t(dhr == skip_hr, "r9-diag 无 PNG 编码器时 hr 与探针直接创建一致");
         t(dinit == S_OK, "r9-diag 无 PNG 编码器时 CoInitializeEx 本身成功 S_OK");
     }
 

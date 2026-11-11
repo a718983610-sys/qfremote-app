@@ -121,7 +121,16 @@ static void capture_free(capture_t *c) {
  * RPC_E_CHANGED_MODE（线程已被别处以另一模式初始化）时不反初始化、
  * 直接往下走。
  * r9-diag（真机仍败，file/inline 均 31ms）：本函数与两处调用点现把失败步骤＋
- * HRESULT＋CoInitializeEx 结果＋抓屏尺寸带回 err_text，定位到步再修。 */
+ * HRESULT＋CoInitializeEx 结果＋抓屏尺寸带回 err_text，定位到步再修。
+ * r9-fix2（真机诊断结论）：失败点是 CreateEncoder/PNG hr=0x88982F50
+ * （init=S_OK、抓屏 1024x768 均正常）；独立探针证实：直接 CoCreateInstance
+ * 编码器 CLSID 全成功（PNG/BMP 编码器、PNG 解码器均为 S_OK），而工厂
+ * CreateEncoder/CreateDecoder 全灭；注册表 InprocServer32 正常
+ * （%SystemRoot%\system32\windowscodecs.dll，Both，DLL 完整 1782440 字节），
+ * 但 CLSID 下无 Implemented Categories 子键——本机 WIC 元数据注册不完整，
+ * 工厂创建编码器前先查元数据故报 COMPONENTNOTFOUND。修法：编码器改直接
+ * CoCreateInstance（工厂能建的直接也能建，无需回退）；工厂只保留给
+ * file 模式建流（CreateStream 本身正常）。 */
 static int encode_png_to_stream(const capture_t *cap, IStream *stream,
                                 HRESULT *hr_out, const char **step_out, HRESULT *hr_init_out) {
     int com_init_here = 0;
@@ -136,22 +145,19 @@ static int encode_png_to_stream(const capture_t *cap, IStream *stream,
     if (SUCCEEDED(hr_init)) com_init_here = 1;
     /* S_FALSE 同样增加引用计数，须配对 CoUninitialize（见上）；失败或
      * RPC_E_CHANGED_MODE 时 com_init_here 保持 0，往下照常尝试创建。 */
-    IWICImagingFactory *factory = NULL;
-    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-                                  &IID_IWICImagingFactory, (void **)&factory);
-    if (FAILED(hr) || !factory) {
+    IWICBitmapEncoder *enc = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_WICPngEncoder, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICBitmapEncoder, (void **)&enc);
+    if (FAILED(hr) || !enc) {
         if (hr_out) *hr_out = FAILED(hr) ? hr : E_FAIL;
-        if (step_out) *step_out = "CoCreateInstance/WICImagingFactory";
+        if (step_out) *step_out = "CoCreateInstance/PNGEncoder";
         if (com_init_here) CoUninitialize();
         return 0;
     }
     int ok = 0;
-    IWICBitmapEncoder *enc = NULL;
     IWICBitmapFrameEncode *frame = NULL;
     HRESULT hr_step = S_OK;
     const char *fail_step = "ok";
-    hr_step = factory->lpVtbl->CreateEncoder(factory, &CLSID_WICPngEncoder, NULL, &enc);
-    if (FAILED(hr_step) || !enc) { fail_step = "CreateEncoder/PNG"; goto done; }
     hr_step = enc->lpVtbl->Initialize(enc, stream, WICBitmapEncoderNoCache);
     if (FAILED(hr_step)) { fail_step = "Encoder/Initialize"; goto done; }
     hr_step = enc->lpVtbl->CreateNewFrame(enc, &frame, NULL);
@@ -187,7 +193,6 @@ done:
     }
     if (frame) frame->lpVtbl->Release(frame);
     if (enc) enc->lpVtbl->Release(enc);
-    if (factory) factory->lpVtbl->Release(factory);
     if (com_init_here) CoUninitialize();
     return ok;
 }
