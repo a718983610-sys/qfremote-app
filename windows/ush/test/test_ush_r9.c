@@ -6,7 +6,9 @@
  *     化 COM）。修前 CoCreateInstance 报 CO_E_NOTINITIALIZED、恒返 0；
  *     修后函数内按需 CoInitializeEx（MTA）＋平衡 CoUninitialize，编出
  *     合法 PNG（签名字节＋非空）。用 #include 直接测 static 函数，伪造
- *     4x3 32bpp 抓屏，不依赖真屏幕／BitBlt。
+ *     4x3 32bpp 抓屏，不依赖真屏幕／BitBlt。r9-diag：encode 失败时经
+ *     out 参数带回失败步骤＋HRESULT＋CoInitializeEx 结果；wine 无编码
+ *     器时应精确报 CreateEncoder/PNG＋0x88982F50（即原 SKIP 分支）。
  *  ② ui.input 坐标定位：find_element 在无任何元素定位字段时立即返 0
  *     （修前空转满 deadline 才返 0，坐标 input 恒 5000ms 超时）；另验
  *     ush_parse_target 能从顶层 params 读出 r8 原样 {"x":200,"y":736}，
@@ -40,8 +42,9 @@ static void t(int cond, const char *name) {
     else { g_fail++; printf("FAIL %s\n", name); }
 }
 
-/* 编一次 4x3 伪造抓屏到内存流，验 PNG 签名。返回 1 编出合法 PNG。 */
-static int encode_once(void) {
+/* 编一次 4x3 伪造抓屏到内存流，验 PNG 签名。返回 1 编出合法 PNG。
+ * diag 出参（可 NULL）接 encode 的失败步骤＋HRESULT＋初始化结果。 */
+static int encode_once(HRESULT *hr_out, const char **step_out, HRESULT *hr_init_out) {
     capture_t cap;
     memset(&cap, 0, sizeof(cap));
     cap.width = 4;
@@ -60,7 +63,13 @@ static int encode_once(void) {
     IStream *mem = NULL;
     HRESULT hr = CreateStreamOnHGlobal(NULL, TRUE, &mem);
     if (FAILED(hr) || !mem) { free(cap.bits); return 0; }
-    int ok = encode_png_to_stream(&cap, mem);
+    HRESULT dhr = S_OK;
+    const char *dstep = "ok";
+    HRESULT dinit = S_OK;
+    int ok = encode_png_to_stream(&cap, mem, &dhr, &dstep, &dinit);
+    if (hr_out) *hr_out = dhr;
+    if (step_out) *step_out = dstep;
+    if (hr_init_out) *hr_init_out = dinit;
     int sig_ok = 0;
     SIZE_T sz = 0;
     if (ok) {
@@ -75,7 +84,9 @@ static int encode_once(void) {
     }
     mem->lpVtbl->Release(mem);
     free(cap.bits);
-    printf("  [encode] ok=%d sig_ok=%d bytes=%llu\n", ok, sig_ok, (unsigned long long)sz);
+    printf("  [encode] ok=%d sig_ok=%d bytes=%llu step=%s hr=0x%08lx init=0x%08lx\n",
+           ok, sig_ok, (unsigned long long)sz, dstep,
+           (unsigned long)dhr, (unsigned long)dinit);
     return ok && sig_ok;
 }
 
@@ -119,10 +130,28 @@ int main(void) {
         if (SUCCEEDED(hr_init)) CoUninitialize();
     }
     /* ③ encode_png_to_stream 全程（仅当编码器存在）：函数内按需初始化
-     * COM，两次调用都成即进出平衡。 */
+     * COM，两次调用都成即进出平衡。第二次带回诊断字段，成功时应为
+     * ok／S_OK／S_OK。 */
     if (!skip_encode) {
-        t(encode_once(), "r9 snapshot 无 COM 初始化线程上 WIC 编 PNG 成功（首次）");
-        t(encode_once(), "r9 snapshot 无 COM 初始化线程上 WIC 编 PNG 成功（再次，进出平衡）");
+        t(encode_once(NULL, NULL, NULL), "r9 snapshot 无 COM 初始化线程上 WIC 编 PNG 成功（首次）");
+        {
+            HRESULT dhr = S_OK;
+            const char *dstep = "";
+            HRESULT dinit = S_OK;
+            t(encode_once(&dhr, &dstep, &dinit), "r9 snapshot 无 COM 初始化线程上 WIC 编 PNG 成功（再次，进出平衡）");
+            t(dhr == S_OK && dstep && strcmp(dstep, "ok") == 0 && dinit == S_OK,
+              "r9-diag 编码成功时诊断字段为 ok/S_OK/S_OK");
+        }
+    } else {
+        /* 无编码器分支：诊断必须精确指到 CreateEncoder/PNG＋0x88982F50，
+         * 且 CoInitializeEx 本身成功（S_OK），证明失败不在 COM 初始化。 */
+        HRESULT dhr = S_OK;
+        const char *dstep = "";
+        HRESULT dinit = S_OK;
+        t(!encode_once(&dhr, &dstep, &dinit), "r9-diag 无 PNG 编码器时 encode 返 0");
+        t(dstep && strcmp(dstep, "CreateEncoder/PNG") == 0 && dhr == (HRESULT)0x88982F50,
+          "r9-diag 无 PNG 编码器时报 CreateEncoder/PNG hr=0x88982F50");
+        t(dinit == S_OK, "r9-diag 无 PNG 编码器时 CoInitializeEx 本身成功 S_OK");
     }
 
     /* find_element 无定位字段：立即返 0，不空转满 deadline。 */

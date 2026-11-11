@@ -119,10 +119,16 @@ static void capture_free(capture_t *c) {
  * WaitForSingleObject 上不泵消息，会把现已能跑的 click/tree/input
  * 全部挂死。MTA 内创建 WIC 工厂是支持的（WIC 组件 apartment-neutral）。
  * RPC_E_CHANGED_MODE（线程已被别处以另一模式初始化）时不反初始化、
- * 直接往下走。 */
-static int encode_png_to_stream(const capture_t *cap, IStream *stream) {
+ * 直接往下走。
+ * r9-diag（真机仍败，file/inline 均 31ms）：本函数与两处调用点现把失败步骤＋
+ * HRESULT＋CoInitializeEx 结果＋抓屏尺寸带回 err_text，定位到步再修。 */
+static int encode_png_to_stream(const capture_t *cap, IStream *stream,
+                                HRESULT *hr_out, const char **step_out, HRESULT *hr_init_out) {
     int com_init_here = 0;
     HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (hr_init_out) *hr_init_out = hr_init;
+    if (hr_out) *hr_out = S_OK;
+    if (step_out) *step_out = "ok";
     /* COM 规则：CoInitializeEx 每次成功调用（含返回 S_FALSE“已按同模
      * 式初始化”）都会增加引用计数，必须配对一次 CoUninitialize。故用
      * SUCCEEDED 判定——首轮复核误称 S_FALSE 不应反初始化，已由跟进复
@@ -133,29 +139,52 @@ static int encode_png_to_stream(const capture_t *cap, IStream *stream) {
     IWICImagingFactory *factory = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                   &IID_IWICImagingFactory, (void **)&factory);
-    if (FAILED(hr) || !factory) { if (com_init_here) CoUninitialize(); return 0; }
+    if (FAILED(hr) || !factory) {
+        if (hr_out) *hr_out = FAILED(hr) ? hr : E_FAIL;
+        if (step_out) *step_out = "CoCreateInstance/WICImagingFactory";
+        if (com_init_here) CoUninitialize();
+        return 0;
+    }
     int ok = 0;
     IWICBitmapEncoder *enc = NULL;
     IWICBitmapFrameEncode *frame = NULL;
-    if (FAILED(factory->lpVtbl->CreateEncoder(factory, &CLSID_WICPngEncoder, NULL, &enc)) || !enc)
-        goto done;
-    if (FAILED(enc->lpVtbl->Initialize(enc, stream, WICBitmapEncoderNoCache)) ) goto done;
-    if (FAILED(enc->lpVtbl->CreateNewFrame(enc, &frame, NULL)) || !frame) goto done;
-    if (FAILED(frame->lpVtbl->Initialize(frame, NULL))) goto done;
-    if (FAILED(frame->lpVtbl->SetSize(frame, (UINT)cap->width, (UINT)cap->height))) goto done;
+    HRESULT hr_step = S_OK;
+    const char *fail_step = "ok";
+    hr_step = factory->lpVtbl->CreateEncoder(factory, &CLSID_WICPngEncoder, NULL, &enc);
+    if (FAILED(hr_step) || !enc) { fail_step = "CreateEncoder/PNG"; goto done; }
+    hr_step = enc->lpVtbl->Initialize(enc, stream, WICBitmapEncoderNoCache);
+    if (FAILED(hr_step)) { fail_step = "Encoder/Initialize"; goto done; }
+    hr_step = enc->lpVtbl->CreateNewFrame(enc, &frame, NULL);
+    if (FAILED(hr_step) || !frame) { fail_step = "CreateNewFrame"; goto done; }
+    hr_step = frame->lpVtbl->Initialize(frame, NULL);
+    if (FAILED(hr_step)) { fail_step = "Frame/Initialize"; goto done; }
+    hr_step = frame->lpVtbl->SetSize(frame, (UINT)cap->width, (UINT)cap->height);
+    if (FAILED(hr_step)) { fail_step = "Frame/SetSize"; goto done; }
     {
         WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
-        if (FAILED(frame->lpVtbl->SetPixelFormat(frame, &fmt))) goto done;
-        if (memcmp(&fmt, &GUID_WICPixelFormat32bppBGRA, sizeof(GUID)) != 0) goto done;
+        hr_step = frame->lpVtbl->SetPixelFormat(frame, &fmt);
+        if (FAILED(hr_step)) { fail_step = "Frame/SetPixelFormat"; goto done; }
+        if (memcmp(&fmt, &GUID_WICPixelFormat32bppBGRA, sizeof(GUID)) != 0) {
+            fail_step = "Frame/SetPixelFormat-not-BGRA";
+            hr_step = E_FAIL;
+            goto done;
+        }
     }
-    if (FAILED(frame->lpVtbl->WritePixels(frame, (UINT)cap->height,
-                                          (UINT)cap->stride,
-                                          (UINT)(cap->stride * cap->height),
-                                          (BYTE *)cap->bits))) goto done;
-    if (FAILED(frame->lpVtbl->Commit(frame))) goto done;
-    if (FAILED(enc->lpVtbl->Commit(enc))) goto done;
+    hr_step = frame->lpVtbl->WritePixels(frame, (UINT)cap->height,
+                                         (UINT)cap->stride,
+                                         (UINT)(cap->stride * cap->height),
+                                         (BYTE *)cap->bits);
+    if (FAILED(hr_step)) { fail_step = "Frame/WritePixels"; goto done; }
+    hr_step = frame->lpVtbl->Commit(frame);
+    if (FAILED(hr_step)) { fail_step = "Frame/Commit"; goto done; }
+    hr_step = enc->lpVtbl->Commit(enc);
+    if (FAILED(hr_step)) { fail_step = "Encoder/Commit"; goto done; }
     ok = 1;
 done:
+    if (!ok) {
+        if (hr_out) *hr_out = FAILED(hr_step) ? hr_step : E_FAIL;
+        if (step_out) *step_out = fail_step;
+    }
     if (frame) frame->lpVtbl->Release(frame);
     if (enc) enc->lpVtbl->Release(enc);
     if (factory) factory->lpVtbl->Release(factory);
@@ -404,25 +433,38 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
         snprintf(path, sizeof(path), "%s\\ush-%04d%02d%02d-%02d%02d%02d-%03d-%lu.png",
             dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
             st.wMilliseconds, (unsigned long)GetCurrentProcessId());
-        /* WIC 直接写文件：用 IWICStream::InitializeFromFilename */
+        /* WIC 直接写文件：用 IWICStream::InitializeFromFilename。
+         * r9-diag：handler 自身的工厂创建与流搭建失败时同样带回步骤＋HRESULT；
+         * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。 */
+        HRESULT diag_hr = E_FAIL;
+        const char *diag_step = "handler/stream-setup";
+        /* 0xFFFFFFFF＝哨兵：CoInitializeEx 尚未在本路径调用（encode 未被调
+         * 到时沿用此值）；切勿默认为 S_OK，那会谎称“初始化已成功”。 */
+        HRESULT diag_init = (HRESULT)0xFFFFFFFF;
         IWICImagingFactory *factory = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                       &IID_IWICImagingFactory, (void **)&factory);
         if (SUCCEEDED(hr) && factory) {
             IWICStream *wstream = NULL;
-            if (SUCCEEDED(factory->lpVtbl->CreateStream(factory, &wstream)) && wstream) {
+            HRESULT hr2 = factory->lpVtbl->CreateStream(factory, &wstream);
+            if (SUCCEEDED(hr2) && wstream) {
                 WCHAR wpath[MAX_PATH + 64];
                 MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH + 64);
-                if (SUCCEEDED(wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE))) {
+                hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
+                if (SUCCEEDED(hr2)) {
                     IStream *istream = NULL;
-                    if (SUCCEEDED(wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream)) && istream) {
-                        ok = encode_png_to_stream(&cap, istream);
+                    hr2 = wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream);
+                    if (SUCCEEDED(hr2) && istream) {
+                        ok = encode_png_to_stream(&cap, istream, &diag_hr, &diag_step, &diag_init);
                         istream->lpVtbl->Release(istream);
-                    }
-                }
+                    } else { diag_step = "handler/QueryInterface"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
+                } else { diag_step = "handler/InitializeFromFilename"; diag_hr = hr2; }
                 wstream->lpVtbl->Release(wstream);
-            }
+            } else { diag_step = "handler/CreateStream"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
             factory->lpVtbl->Release(factory);
+        } else {
+            diag_step = "handler/CoCreateInstance";
+            diag_hr = FAILED(hr) ? hr : E_POINTER;
         }
         if (ok) {
             /* 文件大小 */
@@ -440,7 +482,9 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                 pesc, cap.width, cap.height, (unsigned long)fsize);
         } else {
             strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
-            snprintf(err_text, err_text_size, "PNG encode failed");
+            snprintf(err_text, err_text_size, "PNG encode failed at %s hr=0x%08lX init=0x%08lX cap=%dx%d stride=%d",
+                     diag_step, (unsigned long)diag_hr, (unsigned long)diag_init,
+                     cap.width, cap.height, cap.stride);
         }
     } else {
         /* 内联：编到内存流 → 读 HGLOBAL → Base64 */
@@ -448,7 +492,10 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
         IStream *mem = NULL;
         HRESULT hr = CreateStreamOnHGlobal(NULL, TRUE, &mem);
         if (SUCCEEDED(hr) && mem) {
-            if (encode_png_to_stream(&cap, mem)) {
+            HRESULT diag_hr = S_OK;
+            const char *diag_step = "ok";
+            HRESULT diag_init = S_OK;
+            if (encode_png_to_stream(&cap, mem, &diag_hr, &diag_step, &diag_init)) {
                 HGLOBAL hret = NULL;
                 if (SUCCEEDED(GetHGlobalFromStream(mem, &hret)) && hret) {
                     SIZE_T sz = GlobalSize(hret);
@@ -490,12 +537,15 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                 }
             } else {
                 strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
-                snprintf(err_text, err_text_size, "PNG encode failed");
+                snprintf(err_text, err_text_size, "PNG encode failed at %s hr=0x%08lX init=0x%08lX cap=%dx%d stride=%d",
+                         diag_step, (unsigned long)diag_hr, (unsigned long)diag_init,
+                         cap.width, cap.height, cap.stride);
             }
             mem->lpVtbl->Release(mem);
         } else {
             strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
-            snprintf(err_text, err_text_size, "CreateStreamOnHGlobal failed");
+            snprintf(err_text, err_text_size, "CreateStreamOnHGlobal failed hr=0x%08lX",
+                     (unsigned long)hr);
         }
         (void)hg;
     }
