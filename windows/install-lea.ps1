@@ -75,22 +75,133 @@ function Write-Degraded([string]$reason) {
   }
 }
 
-function Repair-LeaDataFileAcl([string]$path) {
-  # P2-02 问题 5 自愈：install-report.json / LEA_DEGRADED 的 ACL 损坏（r3：icacls
-  # 输出无 ACE 条目）时 Set-Content / Remove-Item 报 Access denied。本函数只修
-  # 这两个脚本自管文件：takeown 夺回属主 + icacls /reset 恢复自父目录继承的 ACL，
-  # 两步 exit 均为 0 才返回 $true；文件不存在返回 $false（无可修，调用方重试原
-  # 操作时会新建）。
+function Test-LeaDataFileAclUsable([string]$path) {
+  # r10：ACL 可用性回读核验——只信 Get-Acl 的实测结果，不信 exit 码。
+  # 可用 = SYSTEM 或 Administrators 有 Allow 的 FullControl（或至少 Write）。
+  # Get-Acl 本身抛错（空 DACL 下连读 ACL 都拒绝）即不可用。
   if (-not (Test-Path -LiteralPath $path)) { return $false }
+  try {
+    $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+  } catch { return $false }
+  foreach ($r in $acl.Access) {
+    if ($r.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+    $sid = ''
+    try { $sid = [string]($r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value) } catch { $sid = [string]$r.IdentityReference }
+    if ($sid -ne 'S-1-5-18' -and $sid -ne 'NT AUTHORITY\SYSTEM' -and $sid -ne 'S-1-5-32-544' -and $sid -ne 'BUILTIN\Administrators') { continue }
+    $rights = $r.FileSystemRights
+    $full = (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)
+    $write = (($rights -band [System.Security.AccessControl.FileSystemRights]::Write) -eq [System.Security.AccessControl.FileSystemRights]::Write)
+    if ($full -or $write) { return $true }
+  }
+  return $false
+}
+
+function Set-LeaDataFileExplicitAcl([string]$path) {
+  # r10：显式授权——不依赖父目录继承（父目录可继承 ACE 可能已被 QFRLEA
+  # 服务的 set_sys_admin_acl 以无继承标志 SDDL 剥掉，见 r10 根因）。
+  # takeown 夺回属主 + icacls /grant:r 显式授 SYSTEM/Administrators
+  # FullControl，完成后回读核验；任一步失败或核验不过返回 $false。
+  if (-not (Test-Path -LiteralPath $path)) { return $false }
+  try {
+    takeown.exe /F $path | Out-Null
+    $takeownExit = $LASTEXITCODE
+    icacls.exe $path /grant:r "NT AUTHORITY\SYSTEM:(F)" "BUILTIN\Administrators:(F)" | Out-Null
+    $grantExit = $LASTEXITCODE
+    $usable = Test-LeaDataFileAclUsable $path
+    Write-LeaLog ("data file explicit ACL: " + $path + " takeown exit=" + $takeownExit + " icacls /grant exit=" + $grantExit + " usable=" + $usable)
+    return ($takeownExit -eq 0 -and $grantExit -eq 0 -and $usable)
+  } catch {
+    Write-LeaLog ('data file explicit ACL threw: ' + $path + ' ' + $_.Exception.Message)
+    return $false
+  }
+}
+
+function Clear-LeaDataFileReadOnly([string]$path) {
+  # r10：清只读位（r8 遗留文件带 R 属性时 Set-Content / Remove-Item 均失败）。
+  # 尽力而为：失败只记日志，不阻塞调用方。
+  if (-not (Test-Path -LiteralPath $path)) { return }
+  try { Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false -ErrorAction Stop } catch { Write-LeaLog ('clear read-only failed (non-fatal): ' + $path + ' ' + $_.Exception.Message) }
+}
+
+function Repair-LeaDataFileAcl([string]$path) {
+  # P2-02 问题 5 自愈（r10 重做）：install-report.json / LEA_DEGRADED 的 ACL
+  # 损坏（r3：icacls 输出无 ACE 条目）时 Set-Content / Remove-Item 报 Access denied。
+  # r10 根因：只信 exit 码是错的——父目录可继承 ACE 被 QFRLEA 服务剥掉后，
+  # icacls /reset 只能得到空 DACL，exit 仍为 0（2026-11-12 02:10:43 实测：
+  # takeown exit=0、/reset exit=0，重试仍 Access denied）。
+  # 本函数只修这两个脚本自管文件：先清只读位，再 takeown + /reset，最后
+  # 回读核验；核验不过改走显式授权（/grant:r，不依赖父目录继承）；仍不
+  # 过返回 $false（调用方走删重建或改判 degraded，绝不谎报已修好）。
+  # 文件不存在返回 $false（无可修，调用方按新建路径先授权后写）。
+  if (-not (Test-Path -LiteralPath $path)) { return $false }
+  Clear-LeaDataFileReadOnly $path
   try {
     takeown.exe /F $path | Out-Null
     $takeownExit = $LASTEXITCODE
     icacls.exe $path /reset | Out-Null
     $icaclsExit = $LASTEXITCODE
-    Write-LeaLog ("data file ACL repair: " + $path + " takeown exit=" + $takeownExit + " icacls /reset exit=" + $icaclsExit)
-    return ($takeownExit -eq 0 -and $icaclsExit -eq 0)
+    $usable = Test-LeaDataFileAclUsable $path
+    Write-LeaLog ("data file ACL repair: " + $path + " takeown exit=" + $takeownExit + " icacls /reset exit=" + $icaclsExit + " usable=" + $usable)
+    if ($usable) { return $true }
+    Write-LeaLog 'data file ACL repair: /reset left unusable ACL, trying explicit grant'
+    return (Set-LeaDataFileExplicitAcl $path)
   } catch {
     Write-LeaLog ('data file ACL repair threw: ' + $path + ' ' + $_.Exception.Message)
+    return $false
+  }
+}
+
+function Test-LeaInstallReportContent([string]$path, [string]$status, [string]$traceId) {
+  # r10：报告读回核验——内容须是本次写的（status 与 trace_id 一致，
+  # checks 非空），否则算没写好（读不到／内容是旧的／写截断都算失败，
+  # 调用方走删重建）。
+  try {
+    $back = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    return ($null -ne $back -and $back.status -eq $status -and $back.trace_id -eq $traceId -and $null -ne $back.checks)
+  } catch { return $false }
+}
+
+function Write-InstallReportRecreate([string]$report, [string]$status, [string]$detail, [string]$traceId) {
+  # r10：删重建兜底——删（带退避重试；删不掉改改名替换）→ 新建 → 显式授
+  # 权 → 写 → 读回核验。返回 $true=新文件已写好且核验通过。
+  $delays = @(100, 300, 900)
+  $removed = $false
+  for ($i = 0; $i -lt 3 -and -not $removed; $i++) {
+    try {
+      if (Test-Path -LiteralPath $reportFile) {
+        Clear-LeaDataFileReadOnly $reportFile
+        $null = Repair-LeaDataFileAcl $reportFile
+        Remove-Item -LiteralPath $reportFile -Force -ErrorAction Stop
+      }
+      $removed = $true
+    } catch {
+      Write-LeaLog ("install report recreate: remove attempt " + ($i + 1) + " failed: " + $_.Exception.Message)
+      if ($i -lt 2) { Start-Sleep -Milliseconds $delays[$i] }
+    }
+  }
+  if (-not $removed) {
+    # 删不掉（占用）：改名替换——改名不受共享读句柄阻塞。
+    try {
+      $bak = $reportFile + '.r10bak-' + (Get-Date -Format 'yyyyMMddHHmmss')
+      Move-Item -LiteralPath $reportFile -Destination $bak -Force -ErrorAction Stop
+      Write-LeaLog ("install report recreate: renamed stale file to " + $bak)
+      $removed = $true
+    } catch {
+      Write-LeaLog ('install report recreate FAILED (cannot remove or rename stale file): ' + $_.Exception.Message)
+      return $false
+    }
+  }
+  try {
+    Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8 -Force
+    $null = Set-LeaDataFileExplicitAcl $reportFile
+    if (Test-LeaInstallReportContent $reportFile $status $traceId) {
+      Write-LeaLog ("install report written after delete-recreate: " + $status + " " + $detail)
+      return $true
+    }
+    Write-LeaLog 'install report recreate: read-back verification failed'
+    return $false
+  } catch {
+    Write-LeaLog ('install report recreate FAILED on write: ' + $_.Exception.Message)
     return $false
   }
 }
@@ -368,15 +479,22 @@ function Test-LeaSelfCheck {
 }
 
 function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detail) {
-  # 写报告；返回 $true=已写好。写失败时先修一次报告文件的 ACL（P2-02 问题 5：r3
-  # 根因为文件 ACL 损坏致 Access denied）再重试一次；仍失败则大声记日志并返回
-  # $false（调用方改判 degraded / exit 1，绝不静默当作已上报——r3：wrapper 的
-  # 报告检查读到的是旧报告）。上报 URL 部分仍是非阻塞口径（失败只记日志）。
+  # 写报告；返回 $true=已写好且读回核验通过。
+  # r10 重做（P2-02 问题 5＋r10 缺口 2）：
+  #  ① 先授权后写：文件已存在且 ACL 不可用时先修（/reset＋核验＋显式授权），
+  #     不存在时先建占位再显式授权——不依赖父目录继承（父目录可继承 ACE
+  #     可能已被 QFRLEA 服务剥掉，新建文件会得空 DACL）。
+  #  ② 写失败 → 修 ACL → 重试 → 仍失败 → 删重建（带退避重试；删不掉改
+  #     改名替换）→ 新文件显式授权 → 读回核验（status/trace_id 一致）。
+  #  ③ 任一步失败都大声记日志并返回 $false（调用方改判 degraded / exit 1，
+  #     绝不静默当作已上报——r3：wrapper 的报告检查读到的是旧报告）。
+  # 上报 URL 部分仍是非阻塞口径（失败只记日志）。
   $report = $null
+  $traceId = [Guid]::NewGuid().ToString()
   try {
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
     $report = @{
-      trace_id = [Guid]::NewGuid().ToString()
+      trace_id = $traceId
       status = $status
       detail = $detail
       checks = $checks
@@ -386,9 +504,29 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
     Write-LeaLog ('install report build failed: ' + $_.Exception.Message)
     return $false
   }
+  # ① 先授权后写
+  try {
+    if (Test-Path -LiteralPath $reportFile) {
+      Clear-LeaDataFileReadOnly $reportFile
+      if (-not (Test-LeaDataFileAclUsable $reportFile)) {
+        Write-LeaLog 'install report: existing file ACL unusable, repairing before write'
+        $null = Repair-LeaDataFileAcl $reportFile
+      }
+    } else {
+      New-Item -ItemType File -Force -Path $reportFile | Out-Null
+      if (-not (Set-LeaDataFileExplicitAcl $reportFile)) {
+        Write-LeaLog 'install report: explicit ACL on new placeholder failed (will still try write, then delete-recreate)'
+      }
+    }
+  } catch {
+    Write-LeaLog ('install report pre-write authorize failed (non-fatal, will try write): ' + $_.Exception.Message)
+  }
+  $written = $false
+  $how = ''
   try {
     Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8 -Force
-    Write-LeaLog ("install report written: " + $status + " " + $detail)
+    $written = $true
+    $how = 'direct'
   } catch {
     Write-LeaLog ('install report write failed: ' + $_.Exception.Message + ' (trying ACL repair + retry)')
     $repaired = $false
@@ -396,16 +534,28 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
     if ($repaired) {
       try {
         Set-Content -LiteralPath $reportFile -Value $report -Encoding UTF8 -Force
-        Write-LeaLog ("install report written after ACL repair: " + $status + " " + $detail)
+        $written = $true
+        $how = 'after-acl-repair'
       } catch {
         Write-LeaLog ('install report write FAILED after ACL repair: ' + $_.Exception.Message)
-        return $false
       }
     } else {
       Write-LeaLog 'install report write FAILED (ACL repair unavailable/failed)'
+    }
+  }
+  if ($written -and -not (Test-LeaInstallReportContent $reportFile $status $traceId)) {
+    Write-LeaLog 'install report written but read-back verification failed; trying delete-recreate'
+    $written = $false
+  }
+  if (-not $written) {
+    if (Write-InstallReportRecreate $report $status $detail $traceId) {
+      $written = $true
+      $how = 'delete-recreate'
+    } else {
       return $false
     }
   }
+  Write-LeaLog ("install report written (" + $how + "): " + $status + " " + $detail)
   try {
     $url = $env:QFR_LEA_REPORT_URL
     if ($url) {
@@ -644,7 +794,12 @@ try {
     # wrapper 凭标记判 degraded，不会因“标记已删＋报告没写成”误判已装。
     $reportOk = Write-InstallReport $checks 'ok' ("lea " + $leaVersion)
     if (-not $reportOk) {
-      Write-LeaLog 'install report write failed on success path; LEA_DEGRADED marker left in place (wrapper will see degraded)'
+      # r10：报告写不进即改判 degraded——必须补写 LEA_DEGRADED 标记。旧代码
+      # 只 exit 1、不写标记；全新补装时本就无标记，wrapper 读不到标记、报告
+      # 又读不出，会误报“report ok”（2026-11-12 02:10:43 实测即此情形）。
+      # 标记写失败也不静默：Write-Degraded 自带修 ACL＋大声记日志。
+      Write-LeaLog 'install report write failed on success path; writing LEA_DEGRADED marker (install-report-write-failed)'
+      $null = Write-Degraded 'install-report-write-failed'
       if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
       exit 1
     }

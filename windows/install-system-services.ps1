@@ -142,6 +142,27 @@ try {
       Write-InstallLog 'LEA install: no -LeaScriptHash provided, relying on caller whitelist check'
     }
     if ($leaHashOk) {
+      $leaDataDir = Join-Path $env:ProgramData 'QFR\LEA'
+      $leaReportFile = Join-Path $leaDataDir 'install-report.json'
+      # r10（F2）：调用前先清旧报告。否则 install-lea 本次没写成报告时，
+      # 本段读到的是 r8 旧报告（status=ok），会误报“report ok”。
+      # 清不掉（空 DACL 下 Remove-Item 也拒绝）时改名 .bak；清不掉也不
+      # 阻塞调用——本次判读另有新鲜度核验（见下，报告须是本次调用后写的）。
+      if (Test-Path -LiteralPath $leaReportFile) {
+        try {
+          Remove-Item -LiteralPath $leaReportFile -Force -ErrorAction Stop
+          Write-InstallLog 'LEA stale report cleared'
+        } catch {
+          try {
+            $leaStaleBak = $leaReportFile + '.stale-' + (Get-Date -Format 'yyyyMMddHHmmss')
+            Move-Item -LiteralPath $leaReportFile -Destination $leaStaleBak -Force -ErrorAction Stop
+            Write-InstallLog ("LEA stale report renamed to " + $leaStaleBak)
+          } catch {
+            Write-InstallLog ('LEA stale report could not be cleared (continuing; report will be judged by readability): ' + $_.Exception.Message)
+          }
+        }
+      }
+      $leaInvokeAt = Get-Date
       Write-InstallLog 'installing QFRLEA'
       & $leaScript -LeaDir $LeaDir
       $leaExit = $LASTEXITCODE
@@ -149,24 +170,41 @@ try {
       # 退出码即失败信号；本段仍显式读 LEA_DEGRADED 标记与 install-report.json
       # 判定：有标记或报告 status 非 ok 即在安装日志里留一条明确的失败行，
       # 仍不改本段非阻塞口径（本段自身仍 exit 0，主程序照常继续）。
-      $leaDataDir = Join-Path $env:ProgramData 'QFR\LEA'
-      $leaFailed = Test-Path -LiteralPath (Join-Path $leaDataDir 'LEA_DEGRADED')
+      # r10（F2）：报告三态——missing（没写成）/unreadable（读或解析失败，
+      # 空 DACL 即此态）/ok；三态中只有“存在、可读、status=ok”才算成功，
+      # 且 exit 码与报告内容交叉判定——exit 非 0 即判失败，绝不再印“report ok”。
+      # 新鲜度核验（DS 复核阻断项）：报告的 LastWriteTime 必须晚于本次调用
+      # 开始（容差 2 秒）；旧报告即使 status=ok 也不可信——清旧报告失败且
+      # install-lea 本次没写成时，读到的正是这份旧报告，必须判失败（stale）。
+      $leaMarkerPresent = Test-Path -LiteralPath (Join-Path $leaDataDir 'LEA_DEGRADED')
+      $leaFailed = $leaMarkerPresent
+      $leaReportState = 'missing'
       $leaDetail = ''
       try {
-        $leaReportFile = Join-Path $leaDataDir 'install-report.json'
         if (Test-Path -LiteralPath $leaReportFile) {
-          $leaReport = Get-Content -LiteralPath $leaReportFile -Raw -ErrorAction Stop | ConvertFrom-Json
-          if ($leaReport.status -and $leaReport.status -ne 'ok') { $leaFailed = $true }
-          if ($leaReport.detail) { $leaDetail = [string]$leaReport.detail }
+          $leaReportItem = Get-Item -LiteralPath $leaReportFile -ErrorAction Stop
+          if ($leaReportItem.LastWriteTime -lt $leaInvokeAt.AddSeconds(-2)) {
+            $leaReportState = 'stale'
+            $leaFailed = $true
+          } else {
+            $leaReport = Get-Content -LiteralPath $leaReportFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            $leaReportState = 'ok'
+            if ($leaReport.status -and $leaReport.status -ne 'ok') { $leaFailed = $true; $leaReportState = 'degraded' }
+            if ($leaReport.detail) { $leaDetail = [string]$leaReport.detail }
+          }
         }
-      } catch { }
+      } catch {
+        $leaReportState = 'unreadable'
+        $leaFailed = $true
+      }
+      if ($leaExit -ne 0) { $leaFailed = $true }
       if ($leaFailed) {
         # WinPS 5.1 不支持 PS7 三元运算符，改用 if/else。
         $leaDetailSuffix = ''
         if ($leaDetail) { $leaDetailSuffix = ' detail=' + $leaDetail }
-        Write-InstallLog ('LEA install FAILED (degraded marker/report; install-lea exit=' + $leaExit + $leaDetailSuffix + ')')
+        Write-InstallLog ('LEA install FAILED (install-lea exit=' + $leaExit + ' report=' + $leaReportState + ' marker=' + $leaMarkerPresent + $leaDetailSuffix + ')')
       } else {
-        Write-InstallLog ('LEA install script exit=' + $leaExit + ' (non-blocking; no LEA_DEGRADED marker, report ok)')
+        Write-InstallLog ('LEA install ok (install-lea exit=' + $leaExit + ' report=' + $leaReportState + ')')
       }
     }
   }

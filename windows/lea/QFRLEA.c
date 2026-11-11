@@ -79,7 +79,9 @@
 #define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
 #define USH_PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1"
 #define PIPE_SDDL_W L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)"
-#define DIR_SDDL_W L"D:(A;;FA;;;SY)(A;;FA;;;BA)"
+/* r10：与 set_sys_admin_acl() 同步带 OICI（本宏当前未被引用，留作防复发；
+ * 无继承标志时服务启动会把数据目录可继承 ACE 剥掉，子项得空 DACL）。 */
+#define DIR_SDDL_W L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 /* USH token 目录：SY/BA 完全控制，AU 仅 FILE_ADD_FILE（WD）——USH（用户
  * 身份）只能新建自己的 token 文件，读不到他人 token；token 文件继承此
  * ACL，WD 在文件上即 FILE_WRITE_DATA，故同机认证用户可覆写他人 token
@@ -184,11 +186,17 @@ static int mkdir_one(const char *path) {
 /* 目录／文件 ACL：仅 SYSTEM＋Administrators 完全控制。
  * #24：返回 1=已设置、0=失败——转换失败不再静默 return，调用方必须
  * 处理（目录：记 ERROR 日志；刚写好的敏感文件：删文件＋记 ERROR，
- * 见 set_acl_or_remove_file，绝不留一个继承父目录宽松 ACL 的状态文件）。 */
+ * 见 set_acl_or_remove_file，绝不留一个继承父目录宽松 ACL 的状态文件）。
+ * r10（2026-11-12，触发器证据缺口 2）：ACE 须带 OICI（容器＋对象继承）。
+ * 无继承标志时，服务每次启动调用 ensure_dirs() 都会把 %ProgramData%\QFR\LEA
+ * 的可继承 ACE 剥掉；install-lea 步骤③新建的 install-report.json 遂得
+ * 空 DACL，Set-Content 报 Access denied（2026-11-12 02:10:43 实测）。
+ * OICI 与文件内 USH token 目录 SDDL 惯例一致；文件自身访问判定不受
+ * OICI 影响（ACE 仍按 SY/BA FA 生效），目录子项将继承 SY+BA FA。 */
 static int set_sys_admin_acl(const char *path_utf8) {
     PSECURITY_DESCRIPTOR sd = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(
-            "D:(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL))
+            "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", SDDL_REVISION_1, &sd, NULL))
         return 0;
     /* 2026-11-11 启动即退出根因：ConvertStringSecurityDescriptor*
      * 返回的是自相对（self-relative）描述符，其 Dacl 字段是偏移量而

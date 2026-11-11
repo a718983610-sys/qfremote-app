@@ -23,21 +23,47 @@ const extRetryMod = require('./ext-retry');
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
 
-// ---------- 启动日志 bootLog（W-08，2.4.5） ----------
+// ---------- 启动日志 bootLog（W-08，2.4.5；r10 fallback） ----------
 // 启动全程留痕：%TEMP%\qfremote-boot.log，本地时间戳＋节点＋分类码，
 // 只写时间戳与节点，绝不写账号、密码、令牌、cookie。写盘失败静默，
 // 绝不因日志影响启动。诊断信息里会给出本文件路径。
+// r10（2026-11-12，触发器证据缺口 1）：%TEMP% 在管理员控制台会话下
+// 解析为 per-session 目录（Temp\1），验证者曾在 Temp\ 顶层查无此行而
+// 误判“日志缺失”——行一直在，只是目录多了一层。主路径行为不变；主路
+// 径追加失败时改写到 userData\logs\qfremote-boot.log（会话无关、恒可
+// 写），并记一行 bootlog-fallback 标明主路径失败；bootLogPath() 返回
+// 最近一次写成功的实际路径。启动时另记 bootlog.path 一行（见
+// whenReady.begin 之后），把解析后的实际主路径打出来，验证者按行取
+// 路径、不再猜目录。路径行含本机 profile 路径是必要的（那就是文件位置）。
+let bootLogLastPath = '';
+let bootLogFallbackNoted = false;
 function bootLog(tag, detail) {
   try {
     const d = new Date();
     const p = (n) => String(n).padStart(2, '0');
     const ts = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
       p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
-    fs.appendFileSync(path.join(os.tmpdir(), 'qfremote-boot.log'),
-      ts + ' ' + tag + (detail ? ' ' + String(detail).replace(/[\r\n]+/g, ' ') : '') + '\n');
+    const line = ts + ' ' + tag + (detail ? ' ' + String(detail).replace(/[\r\n]+/g, ' ') : '') + '\n';
+    try {
+      const primary = path.join(os.tmpdir(), 'qfremote-boot.log');
+      fs.appendFileSync(primary, line);
+      bootLogLastPath = primary;
+      return;
+    } catch (e1) { /* fall through to fallback */ }
+    try {
+      const dir = path.join(app.getPath('userData'), 'logs');
+      try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
+      const fb = path.join(dir, 'qfremote-boot.log');
+      if (!bootLogFallbackNoted) {
+        try { fs.appendFileSync(fb, ts + ' bootlog-fallback primary-tmpdir-unwritable\n'); } catch (e) { /* ignore */ }
+        bootLogFallbackNoted = true;
+      }
+      fs.appendFileSync(fb, line);
+      bootLogLastPath = fb;
+    } catch (e2) { /* ignore */ }
   } catch (e) { /* ignore */ }
 }
-function bootLogPath() { try { return path.join(os.tmpdir(), 'qfremote-boot.log'); } catch (e) { return ''; } }
+function bootLogPath() { try { if (bootLogLastPath) return bootLogLastPath; return path.join(os.tmpdir(), 'qfremote-boot.log'); } catch (e) { return ''; } }
 
 // ---------- 全局异常处理（W-16，2.4.5） ----------
 // 主进程任意未捕获异常/未处理拒绝：记 bootLog、弹原生人话提示、干净退出，
@@ -3711,6 +3737,9 @@ ipcMain.handle('qf-logout-request', async () => {
 
 app.whenReady().then(async () => {
   bootLog('whenReady.begin', 'version=' + app.getVersion());
+  // r10：启动即打解析后的 boot log 实际路径（含 per-session Temp\1 这一层），
+  // 验证者按行取路径，不再猜目录。
+  bootLog('bootlog.path', bootLogPath());
   try {
   if (!gotSingleLock) return;
   try {
