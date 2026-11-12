@@ -187,6 +187,20 @@ const server = http.createServer((req, res) => {
     serveMode = 'signed';
     result.cases.M_badSigRejected = { error: mErr, pass: !!mErr && mErr.includes('签名') };
 
+    // O（r11③）：无签名但版本 ≤2.4.4（H26 前最后一个版本）→ 有界兼容
+    // 放行，About 不再报失败；无签名且版本更新（如 9.9.9，见 L）仍拒绝；
+    // 签名在场但被篡改（见 M）仍拒绝。放行时 signatureVerified=false。
+    const savedVersion = manifest.version;
+    manifest.version = '2.4.4';
+    serveMode = 'unsigned';
+    let oManifest = null; let oErr = null;
+    try { oManifest = await updater.fetchManifest(); } catch (e) { oErr = e.message; }
+    let oCheck = null;
+    try { oCheck = await updater.checkForUpdate('3.0.0', 500); } catch (e) { oCheck = { error: e.message }; }
+    serveMode = 'signed';
+    manifest.version = savedVersion;
+    result.cases.O_unsigned244Compat = { version: oManifest && oManifest.version, signatureVerified: oManifest && oManifest.signatureVerified, checkError: oCheck && oCheck.error, checkAvailable: oCheck && oCheck.available, error: oErr, pass: !!oManifest && oManifest.version === '2.4.4' && oManifest.signatureVerified === false && !oErr && !!oCheck && !oCheck.error && oCheck.available === false };
+
     // N（QF-11，3.0.0 低组）：清单缺 size -> downloadUpdate 拒绝下载、
     // 不留文件，不再“只凭 SHA-256”放行。
     const nManifest = Object.assign({}, manifest);

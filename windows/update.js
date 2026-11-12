@@ -86,7 +86,9 @@ function canonicalReleaseJson(doc) {
 // H26：验 release.json 签名。返回 { ok, reason }；ok=false 时调用方拒绝更新。
 function verifyReleaseSignature(doc) {
   const sig = doc && doc.signature;
-  if (!sig || typeof sig !== 'object') return { ok: false, reason: '缺少 signature 字段' };
+  // r11③：缺签名单独给机器码 missing-signature——fetchManifest 的兼容
+  // 垫片按码识别，不依赖 reason 文案（文案一改垫片就失效）。
+  if (!sig || typeof sig !== 'object') return { ok: false, reason: '缺少 signature 字段', code: 'missing-signature' };
   if (sig.alg !== 'ed25519') return { ok: false, reason: '未知签名算法：' + String(sig.alg) };
   if (typeof sig.sig !== 'string' || !/^[A-Za-z0-9_-]+$/.test(sig.sig)) return { ok: false, reason: 'sig 不是 base64url' };
   let pub;
@@ -166,8 +168,22 @@ async function fetchManifest(timeoutMs) {
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error('更新清单缺少完整的 SHA256 校验码');
   // H26：清单签名必验——无签名／验签不过即拒绝更新（fail-closed）。
   // 2.4.5 起发版流程用 --sign-key 签名；签发方漏签时客户端宁可不更新。
+  // r11③ 例外（有界兼容垫片）：线上现行清单是 H26 之前发布的 2.4.4，
+  // 本来就没有 signature 字段——它不是被篡改，是发版时签名机制还不
+  // 存在。仅当“缺签名、且版本号 ≤2.4.4（最后一个发版前版本）”时放
+  // 行，并记 signatureVerified:false；版本号更新、或签名在场但验不
+  // 过，仍一律拒绝。放行的唯一后果是“不提供比 2.4.4 更新的版本”，
+  // 与清单未签名时能做的事相同；下载仍须 SHA256＋size＋可信 origin
+  // 三重核对。服务端正确修复是重发已签名的 release.json（见 REPORT），
+  // 该垫片在服务端清单带签名后即可删除（日落条件：线上清单含有效签名）。
   const vr = verifyReleaseSignature(m);
-  if (!vr.ok) throw new Error('更新清单签名无效（' + vr.reason + '），拒绝更新');
+  let signatureVerified = true;
+  if (!vr.ok) {
+    const missingSig = vr.code === 'missing-signature';
+    const preSigning = compareVersions(m.version, '2.4.4') <= 0;
+    if (!(missingSig && preSigning)) throw new Error('更新清单签名无效（' + vr.reason + '），拒绝更新');
+    signatureVerified = false;
+  }
   // 强更线 minUsable（2026-11-07 站长令）：清单可选字段，本机版本低于它即触发
   // 启动强制更新（见 main.js startupUpdateGate）；缺失/格式不合规按无强更线处理。
   const minUsable = (typeof m.minUsable === 'string' && /^\d+\.\d+\.\d+$/.test(m.minUsable)) ? m.minUsable : null;
@@ -178,7 +194,7 @@ async function fetchManifest(timeoutMs) {
     sha256: sha,
     size: typeof m.size === 'number' ? m.size : null,
     minUsable,
-    signatureVerified: true
+    signatureVerified
   };
 }
 
