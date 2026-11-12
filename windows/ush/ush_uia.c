@@ -1235,7 +1235,11 @@ int ush_ui_tree(const ush_request_t *req, char *data_json, size_t data_size,
     memset(&ctx, 0, sizeof(ctx));
     ctx.max_nodes = (int)max_nodes;
     ctx.max_depth = (int)max_depth;
-    tree_append(&ctx, "{\"truncated\":false,\"nodes\":0,\"tree\":\n");
+    /* r11 tree 主修：删占位 head。旧代码先把 {"truncated":false,"nodes":0,
+     * "tree": 写进 ctx.buf，随后又在前面 memcpy 一个回填后的 head，
+     * 导致 data 里出现两个 head、外层信封少一个 '}'，响应为畸形 JSON
+     * （LEA 帧校验拒收，报 ush-read-timeout-or-empty）。删除后 ctx.buf
+     * 只含 tree_walk 输出，data = 回填 head ＋根节点＋1 个 '}'，括号平衡。 */
     tree_walk(scope, 0, &ctx);
     scope->lpVtbl->Release(scope);
     /* 回填 truncated/nodes */
