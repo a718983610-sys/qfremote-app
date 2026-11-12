@@ -9,6 +9,7 @@
  *     无 iframe、无外站地址；preload 桥面与 main.js 接线（IPC 通道名）一致；
  *  F. 主链点击计量：登录后落设备页起算 ≤3 下（站长 11:35/11:47 口径）；
  *  G. 视图登记：devices/session 已进 VIEW_KEYS 且不进社交预加载序列。
+ *  J. r12② 登录落点重刷＋登出只清不读＋在途失效＋未登录非错＋早退日志。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  */
 const fs = require('fs');
@@ -180,12 +181,57 @@ async function retryCase() {
   ok('I5_threw_flag', r5.value === null && r5.attempts === 3 && r5.threw === true && seen.join(',') === '1,2,3', { attempts: r5.attempts, threw: r5.threw, seen });
 }
 
+// ---------- J r12② 登录落点重刷＋登出只清不读 ----------
+// 根因（2026-11-12 阿里真机实测）：登出时 handleManualLogout 发
+// qf-devices-reset，设备页 onReset 跑 load()，而此时 loggedIn 已为假，
+// fetchDevicesModel 在 not-logged-in 早退、从未进入探针——r11 的
+// probeWithRetry 一次也没跑；登录成功后 showView('devices') 只切可见性
+// 不重跑 load()，登出时留下的报错态原样见光（bootLog 全文 devicesModel
+// 命中 0 行；复现两帧字节相同；标题残留旧计数）。修复：登录落点对已存在
+// 视图补发 reset 重刷；登出改发只清不读的 clear；load() 序号废止在途
+// 旧请求；not-logged-in 在页内按非错处理；早退三路各记 bootLog。
+function jCase() {
+  const main = fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
+  const html = fs.readFileSync(path.join(SRC, 'devices.html'), 'utf8');
+  const preload = fs.readFileSync(path.join(SRC, 'devices-preload.js'), 'utf8');
+  const resetSends = (main.match(/devicesView\.webContents\.send\('qf-devices-reset'\)/g) || []).length;
+  const clearSends = (main.match(/devicesView\.webContents\.send\('qf-devices-clear'\)/g) || []).length;
+  // J1：reset 必须与三道守门（hadDevicesView／未加载中／已登录）同块，
+  // 而非只在文件某处出现——否则守门被移走测试仍绿。
+  const landingBlock = /const hadDevicesView = !!devicesView;[\s\S]{0,800}?devicesView\.webContents\.send\('qf-devices-reset'\)/.test(main);
+  const landingGuards = /!devicesView\.webContents\.isLoading\(\)\s*&&\s*viewMgr\.state\(\)\.loggedIn\)/.test(main);
+  ok('J1_login_reset_on_landing', landingBlock && landingGuards && resetSends === 1,
+    { resetSends });
+  // J2：clear 必须在 handleManualLogout 函数体内，且该函数体内不再发 reset。
+  const logoutBody = main.slice(main.indexOf('function handleManualLogout'), main.indexOf('function recoverConsoleViewAfterLogout'));
+  ok('J2_logout_clear_not_reset', clearSends === 1 && logoutBody.includes("send('qf-devices-clear')") &&
+    !logoutBody.includes("send('qf-devices-reset')"),
+    { clearSends });
+  ok('J3_preload_onClear', /onClear/.test(preload) && /qf-devices-clear/.test(preload));
+  // J4：必须同时有序号递增与守卫比较——只留比较、删了递增也会绿是旧断言漏洞。
+  ok('J4_clear_handler_seq', /qfDevices\.onClear\(\(\) => \{ loadSeq\+\+; selectedId = ''; model = null; render\(\); hideState\(\); \}\)/.test(html) &&
+    /const seq = \+\+loadSeq;/.test(html) && /if \(seq !== loadSeq\) return;/.test(html));
+  // J5：not-logged-in 分支内不得有 showState（静默清态），且清 selectedId。
+  const nliBranch = (html.match(/if \(res && res\.reason === 'not-logged-in'\) \{[^}]*\}/) || [''])[0];
+  ok('J5_not_logged_in_non_error', nliBranch.includes("selectedId = ''") && !/showState/.test(nliBranch) &&
+    /没能读取到设备列表/.test(html));
+  ok('J6_render_clears_count', /if \(!model\) \{ els\.count\.textContent = ''; els\.detail\.classList\.remove\('show'\); return; \}/.test(html));
+  ok('J7_onReset_still_loads', /onReset\(\(\) => \{ selectedId = ''; model = null; render\(\); load\(\); \}\)/.test(html));
+  ok('J8_early_fail_logged', (main.match(/devicesModel\.early-fail/g) || []).length === 3,
+    { hits: (main.match(/devicesModel\.early-fail/g) || []).length });
+  ok('J9_reset_guarded_loading', /!devicesView\.webContents\.isLoading\(\)/.test(main));
+  // J10：无模型时详情面板必须藏掉——旧 render() 在 !model 时直接 return，
+  // 详情面板会漏清、顶着上一账号的设备信息。
+  ok('J10_render_hides_detail', /els\.detail\.classList\.remove\('show'\)/.test(html));
+}
+
 (async () => {
   await probeCase();
   libCase();
   contractCase();
   viewCase();
   await retryCase();
+  jCase();
   result.pass = Object.values(result.cases).every(c => c.pass);
   try { fs.mkdirSync(path.dirname(OUT), { recursive: true }); fs.writeFileSync(OUT, JSON.stringify(result, null, 2)); } catch (e) { /* ignore */ }
   console.log(JSON.stringify({ pass: result.pass, failed: Object.keys(result.cases).filter(k => !result.cases[k].pass) }));

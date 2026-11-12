@@ -367,8 +367,12 @@ function handleManualLogout() {
   if (sessionView && !sessionView.webContents.isDestroyed()) {
     try { sessionView.webContents.loadURL('about:blank'); viewMgr.markUnloaded('session'); } catch (e) { /* ignore */ }
   }
+  // r12②：登出只清不读——发 qf-devices-clear（清模型、清计数、藏报错态，
+  // 废止在途 load），不再发 qf-devices-reset：reset 会跑 load()，登出时
+  // loggedIn 已为假、必以 not-logged-in 失败并画出“没能读取到设备列表”，
+  // 该报错态会残留到下次登录见光（r8–r11 首刷失败根因）。
   if (devicesView && !devicesView.webContents.isDestroyed()) {
-    try { devicesView.webContents.send('qf-devices-reset'); } catch (e) { /* ignore */ }
+    try { devicesView.webContents.send('qf-devices-clear'); } catch (e) { /* ignore */ }
   }
   // P1-4a（2026-11-11）：登出后登录表单须立即出现（见 recoverConsoleViewAfterLogout）。
   recoverConsoleViewAfterLogout();
@@ -582,7 +586,17 @@ async function processAuthPage() {
 
       if (!devicesLanded) {
         devicesLanded = true;
+        // r12②：登出时设备页已跑过一次必失败的 load()（not-logged-in），
+        // 报错态会残留到本次登录。视图若在登录前已存在，showView 只切可
+        // 见性不重跑 load()，须补发 reset 在已登录态下重刷；新创建的视图
+        // 创建时已 load()，且 send 可能在页面就绪前丢失，故不重复发。
+        // 只在页面未加载中时发（已加载完成的旧页监听必在位）。
+        const hadDevicesView = !!devicesView;
         try { showView('devices'); } catch (e) { /* ignore */ }
+        if (hadDevicesView && devicesView && !devicesView.webContents.isDestroyed() &&
+            !devicesView.webContents.isLoading() && viewMgr.state().loggedIn) {
+          try { devicesView.webContents.send('qf-devices-reset'); } catch (e) { /* ignore */ }
+        }
       }
 
       runLicenseGateCheck().catch(() => {});
@@ -2242,13 +2256,17 @@ function closeSession() {
 // 页面直连。视图不在/未登录/探针失败一律如实回 ok:false，设备页给重
 // 试态，绝不冒充空列表。
 async function fetchDevicesModel() {
-  if (!view || view.webContents.isDestroyed()) return { ok: false, reason: 'no-console-view' };
-  if (!viewMgr.state().loggedIn) return { ok: false, reason: 'not-logged-in' };
+  // r12②：三路早退各记一行 bootLog——r11 误诊为“探针重试未生效”，实为
+  // 失败的 load() 在此早退、从未进入探针；下次同类问题凭日志直接定性。
+  // 调用方只有设备页 load()（创建/reset/刷新点击）与自愈 resolveOwnNodeId
+  // （启动＋手动重试），无高频源，不刷屏。
+  if (!view || view.webContents.isDestroyed()) { bootLog('devicesModel.early-fail', 'no-console-view'); return { ok: false, reason: 'no-console-view' }; }
+  if (!viewMgr.state().loggedIn) { bootLog('devicesModel.early-fail', 'not-logged-in'); return { ok: false, reason: 'not-logged-in' }; }
   let wsUrl = '';
   try {
     const u = new URL(CONSOLE_URL);
     wsUrl = (u.protocol === 'https:' ? 'wss://' : 'ws://') + u.host + devicesMod.CONTROL_WS_PATH;
-  } catch (e) { return { ok: false, reason: 'bad-console-url' }; }
+  } catch (e) { bootLog('devicesModel.early-fail', 'bad-console-url'); return { ok: false, reason: 'bad-console-url' }; }
   let raw = null;
   // r11②：首刷竞速重试——登录后控制台视图未必已就绪，单次探针失败
   // 不再直接报“没能读取”，先在主进程侧自动重试（最多 3 次、间隔

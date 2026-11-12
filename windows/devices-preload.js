@@ -7,5 +7,8 @@ contextBridge.exposeInMainWorld('qfDevices', {
   list: () => ipcRenderer.invoke('qf-devices-list'),
   open: (nodeId, name, mode) => ipcRenderer.send('qf-devices-open', { nodeId, name, mode }),
   onReset: (cb) => ipcRenderer.on('qf-devices-reset', () => cb()),
+  // r12②：登出只清不读（见 main.js handleManualLogout）——clear 只清
+  // 模型与状态、不跑 load()，不再制造一次必失败的读取。
+  onClear: (cb) => ipcRenderer.on('qf-devices-clear', () => cb()),
   onTheme: (cb) => ipcRenderer.on('qf-theme-state', (e, t) => cb(t))
 });

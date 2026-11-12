@@ -124,6 +124,9 @@
   };
   let model = null;
   let selectedId = '';
+  // r12②：load 请求版本号——新 load()/clear 启动即废止旧的在途请求，
+  // 旧响应不得覆盖新态（登出前刷新在途、登出、重登的三段竞态）。
+  let loadSeq = 0;
 
   function findDevice(id) {
     if (!model) return null;
@@ -140,7 +143,10 @@
 
   function render() {
     els.groups.innerHTML = '';
-    if (!model) return;
+    // r12②：无模型时清空计数、藏详情——失败态不得顶着上一会话的旧计数
+    // 与旧设备详情误导（r11 首刷失败帧标题仍挂“共 1 台 · 在线 1 台”即此残留；
+    // render() 旧代码在 !model 时直接 return，详情面板会被漏掉）。
+    if (!model) { els.count.textContent = ''; els.detail.classList.remove('show'); return; }
     els.count.textContent = model.total ? ('共 ' + model.total + ' 台 · 在线 ' + model.onlineCount + ' 台') : '';
     for (const g of model.groups) {
       if (!g.devices.length) continue;
@@ -185,11 +191,16 @@
   }
 
   async function load() {
+    const seq = ++loadSeq;
     hideState();
     showState('正在读取设备列表…', '', false);
     let res = null;
     try { res = await qfDevices.list(); } catch (e) { res = null; }
+    if (seq !== loadSeq) return; // 已被更新的 load()/clear 废止，不覆盖新态
     if (!res || !res.ok || !res.model) {
+      // r12②：未登录不是读取失败——登录交接时任何误触发的 load() 都只
+      // 清模型藏状态、不画报错；登录落点重刷时再正常读。
+      if (res && res.reason === 'not-logged-in') { selectedId = ''; model = null; render(); hideState(); return; }
       model = null; render(); hideState();
       showState('没能读取到设备列表', '可能是网络暂时不通，或登录状态已失效。请检查网络后重试；若刚退出过登录，请先回到控制台重新登录。', true);
       return;
@@ -214,6 +225,8 @@
 
   if (window.qfDevices) {
     qfDevices.onReset(() => { selectedId = ''; model = null; render(); load(); });
+    // r12②：登出只清不读——废止在途 load，清模型/计数/报错态，不跑 load()。
+    qfDevices.onClear(() => { loadSeq++; selectedId = ''; model = null; render(); hideState(); });
     qfDevices.onTheme((t) => {
       if (t === 'dark') document.documentElement.dataset.theme = 'dark';
       else delete document.documentElement.dataset.theme;
