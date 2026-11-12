@@ -1169,6 +1169,34 @@ static int ush_write_all_overlapped(HANDLE pipe, const char *buf, size_t len,
     return ok;
 }
 
+/* r11 tree 加固②：收帧尾 '\n' 但 lea_json_is_valid 为 0 时的早停判据。
+ * 裸按“见 '\n' 即完整”会误伤：ui.tree 的 data 内含 pretty-print 字面换行，
+ * 4096 字节块边界恰停在行内 '\n' 上时，未收完的前缀也会以 '\n' 结尾。
+ * 但行内换行只出现在 data 对象内部（深度 ≥2），而一封已写完的畸形响应
+ * （如 r11 的双 head：信封缺 1 个 '}'）收尾时净深度恰为 1；尾部多余内容
+ * 的非法帧净深度为 0 或负。只在净深度 ≤1 时早停：完整非法帧立即结束，
+ * 行内换行前缀继续读；深度 ≥2 的非法帧不早停，仍由对端关闭（233/109）
+ * 交终判，错误码同样是 ush-response-no-ok，只多一次读。
+ * 硬约束（DS v4-pro 复核要求写死）：未来不得让信封层在深度 ≤1 的位置
+ * 引入 pretty-print 字面换行（例如 "data": 与 data 对象 '{' 之间插 '\n'），
+ * 否则 4096 分片恰停在那里会误早停，合法响应被终判失败。 */
+static int ush_resp_open_depth(const char *s) {
+    int depth = 0, in_str = 0, esc = 0;
+    if (!s) return 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (*p == '\\') esc = 1;
+            else if (*p == '"') in_str = 0;
+            continue;
+        }
+        if (*p == '"') { in_str = 1; continue; }
+        if (*p == '{' || *p == '[') depth++;
+        else if (*p == '}' || *p == ']') depth--;
+    }
+    return depth;
+}
+
 static int ush_forward(const char *envelope_line, long timeout_ms,
                        char *resp, size_t resp_size, char *detail, size_t detail_size) {
     /* 绝对 deadline：写＋读共享同一个 timeout_ms 预算。 */
@@ -1255,8 +1283,14 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
                 /* r10：USH 写完响应即 DisconnectNamedPipe，挂起的读可
                  * 以 ERROR_BROKEN_PIPE 完成，与 got==0 同款视为帧结束；
                  * 已收数据以已收内容为准，终判仍由 lea_ush_response_ok
-                 * 做。其它错误仍判失败。 */
-                if (ogle == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+                 * 做。其它错误仍判失败。
+                 * r11 加固①：ERROR_PIPE_NOT_CONNECTED (233) 同按 EOF
+                 * 处理——r11 实证第 4 次读即以 233 完成（USH 已断开），
+                 * 旧代码只认 109，把已收完整 8883 字节误报为
+                 * ush-read-timeout-or-empty。ok=1 只表示“交终判”，
+                 * 不得直接判成功。 */
+                if ((ogle == ERROR_BROKEN_PIPE ||
+                     ogle == ERROR_PIPE_NOT_CONNECTED) && total > 0) { ok = 1; }
                 svc_log("R11-INSTR read BREAK overlapped-fail ogle=%lu got=%lu total=%lu ok=%d elapsed_ms=%llu",
                         (unsigned long)ogle, (unsigned long)got,
                         (unsigned long)total, ok,
@@ -1264,8 +1298,10 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
                 break;
             }
         } else if (!r) {
-            /* r10：同上——无挂起读时对端已断开亦为帧结束。 */
-            if (gle == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+            /* r10：同上——无挂起读时对端已断开亦为帧结束。
+             * r11 加固①：233 与 109 同按 EOF 处理（见上）。 */
+            if ((gle == ERROR_BROKEN_PIPE ||
+                 gle == ERROR_PIPE_NOT_CONNECTED) && total > 0) { ok = 1; }
             svc_log("R11-INSTR read BREAK immediate-fail gle=%lu total=%llu ok=%d elapsed_ms=%llu",
                     (unsigned long)gle, (unsigned long long)total, ok,
                     (unsigned long long)(GetTickCount64() - fwd_t0));
@@ -1304,6 +1340,19 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
         if (total > 0 && resp[total - 1] == '\n' && lea_json_is_valid(resp)) {
             ok = 1;
             svc_log("R11-INSTR read BREAK frame-complete total=%llu elapsed_ms=%llu",
+                    (unsigned long long)total,
+                    (unsigned long long)(GetTickCount64() - fwd_t0));
+            break;
+        }
+        /* r11 加固②：已收帧尾 '\n' 但校验失败，且净深度 ≤1（见
+         * ush_resp_open_depth）——这是“完整但非法响应”，立即结束，
+         * 不再发起下一次读（旧行为会再撞 233，误报
+         * ush-read-timeout-or-empty）。ok=1 只表示交终判：
+         * lea_ush_response_ok 失败后调用方报 ush-response-no-ok。 */
+        if (total > 0 && resp[total - 1] == '\n' &&
+            ush_resp_open_depth(resp) <= 1) {
+            ok = 1;
+            svc_log("R11-INSTR read BREAK frame-invalid total=%llu elapsed_ms=%llu",
                     (unsigned long long)total,
                     (unsigned long long)(GetTickCount64() - fwd_t0));
             break;
