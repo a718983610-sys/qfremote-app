@@ -29,6 +29,34 @@
  * 探针 P1（非门禁）：拉起成功／失败行由 M-C DS-6 拉起块记既有日志
  * （launched／install-failed 等），本线为保 hunk 可分未在该块加 backfill
  * 打标，排障按序对上 lea-missing 行；是否须逐行打标待 DS R2 裁决。
+ *  K. r12 哈希比对（leaServiceInstalled 同版号不同哈希 → 未装 → backfill）：
+ *     K1 载荷在、三件哈希一致 → 已装／already-installed，不拉起；
+ *     K2 载荷在、live USH 哈希不同 → 未装 → launched 补装，记
+ *        system-services.lea-hash-mismatch:QFUserHelper.exe；
+ *     K3 载荷在、live QFRLEA 哈希不同 → 未装 → launched 补装；
+ *     K4 载荷缺失（开发态未编／旧包无 LEA）→ 无法比对，按旧判据放行；
+ *     K5 live 比随包新（用户降级应用）→ 同样判未装、与运行中应用对齐；
+ *     K6 打包态（execPath 旁 LEA/）：一致 → 已装；USH 不同 → launched。
+ *     K7 载荷在、live qf-lea-client.exe 哈希不同 → 未装 → launched 补装。
+ *     K8 载荷在、live QFUserHelper.exe 文件缺失 → 未装 → launched 补装
+ *        （DS diff 复核覆盖缺口：旧夹具让 live USH 永不缺失）。
+ *     K9 载荷在、随包 USH 存在但读失败 → 单记 lea-pkg-hash-read-error
+ *        并跳过该件，其余件一致 → 已装（DS diff 复核问题 A）。
+ *     沙箱内补装是桩 spawn，不真换文件，故补装后复核仍记 lea-degraded，
+ *     属夹具局限（真机上 backfill 换件后哈希即一致，记 lea-installed），
+ *     K 组只断言拉起与否与 mismatch 日志，不对复核行断言。
+ *  L. r12 守门键（版本 OR 载荷签名，DS 方案复核阻断点 1）：
+ *     L1 同版本＋同载荷签名 → tried-this-version，不拉起；
+ *     L2 同版本＋载荷签名变 → 放行检查（live 一致 → already-installed，
+ *        且 settings.systemServicesTriedPayload 已刷新为新签名）；
+ *     L3 同版本＋旧设置无 triedPayload（r11 机器首启 r12）＋live USH
+ *        不同 → 放行 → launched 补装（复测无需手动重置守门）；
+ *     L4 载荷缺失无法签名＋同版本 → 退回只比版本 → tried-this-version；
+ *     L5 owner UAC 在飞 defer 时 triedPayload 随 triedVersion 一并恢复。
+ *     L6 部分载荷（缺 client）＋同版本＋签名与在位两件一致 →
+ *        tried-this-version（签名逐项跳过，与比对循环同语义）；
+ *     L7 部分载荷（缺 client）＋同版本＋旧签名为三件全量 →
+ *        签名变 → 放行检查（live 在位件一致 → already-installed）。
  */
 const fs = require('fs');
 const os = require('os');
@@ -61,11 +89,13 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
 (async () => {
   try {
     // ---- 抽取真实函数文本，并做防 stale 断言 ----
-    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath']
+    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath', 'leaPayloadPath', 'sha256File', 'leaPayloadSignature']
       .map((n) => extractFunction(MAIN_SRC, n)).join('\n');
     ok('X0_extract', fns.includes('leaServiceInstalled()') && fns.includes('LEA_DEGRADED')
       && fns.includes('system-services.lea-missing') && fns.includes('lea-backfill-deferred')
-      && fns.includes('sc.exe') && fns.includes('qf-lea-client.exe'));
+      && fns.includes('sc.exe') && fns.includes('qf-lea-client.exe')
+      && fns.includes('lea-hash-mismatch') && fns.includes('QFUserHelper.exe')
+      && fns.includes('systemServicesTriedPayload') && fns.includes('leaPayloadSignature()'));
 
     // ---- 夹具：四件被验文件＋白名单落在真临时目录（__dirname 即该目录），
     //      走真 sys-helper loadWhitelist／verifyFileHash ----
@@ -108,6 +138,15 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         svcRegistered: true,
         ownerChanged: false, ownerUac: false, prevVersion: '2.4.4', appVersion: '3.0.0',
         tamperLea: false, tamperPkgLea: false, packaged: false, execPath: null, extraPresent: null,
+        // K（r12）：随包载荷是否在位；live／随包三件内容（默认一致 = r11）。
+        payloadPresent: false,
+        liveQfr: 'live-QFRLEA-r11', pkgQfr: 'live-QFRLEA-r11',
+        liveClient: 'live-qf-client-r11', pkgClient: 'live-qf-client-r11',
+        liveUsh: 'live-USH-r11', pkgUsh: 'live-USH-r11',
+        // L（r12）：上次已试的载荷签名（undefined = 旧设置无此键，如 r11）。
+        prevPayload: undefined,
+        // K8/L6/L7/K9（r12）：live USH 是否在位；随包省略件；随包读失败件。
+        liveUshPresent: true, pkgOmit: [], pkgReadFail: [],
       }, opts || {});
       if (o.tamperLea) fs.writeFileSync(P.leaPs1, 'tampered\n');
       else fs.writeFileSync(P.leaPs1, leaOrig);
@@ -119,18 +158,58 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       if (o.leaClient) present.add(W.leaClient);
       if (o.leaVer) present.add(W.leaVer);
       if (o.leaDegraded) present.add(W.leaDegraded);
+      // K：live 三件＋随包三件的内容映射（路径 → Buffer）。live 路径恒为
+      // %ProgramFiles%\QFR\LEA\ 下三件；随包路径打包态为 execPath 旁 LEA/，
+      // 开发态为 __dirname 下 lea/（QFRLEA／client）与 ush/（QFUserHelper）。
+      const liveQfrPath = path.join(PF, 'QFR', 'LEA', 'QFRLEA.exe');
+      const liveClientPath = path.join(PF, 'QFR', 'LEA', 'qf-lea-client.exe');
+      const liveUshPath = path.join(PF, 'QFR', 'LEA', 'QFUserHelper.exe');
+      const pkgQfrPath = o.packaged
+        ? path.join(path.dirname(o.execPath || 'C:\\QFRemote\\QFRemote.exe'), 'LEA', 'QFRLEA.exe')
+        : path.join(tmp, 'lea', 'QFRLEA.exe');
+      const pkgClientPath = o.packaged
+        ? path.join(path.dirname(o.execPath || 'C:\\QFRemote\\QFRemote.exe'), 'LEA', 'qf-lea-client.exe')
+        : path.join(tmp, 'lea', 'qf-lea-client.exe');
+      const pkgUshPath = o.packaged
+        ? path.join(path.dirname(o.execPath || 'C:\\QFRemote\\QFRemote.exe'), 'LEA', 'QFUserHelper.exe')
+        : path.join(tmp, 'ush', 'QFUserHelper.exe');
+      const contentMap = new Map();
+      if (o.leaExe) contentMap.set(liveQfrPath, Buffer.from(o.liveQfr));
+      if (o.leaClient) contentMap.set(liveClientPath, Buffer.from(o.liveClient));
+      // USH live 件：r12 哈希比对新增的读取对象；存在性本身不由 leaServiceInstalled
+      // 的旧判据检查（旧判据只查 QFRLEA／client／version.json），故只进内容映射，
+      // 不进 present 集合——旧用例不受影响。K8 用 liveUshPresent:false 模拟
+      // live USH 缺失（DS diff 复核覆盖缺口）。
+      if (o.liveUshPresent) contentMap.set(liveUshPath, Buffer.from(o.liveUsh));
+      if (o.payloadPresent) {
+        if (!o.pkgOmit.includes('QFRLEA.exe')) contentMap.set(pkgQfrPath, Buffer.from(o.pkgQfr));
+        if (!o.pkgOmit.includes('qf-lea-client.exe')) contentMap.set(pkgClientPath, Buffer.from(o.pkgClient));
+        if (!o.pkgOmit.includes('QFUserHelper.exe')) contentMap.set(pkgUshPath, Buffer.from(o.pkgUsh));
+      }
       const fakeFs = {
         // 夹具四件＋白名单＋打包 LEA 载荷走真磁盘；Windows 落盘态走场景集合；
         // 其余一律 false（尤其 resourcesPath 为空时拼出的相对路径
         // 'QFSysHelper.exe'，不得随 cwd 抖动）。
         existsSync: (p) => {
           if (present.has(p)) return true;
+          if (contentMap.has(p)) return true;
           if (p === P.sysPs1 || p === P.helperExe || p === P.installPs1 || p === P.leaPs1 || p === P.pkgLeaPs1 || p === P.wlJson) return true;
           if (o.extraPresent && o.extraPresent.has(p)) return true;
           if (p === 'QFSysHelper.exe') return false;
           return false;
         },
-        readFileSync: (p, enc) => fs.readFileSync(p, enc),
+        readFileSync: (p, enc) => {
+          if (contentMap.has(p)) {
+            // K9：模拟随包件存在但读失败（杀毒瞬锁等）——只针对随包路径。
+            // 沙箱 path 是 Linux 版，basename 认不出反斜杠，用 split 取尾名。
+            const isPkg = p === pkgQfrPath || p === pkgClientPath || p === pkgUshPath;
+            const base = String(p).split(/[\\/]/).pop();
+            if (isPkg && o.pkgReadFail.includes(base)) throw new Error('simulated read failure: ' + base);
+            const b = contentMap.get(p);
+            return enc ? b.toString(enc) : b;
+          }
+          return fs.readFileSync(p, enc);
+        },
       };
       const spawns = [];
       const spawnSyncCalls = [];
@@ -140,7 +219,7 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         __dirname: tmp,
         process: { platform: 'win32', env: { ProgramFiles: PF, ProgramData: PD }, resourcesPath: '', execPath: o.execPath || 'C:\\QFRemote\\QFRemote.exe' },
         app: { isPackaged: !!o.packaged, getVersion: () => o.appVersion },
-        settings: { systemServicesTriedVersion: o.prevVersion },
+        settings: { systemServicesTriedVersion: o.prevVersion, systemServicesTriedPayload: o.prevPayload },
         saveSettings: () => {},
         currentGateUsername: () => '718983610',
         bootLog: (tag, detail) => { bootLogs.push(tag + (detail ? ':' + detail : '')); },
@@ -155,6 +234,7 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         fs: fakeFs,
         path,
         require: (name) => {
+          if (name === 'crypto') return crypto; // r12：sha256File 内联 require
           if (name === 'child_process') {
             return {
               spawn: (file, args, opts2) => {
@@ -229,6 +309,126 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       const r2 = await run(c2);
       ok('D3_owner_updated', r2 && r2.ok === true && r2.reason === 'owner-updated');
       ok('D4_no_spawn2', c2.spawns.length === 0);
+    }
+
+    // ---- K. r12 哈希比对：同版号不同哈希 → 未装 → backfill ----
+    {
+      // K1：载荷在、两件哈希一致 → 已装／already-installed，不拉起。
+      const c = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true });
+      ok('K1_match_installed', vm.runInContext('leaServiceInstalled()', c.sandbox) === true);
+      const r = await run(c);
+      ok('K1_match_already', r && r.ok === true && r.reason === 'already-installed', { reason: r && r.reason });
+      ok('K1_match_no_spawn', c.spawns.length === 0);
+      ok('K1_match_no_mismatch_log', !c.bootLogs.some((l) => l.startsWith('system-services.lea-hash-mismatch')));
+      // K2：live USH 哈希不同（r10 件）→ 未装 → launched 补装。
+      const c2 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUsh: 'live-USH-r10' });
+      ok('K2_ush_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c2.sandbox) === false);
+      ok('K2_ush_mismatch_log', c2.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFUserHelper.exe'));
+      const r2 = await run(c2);
+      ok('K2_ush_launched', r2 && r2.ok === true && r2.reason === 'launched', { reason: r2 && r2.reason });
+      ok('K2_ush_spawn_once', c2.spawns.length === 1);
+      ok('K2_ush_missing_log', c2.bootLogs.some((l) => l.startsWith('system-services.lea-missing')));
+      // K3：live QFRLEA 哈希不同 → 未装 → launched 补装。
+      const c3 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveQfr: 'live-QFRLEA-r10' });
+      ok('K3_qfr_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c3.sandbox) === false);
+      ok('K3_qfr_mismatch_log', c3.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFRLEA.exe'));
+      const r3 = await run(c3);
+      ok('K3_qfr_launched', r3 && r3.ok === true && r3.reason === 'launched', { reason: r3 && r3.reason });
+      ok('K3_qfr_spawn_once', c3.spawns.length === 1);
+      // K4：载荷缺失 → 无法比对，按旧判据放行（already-installed）。
+      const c4 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: false });
+      ok('K4_no_payload_installed', vm.runInContext('leaServiceInstalled()', c4.sandbox) === true);
+      const r4 = await run(c4);
+      ok('K4_no_payload_already', r4 && r4.ok === true && r4.reason === 'already-installed', { reason: r4 && r4.reason });
+      ok('K4_no_payload_no_spawn', c4.spawns.length === 0);
+      // K5：live 比随包新（用户降级应用）→ 同样判未装、与运行中应用对齐。
+      const c5 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveQfr: 'live-QFRLEA-vNEXT', liveUsh: 'live-USH-vNEXT' });
+      ok('K5_newer_live_uninstalled', vm.runInContext('leaServiceInstalled()', c5.sandbox) === false);
+      const r5 = await run(c5);
+      ok('K5_newer_live_launched', r5 && r5.ok === true && r5.reason === 'launched', { reason: r5 && r5.reason });
+      // K6：打包态（execPath 旁 LEA/）：一致 → 已装；USH 不同 → launched。
+      const pkgExec = path.join(tmp, 'QFRemote.exe');
+      const c6 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, packaged: true, execPath: pkgExec, payloadPresent: true });
+      ok('K6a_pkg_match_installed', vm.runInContext('leaServiceInstalled()', c6.sandbox) === true);
+      const r6 = await run(c6);
+      ok('K6a_pkg_match_already', r6 && r6.ok === true && r6.reason === 'already-installed', { reason: r6 && r6.reason });
+      ok('K6a_pkg_match_no_spawn', c6.spawns.length === 0);
+      const c7 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, packaged: true, execPath: pkgExec, payloadPresent: true, liveUsh: 'live-USH-r10' });
+      ok('K6b_pkg_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c7.sandbox) === false);
+      const r7 = await run(c7);
+      ok('K6b_pkg_mismatch_launched', r7 && r7.ok === true && r7.reason === 'launched', { reason: r7 && r7.reason });
+      ok('K6b_pkg_mismatch_spawn_once', c7.spawns.length === 1);
+      // K7：live qf-lea-client.exe 哈希不同 → 未装 → launched 补装。
+      const c8 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveClient: 'live-qf-client-r10' });
+      ok('K7_client_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c8.sandbox) === false);
+      ok('K7_client_mismatch_log', c8.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:qf-lea-client.exe'));
+      const r8 = await run(c8);
+      ok('K7_client_launched', r8 && r8.ok === true && r8.reason === 'launched', { reason: r8 && r8.reason });
+      ok('K7_client_spawn_once', c8.spawns.length === 1);
+      // K8：live QFUserHelper.exe 文件缺失 → 未装 → launched 补装。
+      const c9 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUshPresent: false });
+      ok('K8_live_ush_missing_uninstalled', vm.runInContext('leaServiceInstalled()', c9.sandbox) === false);
+      ok('K8_live_ush_missing_log', c9.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFUserHelper.exe'));
+      const r9 = await run(c9);
+      ok('K8_live_ush_missing_launched', r9 && r9.ok === true && r9.reason === 'launched', { reason: r9 && r9.reason });
+      ok('K8_live_ush_missing_spawn_once', c9.spawns.length === 1);
+      // K9：随包 USH 存在但读失败 → 单记 pkg-hash-read-error 并跳过该件，
+      // 其余件一致 → 已装，不误触发补装。
+      const c10 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, pkgReadFail: ['QFUserHelper.exe'] });
+      ok('K9_pkg_read_fail_installed', vm.runInContext('leaServiceInstalled()', c10.sandbox) === true);
+      ok('K9_pkg_read_fail_log', c10.bootLogs.some((l) => l === 'system-services.lea-pkg-hash-read-error:QFUserHelper.exe'));
+      const r10 = await run(c10);
+      ok('K9_pkg_read_fail_already', r10 && r10.ok === true && r10.reason === 'already-installed', { reason: r10 && r10.reason });
+      ok('K9_pkg_read_fail_no_spawn', c10.spawns.length === 0);
+    }
+
+    // ---- L. r12 守门键：版本 OR 载荷签名 ----
+    {
+      const sig = (q, cl, u) => [sha256(Buffer.from(q)), sha256(Buffer.from(cl)), sha256(Buffer.from(u))].join(':');
+      const curSig = sig('live-QFRLEA-r11', 'live-qf-client-r11', 'live-USH-r11');
+      const r10Sig = sig('live-QFRLEA-r10', 'live-qf-client-r10', 'live-USH-r10');
+      // L1：同版本＋同载荷签名 → tried-this-version，不拉起。
+      const c = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, prevVersion: '3.0.0', prevPayload: curSig });
+      const r = await run(c);
+      ok('L1_same_sig_tried', r && r.ok === false && r.reason === 'tried-this-version', { reason: r && r.reason });
+      ok('L1_same_sig_no_spawn', c.spawns.length === 0);
+      // L2：同版本＋载荷签名变 → 放行检查（live 一致 → already-installed，
+      // 且 triedPayload 已刷新为新签名）。
+      const c2 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, prevVersion: '3.0.0', prevPayload: r10Sig });
+      const r2 = await run(c2);
+      ok('L2_changed_sig_already', r2 && r2.ok === true && r2.reason === 'already-installed', { reason: r2 && r2.reason });
+      ok('L2_changed_sig_no_spawn', c2.spawns.length === 0);
+      ok('L2_sig_recorded', c2.sandbox.settings.systemServicesTriedPayload === curSig);
+      // L3：同版本＋旧设置无 triedPayload（r11 机器首启 r12）＋live USH
+      // 不同 → 放行 → launched 补装。
+      const c3 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, prevVersion: '3.0.0', prevPayload: undefined, liveUsh: 'live-USH-r10' });
+      const r3 = await run(c3);
+      ok('L3_legacy_no_sig_launched', r3 && r3.ok === true && r3.reason === 'launched', { reason: r3 && r3.reason });
+      ok('L3_legacy_no_sig_spawn_once', c3.spawns.length === 1);
+      // L4：载荷缺失无法签名＋同版本 → 退回只比版本 → tried-this-version。
+      const c4 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: false, prevVersion: '3.0.0' });
+      const r4 = await run(c4);
+      ok('L4_no_payload_tried', r4 && r4.ok === false && r4.reason === 'tried-this-version', { reason: r4 && r4.reason });
+      ok('L4_no_payload_no_spawn', c4.spawns.length === 0);
+      // L5：owner UAC 在飞 defer 时 triedPayload 随 triedVersion 一并恢复。
+      const c5 = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false, ownerUac: true, prevVersion: '3.0.0', prevPayload: 'old-sig', payloadPresent: true });
+      const r5 = await run(c5);
+      ok('L5_deferred', r5 && r5.ok === false && r5.reason === 'owner-uac-pending', { reason: r5 && r5.reason });
+      ok('L5_payload_restored', c5.sandbox.settings.systemServicesTriedPayload === 'old-sig');
+      ok('L5_version_restored', c5.sandbox.settings.systemServicesTriedVersion === '3.0.0');
+      // L6：部分载荷（缺 client）＋同版本＋签名与在位两件一致 →
+      // tried-this-version（签名逐项跳过，与比对循环同语义）。
+      const partialSig = [sha256(Buffer.from('live-QFRLEA-r11')), sha256(Buffer.from('live-USH-r11'))].join(':');
+      const c6 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, pkgOmit: ['qf-lea-client.exe'], prevVersion: '3.0.0', prevPayload: partialSig });
+      const r6 = await run(c6);
+      ok('L6_partial_sig_tried', r6 && r6.ok === false && r6.reason === 'tried-this-version', { reason: r6 && r6.reason });
+      ok('L6_partial_sig_no_spawn', c6.spawns.length === 0);
+      // L7：部分载荷（缺 client）＋同版本＋旧签名为三件全量 → 签名变 →
+      // 放行检查（live 在位件一致 → already-installed）。
+      const c7 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, pkgOmit: ['qf-lea-client.exe'], prevVersion: '3.0.0', prevPayload: curSig });
+      const r7 = await run(c7);
+      ok('L7_partial_sig_changed_already', r7 && r7.ok === true && r7.reason === 'already-installed', { reason: r7 && r7.reason });
+      ok('L7_partial_sig_changed_no_spawn', c7.spawns.length === 0);
     }
 
     // ---- B7. 文件齐全但服务未注册 → 仍补装（Q1 保守方向） ----

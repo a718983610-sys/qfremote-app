@@ -3103,6 +3103,42 @@ function preferUnpackedPath(p) {
   } catch (e) { /* ignore */ }
   return p;
 }
+// r12（修复线 B）：随包 LEA 载荷路径。打包态为 process.execPath 旁的
+// LEA/（与 maybeInstallSystemServices 的 packagedLeaDir 同源——SEC_LEA
+// 把 QFRLEA.exe／QFUserHelper.exe 都装到 $INSTDIR\LEA）；开发态为
+// windows/lea/（QFRLEA.exe）与 windows/ush/（QFUserHelper.exe）。
+function leaPayloadPath(name) {
+  try {
+    if (app && app.isPackaged && process.execPath) return path.join(path.dirname(process.execPath), 'LEA', name);
+    return path.join(__dirname, name === 'QFUserHelper.exe' ? 'ush' : 'lea', name);
+  } catch (e) { return ''; }
+}
+// r12（修复线 B）：随包 LEA 载荷签名——在位且可读的载荷件哈希拼接；
+// 全部缺失／全部读失败即 ''。与 leaServiceInstalled 的逐项跳过语义
+// 一致（DS diff 复核问题 B）：缺一件只跳过该件，不让部分缺失把整个
+// 签名打回 ''、使守门退回只比版本；三件齐全时签名即全量签名。
+// 开发态／旧包无载荷时 ''，守门退回只比版本（旧行为）。
+function leaPayloadSignature() {
+  try {
+    const parts = [];
+    for (const name of ['QFRLEA.exe', 'qf-lea-client.exe', 'QFUserHelper.exe']) {
+      const p = leaPayloadPath(name);
+      if (!p || !fs.existsSync(p)) continue;
+      const h = sha256File(p);
+      if (!h) continue;
+      parts.push(h);
+    }
+    return parts.length ? parts.join(':') : '';
+  } catch (e) { return ''; }
+}
+// r12（修复线 B）：文件 SHA-256，读失败返回 ''（调用方按未装处理）。
+// crypto 内联 require（与 leaServiceInstalled 内联 child_process 同款）。
+function sha256File(p) {
+  try {
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+  } catch (e) { return ''; }
+}
 // B-LEA：LEA 已装判据（偏保守：宁可多弹一次 UAC，不可静默跳过补装）。
 // 检查项：%ProgramFiles%\QFR\LEA\ 下 QFRLEA.exe（服务本体）＋
 // qf-lea-client.exe（客户端，与服务本体同在 install-lea.ps1 ②步拷入）＋
@@ -3115,6 +3151,19 @@ function preferUnpackedPath(p) {
 // 尚未实现——F1 深查发现，见发版后续清单，不在此处谎称已兜底）。
 // 注意：不设开发态目录回退——windows/lea/QFRLEA.exe 本就随包在仓内，
 // 回退会让开发机永远判已装，升级补装分支测不到。
+// r12（修复线 B）：同版号不同载荷即判未装——live 三件（QFRLEA.exe／
+// qf-lea-client.exe／QFUserHelper.exe，三件在 install-lea.ps1 里本就
+// 是同一组件集、同一期望哈希门）的 SHA-256 须与随包载荷一致（r10 与
+// r11 同为应用版本 3.0.0，光比版本号触发不了升级；install-lea.ps1 的
+// 载荷期望哈希门与白名单校验仍在，backfill 复用其停服／换件／重启逻辑）。
+// 随包载荷缺失（开发态未编／旧包无 LEA）时无法比对，按旧判据放行，
+// 不误触发补装；live 文件缺失按未装；live 存在但读失败（杀毒瞬锁等）
+// 单记 lea-hash-read-error 行、仍按未装（保守方向：误判代价是一次可
+// 恢复的 backfill，漏判代价是永不升级；运行中 exe 在 Windows 下通常
+// 可读）；live 比随包新（用户降级应用）同样判未装——与运行中的应用
+// 版本对齐是正确行为（强制对齐：旧应用未必理解新 LEA 协议）。
+// 三文件约 600KB 级，哈希毫秒级，每启一次不构成负担。LEA_DEGRADED
+// 标记与服务注册检查保留不动。
 function leaServiceInstalled() {
   try {
     const pf = process.env.ProgramFiles || '';
@@ -3130,6 +3179,23 @@ function leaServiceInstalled() {
       const r = cp.spawnSync('sc.exe', ['query', 'QFRLEA'], { windowsHide: true, timeout: 10000, encoding: 'utf8' });
       if (!r || r.status !== 0) return false;
     } catch (e) { return false; }
+    for (const name of ['QFRLEA.exe', 'qf-lea-client.exe', 'QFUserHelper.exe']) {
+      const pkg = leaPayloadPath(name);
+      if (!pkg || !fs.existsSync(pkg)) continue;
+      const live = path.join(dir, name);
+      const liveHash = sha256File(live);
+      if (!liveHash) {
+        if (fs.existsSync(live)) bootLog('system-services.lea-hash-read-error', name);
+        else bootLog('system-services.lea-hash-mismatch', name);
+        return false;
+      }
+      // DS diff 复核问题 A：随包载荷存在但读失败（杀毒瞬锁等）时 sha256File
+      // 返 ''，若直接比对会误报 mismatch 并触发补装；单记一行并跳过该件
+      // （与载荷缺失同口径），其余件照常比对。
+      const pkgHash = sha256File(pkg);
+      if (!pkgHash) { bootLog('system-services.lea-pkg-hash-read-error', name); continue; }
+      if (liveHash !== pkgHash) { bootLog('system-services.lea-hash-mismatch', name); return false; }
+    }
     return true;
   } catch (e) { return false; }
 }
@@ -3404,8 +3470,18 @@ async function maybeInstallSystemServices(force) {
   if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
   systemServicesInstallTried = true;
   const triedVersion = settings.systemServicesTriedVersion;
-  if (!force && triedVersion === app.getVersion()) return { ok: false, reason: 'tried-this-version' };
+  const triedPayload = settings.systemServicesTriedPayload;
+  // r12（DS 方案复核阻断点 1）：守门键＝版本 OR 载荷签名。r10／r11／
+  // r12 同为 3.0.0，只比版本时同版号换载荷永不触发检查。版本变、或
+  // 载荷签名变时放行检查；载荷缺失无法签名（开发态／旧包）时退回只
+  // 比版本（旧行为）。入口即记两键（与旧 triedVersion 语义一致：同
+  // 一（版本，载荷）只试一次，UAC 被拒后不再每启弹框；手动重试走
+  // force=true）。triedPayload 是 r12 新键，旧设置里没有——已跑过
+  // r11 的机器首启 r12 即放行检查，复测无需手动重置。
+  const payloadSig = leaPayloadSignature();
+  if (!force && triedVersion === app.getVersion() && (!payloadSig || triedPayload === payloadSig)) return { ok: false, reason: 'tried-this-version' };
   settings.systemServicesTriedVersion = app.getVersion();
+  if (payloadSig) settings.systemServicesTriedPayload = payloadSig;
   saveSettings();
   const owner = currentGateUsername();
   if (!owner) { bootLog('system-services.no-owner'); return { ok: false, reason: 'no-owner' }; }
@@ -3443,6 +3519,7 @@ async function maybeInstallSystemServices(force) {
       if (sync.uacDispatched) {
         systemServicesInstallTried = false;
         settings.systemServicesTriedVersion = triedVersion;
+        settings.systemServicesTriedPayload = triedPayload;
         saveSettings();
         bootLog('system-services.lea-backfill-deferred', 'owner-uac-pending');
         return { ok: false, reason: 'owner-uac-pending' };
