@@ -332,8 +332,8 @@ $script:ushWasStopped = $false # P2-02 问题 4：本轮是否停过 USH（停�
 # windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
 # BEGIN LEA-EXPECTED-HASHES (gen_whitelist.py --update-installer)
 $expectedHashes = @{
-  'QFRLEA.exe' = '3824ecaaaff1d8d5fd738ae697b6895013f45a3d0dc25d447d21459731eb1011'
-  'QFUserHelper.exe' = '702adf6fe6231e89dcdee2684bb8f0349f9ce47cb83ee9863f3c2b477169e90d'
+  'QFRLEA.exe' = 'c0021648ed01946370bea266bfa56b2e04a3110601353970264accf0d981cf2a'
+  'QFUserHelper.exe' = '33107c9cb7f9e151386a51a71f6216aa98fbe14379218489d682efeab03d2320'
   'qf-lea-client.exe' = 'a93635de8091a0631566f1116bdc0b560fab45c9e8f1cd8e143485fdfcc20889'
 }
 # END LEA-EXPECTED-HASHES
