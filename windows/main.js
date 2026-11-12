@@ -2250,10 +2250,19 @@ async function fetchDevicesModel() {
     wsUrl = (u.protocol === 'https:' ? 'wss://' : 'ws://') + u.host + devicesMod.CONTROL_WS_PATH;
   } catch (e) { return { ok: false, reason: 'bad-console-url' }; }
   let raw = null;
+  // r11②：首刷竞速重试——登录后控制台视图未必已就绪，单次探针失败
+  // 不再直接报“没能读取”，先在主进程侧自动重试（最多 3 次、间隔
+  // 1 秒），仍无应答才回 ok:false 让设备页给重试态。首试探针超时
+  // 6s、后试 4s；执行抛错（视图已销毁等）与无应答分开归因。
   try {
-    raw = await view.webContents.executeJavaScript(devicesMod.buildProbeCall(wsUrl, 6000), true);
+    const r = await devicesMod.probeWithRetry(async (attempt) => {
+      return await view.webContents.executeJavaScript(
+        devicesMod.buildProbeCall(wsUrl, attempt === 1 ? 6000 : 4000), true);
+    }, 3, 1000);
+    raw = r.value;
+    if (r.attempts > 1) bootLog('devicesModel.probe-retry', 'attempts=' + r.attempts);
+    if (!raw || typeof raw !== 'object') return { ok: false, reason: r.threw ? 'probe-exec-failed' : 'probe-timeout' };
   } catch (e) { return { ok: false, reason: 'probe-exec-failed' }; }
-  if (!raw || typeof raw !== 'object') return { ok: false, reason: 'probe-timeout' };
   return { ok: true, model: devicesMod.normalizeNodes(raw.nodes, raw.meshes) };
 }
 ipcMain.handle('qf-devices-list', () => fetchDevicesModel());

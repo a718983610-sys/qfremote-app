@@ -167,8 +167,35 @@ function mainChainClicks() {
   return mainChain().reduce((s, x) => s + x.clicks, 0);
 }
 
+// r11②：探针有界重试（纯逻辑，可单测）。首刷时控制台视图可能还在
+// 登录后导航/重建中，WS 探针会抢跑失败（null），而手动点“重新读取”
+// 时页面已就绪、一次即成——r10 的偶发“没能读取到设备列表”即此竞速。
+// 在主进程侧自动重试最多 3 次、间隔 1 秒：只重试“探针无应答”，
+// 不重试“未登录/无视图”等确定性失败（调用方在调前已排除）；
+// probeFn 收 attempt（1 起），调用方可据此缩短后几次的探针超时，
+// 避免真故障时总耗时膨胀（首试 6s、后试 4s：最坏 6+1+4+1+4=16s，
+// 其中加载态一直显示“正在读取”，不是报错态）。
+// 返回 { value, attempts, threw }：threw 表示最后一次尝试是否抛错，
+// 供调用方区分 probe-timeout（无应答）与 probe-exec-failed（执行错）。
+async function probeWithRetry(probeFn, attempts, delayMs) {
+  const n = (typeof attempts === 'number' && attempts > 0) ? Math.floor(attempts) : 3;
+  const gap = (typeof delayMs === 'number' && delayMs >= 0) ? delayMs : 1000;
+  let last = null;
+  let threw = false;
+  for (let i = 1; i <= n; i++) {
+    let v = null;
+    threw = false;
+    try { v = await probeFn(i); } catch (e) { v = null; threw = true; }
+    if (v && typeof v === 'object') return { value: v, attempts: i, threw: false };
+    last = v;
+    if (i < n) await new Promise((r) => setTimeout(r, gap));
+  }
+  return { value: last, attempts: n, threw };
+}
+
 module.exports = {
   CONTROL_WS_PATH, PROBE_RESPONSE_ID, PROBE_ACTION, VIEWMODES, MODE_LABELS,
   bareNodeId, sessionUrl, normalizeNodes, probeNodes, buildPageLib, buildProbeCall,
+  probeWithRetry,
   mainChain, mainChainClicks
 };

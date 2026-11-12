@@ -156,11 +156,36 @@ function viewCase() {
   ok('G2_preload_untouched', seq.join(',') === 'friends,chat,forum', { seq });
 }
 
+// ---------- I r11② 探针有界重试 ----------
+async function retryCase() {
+  // 首刷竞速：第一次 null、第二次有应答 → 成功且只试 2 次
+  let c1 = 0;
+  const r1 = await D.probeWithRetry(async () => { c1++; return c1 < 2 ? null : { nodes: {}, meshes: {} }; }, 3, 1);
+  ok('I1_retry_then_ok', !!r1.value && r1.attempts === 2, { attempts: r1.attempts });
+  // 一直失败 → 耗尽 3 次、回 null（调用方再报重试态）
+  let c2 = 0;
+  const r2 = await D.probeWithRetry(async () => { c2++; return null; }, 3, 1);
+  ok('I2_exhausted', r2.value === null && r2.attempts === 3 && c2 === 3, { attempts: r2.attempts, calls: c2 });
+  // 探针抛错也当一次失败重试，不向上传播
+  let c3 = 0;
+  const r3 = await D.probeWithRetry(async () => { c3++; if (c3 < 3) throw new Error('boom'); return { nodes: {}, meshes: {} }; }, 3, 1);
+  ok('I3_throw_retried', !!r3.value && r3.attempts === 3 && r3.threw === false, { attempts: r3.attempts });
+  // 首试即成 → 不多试
+  const r4 = await D.probeWithRetry(async () => ({ nodes: {}, meshes: {} }), 3, 1);
+  ok('I4_first_ok', !!r4.value && r4.attempts === 1, { attempts: r4.attempts });
+  // r11② DS 复核：一直抛错 → 耗尽后 threw=true（调用方据此报
+  // probe-exec-failed，而非 probe-timeout）；attempt 序号透传给探针。
+  const seen = [];
+  const r5 = await D.probeWithRetry(async (attempt) => { seen.push(attempt); throw new Error('boom'); }, 3, 1);
+  ok('I5_threw_flag', r5.value === null && r5.attempts === 3 && r5.threw === true && seen.join(',') === '1,2,3', { attempts: r5.attempts, threw: r5.threw, seen });
+}
+
 (async () => {
   await probeCase();
   libCase();
   contractCase();
   viewCase();
+  await retryCase();
   result.pass = Object.values(result.cases).every(c => c.pass);
   try { fs.mkdirSync(path.dirname(OUT), { recursive: true }); fs.writeFileSync(OUT, JSON.stringify(result, null, 2)); } catch (e) { /* ignore */ }
   console.log(JSON.stringify({ pass: result.pass, failed: Object.keys(result.cases).filter(k => !result.cases[k].pass) }));
