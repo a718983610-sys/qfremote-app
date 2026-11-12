@@ -1213,6 +1213,12 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
     size_t total = 0;
     int ok = 0;
     char chunk[4096];
+    /* r11 仪器（定位用，定论后由协调人定去留）：记每轮读的 total／got／
+     * GetLastError 与退出分支＋相对耗时。逻辑与 r10 完全一致，只加日志；
+     * GetLastError 均在失败调用后立即取值，svc_log 本身不污染它。 */
+    ULONGLONG fwd_t0 = GetTickCount64();
+    int iter = 0;
+    svc_log("R11-INSTR fwd-start timeout_ms=%ld", timeout_ms);
     while (total + 1 < resp_size) {
         OVERLAPPED ov;
         memset(&ov, 0, sizeof(ov));
@@ -1221,40 +1227,71 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
         ResetEvent(ev);
         DWORD got = 0;
         BOOL r = ReadFile(pipe, chunk, sizeof(chunk), &got, &ov);
-        if (!r && GetLastError() == ERROR_IO_PENDING) {
+        DWORD gle = r ? 0 : GetLastError();
+        svc_log("R11-INSTR read iter=%d total=%llu elapsed_ms=%llu r=%d gle=%lu got=%lu",
+                iter, (unsigned long long)total,
+                (unsigned long long)(GetTickCount64() - fwd_t0),
+                (int)r, (unsigned long)gle, (unsigned long)got);
+        iter++;
+        if (!r && gle == ERROR_IO_PENDING) {
             ULONGLONG now = GetTickCount64();
             if (now >= deadline_tick) {
                 CancelIo(pipe);
+                svc_log("R11-INSTR read BREAK deadline-reached total=%llu elapsed_ms=%llu",
+                        (unsigned long long)total,
+                        (unsigned long long)(GetTickCount64() - fwd_t0));
                 break;
             }
             DWORD wait_ms = (DWORD)(deadline_tick - now);
             if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
                 CancelIo(pipe);
+                svc_log("R11-INSTR read BREAK wait-timeout total=%llu elapsed_ms=%llu",
+                        (unsigned long long)total,
+                        (unsigned long long)(GetTickCount64() - fwd_t0));
                 break;
             }
             if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) {
+                DWORD ogle = GetLastError();
                 /* r10：USH 写完响应即 DisconnectNamedPipe，挂起的读可
                  * 以 ERROR_BROKEN_PIPE 完成，与 got==0 同款视为帧结束；
                  * 已收数据以已收内容为准，终判仍由 lea_ush_response_ok
                  * 做。其它错误仍判失败。 */
-                if (GetLastError() == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+                if (ogle == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+                svc_log("R11-INSTR read BREAK overlapped-fail ogle=%lu got=%lu total=%lu ok=%d elapsed_ms=%llu",
+                        (unsigned long)ogle, (unsigned long)got,
+                        (unsigned long)total, ok,
+                        (unsigned long long)(GetTickCount64() - fwd_t0));
                 break;
             }
         } else if (!r) {
             /* r10：同上——无挂起读时对端已断开亦为帧结束。 */
-            if (GetLastError() == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+            if (gle == ERROR_BROKEN_PIPE && total > 0) { ok = 1; }
+            svc_log("R11-INSTR read BREAK immediate-fail gle=%lu total=%llu ok=%d elapsed_ms=%llu",
+                    (unsigned long)gle, (unsigned long long)total, ok,
+                    (unsigned long long)(GetTickCount64() - fwd_t0));
             break;
         }
         /* T24 同款（M-B 修法，同根）：got==0（对端关闭）时，若已收到部分
          * 数据即视为本次响应结束（无换行也以已收内容为准）；尚未收到任何
          * 数据则仍判无响应。管道短读是常态，不得把 got < sizeof(chunk)
          * 当作完成。 */
-        if (got == 0) { if (total > 0) ok = 1; break; }
+        if (got == 0) {
+            if (total > 0) ok = 1;
+            svc_log("R11-INSTR read BREAK got0 total=%llu ok=%d elapsed_ms=%llu",
+                    (unsigned long long)total, ok,
+                    (unsigned long long)(GetTickCount64() - fwd_t0));
+            break;
+        }
         size_t take = got;
         if (total + take >= resp_size) take = resp_size - total - 1;
         memcpy(resp + total, chunk, take);
         total += take;
         resp[total] = '\0';
+        svc_log("R11-INSTR read data got=%lu total=%llu last_nl=%d json_valid=%d elapsed_ms=%llu",
+                (unsigned long)got, (unsigned long long)total,
+                (int)(total > 0 && resp[total - 1] == '\n'),
+                (int)(total > 0 && resp[total - 1] == '\n' && lea_json_is_valid(resp)),
+                (unsigned long long)(GetTickCount64() - fwd_t0));
         /* r10 tree 修复（方案②改良版，DS v4-pro 复核）：USH 响应是
          * "<JSON>\n"，但 ui.tree 的 JSON 内含 pretty-print 字面换行，
          * 旧逻辑见第一个 '\n' 即停，只收到 `"tree":` 前的半行。
@@ -1264,9 +1301,23 @@ static int ush_forward(const char *envelope_line, long timeout_ms,
          * 后、无 '\n' 时亦继续读，防前缀完整提前停）。未见帧尾时，
          * 对端关闭（got==0／ERROR_BROKEN_PIPE）或超时／64KB 上限
          * 仍可结束，终判由 lea_ush_response_ok 做。 */
-        if (total > 0 && resp[total - 1] == '\n' && lea_json_is_valid(resp)) { ok = 1; break; }
+        if (total > 0 && resp[total - 1] == '\n' && lea_json_is_valid(resp)) {
+            ok = 1;
+            svc_log("R11-INSTR read BREAK frame-complete total=%llu elapsed_ms=%llu",
+                    (unsigned long long)total,
+                    (unsigned long long)(GetTickCount64() - fwd_t0));
+            break;
+        }
         /* 短读继续读：只有帧完整、对端关闭或超时才算完成。 */
     }
+    if (total + 1 >= resp_size) {
+        svc_log("R11-INSTR read BREAK resp-full total=%llu elapsed_ms=%llu",
+                (unsigned long long)total,
+                (unsigned long long)(GetTickCount64() - fwd_t0));
+    }
+    svc_log("R11-INSTR fwd-end ok=%d total=%llu elapsed_ms=%llu",
+            ok, (unsigned long long)total,
+            (unsigned long long)(GetTickCount64() - fwd_t0));
     CloseHandle(ev);
     CloseHandle(pipe);
     if (!ok || total == 0) {
@@ -1646,6 +1697,9 @@ static void execute_item(lea_queue_item_t *item) {
          * H03：转发前读当前会话 USH 的每启动随机 token 并插入信封行
          * （ush_token 字段），USH 验 token＋验 LEA 进程镜像；token
          * 读不到即 fail-closed，不裸发。 */
+        /* r11 仪器：给 ush_forward 的 R11-INSTR 行配命令＋请求 id。 */
+        svc_log("R11-INSTR dispatch cmd=%s req=%s timeout_ms=%ld",
+                env->command, env->request_id, timeout_ms);
         char ush_resp[LEA_MAX_RESPONSE] = { 0 };
         char udetail[256] = { 0 };
         char env_line[LEA_MAX_ENVELOPE] = { 0 };
