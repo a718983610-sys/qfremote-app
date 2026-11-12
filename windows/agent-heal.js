@@ -364,13 +364,31 @@ function defaultTcp(host, port) {
 
 function defaultTls(host, port) {
   return new Promise((resolve, reject) => {
-    const sock = tls.connect({ host, port, servername: host });
+    // rejectUnauthorized:false 是刻意的：见下文。握手失败（error 事件）
+    // 仍 reject → tls-fail；握手完成即 resolve，证书信任只记 detail。
+    const sock = tls.connect({ host, port, servername: host, rejectUnauthorized: false });
     sock.once('secureConnect', () => {
+      // r11① 根因（2026-11-12 东京机实测）：:8443 是 MeshCentral 自家
+      // agent 端点，证书为 MeshCentral 自签根签发（CN=54.248.9.192，
+      // SAN 只有该 IP/localhost/127.0.0.1，无 app.qfremote.top），Node
+      // 默认 CA 校验恒报 UNABLE_TO_VERIFY_LEAF_SIGNATURE。旧代码用
+      // 默认校验（rejectUnauthorized:true）：校验一失败就只走 error
+      // 事件、根本到不了 secureConnect，TLS 阶梯在任何机器上都永不
+      // 过，阶梯到不了服务端 presence 确认，轮轮 unverified tls-fail，
+      // 每次冷启动都弹误报弹窗、还白白重启一次服务。
+      // 本阶梯只判“能不能和 :8443 说上 TLS”（连通性诊断），证书信任
+      // 不是它的职责：agent 自己的 wss 通道由 MeshCentral 机制认证，
+      // 在线与否的唯一判官是走 :443 公共证书的 presence 查询；探针结
+      // 果不授权任何操作，故此处 rejectUnauthorized:false，只测握手
+      // 通断。握手完成即算通，证书问题只记 detail 供日志定位；真正
+      // 连不上（error 事件、无握手）仍走 tls-fail。
       const ok = !!sock.authorized;
       const err = sock.authorizationError || null;
+      // Node 里 authorizationError 可能是字符串（如 'DEPTH_ZERO_SELF_SIGNED_CERT'）
+      // 也可能是带 .code 的 Error，两形态都取。
+      const certCode = !err ? null : (typeof err === 'string' ? err : (err.code || err.message || 'NOT_AUTHORIZED'));
       try { sock.destroy(); } catch (e) { /* ignore */ }
-      if (ok) resolve({ authorized: true });
-      else reject(new Error('CERT:' + (err && err.code ? err.code : 'NOT_AUTHORIZED')));
+      resolve({ authorized: ok, certError: ok ? null : (certCode || 'NOT_AUTHORIZED') });
     });
     sock.once('error', reject);
   });
@@ -395,12 +413,16 @@ async function probeConnectivity(deps) {
   } catch (e) {
     return { ok: false, stage: 'tcp', code: HEAL_CODES.TCP_FAIL, detail: (e && e.code) || (e && e.message) || 'tcp-fail' };
   }
+  // r11①：TLS 握手完成即算通（见 defaultTls）；证书未受公共 CA 信任
+  // 只记 detail，不再算失败。真正握手失败（抛错/超时）仍是 tls-fail。
+  let tlsDetail = 'ok';
   try {
-    await withTimeout(Promise.resolve().then(() => tlsFn(PRESENCE_HOST, PRESENCE_PORT)), timeoutMs, new Error('tls-timeout'));
+    const tlsRes = await withTimeout(Promise.resolve().then(() => tlsFn(PRESENCE_HOST, PRESENCE_PORT)), timeoutMs, new Error('tls-timeout'));
+    if (tlsRes && tlsRes.certError) tlsDetail = 'tls-ok-cert-untrusted:' + tlsRes.certError;
   } catch (e) {
     return { ok: false, stage: 'tls', code: HEAL_CODES.TLS_FAIL, detail: (e && e.code) || (e && e.message) || 'tls-fail' };
   }
-  return { ok: true, stage: 'ok', code: null, detail: 'ok' };
+  return { ok: true, stage: 'ok', code: null, detail: tlsDetail };
 }
 
 // ---------- 运行时助手（Electron 侧调用，可注入假依赖单测） ----------
@@ -608,7 +630,7 @@ async function runHealLadder(deps) {
   }
   // 连通性阶梯：DNS → TCP → TLS
   const conn = await probeFn();
-  log('ladder connectivity stage=' + conn.stage + ' code=' + (conn.code || 'ok'));
+  log('ladder connectivity stage=' + conn.stage + ' code=' + (conn.code || 'ok') + ' detail=' + (conn.detail || ''));
   if (!conn.ok) {
     if (conn.code === HEAL_CODES.DNS_FAIL) {
       return { outcome: 'unverified', code: conn.code, rounds };
@@ -621,7 +643,7 @@ async function runHealLadder(deps) {
       if (r && r.outcome === 'denied') return { outcome: 'denied', code: conn.code, rounds };
       if (r && r.skipped) return { outcome: 'unverified', code: conn.code, rounds };
       const conn2 = await probeFn();
-      log('ladder connectivity recheck stage=' + conn2.stage + ' code=' + (conn2.code || 'ok'));
+      log('ladder connectivity recheck stage=' + conn2.stage + ' code=' + (conn2.code || 'ok') + ' detail=' + (conn2.detail || ''));
       if (!conn2.ok) return { outcome: 'unverified', code: conn2.code, rounds };
     } else {
       return { outcome: 'unverified', code: conn.code, rounds };
@@ -726,6 +748,7 @@ module.exports = {
   formatLocalTs,
   appendHealLog,
   probeConnectivity,
+  defaultTls,
   checkAgentState,
   runHealElevated,
   runHealLadder

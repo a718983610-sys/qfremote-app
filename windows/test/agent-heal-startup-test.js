@@ -244,6 +244,24 @@ try {
   const probeTlsFail = await heal.probeConnectivity({ lookup: okLookup, tcp: async () => true, tls: tlsFail, timeoutMs: 3000 });
   ok('O5-tls-fail', probeTlsFail.ok === false && probeTlsFail.code === 'tls-fail');
 
+  // ---- r11①：自签证书的 TLS 握手即算通 ----
+  // :8443 是 MeshCentral 自签端点（CN=IP、无 app.qfremote.top SAN），
+  // 默认 CA 校验恒败；阶梯只测“能不能说上 TLS”，证书信任只记 detail。
+  const tlsSelfSigned = async () => ({ authorized: false, certError: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' });
+  const probeTlsSelfSigned = await heal.probeConnectivity({ lookup: okLookup, tcp: async () => true, tls: tlsSelfSigned, timeoutMs: 3000 });
+  ok('O6-tls-selfsigned-ok', probeTlsSelfSigned.ok === true && probeTlsSelfSigned.stage === 'ok' && (probeTlsSelfSigned.detail || '').includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE'));
+  // O7：defaultTls 对真自签服务器（CN=54.248.9.192，与东京机 :8443 同款
+  // 证书形态）握手成功且记下证书码；旧行为（默认校验）在此直接 error。
+  // 证书/私钥为测试专用现签对，与生产密钥无关。
+  const SELF_SIGNED_CERT = '-----BEGIN CERTIFICATE-----\nMIIDMTCCAhmgAwIBAgIUICr204oOSSL62YI10RaLxZfhrBgwDQYJKoZIhvcNAQEL\nBQAwFzEVMBMGA1UEAwwMNTQuMjQ4LjkuMTkyMB4XDTI2MTExMjAwMDI0MloXDTI3\nMTExMjAwMDI0MlowFzEVMBMGA1UEAwwMNTQuMjQ4LjkuMTkyMIIBIjANBgkqhkiG\n9w0BAQEFAAOCAQ8AMIIBCgKCAQEApovAOAtdfW/i3L74PcXQ6/Dl6qTsNZ42+wka\n6mur/A9gWIX1lCMDMc4xUF1ZM1oSn0GVTvVLNQzr72a/LJkK+SVRDUYk8ZMPI0VL\nKlCos8xvC7+Q8SJpBSKmCb3CyGNFmmkBLGYYK4JmddHCtJjkhD0jzw+Vzsq53X39\n3JFW2eHiB2FSBT5f7Fpr+fNXR1O4fOxNIPYrHRJls4UqIh/yk03GBD+bCYHbqy3R\nYbOYuDnJHbNITXjYLApMwcPu8InR6E7bOfQqUs1ly38Q+xrgfbVijUrJG9qHkxuk\nCJRb+ywfxFkS2RIAmWG/h3ZkjtRhAxCkf9H0GGS/AnvNcTOswQIDAQABo3UwczAd\nBgNVHQ4EFgQUWStesBaoquyb0IBgJflTwbjAogMwHwYDVR0jBBgwFoAUWStesBao\nquyb0IBgJflTwbjAogMwDwYDVR0TAQH/BAUwAwEB/zAgBgNVHREEGTAXhwQ2+AnA\ngglsb2NhbGhvc3SHBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAEF7shvyiuCE2giU\nBKJnhd6h3L98TRzT7TU0kqwJda8xpKOmBCmtudKREG/qX9rY/+iwb3Pr/55JK6By\nM/gFz/1GEJVouMbBk+p+YsnoyLQEwMz3SNuN2sahbHjoGhNg3yW304ob2oZ+Te2j\naFtmm3Y4/NmAO4tD9Dx46bu/xI5g4HssHkeLMWqUdh3upNHU8UI0LQFyJw8PpcZE\n3zSgV1bnlydM/UNW42oYqh+vIe2V781LQAXa5cbStkABmFPwB/kpSgI1NkGPUxio\nv0DHCAG71VpwlyT7tuSZTQbk2TDwKIGQojiuIirSexqOKryxQ0kP3lf97trluy7I\nQjr2ii4=\n-----END CERTIFICATE-----\n';
+  const SELF_SIGNED_KEY = '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCmi8A4C119b+Lc\nvvg9xdDr8OXqpOw1njb7CRrqa6v8D2BYhfWUIwMxzjFQXVkzWhKfQZVO9Us1DOvv\nZr8smQr5JVENRiTxkw8jRUsqUKizzG8Lv5DxImkFIqYJvcLIY0WaaQEsZhgrgmZ1\n0cK0mOSEPSPPD5XOyrndff3ckVbZ4eIHYVIFPl/sWmv581dHU7h87E0g9isdEmWz\nhSoiH/KTTcYEP5sJgdurLdFhs5i4Ockds0hNeNgsCkzBw+7widHoTts59CpSzWXL\nfxD7GuB9tWKNSskb2oeTG6QIlFv7LB/EWRLZEgCZYb+HdmSO1GEDEKR/0fQYZL8C\ne81xM6zBAgMBAAECggEASi95DV3epJfYpXy5Zga+E8MIHxeckhuqIPNC1oXko5AT\n2gq9w+E+tIpExCf4qlumbOMRR40TFYvucoLBiHOZhDZfnrqOjT704MCmhTBNnV1k\nX4bS4N5zilKPREqPP6ScpfW9DJJjlMnuqu+nO7vZGqCDWWH3WJhL54IOORhSaBWy\nSKfWzAnupDvUK2nSgoBUTIC4LXrhy5ZPneD2njprI4n80Sxqa34pdEudG+5bqkJt\ntowrkVJeD+uDDtUj8wqyrHE2a3BgLaoEcMrOu2ZRgJH9UwNKU0xuLTeHw26rXw6v\nUKfygtZn4Icb+/2935g8sKFsUBPDqIVgqF4yLKJBiwKBgQDbQSFtREW+5urZMSCE\nsO4frszt30FBsCL+DxgFA4ziDxOR9FWfkUbud9zC1tjAVcxNGagLMhYflNGtyQgw\n/eVluZyO2p2G+8hxugHqyDMbj8hsfMOgRKV+TFvUsHTftNbC0wAgYRIYsklCy11u\nrg4ArpgXNajT2kCRsyCcpub96wKBgQDCdTgvikQNhNVMiiYcRPLEn3FodDje9+Ou\ny5tyhCm5OxyQa3kWw9/E9UpNA9nByyV3V4ik5sCdo9A3pdbPgcQWQARZpv2LZ0+m\nZ20zrzBar1xPruSjW1ik/i0taMWxciPvgti8xpds9yXq3TRM2GmPCE2yS+RVH7uy\ndAkQpKhZAwKBgQCKrYti/UfQE2Z/sZ8Lzo0O5RUhb5Bq5+l6IDnlEfXOFhMewhhW\nMSFYO+AaLKI0JRBvw8aSLj/oAc0NypWvxyeNS/VGNehlNGP36trDkZUh3bO7Sr7B\nZCn41HtQ77s8s7kSyTrPQBaeIEZORSr3koewzr3MEFiUhvtILLB35Ok9uQKBgBB+\njuiBaupWpR0b7sWhF5KUD7OTgCtxjW+LN8FL8poSqIabhybmMHntcIL925+zkpb/\n5shOBnKYrZW6zHDHihF1FqlgH8uOVNRBm6KxroFStJrRs/UjT26XXM+oPnShwOiV\nCbthgQCuKho07zXBeZq3UpfYFiMeUPZ/HzG5NcpvAoGBAKgglPjKmnFPwtq2OTQh\nFLPP+Z994UBUzYL8zMjLFkhSCfjNOw9cSwnoEX2BEnesPVqVrheByl31m7f9jLEa\n3ASBbhOQmpl2XNxnhiiJzylW+QCrCbuPqaRJILLmZpChbA/AjY2ZdNiOThafyP/l\nrTj3my2+7BlfhSit7vLVFX7/\n-----END PRIVATE KEY-----\n';
+  const tlsSrv = require('tls').createServer({ key: SELF_SIGNED_KEY, cert: SELF_SIGNED_CERT }, (so) => so.end());
+  await new Promise((res) => tlsSrv.listen(0, '127.0.0.1', res));
+  const tlsPort = tlsSrv.address().port;
+  const tlsReal = await heal.defaultTls('127.0.0.1', tlsPort);
+  ok('O7-defaultTls-selfsigned', tlsReal && tlsReal.authorized === false && typeof tlsReal.certError === 'string' && tlsReal.certError.length > 0, { certError: tlsReal && tlsReal.certError });
+  await new Promise((res) => tlsSrv.close(res));
+
   // ---- P. runHealLadder（注入 fake） ----
   const okState = { msh: { found: true, meshServer: TARGET }, service: { exists: true, status: 'RUNNING' }, action: 'none' };
   const staleState = { msh: { found: true, meshServer: TARGET }, service: { exists: true, status: 'RUNNING' }, action: 'restart-stale', mshMtime: t1, procStart: t0 };
@@ -331,6 +349,13 @@ try {
   ok('P9c-service-missing-presence-null-no-agent', rP9c.outcome === 'no_agent' && rP9c.code === 'service-missing');
   const rP9d = await heal.runHealLadder({ checkState: async () => missingState, probeConnectivity: probePass, queryPresence: async () => { throw new Error('presence boom'); }, runRepair: fixRepair, log: logNoop });
   ok('P9d-service-missing-presence-throw-no-agent', rP9d.outcome === 'no_agent' && rP9d.code === 'service-missing');
+  // r11①：TLS 段带自签证书 detail（握手通、证书不受信任）时阶梯照常
+  // 走到 presence 确认——在线即 already_correct、0 轮修复，不再因
+  // tls-fail 白白重启服务、不再弹误报弹窗。
+  let p10Repairs = 0;
+  const probeTlsUntrusted = async () => ({ ok: true, stage: 'ok', code: null, detail: 'tls-ok-cert-untrusted:UNABLE_TO_VERIFY_LEAF_SIGNATURE' });
+  const rP10 = await heal.runHealLadder({ checkState: async () => okState, probeConnectivity: probeTlsUntrusted, queryPresence: onlinePresence, runRepair: async () => { p10Repairs++; return { outcome: 'fixed' }; }, log: logNoop });
+  ok('P10-tls-untrusted-online-already-correct', rP10.outcome === 'already_correct' && rP10.rounds === 0 && p10Repairs === 0);
 
   result.pass = Object.values(result.cases).every((c) => c.pass);
 } catch (e) {

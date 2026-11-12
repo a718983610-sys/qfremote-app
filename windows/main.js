@@ -3011,7 +3011,14 @@ function recordHealOutcome(outcome, detail) {
   if (outcome === 'denied' && (st.consecutiveFailures || 0) < 2) return;
   if (outcome === 'unverified' && detail && (detail.rounds || 0) === 0 &&
       (detail.code === 'server-unconfirmed' || detail.code === 'not-found')) return;
-  showHealFailure(msg);
+  // r11①：同一会话内同一失败（outcome+code）只提醒一次——dismiss 后
+  // 不再重弹；重复触发只说明根因未除，不应拿弹窗刷用户。须放在上面
+  // 两条抑制之后：被抑制掉的那次不算“已提醒”。只“检查”去重键，
+  // 不在这里写键：键在弹窗真正打开时才由 showHealFailure 写（DS 复
+  // 核：先写键后弹框会在叠框守卫挡掉第二次提醒时把那次提醒永久丢掉）。
+  const shownKey = outcome + ':' + (detail && detail.code || '');
+  if (lastHealShownKey === shownKey) return;
+  showHealFailure(msg, shownKey);
 }
 
 // ---------- 锁组件与 SYSTEM helper 首装（W-11，2.4.5） ----------
@@ -3489,14 +3496,26 @@ async function maybeInstallSystemServices(force) {
   }
 }
 
-async function showHealFailure(msg) {
+// r11①：heal 弹窗单飞守卫＋同会话去重键。原生 showMessageBox 被连调
+// 两次会在 Windows 上叠两张一模一样的框：点 X 关掉上面一张、下面还
+// 有一张，帧面分毫不差，看起来就是“X 点了没反应”（r10 实测）；回车
+// 因按钮有焦点每次都能关，更印证是叠框而非 X 失灵。守卫保证同一时间
+// 只有一张；cancelId: 0 让 X/ Esc 明确走“知道了”分支。
+let healDialogOpen = false;
+let lastHealShownKey = null;
+async function showHealFailure(msg, shownKey) {
+  if (healDialogOpen) return;
+  healDialogOpen = true;
+  // 键在这里写（弹窗真正打开时）：被单飞守卫挡掉的那次不算已提醒，
+  // 下次同失败再触发时仍会弹，不会永久丢失一次提示。
+  if (typeof shownKey === 'string') lastHealShownKey = shownKey;
   try {
     const owner = (win && !win.isDestroyed()) ? win : undefined;
     await dialog.showMessageBox(owner, {
       type: 'warning', title: 'QFRemote', message: msg,
-      buttons: ['知道了'], defaultId: 0, noLink: true
+      buttons: ['知道了'], defaultId: 0, cancelId: 0, noLink: true
     });
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* ignore */ } finally { healDialogOpen = false; }
 }
 
 // 强更页自测（仅 QFREMOTE_PREVIEW=force）：截强更页 -> 点「立即更新」走真下载 ->
