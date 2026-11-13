@@ -1734,7 +1734,7 @@ const Sess = {
      （preflight 在 t0 置位前，见 buildSessionFrame；iframe-load 12 秒预算见
      哨兵：onload 后 12 秒 probe 仍为 blank 即 TIMEOUT_IFRAME_LOAD）。
      stageAt 以 performance.now() 计；超时码与文案见 failStage/showSessionMask。 */
-  stage: '', stageAt: 0, webappReady: false, preflight: null, maskCode: '', navFallback: '',
+  stage: '', stageAt: 0, webappReady: false, preflight: null, maskCode: '', navFallback: '', identityCheck: '',
   forcedConnectN: 0, connectingSince: 0, connectAttempts: [],
   lostSince: 0, lostReloaded: false, reconnectN: 0, lastLostTry: 0,
   lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, morphRetryAt: 0, stageTextSec: -1,
@@ -1774,6 +1774,62 @@ function fmtAgeMs(ms) {
   const m = Math.round(s / 60);
   if (m < 60) return m + ' 分钟前';
   return Math.round(m / 60) + ' 小时前';
+}
+/* ---------- 防御 (a) 挂载前控制面会话绑定校验（r13 复测阻塞项，DS 定夺发版前必须实现） ----------
+   buildSessionFrame 挂 iframe 之前，以控制 WS（/control.ashx，与原生控制台
+   同一通道、浏览器凭会话自动鉴权）核对当前会话的可见节点是否包含目标设备。
+   W-01 presence 预检只验设备在线、不验会话归属：会话有效但目标不在其可见
+   集内时（共享撤销/切号/解析残留），预热框可能仍是旧会话暖页，必须强制走
+   W-04 失配重建分支重新导航，不得原样复用。探针本身失败/超时（unknown）
+   时不拦挂载（瞬态通道故障不杀会话），挂后 probeFrame/driveConnect 继续兜底。
+   预算 CONTROL_PROBE_MS（1500ms，与慢源探测一致）；至多开一条 WS，且在途
+   慢探测存在时复用它、不另开（X-05：首屏 WS 数约束）。 */
+function controlNodesContain(grouped, nodeid) {
+  const want = bareNodeId(nodeid || '');
+  if (!want) return false;
+  let found = false;
+  Object.values(grouped || {}).forEach((arr) => {
+    (Array.isArray(arr) ? arr : []).forEach((n) => {
+      if (!n || !n._id) return;
+      if (bareNodeId(n._id) === want) found = true;
+    });
+  });
+  return found;
+}
+function probeControlSessionOnce(nodeid, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; try { ws.close(); } catch (e) {} resolve(v); } };
+    let ws;
+    try {
+      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      ws = new WebSocket(proto + location.host + '/control.ashx');
+    } catch (e) { resolve({ status: 'unknown' }); return; }
+    const timer = setTimeout(() => finish({ status: 'unknown' }), timeoutMs || CONTROL_PROBE_MS);
+    ws.onopen = () => { try { ws.send(JSON.stringify({ action: 'nodes', responseid: 'qf-sess-identity' })); } catch (e) { clearTimeout(timer); finish({ status: 'unknown' }); } };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m && m.responseid === 'qf-sess-identity') {
+        clearTimeout(timer);
+        const nodes = m.nodes || {};
+        applyControlNodes(nodes); // 回填节点图，不白跑（与慢源探测同款）
+        finish({ status: controlNodesContain(nodes, nodeid) ? 'match' : 'mismatch' });
+      }
+    };
+    ws.onerror = () => { clearTimeout(timer); finish({ status: 'unknown' }); };
+    ws.onclose = () => { clearTimeout(timer); finish({ status: 'unknown' }); };
+  });
+}
+async function checkSessionIdentity(nodeid) {
+  const id = bareNodeId(nodeid || '');
+  if (!id) return { status: 'mismatch' };
+  const nm = ensureNodeMap();
+  if (nm.at && (Date.now() - nm.at) < NODE_MAP_TTL_MS && nm.byId.has(id)) return { status: 'match' };
+  if (nodeMapSlowInflight) {
+    try { await nodeMapSlowInflight; } catch (e) {}
+    return { status: ensureNodeMap().byId.has(id) ? 'match' : 'mismatch' };
+  }
+  return probeControlSessionOnce(id, CONTROL_PROBE_MS);
 }
 async function checkPresence(nodeid) {
   const id = bareNodeId(nodeid || '');
@@ -2103,7 +2159,7 @@ async function buildSessionFrame(view, preflightResult) {
   Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
   Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
-  Sess.maskCode = ''; Sess.navFallback = ''; Sess.preflight = null; Sess.webappReady = false;
+  Sess.maskCode = ''; Sess.navFallback = ''; Sess.preflight = null; Sess.webappReady = false; Sess.identityCheck = '';
   /* W-01 会话建立预检（Sess.t0 置位之前）：先问服务端这台设备在线吗——
      online:false 或 fresh:false（stale）时直接 OFFLINE 遮罩，不挂 iframe；
      预检本身超时/网络失败时回 TIMEOUT 码进遮罩，不静默进框；预检失败不得
@@ -2126,6 +2182,16 @@ async function buildSessionFrame(view, preflightResult) {
     showSessionMask(view, 'OFFLINE', { preflight: pre });
     return;
   }
+  /* 防御 (a)：W-01 通过后、挂 iframe 之前，以控制 WS 核对会话身份——
+     当前会话可见节点含目标设备才算绑定一致；失配（mismatch）时不得复用
+     预热框，下方 W-04 门随 identityMismatch 强制走重建分支；探针本身
+     失败/超时（unknown）时不拦挂载，记入 Sess.identityCheck 供日志与
+     哨兵复用，挂后 probeFrame/driveConnect 继续兜底。 */
+  const identity = await checkSessionIdentity(Sess.nodeid);
+  if (gen0 !== Sess.gen || !Sess.active) return;
+  Sess.identityCheck = identity.status;
+  try { console.debug('[qf-sess] identity node=' + Sess.nodeid + ' status=' + identity.status); } catch (e) {}
+  const identityMismatch = (identity.status === 'mismatch');
   Sess.t0 = performance.now(); Sess.state = 'connecting';
   setStage(view, 'iframe-attach');
   /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
@@ -2142,6 +2208,7 @@ async function buildSessionFrame(view, preflightResult) {
      （同一 nodeid/vm 组合失败过不得复用，见 showSessionMask 的 lastFail 记录）。 */
   let reuseOk = false;
   if (QF_PRE.nodeid === Sess.nodeid && QF_PRE.vm === Sess.vm && QF_PRE.ready === true
+      && !identityMismatch // 防御 (a)：控制 WS 核对失配时强制重建，不得原样复用预热框
       && !(Sess.lastFailCode && Sess.lastFailNodeid === Sess.nodeid && Sess.lastFailVm === Sess.vm)) {
     try {
       const href = String(f.contentWindow && f.contentWindow.location.href || '');
