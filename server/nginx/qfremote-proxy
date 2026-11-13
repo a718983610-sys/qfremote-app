@@ -7,6 +7,8 @@ map $http_cookie $qf_has_sig   { default 0; "~(^|;\s*)xid\.sig=" 1; }
 map $http_cookie $qf_has_qfrem { default 0; "~(^|;\s*)qfrem=" 1; }
 map $http_cookie $qf_dup_xid   { default 0; "~(^|;\s*)xid=[^;]*;.*;\s*xid=" 1; }
 log_format qfcookie '$time_iso8601 "$uri" $status bytes=$bytes_sent has_xid=$qf_has_xid has_sig=$qf_has_sig has_qfrem=$qf_has_qfrem dup_xid=$qf_dup_xid ua="$http_user_agent"';
+# Diagnostic log for Host/Origin/IP chain (2026-11-12, temporary; headers + flags only, NO cookie values).
+log_format qfdiag '$time_iso8601 "$request" $status bytes=$bytes_sent host="$http_host" xff="$http_x_forwarded_for" xrip="$http_x_real_ip" cfip="$http_cf_connecting_ip" up="$upstream_addr" up_status="$upstream_status" referer="$http_referer" has_xid=$qf_has_xid has_sig=$qf_has_sig has_qfrem=$qf_has_qfrem';
 
 # QFRemote 临时通道本机反代：只听回环，cloudflared 快速隧道只对它开口。
 # / 及全部路径 -> MeshCentral 控制台(8443)；/register 与 /api/register -> 注册服务(8444)。
@@ -18,10 +20,23 @@ map $cookie_qfrem $qf_console_upstream {
     "1"     http://127.0.0.1:8450;
 }
 
+# Real client IP for console-engine shim chain (2026-11-12 IP passthrough fix):
+# prefer Cloudflare CF-Connecting-IP; fall back to first non-127.0.0.1 XFF entry.
+# (nginx sees cloudflared on 127.0.0.1, so $remote_addr is useless here.)
+map $http_cf_connecting_ip $qf_real_ip {
+    default $http_cf_connecting_ip;
+    ""      $qf_xff_real_ip;
+}
+map $http_x_forwarded_for $qf_xff_real_ip {
+    default $http_x_forwarded_for;
+    "~^(?:127\.0\.0\.1,\s*)*([^,\s]+)" $1;
+}
+
 server {
     listen 127.0.0.1:8080;
     server_name _;
     access_log /var/log/nginx/qf-ws-cookie.log qfcookie;
+    access_log /var/log/nginx/qf-diag.log qfdiag;
 
     client_max_body_size 512m;
     absolute_redirect off; # P2-010（2026-10-26 巡查）：收口 return 302 一律相对路径，防经隧道生成 http://域名:8080 死链
@@ -153,6 +168,12 @@ server {
 
     # 站长 API（助手事件接口，#22/#31；高频只读轮询，不挂限流）
     location /assistant-api/ {
+        proxy_pass http://127.0.0.1:8448;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 本地 Agent（LEA，3.0.0，P2-02 解堵 2026-11-11）：/api/lea/* -> qfremote-ext(8448, 本机明文)
+    location /api/lea/ {
         proxy_pass http://127.0.0.1:8448;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -307,6 +328,13 @@ server {
         proxy_buffering off;
         proxy_set_header User-Agent $qf_ce_ua;
         include /etc/nginx/qf-front-proxy-common.inc;
+        # IP passthrough fix 2026-11-12: override include's X-Real-IP ($remote_addr is
+        # 127.0.0.1 via cloudflared) and X-Forwarded-For with the trusted real client
+        # IP; drop any client-supplied XFF/X-Real-IP (forgery risk). Later header wins.
+        proxy_set_header X-Real-IP $qf_real_ip;
+        proxy_set_header X-Forwarded-For $qf_real_ip;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Forwarded-Proto https;
     }
 
     location = /console-engine {
@@ -319,10 +347,24 @@ server {
         proxy_buffering off;
         proxy_set_header User-Agent $qf_ce_ua;
         include /etc/nginx/qf-front-proxy-common.inc;
+        # IP passthrough fix 2026-11-12: override include's X-Real-IP ($remote_addr is
+        # 127.0.0.1 via cloudflared) and X-Forwarded-For with the trusted real client
+        # IP; drop any client-supplied XFF/X-Real-IP (forgery risk). Later header wins.
+        proxy_set_header X-Real-IP $qf_real_ip;
+        proxy_set_header X-Forwarded-For $qf_real_ip;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Forwarded-Proto https;
     }
 
     # 步3验收修复2：设备解析兜底 ext 路由（仓内 ext 有此端点、翻牌前亦未挂载，今补齐）
     location = /api/device/resolve {
+        proxy_pass http://127.0.0.1:8448;
+        proxy_http_version 1.1;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # 设备在线预检 ext 路由（W-11，2.4.5 新增；仓内 ext 有此端点，nginx 未挂载致会话预检 404→TIMEOUT，今补齐）
+    location = /api/device/presence {
         proxy_pass http://127.0.0.1:8448;
         proxy_http_version 1.1;
         include /etc/nginx/qfremote-proxy-headers.conf;

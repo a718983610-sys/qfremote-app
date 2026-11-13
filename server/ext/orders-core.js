@@ -31,7 +31,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PAY_WINDOW_MS = 15 * 60 * 1000; // 待支付时限（21-补4 定版 15 分钟）
-const MAX_SHOT_BYTES = 8 * 1024 * 1024;
+// 截图体积上限（解码后字节）：12MiB（DS-R03-① 全链对齐：模块校验 12MiB ←→
+// ext 路由请求体上限按 12MiB 图 base64≈16MiB＋JSON 包装放行，见 server.js
+// BODY_LIMIT_SHOT；超限在本模块回 SHOT_INVALID、路由层回 PAYLOAD_TOO_LARGE，
+// 均为明确 JSON 错误、不断连）。
+const MAX_SHOT_BYTES = 12 * 1024 * 1024;
 
 function createOrdersCore(deps) {
   const dir = deps.dir; // LIC_DIR
@@ -169,6 +173,13 @@ function createOrdersCore(deps) {
       }
       if (hasNo && !Object.prototype.hasOwnProperty.call(v.orderNos, o.orderNo)) {
         failLoad('shape', '订单 ' + o.id + ' 的订单号（尾 ' + o.orderNo.slice(-4) + '）在 orderNos 中无登记，登记表不可信', true);
+        return;
+      }
+      // DS-R03-② 反向一致：登记必须指回本订单——只查「登记存在」时，两个
+      // 订单共用同一订单号、登记只指向其一，另一单也会蒙混过关，一号一钥
+      // 被击穿（登记↔订单互指的订单侧一半，与下方登记侧校验成对）。
+      if (hasNo && v.orderNos[o.orderNo].orderId !== o.id) {
+        failLoad('shape', '订单 ' + o.id + ' 的订单号（尾 ' + o.orderNo.slice(-4) + '）登记指向另一订单，登记表不可信', true);
         return;
       }
       // 门二增补（F3）：已提交痕迹（submittedAt/裁定记录/已发钥）与 orderNo 由
@@ -346,11 +357,30 @@ function createOrdersCore(deps) {
     // 密钥原文下发口径：仅本单买家本人的订单视图（listUser 按会话账号过滤、
     // 后台 listRecent 为站长侧），且钥须仍归属买家本人、未被回收。
     let keyStr = null;
+    // 发放形态判定（显示层分流，台账实有字段为据）：
+    // - grantsByOrder[o.id].stacked 为 FIX-B1-4 后发放的权威标记；
+    // - 存量无发放记录时以钥的 orderId（issueKey 落的发放单）判定：本单即
+    //   发放单＝新发，本单指向他人发放的既有钥＝叠加并入。
+    // 叠加单与原单共用同一把钥是定版口径（时长并入），不是重复发钥；
+    // 但卡面必须明示并入形态，不得再以「本单密钥」呈现（站长 2026-10-26
+    // 14:50 亲报误读事故）。
+    let keyForm = null, keyMasked = null, keyActivated = null, keyExpiresMs = null;
     if (delivered) {
       try {
         const st = lic.state();
         const k = st && st.keys ? st.keys[o.keyId] : null;
-        if (k && k.username === o.username && k.lifecycle !== 'revoked') keyStr = k.str || null;
+        if (k && k.username === o.username && k.lifecycle !== 'revoked') {
+          keyStr = k.str || null;
+          if (keyStr) {
+            const gbo = st.grantsByOrder ? st.grantsByOrder[o.id] : null;
+            const stacked = gbo ? !!gbo.stacked : (k.orderId !== o.id);
+            keyForm = stacked ? 'stacked' : 'new';
+            keyMasked = lic.maskKey(k.str);
+            keyActivated = k.lifecycle === 'activated';
+            const exp = lic.effectiveExpiry(k, now);
+            keyExpiresMs = (typeof exp === 'number' && isFinite(exp)) ? exp : null;
+          }
+        }
       } catch (e) {}
     }
     return {
@@ -359,7 +389,7 @@ function createOrdersCore(deps) {
       createdAt: o.createdAt, payDeadline: o.payDeadline,
       remainingSec: o.status === 'pending_pay' ? Math.max(0, Math.floor((o.payDeadline - now) / 1000)) : null,
       submittedAt: o.submittedAt, orderNo: o.orderNo, keyId: o.keyId,
-      keyStr, canViewKey: !!keyStr,
+      keyStr, canViewKey: !!keyStr, keyForm, keyMasked, keyActivated, keyExpiresMs,
       canDelete: (o.status === 'cancelled' || o.status === 'completed' || o.status === 'rejected') && !o.deletedByUser,
       canCancel: o.status === 'pending_pay',
       canContinue: o.status === 'pending_pay',
@@ -502,7 +532,14 @@ function createOrdersCore(deps) {
         o.stage = 2; // 进站长二审（到账核对）
         save();
       } catch (e) {
+        // DS-R03-③：发钥已由 grantPurchase 幂等落盘（FIX-B1-4 grantsByOrder
+        // 同单查重回原钥，绝不双发），订单侧落盘失败不回收已发钥——买家
+        // 权益以许可台账为准，本单内存回滚与磁盘一致后抛错，调用方保留
+        // 待审事件，重试时 grantPurchase 命中原钥回填 keyId 即收敛。此处
+        // 补记事件让「已发未落单」的悬置发放可在日志中对账，不再无声。
+        const grantedKeyId = o.keyId;
         o[slot] = null; o.keyId = prevKeyId; o.stage = stage;
+        try { log({ ev: 'pay-order-review1-save-failed', orderId: o.id, target: o.username, grantedKeyId, err: String(e && e.message) }); } catch (e2) {}
         throw e;
       }
       log({ ev: 'pay-order-review1-approved', orderId: o.id, target: o.username, keyId: o.keyId, actor });
@@ -529,19 +566,50 @@ function createOrdersCore(deps) {
     // （revokedBanId＝本笔封禁）：申诉成功推翻判假时，原钥按永封恢复同一路径
     // 恢复（设计稿 §11.5：恢复校验看回收原因与对应封禁；到期/支付异常/人工
     // 作废的回收不在此列，不复活）。
-    o.status = 'rejected'; o.stage = null; o.fakeFlag = true; save();
-    let revoked = false;
-    try {
-      const ban = lic.applyBan({ targetType: 'account', target: o.username, code: 'B7', permanent: true, actor: 'order-review-' + actor, evidence: 'payment-shot-fraud ' + o.id }, now);
-      const st = lic.state();
-      const k = o.keyId ? st.keys[o.keyId] : null;
-      if (k && k.lifecycle === 'revoked' && k.revokedBanId === (ban && ban.id)) { k.revokedReason = 'payment-fraud'; revoked = true; }
-      else if (k && (k.lifecycle === 'unactivated' || k.lifecycle === 'activated')) { k.lifecycle = 'revoked'; k.revokedReason = 'payment-fraud'; k.revokedBanId = ban && ban.id; k.timing = 'exhausted'; revoked = true; }
-      lic.save();
-    } catch (e) { log({ ev: 'pay-order-fake-error', orderId: o.id, err: String(e && e.message) }); }
-    if (hooks && hooks.onFake) { try { hooks.onFake(o); } catch (e) {} }
-    log({ ev: 'pay-order-fake', orderId: o.id, target: o.username, keyRevoked: revoked, actor });
-    return { ok: true, stage: 2, fake: true, keyRevoked: revoked, order: view(o, now) };
+    // 【DS-R03-③ 原子性收口】旧序「先落订单、后封号回收、异常吞掉」两头不靠：
+    // 订单 save 抛错时内存已判假、重试被 BAD_STATE 挡死且封号永不执行；封号
+    // 侧抛错被吞时订单已终局、封号/回收永不补办。现序（先落盘后生效的镜像）：
+    // 许可侧先生效并落盘——封禁按 evidence 查重（重试命中既有封禁不重复建
+    // 封）、回收改标随 lic.save 落盘；再落订单。任一侧失败 → 订单内存字面
+    // 回滚＋抛错（不再吞），调用方保留待审事件，重试收敛：许可侧已生效部分
+    // 由查重/改标的幂等形态承接，不重复封号、不重复回收。
+    // 【DS-R03-⑨ 同块守卫】本段只许 stage===2 && decision==='fake' 进入；
+    // stage 异常值（台账外力篡改/历史脏数据）落兜底拒绝，不再误入封号回收。
+    if (stage === 2 && decision === 'fake') {
+      let ban = null;
+      try {
+        ban = lic.activeBansFor(o.username, now).find((b) => b.code === 'B7' && b.permanent && b.evidence === 'payment-shot-fraud ' + o.id) || null;
+        if (!ban) ban = lic.applyBan({ targetType: 'account', target: o.username, code: 'B7', permanent: true, actor: 'order-review-' + actor, evidence: 'payment-shot-fraud ' + o.id }, now);
+      } catch (e) {
+        o[slot] = null;
+        try { log({ ev: 'pay-order-fake-ban-failed', orderId: o.id, target: o.username, err: String(e && e.message) }); } catch (e2) {}
+        throw e;
+      }
+      let revoked = false;
+      try {
+        const st = lic.state();
+        const k = o.keyId ? st.keys[o.keyId] : null;
+        if (k && k.lifecycle === 'revoked' && k.revokedBanId === (ban && ban.id)) { k.revokedReason = 'payment-fraud'; revoked = true; }
+        else if (k && (k.lifecycle === 'unactivated' || k.lifecycle === 'activated')) { k.lifecycle = 'revoked'; k.revokedReason = 'payment-fraud'; k.revokedBanId = ban && ban.id; k.timing = 'exhausted'; revoked = true; }
+        lic.save();
+      } catch (e) {
+        o[slot] = null;
+        try { log({ ev: 'pay-order-fake-revoke-failed', orderId: o.id, target: o.username, err: String(e && e.message) }); } catch (e2) {}
+        throw e;
+      }
+      const prevFake = { status: o.status, stage: o.stage, fakeFlag: o.fakeFlag };
+      o.status = 'rejected'; o.stage = null; o.fakeFlag = true;
+      try { save(); } catch (e) {
+        o.status = prevFake.status; o.stage = prevFake.stage; o.fakeFlag = prevFake.fakeFlag; o[slot] = null;
+        try { log({ ev: 'pay-order-fake-save-failed', orderId: o.id, target: o.username, err: String(e && e.message) }); } catch (e2) {}
+        throw e;
+      }
+      if (hooks && hooks.onFake) { try { hooks.onFake(o); } catch (e) {} }
+      log({ ev: 'pay-order-fake', orderId: o.id, target: o.username, keyRevoked: revoked, actor });
+      return { ok: true, stage: 2, fake: true, keyRevoked: revoked, order: view(o, now) };
+    }
+    o[slot] = null; // 兜底拒绝：字面零变更（槽位赋值未落盘，一并回滚内存）
+    return { ok: false, code: 'BAD_STATE', msg: '该订单不在审核中。' };
   }
 
   // #38 站长改判重审：仅对「已驳回且未发钥、未进过二审裁定」的订单开放——

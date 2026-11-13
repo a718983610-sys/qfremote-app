@@ -319,6 +319,21 @@ function whoamiSessionIp(cookieHeader) {
   } catch (e) { /* 解不出就走后备候选 */ }
   return null;
 }
+
+// 2026-11-12 会话 IP 覆写（公共）：从请求 Cookie 的 xid 解出登录时绑定的会话 IP，
+// 把 CF-Connecting-IP / X-Forwarded-For / X-Real-IP 三者覆写为该会话 IP。
+// 接受一个 headers 对象（键为小写头名），就地覆写；返回会话 IP，解不出返回 null。
+// 供 handleGeneric（普通 HTTP）与 WebSocket upgrade 共用；解不出时调用方回退
+// 现行透传，不覆写。MeshCentral 在 trustedProxy 下优先采信 CF-Connecting-IP，
+// 故三者必须同时覆写，只改 XFF 会被 CF-Connecting-IP 的当前出口 IP 覆盖。
+function applySessionIp(headers, cookieHeader) {
+  const sip = whoamiSessionIp(cookieHeader);
+  if (!sip) return null;
+  headers['cf-connecting-ip'] = sip;
+  headers['x-forwarded-for'] = sip;
+  headers['x-real-ip'] = sip;
+  return sip;
+}
 const whoamiCache = new Map(); // sha256(xid+'.'+xid.sig) -> {at, role}
 const WHOAMI_CACHE_MAX = 5000;
 function whoamiCacheGet(key) {
@@ -724,6 +739,14 @@ function serveFrozenPage(req, res, usernameRaw) {
 function handleGeneric(req, res, isLogout) {
   const marked = hasMarker(req);
   const headers = Object.assign({}, req.headers, { host: '127.0.0.1:8443' });
+  // 2026-11-12 会话 IP 修复（见 applySessionIp）：MeshCentral 按 clientIp 校验会话
+  // （checkCookieIp，默认 lax：同 /24 或双私有才过），登录时绑定的 IP 存于 xid 的
+  // ip 字段。浏览器出口 IP 跨 /24 轮换时，后续 HTTP 请求若仍透传当前出口 IP 会被
+  // 清空会话、回落登录页。解不出则回退现行透传，不覆写。
+  const sip = applySessionIp(headers, req.headers.cookie);
+  if (sip) {
+    try { console.log('[qf-shim] session-ip override: ' + req.method + ' ' + String(req.url || '').split('?')[0]); } catch (e) {}
+  }
   const up = https.request({ hostname: '127.0.0.1', port: 8443, path: req.url, method: req.method, headers, rejectUnauthorized: false }, (ur) => {
     const h = Object.assign({}, ur.headers);
     if (isLogout) {
@@ -739,16 +762,33 @@ function handleGeneric(req, res, isLogout) {
 }
 
 // —— WebSocket 透传：记住用户的控制台长连接（原始字节管道，不解析） ——
+// 2026-11-12 会话 IP 覆写（与 handleGeneric 共用 applySessionIp）：WS 升级原先只换
+// Host、不覆写 IP 头，导致控制台实时通道仍以当前出口 IP 到达 MeshCentral，
+// checkCookieIp 不认，iframe 报 Unable to perform authentication。本处在转发前
+// 同样把三个 IP 头覆写为 xid 解出的会话 IP；解不出则原样透传。其余头
+// （Connection/Upgrade/Sec-WebSocket-* 等握手头）保持原样透传；序列化时沿用
+// 原始头顺序与原始头名大小写。
 server.on('upgrade', (req, socket, head) => {
+  const headers = {};
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    headers[String(req.rawHeaders[i]).toLowerCase()] = req.rawHeaders[i + 1];
+  }
+  headers['host'] = '127.0.0.1:8443';
+  const sip = applySessionIp(headers, req.headers.cookie);
+  if (sip) { try { console.log('[qf-shim] session-ip override (upgrade): ' + req.method + ' ' + String(req.url || '').split('?')[0]); } catch (e) {} }
   const upstream = tls.connect({ host: '127.0.0.1', port: 8443, rejectUnauthorized: false }, () => {
     const lines = [req.method + ' ' + req.url + ' HTTP/' + req.httpVersion];
-    let hostWritten = false;
+    const seen = {};
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      const k = req.rawHeaders[i], v = req.rawHeaders[i + 1];
-      if (k.toLowerCase() === 'host') { lines.push('Host: 127.0.0.1:8443'); hostWritten = true; }
-      else lines.push(k + ': ' + v);
+      const k = String(req.rawHeaders[i]);
+      const lk = k.toLowerCase();
+      if (lk in seen) continue;
+      seen[lk] = true;
+      lines.push(k + ': ' + headers[lk]);
     }
-    if (!hostWritten) lines.push('Host: 127.0.0.1:8443');
+    for (const lk of Object.keys(headers)) {
+      if (!(lk in seen)) lines.push(lk + ': ' + headers[lk]);
+    }
     upstream.write(lines.join('\r\n') + '\r\n\r\n');
     if (head && head.length) upstream.write(head);
     upstream.pipe(socket);

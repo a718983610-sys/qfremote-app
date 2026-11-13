@@ -277,7 +277,8 @@ function profileCardHtml(p) {
     <div id="pfNickOut"></div>
     <div class="pf-ops"><button class="btn sm" id="pf-nick-save">保存昵称</button><button class="btn sm grey" id="pf-nick-clear">清除昵称</button></div>
     <div class="field" style="margin-top:18px"><label for="pfAvatarFile">头像</label>
-      <input id="pfAvatarFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+      <input id="pfAvatarFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="filepick">
+      <label for="pfAvatarFile" class="btn sm ghost">选择图片</label><span id="pfAvatarName" class="filepick-name">尚未选择图片</span>
       <p class="hint">头像只支持 PNG、JPG、WebP 或 GIF 图片，大小不超过 200KB；超出时将先在本地压缩再上传。</p></div>
     <div id="pfAvatarOut"></div>
     <div class="pf-ops"><button class="btn sm" id="pf-avatar-upload">上传头像</button><button class="btn sm grey" id="pf-avatar-del">删除头像</button></div>
@@ -1153,7 +1154,8 @@ function navBtn(item, activeRoute, cls) {
 }
 function menu34Html(activeRoute, cls) {
   return MENU34.map(i => navBtn(i, activeRoute, cls)).join('') +
-    (S.isAdmin ? navBtn({ icon: 'gear', label: '站长管理', route: 'admin' }, activeRoute, cls) : '') + websiteNavHtml(cls) +
+    `<div class="gtitle">功能</div>` + FUNC.map(i => navBtn(i, activeRoute, cls)).join('') + // r13：抽屉此前只渲染 MENU34，缺「功能」组 5 项（我的设备/聊天/智能客服/购买密钥/积分与福利），与桌面侧边栏不一致；补齐与侧边栏同序
+    (S.isAdmin ? `<div class="gtitle">站长</div>` + navBtn({ icon: 'gear', label: '站长管理', route: 'admin' }, activeRoute, cls) : '') + websiteNavHtml(cls) +
     `<button class="${cls || 'nav'} red" data-nav="logout">${ic('logout')}<span>登出</span></button>`;
 }
 function renderNavs() {
@@ -2367,7 +2369,7 @@ function startSentinel(view) {
           setStage(view, 'peer-connecting');
         }
         driveConnect();
-      } else if (p === 'blank') {
+      } else if ((p === 'blank') || (p === 'lost')) {
         driveConnect(); // 帧尚未绑定目标文档时 driveConnect 内部的 href 身份口径会自行拦下
       }
       // 阶段超时阶梯（每阶段只看本阶段内耗时）＋总闸 30 秒兜底（W-02 深查原规格）。
@@ -2926,7 +2928,7 @@ Views.device = async function (view, name, seq) {
     <div class="grid2"><div class="card" id="devConnCard"><h3>连接</h3>
       <button class="row" data-remote="${esc(d.name)}"${dis}><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"${dis}><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"${dis}><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
       <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}"${dis}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${dis}>文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}"${dis}>远程终端</button></p></div>
-    <div class="card"><h3>设备信息</h3><div class="tblwrap"><table>
+    <div class="card"><h3>设备信息</h3><div class="tblwrap fit"><table>
       <tr><th>系统</th><td>${esc(d.os || '—')}</td></tr><tr><th>分组</th><td>${esc(d.group || '默认分组')}</td></tr>
       <tr><th>状态</th><td data-devstatus>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div></div>
     <div class="card" id="lockCard"><h3>屏幕锁</h3><div id="lockBody"><div class="skel" style="height:52px"></div></div></div>
@@ -3102,7 +3104,7 @@ async function initLockPanel(view, deviceName) {
 function mountFileSend(container, opts) {
   opts = opts || {};
   container.innerHTML = `
-    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file"><div class="hint fs-chosen">尚未选择文件</div></div>
+    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file filepick" id="fsFile"><label for="fsFile" class="btn sm ghost">选择文件</label><div class="hint fs-chosen">尚未选择文件</div></div>
     <div class="grid2">
       <div class="field"><label>来源设备</label><select class="fs-from"></select></div>
       <div class="field"><label>目标设备</label><select class="fs-to"></select></div>
@@ -4779,7 +4781,7 @@ Views.purchase = async function (view, param, _s, opts) {
         <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">请上传付款账单详情截图。<b style="color:var(--err)">截图必须露出完整订单号</b>，并填写截图中的订单号。一个订单号只能兑换一把密钥。</p>
         <img src="${esc(pay.exampleUrl || '/license/assets/pay-example.jpg')}" alt="账单详情截图示例" style="display:block;max-width:250px;width:100%;margin:0 auto 12px;border:1px solid var(--line);border-radius:10px" onerror="this.style.display='none'">
         <div class="field"><label>订单号</label><input data-ono maxlength="64" placeholder="请填写截图中的完整订单号"></div>
-        <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png"></div>
+        <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png" class="filepick" id="payShot"><label for="payShot" class="btn sm ghost">选择截图</label></div>
         <div data-ocr hidden style="margin:2px 0 10px"></div>
         <button class="btn block" data-act="submit">提交审核</button>
         <div data-subout style="margin-top:12px"></div>
@@ -5242,7 +5244,7 @@ Views.profile = async function (view) {
       <div class="field"><label>输入密钥</label><input id="pf-key" placeholder="粘贴完整密钥串"><p class="hint">他人出售的一手未激活密钥、转赠密钥、积分兑换密钥都在这里兑换；兑换即完成归属转移并激活。</p></div>
       <button class="btn block" id="pf-claim">兑换并激活</button><div id="pf-claim-out" style="margin-top:10px"></div>
       <h3 style="margin-top:20px">待领取的转赠</h3><div id="pf-transfers"><div class="skel" style="height:40px"></div></div></div>
-    <div class="card"><h3>我的密钥（查询密钥）</h3><div class="tblwrap"><table>
+    <div class="card"><h3>我的密钥（查询密钥）</h3><div class="tblwrap fit"><table>
       <tr><th>套餐</th><td>${esc(lic.planName || '尚未激活')}</td></tr>
       <tr><th>密钥</th><td><span id="pf-masked">${esc(lic.maskedKey || '—')}</span> <a id="pf-reveal" style="color:var(--brand);font-weight:600;cursor:pointer">查看完整密钥（输密码核验）</a></td></tr>
       <tr><th>状态</th><td>${esc(lic.displayStatus || '—')}${lic.remainText ? ' · ' + esc(lic.remainText) : (lic.keyExpiresMs ? ' · 到期：' + fmtDate(lic.keyExpiresMs) : '')}</td></tr>
@@ -5325,6 +5327,8 @@ Views.profile = async function (view) {
   const nickClearBtn = $('#pf-nick-clear', view);
   if (nickClearBtn) nickClearBtn.onclick = async () => { await submitProfileField({ nickname: '' }, $('#pfNickOut', view), 'nickname'); };
   const avatarUpBtn = $('#pf-avatar-upload', view);
+  const avatarFileInput = $('#pfAvatarFile', view); // r13：选图即回显文件名（原原生控件的「No file chosen」回显随控件隐藏而消失）
+  if (avatarFileInput) avatarFileInput.addEventListener('change', () => { const n = $('#pfAvatarName', view); if (n) n.textContent = avatarFileInput.files[0] ? ('已选择：' + avatarFileInput.files[0].name) : '尚未选择图片'; });
   if (avatarUpBtn) avatarUpBtn.onclick = async () => {
     const out = $('#pfAvatarOut', view); const f = $('#pfAvatarFile', view).files[0];
     if (!f) { out.innerHTML = '<div class="note warn">请先选择图片文件。</div>'; return; }
@@ -5636,7 +5640,7 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
 (function boot() {
   $('#burgerBtn').innerHTML = ic('menu');
   $('#bellBtn').innerHTML = ic('bell');
-  $('#topSearch').innerHTML = ic('search') + '<input id="topSearchIn" placeholder="搜索功能或关键词…">';
+  $('#topSearch').innerHTML = ic('search') + '<input id="topSearchIn" placeholder="搜索功能">'; // r13：手机 390px 下搜索框实测仅 111px、原占位「搜索功能或关键词…」需 204px 被夹断；16px 字号不可缩（iOS 聚焦放大），改短占位＋CSS 隐藏 .grow 后搜索框约 212px、占位完整显示
   $('#burgerBtn').addEventListener('click', () => setDrawer(!drawerOpen));
   $('#bellBtn').addEventListener('click', () => toast('暂无新的通知。版本公告将在论坛官方公告中发布。', 'info'));
   $('#acctChip').addEventListener('click', () => $('#acctMenu').classList.toggle('open'));
