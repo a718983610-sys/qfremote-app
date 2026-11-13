@@ -26,7 +26,7 @@ def ensure_forward():
         subprocess.Popen(["ssh", "-i", SSH_KEY, "-o", f"ProxyCommand={PROXY}",
                           "-o", "StrictHostKeyChecking=accept-new", "-o", "ExitOnForwardFailure=yes",
                           "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
-                          "-N", "-L", "18080:127.0.0.1:8080", "ubuntu@54.248.9.192"],
+                          "-N", "-L", "18080:127.0.0.1:8080", "ubuntu@app.qfremote.top"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(3)
 
