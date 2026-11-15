@@ -2,57 +2,69 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; }
+  html, body { height:100%; }
   body {
-    background:#f4f7fb; color:#1f2d47; overflow-y:auto;
-    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    background:var(--bg); color:var(--text-1); overflow-y:auto;
     -webkit-user-select:none; user-select:none;
   }
-  html[data-theme="dark"] body { background:#17181c; color:#eceff3; }
-  .wrap { max-width:560px; margin:0 auto; padding:34px 22px 30px; box-sizing:border-box; }
-  .logo { width:54px; height:54px; border-radius:14px; margin:0 auto; padding:3px;
-    background:#0b2b5b; box-sizing:border-box; }
-  html[data-theme="dark"] .logo { background:#ffffff; }
-  .logo img { width:100%; height:100%; border-radius:11px; display:block; }
-  h1 { font-size:20px; font-weight:700; text-align:center; margin:14px 0 6px; }
-  .acct { text-align:center; font-size:13px; color:#5d6e84; margin:0 0 16px; }
-  html[data-theme="dark"] .acct { color:#9aa1ab; }
-  .card { background:#ffffff; border:1px solid #dfe7f2; border-radius:14px;
-    padding:16px; font-size:15px; line-height:1.65; }
-  html[data-theme="dark"] .card { background:#22262e; border-color:rgba(255,255,255,.08); }
-  .guide { font-size:13px; line-height:1.6; color:#5d6e84; margin:12px 2px 0; }
-  html[data-theme="dark"] .guide { color:#9aa1ab; }
+  /* 重做 A §4：撤销六项②深色合并——卡片用 BG2，与页面 BG0 靠 hairline + e1 分离。 */
+  body { animation: win-in var(--d5) var(--e-l) both; }
+  .wrap { max-width:480px; margin:0 auto; padding:24px; box-sizing:border-box; }
+  /* W4 M 档：60／圆角 14／padding 4／内图圆角 10（原 54／3，六档之一） */
+  .logo { width:60px; height:60px; border-radius:14px; margin:0 auto; padding:4px;
+    background:var(--tile-bg); box-sizing:border-box; }
+  .logo img { width:100%; height:100%; border-radius:10px; display:block; }
+  h1 { font-size:24px; font-weight:600; line-height:32px; text-align:center; margin:16px 0 8px; }
+  .acct { text-align:center; font-size:13px; color:var(--text-2); margin:0 0 16px; line-height:20px; }
+  .card { background:var(--bg2); border:1px solid var(--line); border-radius:12px;
+    padding:20px; font-size:14px; line-height:22px; }
+  /* C §2.4：许可详情行（机器码 mono 分组 / 状态 chip / 有效期 / 席位）——无接口字段的显示 — */
+  .meta { margin-top:16px; }
+  .meta .mrow { display:flex; justify-content:space-between; gap:16px; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; line-height:20px; }
+  .meta .mrow:last-child { border-bottom:none; }
+  .meta .mk { color:var(--text-2); flex:none; }
+  .meta .mv { font-weight:500; text-align:right; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .meta .mv.mono { font-family:var(--font-mono); font-size:13px; line-height:20px; letter-spacing:.02em; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid var(--line); border-radius:999px; background:var(--bg3); font-size:12px; line-height:18px; font-weight:500; }
+  .chip::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--text-3); flex:none; }
+  details.fp { margin-top:16px; padding:12px 20px; border:1px solid var(--line); border-radius:12px; background:var(--bg2); font-size:12px; line-height:18px; color:var(--text-2); }
+  details.fp summary { cursor:pointer; font-size:13px; line-height:20px; font-weight:500; color:var(--text-1); }
+  details.fp .fpv { font-family:var(--font-mono); font-size:13px; line-height:20px; margin-top:8px; word-break:break-all; }
+  .guide { font-size:13px; line-height:1.6; color:var(--text-2); margin:12px 0 0; }
   .claim { margin-top:16px; }
-  .claim label { display:block; font-size:14px; font-weight:700; margin-bottom:10px; }
+  .claim label { display:block; font-size:14px; font-weight:600; margin-bottom:8px; }
   .claim input {
-    width:100%; box-sizing:border-box; font-family:inherit; font-size:14px;
-    padding:11px 12px; border-radius:10px; border:1px solid #c9d6ea;
-    background:#ffffff; color:#1f2d47; text-transform:uppercase;
+    width:100%; height:40px; box-sizing:border-box; font-family:inherit; font-size:14px; line-height:22px;
+    padding:8px 12px; border-radius:var(--radius-1); border:1px solid var(--line);
+    background:var(--surface-3); color:var(--text-1); text-transform:uppercase;
   }
-  html[data-theme="dark"] .claim input { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16); }
-  .claim input:focus-visible, button:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
+  html[data-theme="dark"] .claim input { border-color:var(--line); }
   .out { font-size:14px; line-height:1.55; margin-top:10px; min-height:0; }
   .out:empty { display:none; }
   .btn {
     width:100%; border:none; cursor:pointer; font-family:inherit; margin-top:12px;
-    font-size:15px; font-weight:700; color:#fff; padding:12px 0; border-radius:11px;
-    background:#2470e0; transition:filter .15s ease, opacity .15s;
+    font-size:14px; font-weight:600; color:var(--on-brand); height:40px; padding:0; border-radius:var(--radius-1);
+    background:var(--brand); transition:background var(--d1) var(--e-c), transform var(--d0) var(--e-s), opacity var(--d1) var(--e-c);
   }
-  .btn:hover { filter:brightness(1.07); }
-  .btn:disabled { opacity:.55; cursor:default; filter:none; }
+  .btn:hover { filter:none; background:var(--brand-press); }
+  .btn:active { transform: scale(.985); }
+  .btn:disabled { background:var(--bg3); color:var(--text-disabled); cursor:default; filter:none; transform:none; }
   .row { display:flex; justify-content:center; gap:4px; margin-top:8px; flex-wrap:wrap; }
+  /* 链接行（定夺 §3.3）：主文字色＋始终下划线，hover 下划线变主文字色；退出账号保留 danger 色 */
   .link {
     appearance:none; background:none; border:none; cursor:pointer; font-family:inherit;
-    font-size:14px; color:#2470e0; padding:10px 12px; border-radius:8px;
+    font-size:14px; line-height:22px; color:var(--link); padding:8px 12px; min-height:36px; display:inline-flex; align-items:center; border-radius:8px;
+    text-decoration:underline; text-decoration-color:var(--link-underline);
   }
-  .link:hover { background:rgba(36,112,224,.08); }
-  .link.danger { color:#d3382c; }
-  html[data-theme="dark"] .link.danger { color:#ff9d8f; }
-  .err { text-align:center; font-size:13px; color:#d3382c; margin-top:10px; }
-  html[data-theme="dark"] .err { color:#ff9d8f; }
+  .link:hover { background:rgba(var(--brand-rgb),.08); text-decoration-color:var(--link); }
+  .link.danger { color:var(--danger); text-decoration-color:rgba(var(--danger-rgb),.55); }
+  .link.danger:hover { text-decoration-color:var(--danger); }
+  .err { text-align:center; font-size:13px; line-height:20px; color:var(--text-1); margin-top:10px; } /* Q1-2(a)：错误行文字中性墨色，红点已在 ::before */
+  .err::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .err:empty::before { display:none; }
   .err:empty { display:none; }
-  @media (prefers-reduced-motion: reduce) { .btn { transition:none; } }
 </style>
 </head>
 <body>
@@ -61,6 +73,15 @@
     <h1 id="title">暂时无法登录</h1>
     <p class="acct" id="acct"></p>
     <div class="card" id="bodyText"></div>
+    <!-- C §2.4 许可详情：账号来自拦截状态（真实）；机器码 / 有效期 / 席位无下发字段，显示 —，见重做报告缺数据清单 -->
+    <div class="card meta" id="metaCard">
+      <div class="mrow"><span class="mk">账号</span><span class="mv" id="metaAcct">—</span></div>
+      <div class="mrow"><span class="mk">机器码</span><span class="mv mono" id="metaCode">—</span></div>
+      <div class="mrow"><span class="mk">状态</span><span class="mv"><span class="chip" id="metaChip">—</span></span></div>
+      <div class="mrow"><span class="mk">有效期</span><span class="mv" id="metaExpire">—</span></div>
+      <div class="mrow"><span class="mk">席位</span><span class="mv" id="metaSlots">—</span></div>
+    </div>
+    <details class="fp"><summary>硬件指纹</summary><div class="fpv">本机设备码未接入显示接口 —</div></details>
     <p class="guide" id="guide" style="display:none;"></p>
     <div class="card claim" id="claimBox" style="display:none;">
       <label for="claimInput" id="claimLabel">请输入 QFRemote 激活密钥</label>
@@ -106,6 +127,7 @@
     state = s;
     titleEl.textContent = s.copy.title;
     acctEl.textContent = s.username ? '当前账号：' + s.username : '';
+    document.getElementById('metaAcct').textContent = s.username || '—';
     bodyEl.textContent = s.copy.body;
     if (s.copy.hasTransferGuide) {
       guideEl.textContent = s.guideText || '';

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---------------- 绑定 ---------------- */
 const char *lea_bind_state_name(lea_bind_state_t s) {
@@ -65,14 +66,26 @@ long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
     return b->epoch;
 }
 
-int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
+int lea_binding_confirm(lea_binding_t *b, const char *account_id, const char *device_id,
+                        long long epoch, long long grant_epoch,
                         long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
                         const char *ticket_signature,
                         long long now_unix) {
+    if (!b) return 0;
     if (b->state != LEA_BIND_PENDING) return 0;
     if (epoch != b->epoch) return 0;
-    if (expires_at > 0 && expires_at <= now_unix) return 0;
+    /* F-05：票据身份须与本机 PENDING 绑定一致。account_id 精确比对；
+     * device_id 归一后比对（票据可能是全形 "node//..."，本机存裸形；
+     * 空／退化 id 永不命中，见 lea_device_id_matches）。 */
+    if (!account_id || !device_id) return 0;
+    if (strcmp(account_id, b->account_id) != 0) return 0;
+    if (!lea_device_id_matches(device_id, b->device_id)) return 0;
+    /* 租约窗口：服务端签发 nowSec()＋24h（lea-core.js TICKET_TTL_S），
+     * 本机允 now＋24h＋5min（时钟偏差容限）。expires_at==0／负数／
+     * 已过期／超长一律拒绝——0 值票据不得再以“永不过期”进入 ACTIVE。 */
+    if (expires_at <= now_unix) return 0;
+    if (expires_at > now_unix + LEA_BINDING_TICKET_MAX_TTL_SEC) return 0;
     b->grant_epoch = grant_epoch;
     b->grant_muse_execute = (int)grant_muse_execute; /* 调用点已验签保证 0/1 */
     snprintf(b->scopes, sizeof(b->scopes), "%s", scopes ? scopes : "");
@@ -159,24 +172,39 @@ int lea_admit(const lea_envelope_t *env, const lea_binding_t *bind,
         snprintf(err_code, err_size, "%s", LEA_ERR_BINDING_CHANGED);
         return 0;
     }
-    /* 4. 账号一致（信封账号须是当前绑定账号）。 */
+    /* 4. grant_epoch 匹配当前授权代次（F-02）。
+     * 选用 LEA_ERR_GRANT_REVOKED（QFR_GRANT_REVOKED）的理由：
+     *   (a) 与服务端 admit() 同一条件同一码——服务端 grant_epoch
+     *       不匹配时即报 QFR_GRANT_REVOKED（lea-core.js），两端错误
+     *       契约一致，调用方据同一码做同一处理（重新授权＋发新 Key）；
+     *   (b) 语义上 grant_epoch 不匹配的唯一成因就是授权被撤销后
+     *       重授予（服务端 grant_epoch 只在撤销／重授予时递增），
+     *       即“旧授权已撤销”，不是绑定变更（那是 BINDING_CHANGED）；
+     *   (c) 该码已在 lea_protocol.h 定义，无需新码，不扩大码表。
+     * 注意：0 也不放行——ACTIVE 绑定经票据确认后 grant_epoch 恒 ≥1，
+     * env.grant_epoch == 0 只能是不匹配，不存在“未授权代次”的合法态。 */
+    if (env->grant_epoch != bind->grant_epoch) {
+        snprintf(err_code, err_size, "%s", LEA_ERR_GRANT_REVOKED);
+        return 0;
+    }
+    /* 5. 账号一致（信封账号须是当前绑定账号）。 */
     if (strcmp(env->account_id, bind->account_id) != 0) {
         snprintf(err_code, err_size, "%s", LEA_ERR_BINDING_CHANGED);
         return 0;
     }
-    /* 5. muse.execute 授权。 */
+    /* 6. muse.execute 授权。 */
     if (!bind->grant_muse_execute) {
         snprintf(err_code, err_size, "%s", LEA_ERR_NOT_AUTHORIZED);
         return 0;
     }
-    /* 6. API Key 归属／吊销：本地吊销表命中即拒绝。 */
+    /* 7. API Key 归属／吊销：本地吊销表命中即拒绝。 */
     for (int i = 0; i < n_revoked; i++) {
         if (revoked_key_ids[i] && strcmp(env->api_key_id, revoked_key_ids[i]) == 0) {
             snprintf(err_code, err_size, "%s", LEA_ERR_KEY_REVOKED);
             return 0;
         }
     }
-    /* 7. scope：危险命令另需 muse.execute.dangerous。 */
+    /* 8. scope：危险命令另需 muse.execute.dangerous。 */
     const lea_command_spec_t *spec = lea_command_spec(env->command);
     if (spec && spec->required_scope &&
         !lea_binding_has_scope(bind, spec->required_scope)) {
@@ -552,6 +580,103 @@ int lea_revoked_generation_advance(const char *gen_path, long long generation) {
     return lea_revoked_generation_write(gen_path, generation);
 }
 
+/* ---------------- 吊销迁移标记（.gen 缺失 fail-open 窗口，DS-Q4） ---------------- */
+/* 背景：启动时“.gen 缺失”曾折算成 max=0，而无 sidecar 的旧格式快照在
+ * max==0 时被兼容放行——.gen 丢失后高水位静默归零，且无 DEGRADED。
+ * 迁移标记 revoked_keys.migrated（内容严格为 "1\n"，schema v1）含义：
+ * “本安装的吊销世代状态已建立（首次安装初始化或旧版迁移）”。首次遇
+ * 到无 .gen＋合法旧格式非空快照时走一次性迁移：写 .gen=1＋标记；此后
+ * .gen 再丢而标记仍在，即进 DEGRADED，不再静默放行。只写 .gen 不够——
+ * .gen 再被删后状态与首次旧版升级完全同构；只写 .gen=0 也不行，
+ * max==0 仍会触发兼容分支。 */
+int lea_revoked_migrated_path(const char *path, char *out, size_t out_size) {
+    if (!path || !path[0] || !out || out_size < 2) return 0;
+    size_t len = strlen(path);
+    int has_txt = 0;
+    if (len >= 4) {
+        const char *suf = path + len - 4;
+        if (suf[0] == '.' && (suf[1] == 't' || suf[1] == 'T') &&
+            (suf[2] == 'x' || suf[2] == 'X') && (suf[3] == 't' || suf[3] == 'T'))
+            has_txt = 1;
+    }
+    size_t need = has_txt ? len + 6 : len + 10; /* ".migrated" 替换 ".txt" 或追加＋'\0' */
+    if (need > out_size) return 0;
+    if (has_txt) {
+        memcpy(out, path, len - 4);
+        memcpy(out + len - 4, ".migrated", 9);
+        out[len + 5] = '\0';
+    } else {
+        memcpy(out, path, len);
+        memcpy(out + len, ".migrated", 9);
+        out[len + 9] = '\0';
+    }
+    return 1;
+}
+
+/* 标记内容严格为 "1\n"。返回 1=有效标记，0=不存在（ENOENT），
+ * -1=损坏／不可读／其他错误。 */
+int lea_revoked_migrated_read(const char *mpath) {
+    if (!mpath || !mpath[0]) return -1;
+    FILE *f = fopen(mpath, "r");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        return -1;
+    }
+    char buf[16];
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; } /* 空文件即损坏 */
+    size_t n = strlen(buf);
+    int complete = (n > 0 && buf[n - 1] == '\n') || feof(f);
+    if (!complete) { fclose(f); return -1; }
+    if (fgetc(f) != EOF) { fclose(f); return -1; }
+    if (strcmp(buf, "1\n") != 0) { fclose(f); return -1; }
+    fclose(f);
+    return 1;
+}
+
+/* 标记原子写（tmp+rename，与 lea_revoked_generation_write 同范式）：
+ * 写 "1\n"，成功 1 失败 0。 */
+int lea_revoked_migrated_write(const char *mpath) {
+    if (!mpath || !mpath[0]) return 0;
+    size_t plen = strlen(mpath);
+    char *tmp = (char *)malloc(plen + 5);
+    if (!tmp) return 0;
+    snprintf(tmp, plen + 5, "%s.tmp", mpath);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { free(tmp); return 0; }
+    int ok = 1;
+    if (fprintf(f, "1\n") < 0) ok = 0;
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok) {
+        remove(mpath);
+        if (rename(tmp, mpath) != 0) ok = 0;
+    }
+    if (!ok) remove(tmp);
+    free(tmp);
+    return ok;
+}
+
+/* 迁移决策（纯函数，便于单测）。snap 为 lea_revoked_validate_snapshot
+ * 回填的快照世代（-1=无 sidecar 的旧格式快照）。
+ * 返回：0=放行，1=需一次性迁移，-1=应 DEGRADED。
+ *   snap>=0 → 0（有世代快照，无需迁移）；
+ *   snap==-1（无 sidecar 旧格式，验证已通过、表非空合法）：
+ *     have_gen → -1（.gen 在位却无 sidecar，状态不一致）；
+ *     have_migrated → -1（已迁移过，.gen 又丢）；
+ *     否则 → 1（一次性迁移）。
+ * 注意：故意不用 have_binding 做参数——迁移前验证器已确认快照合法，
+ * 迁移只写 .gen＋标记、不动表，因此无论有无绑定都安全；无绑定的设备
+ * 本就无法执行 LEA，且重绑后若仍 gen=0 反而留窗口。 */
+int lea_revoked_migration_decision(int have_gen, int have_migrated, long long snap) {
+    if (snap >= 0) return 0;
+    /* X-01（站长 2026-11-15 亲令，严格 fail-closed）：无 .gen 的旧版快照
+     * 一律 DEGRADED，不再自动迁移；须管理员跑显式迁移工具
+     * （QFRLEA.exe --migrate-revoked）。have_gen／have_migrated 不再区分。 */
+    (void)have_gen;
+    (void)have_migrated;
+    return -1;
+}
+
 /* 带世代的并集合并（#1 版本化）：keys.sync-revoked 带 generation 时的
  * 实际写入方；generation < 0 表示成员缺失（旧版回包），走无版本合并，
  * 不碰世代文件。generation ≥ 0 时：
@@ -627,6 +752,165 @@ int lea_revoked_merge_with_generation(const char *path, const char *const *key_i
     return 0;
 }
 
+/* ---------------- 吊销表读取（F-01 三态，fail-closed） ---------------- */
+/* 严格校验规则（全有或全无，任一结构性异常即整份 ERROR）：
+ *   - 世代 sidecar：存在但损坏／读不到 → ERROR；有效世代低于本机已接受
+ *     最大世代 → 陈旧，ERROR；sidecar 丢失而本机已有接受历史 → ERROR。
+ *   - 文件缺失：只有“首次安装”（无 sidecar、无绑定历史）才视为合法空表；
+ *     否则 ERROR。fopen 失败（ENOENT 除外）与读中出错：有界短重试
+ *     （最多 2 次、间隔 5ms）后仍失败即 ERROR，绝不 fail-open。
+ *   - 空文件：只有带合法世代标记（sidecar 存在且有效）时才算合法空表；
+ *     裸空文件 → ERROR。
+ *   - 内容：LF 行尾、末行须带换行（半截行 → ERROR）；禁 CR、NUL、控制
+ *     字符、非 ASCII（混合行尾／非法字符 → ERROR）；每行须为 token
+ *     （与写入方同口径：[A-Za-z0-9_-]，8..128 字节），超长行 → ERROR，
+ *     不截断、不跳过；重复行 → ERROR；总数 >512 → ERROR。
+ * 写入方保持 tmp+rename 原子替换（见 lea_revoked_write），读端正常只
+ * 会看到旧完整文件或新完整文件；半截行仍按 ERROR 处理（非原子写入／
+ * 磁盘损坏／篡改，不得跳过——被跳过的行可能正含应撤销的 Key）。
+ * 局限（诚实记录）：本校验验格式＋世代单调，不验内容哈希——快照格式
+ * 本身无哈希字段；旧表配当前世代被整体还原的情形发现不了（与
+ * merge／H21 世代门同局限），不在本轮范围。 */
+
+/* 快照内容上限：512 行 ×（128 字节 id＋换行）。 */
+#define LEA_REVOKED_SNAPSHOT_MAX_BYTES (LEA_REVOKED_MAX_IDS * 129)
+
+/* 5ms 短延迟（重试间隔用）：clock() 忙等，不引平台头文件；
+ * 至多 2 次、共 10ms，可忽略。 */
+static void lea_revoked_sleep_ms(int ms) {
+    if (ms <= 0) return;
+    clock_t start = clock();
+    clock_t ticks = (clock_t)((double)ms * CLOCKS_PER_SEC / 1000.0);
+    if (ticks < 1) ticks = 1;
+    while (clock() - start < ticks) { /* busy-wait */ }
+}
+
+/* 世代 sidecar 状态：0=缺失，1=有效（*gen_out 置值），-1=存在但损坏／读不到。 */
+static int revoked_gen_state(const char *path, long long *gen_out) {
+    char gen_path[1024];
+    if (!lea_revoked_gen_path(path, gen_path, sizeof(gen_path))) return -1;
+    FILE *f = fopen(gen_path, "rb");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        return -1; /* 世代文件读不到即无法确立快照世代，fail-closed */
+    }
+    fclose(f);
+    long long g = 0;
+    if (!lea_revoked_generation_read(gen_path, &g)) return -1;
+    if (gen_out) *gen_out = g;
+    return 1;
+}
+
+/* 整份读盘（带界短重试）：成功返回 malloc 的缓冲（调用方 free）并置
+ * *len_out；失败返回 NULL。*missing 置 1 表示文件确证不存在（ENOENT）。
+ * fopen 失败（ENOENT 除外）与读中出错各重试至多 2 次、间隔 5ms。 */
+static char *revoked_read_all(const char *path, size_t *len_out, int *missing) {
+    *missing = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) lea_revoked_sleep_ms(5);
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+            if (errno == ENOENT) { *missing = 1; return NULL; }
+            continue; /* 共享冲突／权限瞬时失败：重试 */
+        }
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); continue; }
+        long sz = ftell(f);
+        if (sz < 0 || sz > LEA_REVOKED_SNAPSHOT_MAX_BYTES) { fclose(f); return NULL; }
+        if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); continue; }
+        char *buf = (char *)malloc((size_t)sz + 1);
+        if (!buf) { fclose(f); return NULL; }
+        size_t r = sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+        int bad = ferror(f);
+        fclose(f);
+        if (bad || (long)r != sz) { free(buf); continue; }
+        buf[sz] = '\0';
+        *len_out = (size_t)sz;
+        return buf;
+    }
+    return NULL;
+}
+
+/* 内层：严格校验并输出合法 id 集。成功返回 1（合法快照，*n_out 为
+ * 行数，0=合法空表；*snapshot_gen_out 回填快照世代，无 sidecar 的
+ * 旧版快照为 -1）；任一异常返回 0。 */
+static int revoked_read_validated(const char *path, long long max_accepted_generation,
+                                  int has_history, char ids[][129], int *n_out,
+                                  long long *snapshot_gen_out) {
+    if (snapshot_gen_out) *snapshot_gen_out = -1;
+    if (n_out) *n_out = 0;
+    if (!path || path[0] == '\0') return 0;
+    /* 1. 世代 sidecar。 */
+    long long snap_gen = -1;
+    int gs = revoked_gen_state(path, &snap_gen);
+    if (gs < 0) return 0; /* 世代文件存在但损坏／读不到 */
+    if (gs == 1) {
+        if (snap_gen < max_accepted_generation) return 0; /* 陈旧快照 */
+        if (snapshot_gen_out) *snapshot_gen_out = snap_gen;
+    } else if (max_accepted_generation > 0) {
+        return 0; /* 有已接受世代历史，sidecar 却丢了：状态不一致 */
+    }
+    /* 2. 快照文件整份读盘。 */
+    size_t len = 0;
+    int missing = 0;
+    char *buf = revoked_read_all(path, &len, &missing);
+    if (!buf) {
+        if (missing) return (has_history || gs == 1) ? 0 : 1; /* 仅首次安装缺失=合法空表 */
+        return 0;
+    }
+    /* 3. 空文件：只有带合法世代标记的快照才算合法空表。 */
+    if (len == 0) { free(buf); return gs == 1; }
+    /* 4. 结构：末行须带换行；禁 CR、NUL、控制字符、非 ASCII。 */
+    if (buf[len - 1] != '\n') { free(buf); return 0; }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c == '\n') continue;
+        if (c < 0x20 || c == 0x7F || c >= 0x80) { free(buf); return 0; }
+    }
+    /* 5. 逐行：token 字符集（与写入方同口径）、去重、总数 ≤512。 */
+    int n = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != '\n') continue;
+        size_t llen = i - start;
+        if (llen == 0 || llen > 128) { free(buf); return 0; }
+        char line[129];
+        memcpy(line, buf + start, llen);
+        line[llen] = '\0';
+        if (!lea_validate_token(line)) { free(buf); return 0; }
+        for (int j = 0; j < n; j++)
+            if (strcmp(ids[j], line) == 0) { free(buf); return 0; } /* 重复行 */
+        if (n >= LEA_REVOKED_MAX_IDS) { free(buf); return 0; }
+        memcpy(ids[n], line, llen + 1);
+        n++;
+        start = i + 1;
+    }
+    free(buf);
+    if (n_out) *n_out = n;
+    return 1;
+}
+
+int lea_revoked_validate_snapshot(const char *path, long long max_accepted_generation,
+                                  int has_history, long long *snapshot_gen_out) {
+    char ids[LEA_REVOKED_MAX_IDS][129];
+    int n = 0;
+    return revoked_read_validated(path, max_accepted_generation, has_history,
+                                  ids, &n, snapshot_gen_out);
+}
+
+lea_revocation_status_t lea_revoked_check(const char *path, const char *api_key_id,
+                                          long long max_accepted_generation, int has_history,
+                                          long long *snapshot_gen_out) {
+    if (!api_key_id || !lea_validate_token(api_key_id)) return LEA_REVOCATION_ERROR;
+    char ids[LEA_REVOKED_MAX_IDS][129];
+    int n = 0;
+    if (!revoked_read_validated(path, max_accepted_generation, has_history,
+                                ids, &n, snapshot_gen_out))
+        return LEA_REVOCATION_ERROR;
+    for (int i = 0; i < n; i++)
+        if (strcmp(ids[i], api_key_id) == 0) return LEA_REVOCATION_REVOKED;
+    return LEA_REVOCATION_NOT_REVOKED;
+}
+
 /* ---------------- 幂等表 ---------------- */
 const char *lea_idem_status_name(lea_idem_status_t s) {
     switch (s) {
@@ -636,6 +920,9 @@ const char *lea_idem_status_name(lea_idem_status_t s) {
         case LEA_IDEM_FAILED: return "FAILED";
         case LEA_IDEM_UNKNOWN: return "UNKNOWN";
         case LEA_IDEM_EXPIRED: return "EXPIRED";
+        case LEA_IDEM_CANCEL_REQUESTED: return "CANCEL_REQUESTED";
+        case LEA_IDEM_CANCELLING: return "CANCELLING";
+        case LEA_IDEM_CANCELLED: return "CANCELLED";
         default: return "UNKNOWN";
     }
 }
@@ -647,7 +934,56 @@ lea_idem_status_t lea_idem_status_from_name(const char *name) {
     if (strcmp(name, "SUCCEEDED") == 0) return LEA_IDEM_SUCCEEDED;
     if (strcmp(name, "FAILED") == 0) return LEA_IDEM_FAILED;
     if (strcmp(name, "EXPIRED") == 0) return LEA_IDEM_EXPIRED;
+    if (strcmp(name, "CANCEL_REQUESTED") == 0) return LEA_IDEM_CANCEL_REQUESTED;
+    if (strcmp(name, "CANCELLING") == 0) return LEA_IDEM_CANCELLING;
+    if (strcmp(name, "CANCELLED") == 0) return LEA_IDEM_CANCELLED;
     return LEA_IDEM_UNKNOWN;
+}
+
+/* S-022：取消状态机迁移表（见 lea_state.h 头注）。 */
+int lea_idem_transition_ok(lea_idem_status_t from, lea_idem_status_t to) {
+    switch (from) {
+        case LEA_IDEM_RECEIVED:
+            return to == LEA_IDEM_RUNNING || to == LEA_IDEM_CANCELLED ||
+                   to == LEA_IDEM_EXPIRED || to == LEA_IDEM_UNKNOWN;
+        case LEA_IDEM_RUNNING:
+            return to == LEA_IDEM_SUCCEEDED || to == LEA_IDEM_FAILED ||
+                   to == LEA_IDEM_UNKNOWN || to == LEA_IDEM_CANCEL_REQUESTED ||
+                   to == LEA_IDEM_CANCELLED;
+        case LEA_IDEM_CANCEL_REQUESTED:
+            return to == LEA_IDEM_CANCELLING || to == LEA_IDEM_SUCCEEDED ||
+                   to == LEA_IDEM_FAILED || to == LEA_IDEM_UNKNOWN;
+        case LEA_IDEM_CANCELLING:
+            return to == LEA_IDEM_CANCELLED || to == LEA_IDEM_UNKNOWN;
+        default:
+            return 0; /* SUCCEEDED／FAILED／UNKNOWN／EXPIRED／CANCELLED 为终态 */
+    }
+}
+
+int lea_idem_request_cancel(lea_idem_t *t, lea_idem_entry_t *e, long long now_unix) {
+    (void)t;
+    if (!e) return 0;
+    if (!lea_idem_transition_ok(e->status, LEA_IDEM_CANCEL_REQUESTED)) return 0;
+    e->status = LEA_IDEM_CANCEL_REQUESTED;
+    e->updated_at = now_unix;
+    return 1;
+}
+
+int lea_idem_mark_cancelling(lea_idem_t *t, lea_idem_entry_t *e, long long now_unix) {
+    (void)t;
+    if (!e) return 0;
+    if (!lea_idem_transition_ok(e->status, LEA_IDEM_CANCELLING)) return 0;
+    e->status = LEA_IDEM_CANCELLING;
+    e->updated_at = now_unix;
+    return 1;
+}
+
+int lea_idem_mark_cancelled(lea_idem_t *t, lea_idem_entry_t *e,
+                            const char *result, long long now_unix) {
+    if (!e) return 0;
+    if (!lea_idem_transition_ok(e->status, LEA_IDEM_CANCELLED)) return 0;
+    lea_idem_set_status(t, e, LEA_IDEM_CANCELLED, result, now_unix);
+    return 1;
 }
 
 void lea_idem_init(lea_idem_t *t) {
@@ -661,6 +997,18 @@ lea_idem_entry_t *lea_idem_lookup(lea_idem_t *t, const char *device_id,
         if (strcmp(e->device_id, device_id) == 0 &&
             strcmp(e->account_id, account_id) == 0 &&
             strcmp(e->key, key) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+/* S-022：按 job_id／request_id 查条目。 */
+lea_idem_entry_t *lea_idem_lookup_by_job(lea_idem_t *t, const char *job_id) {
+    if (!t || !job_id || !job_id[0]) return NULL;
+    for (int i = 0; i < t->count; i++) {
+        lea_idem_entry_t *e = &t->entries[i];
+        if ((e->job_id[0] && strcmp(e->job_id, job_id) == 0) ||
+            (e->request_id[0] && strcmp(e->request_id, job_id) == 0))
             return e;
     }
     return NULL;
@@ -732,7 +1080,8 @@ int lea_idem_prune(lea_idem_t *t, long long now_unix) {
         long long retain = (long long)(e->dangerous
             ? LEA_IDEM_RETENTION_DANGEROUS_DAYS : LEA_IDEM_RETENTION_DAYS) * 86400;
         int terminal = e->status == LEA_IDEM_SUCCEEDED || e->status == LEA_IDEM_FAILED ||
-                       e->status == LEA_IDEM_UNKNOWN || e->status == LEA_IDEM_EXPIRED;
+                       e->status == LEA_IDEM_UNKNOWN || e->status == LEA_IDEM_EXPIRED ||
+                       e->status == LEA_IDEM_CANCELLED;
         if (terminal && now_unix - e->updated_at > retain) {
             removed++;
             continue;
@@ -748,7 +1097,9 @@ int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix) {
     int n = 0;
     for (int i = 0; i < t->count; i++) {
         lea_idem_entry_t *e = &t->entries[i];
-        if (e->status == LEA_IDEM_RECEIVED || e->status == LEA_IDEM_RUNNING) {
+        /* S-022：取消未完成即结果未知（CANCEL_REQUESTED／CANCELLING 同款）。 */
+        if (e->status == LEA_IDEM_RECEIVED || e->status == LEA_IDEM_RUNNING ||
+            e->status == LEA_IDEM_CANCEL_REQUESTED || e->status == LEA_IDEM_CANCELLING) {
             e->status = LEA_IDEM_UNKNOWN;
             e->updated_at = now_unix;
             n++;
@@ -762,19 +1113,29 @@ int lea_idem_mark_crashed_unknown(lea_idem_t *t, long long now_unix) {
  * 4MB 内存缓冲）。 */
 static int idem_format_line(const lea_idem_entry_t *e, char *line, size_t line_size) {
     char dev_esc[256] = { 0 }, acc_esc[256] = { 0 }, key_esc[256] = { 0 };
+    /* S-022：job 查询字段（request_id／job_id／command），同款转义。 */
+    char rid_esc[128] = { 0 }, jid_esc[128] = { 0 }, cmd_esc[64] = { 0 };
     size_t eoff = 0;
     if (!lea_json_escape_into(dev_esc, sizeof(dev_esc), &eoff, e->device_id)) return 0;
     eoff = 0;
     if (!lea_json_escape_into(acc_esc, sizeof(acc_esc), &eoff, e->account_id)) return 0;
     eoff = 0;
     if (!lea_json_escape_into(key_esc, sizeof(key_esc), &eoff, e->key)) return 0;
+    eoff = 0;
+    if (!lea_json_escape_into(rid_esc, sizeof(rid_esc), &eoff, e->request_id)) return 0;
+    eoff = 0;
+    if (!lea_json_escape_into(jid_esc, sizeof(jid_esc), &eoff, e->job_id)) return 0;
+    eoff = 0;
+    if (!lea_json_escape_into(cmd_esc, sizeof(cmd_esc), &eoff, e->command)) return 0;
     int n = snprintf(line, line_size,
                      "{\"device_id\":\"%s\",\"account_id\":\"%s\",\"key\":\"%s\","
                      "\"status\":\"%s\",\"dangerous\":%d,\"created_at\":%lld,"
-                     "\"updated_at\":%lld,\"result\":%s}\n",
+                     "\"updated_at\":%lld,\"request_id\":\"%s\",\"job_id\":\"%s\","
+                     "\"command\":\"%s\",\"result\":%s}\n",
                      dev_esc, acc_esc, key_esc,
                      lea_idem_status_name(e->status), e->dangerous,
                      e->created_at, e->updated_at,
+                     rid_esc, jid_esc, cmd_esc,
                      e->result[0] ? e->result : "null");
     if (n < 0 || (size_t)n >= line_size) return 0;
     if (!lea_json_is_valid(line)) return 0;
@@ -835,6 +1196,10 @@ int lea_idem_load_line(lea_idem_t *t, const char *line) {
     if (!lea_json_long(line, "dangerous", &dang)) return 0;
     if (!lea_json_long(line, "created_at", &created)) return 0;
     if (!lea_json_long(line, "updated_at", &updated)) return 0;
+    /* S-022：job 查询字段为可选——旧文件无此三字段时留空串，不跳行。 */
+    lea_json_string(line, "request_id", e.request_id, sizeof(e.request_id));
+    lea_json_string(line, "job_id", e.job_id, sizeof(e.job_id));
+    lea_json_string(line, "command", e.command, sizeof(e.command));
     /* result：取 "result": 后的原始 JSON 值（对象或 null）。
      * 注意行尾还有外层 idem 行的 }，必须用花括号配对提取，不能
      * 直接取到行尾。取出的值须过严格 JSON 校验，否则整行跳过。 */
@@ -936,6 +1301,89 @@ lea_queue_item_t *lea_queue_dequeue(lea_queue_t *q) {
 
 void lea_queue_item_free(lea_queue_item_t *item) {
     free(item);
+}
+
+/* RC-02：按 api_key_id 摘除队列中全部待执行项（见 lea_state.h）。
+ * 两条 lane 各走一遍：摘下匹配项、其余保留；链表与计数同步更新。 */
+lea_queue_item_t *lea_queue_remove_key(lea_queue_t *q, const char *api_key_id, int *removed_out) {
+    if (removed_out) *removed_out = 0;
+    if (!q || !api_key_id || !api_key_id[0]) return NULL;
+    lea_queue_item_t *head = NULL, *tail = NULL;
+    int removed = 0;
+    lea_queue_item_t **lanes_head[2] = { &q->normal_head, &q->danger_head };
+    lea_queue_item_t **lanes_tail[2] = { &q->normal_tail, &q->danger_tail };
+    int *lanes_count[2] = { &q->normal_count, &q->danger_count };
+    for (int l = 0; l < 2; l++) {
+        lea_queue_item_t *prev = NULL;
+        lea_queue_item_t *cur = *lanes_head[l];
+        while (cur) {
+            lea_queue_item_t *next = cur->next;
+            if (strcmp(cur->env.api_key_id, api_key_id) == 0) {
+                if (prev) prev->next = next;
+                else *lanes_head[l] = next;
+                if (cur == *lanes_tail[l]) *lanes_tail[l] = prev;
+                (*lanes_count[l])--;
+                cur->next = NULL;
+                if (!head) head = tail = cur;
+                else { tail->next = cur; tail = cur; }
+                removed++;
+            } else {
+                prev = cur;
+            }
+            cur = next;
+        }
+    }
+    if (removed_out) *removed_out = removed;
+    return head;
+}
+
+/* S-022：按 job_id 找排队项（只看不摘）。 */
+static int lea_queue_item_matches_job(const lea_queue_item_t *it, const char *job_id) {
+    if (!it || !job_id || !job_id[0]) return 0;
+    if (strcmp(it->env.request_id, job_id) == 0) return 1;
+    if (it->env.job_id[0] && strcmp(it->env.job_id, job_id) == 0) return 1;
+    return 0;
+}
+
+lea_queue_item_t *lea_queue_find_by_request_id(lea_queue_t *q, const char *job_id) {
+    if (!q || !job_id || !job_id[0]) return NULL;
+    lea_queue_item_t *cur = q->normal_head;
+    while (cur) {
+        if (lea_queue_item_matches_job(cur, job_id)) return cur;
+        cur = cur->next;
+    }
+    cur = q->danger_head;
+    while (cur) {
+        if (lea_queue_item_matches_job(cur, job_id)) return cur;
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+/* S-022：按 job_id 摘除排队项（job.cancel 用；只摘一项，request_id 唯一）。 */
+lea_queue_item_t *lea_queue_cancel_by_request_id(lea_queue_t *q, const char *job_id) {
+    if (!q || !job_id || !job_id[0]) return NULL;
+    lea_queue_item_t **lanes_head[2] = { &q->normal_head, &q->danger_head };
+    lea_queue_item_t **lanes_tail[2] = { &q->normal_tail, &q->danger_tail };
+    int *lanes_count[2] = { &q->normal_count, &q->danger_count };
+    for (int l = 0; l < 2; l++) {
+        lea_queue_item_t *prev = NULL;
+        lea_queue_item_t *cur = *lanes_head[l];
+        while (cur) {
+            lea_queue_item_t *next = cur->next;
+            if (lea_queue_item_matches_job(cur, job_id)) {
+                if (prev) prev->next = next;
+                else *lanes_head[l] = next;
+                if (cur == *lanes_tail[l]) *lanes_tail[l] = prev;
+                (*lanes_count[l])--;
+                cur->next = NULL;
+                return cur;
+            }
+            prev = cur;
+            cur = next;
+        }
+    }
+    return NULL;
 }
 
 /* ---------------- 批量序号单调表（H10） ---------------- */

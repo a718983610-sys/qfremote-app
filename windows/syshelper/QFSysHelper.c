@@ -44,6 +44,9 @@
 #define LOG_DIR_SUFFIX L"\\QFRemote\\SysHelper"
 #define LOG_FILE_SUFFIX L"\\QFRemote\\SysHelper\\helper.log"
 #define EXEC_TIMEOUT_MS 150000
+/* 低项 1（2026-11-15）：管道读写时限，与 USH #14 同口径（读 30s／写 10s）。 */
+#define QF_PIPE_READ_TIMEOUT_MS 30000
+#define QF_PIPE_WRITE_TIMEOUT_MS 10000
 
 static SERVICE_STATUS_HANDLE g_status_handle = NULL;
 static SERVICE_STATUS g_status;
@@ -132,19 +135,38 @@ static int hash_equals_nocase(const char *a, const char *b) {
 }
 
 /* ---------- 执行白名单脚本 ---------- */
+/* S-012（R-W8）：powershell 一律走绝对路径
+ * %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe，不用裸名
+ * （PATH 劫持面）；路径不存在即 fail-closed，绝不回落裸名调用。 */
+static int powershell_path(WCHAR *out, size_t out_chars) {
+    WCHAR sysdir[MAX_PATH] = { 0 };
+    UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 0;
+    if (_snwprintf(out, out_chars, L"%s\\WindowsPowerShell\\v1.0\\powershell.exe",
+                   sysdir) < 0) return 0;
+    if (GetFileAttributesW(out) == INVALID_FILE_ATTRIBUTES) return 0;
+    return 1;
+}
+
 static int run_powershell_script(const WCHAR *script_path, const char *owner_utf8, DWORD *exit_code) {
+    WCHAR ps_path[MAX_PATH] = { 0 };
+    if (!powershell_path(ps_path, MAX_PATH)) return 0; /* 绝对路径不可用即拒绝 */
     WCHAR cmdline[2048];
     if (owner_utf8 && owner_utf8[0]) {
-        WCHAR wowner[128];
-        MultiByteToWideChar(CP_UTF8, 0, owner_utf8, -1, wowner, 128);
+        /* R-C2：初始化缓冲区并检查转换返回值；MB_ERR_INVALID_CHARS 使
+         * 无效 UTF-8 转换失败即拒绝执行，绝不把未初始化栈内存拼入命令行。 */
+        WCHAR wowner[128] = { 0 };
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, owner_utf8, -1, wowner, 128) == 0) {
+            return 0;
+        }
         /* Owner 已由协议层验过字符集，此处只做引号包裹，不拼接任何其他参数 */
         _snwprintf(cmdline, 2048,
-            L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Owner \"%s\"",
-            script_path, wowner);
+            L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Owner \"%s\"",
+            ps_path, script_path, wowner);
     } else {
         _snwprintf(cmdline, 2048,
-            L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%s\"",
-            script_path);
+            L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\"",
+            ps_path, script_path);
     }
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
@@ -178,7 +200,7 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size) {
     if (!qf_parse_request(req_text, &rq)) {
         log_line("REJECT parse cmd=? error=%s", rq.error);
         snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"%s\"}\n", rq.error);
-        return 1;
+        return;
     }
     const char *expected = (rq.cmd == 0) ? W_HEAL_PS1_SHA256 : W_LOCK_INSTALL_PS1_SHA256;
     const char *base = (rq.cmd == 0) ? "qf-agent-heal.ps1" : "install.ps1";
@@ -188,12 +210,12 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size) {
     if (!sha256_file_hex(wpath, hex)) {
         log_line("REJECT cmd=%s path-missing base=%s", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
         snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"not-found\"}\n");
-        return 1;
+        return;
     }
     if (!hash_equals_nocase(hex, expected)) {
         log_line("REJECT cmd=%s hash-mismatch base=%s", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
         snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"hash-mismatch\"}\n");
-        return 1;
+        return;
     }
     log_line("ACCEPT cmd=%s base=%s hash-ok", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
     DWORD exit_code = 0;
@@ -201,12 +223,12 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size) {
     if (r == -1) {
         log_line("TIMEOUT cmd=%s base=%s", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
         snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"timeout\"}\n");
-        return 1;
+        return;
     }
     if (r == 0) {
         log_line("EXEC-FAILED cmd=%s base=%s", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
         snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"exec-failed\"}\n");
-        return 1;
+        return;
     }
     log_line("DONE cmd=%s base=%s exit=%lu", rq.cmd == 0 ? "heal-agent" : "install-lock", base, (unsigned long)exit_code);
     snprintf(resp, resp_size, "{\"ok\":true,\"code\":\"done\",\"detail\":\"exit=%lu\"}\n", (unsigned long)exit_code);
@@ -230,7 +252,7 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     log_line("START pipe listening");
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
-            PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1, QF_MAX_REQUEST, QF_MAX_REQUEST, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             log_line("ERROR CreateNamedPipe failed %lu", (unsigned long)GetLastError());
@@ -242,17 +264,62 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             CloseHandle(pipe);
             continue;
         }
-        char buf[QF_MAX_REQUEST + 1];
-        DWORD read = 0;
-        BOOL ok = ReadFile(pipe, buf, QF_MAX_REQUEST, &read, NULL);
-        if (ok && read > 0) {
-            buf[read] = '\0';
-            char *nl = strchr(buf, '\n');
-            if (nl) *nl = '\0';
-            char resp[512];
-            handle_request(buf, resp, sizeof(resp));
-            DWORD written = 0;
-            WriteFile(pipe, resp, (DWORD)strlen(resp), &written, NULL);
+        /* 低项 1（2026-11-15）：旧实现同步 ReadFile 无超时——任一可连管道
+         * 的本地 AU 用户连上不发数据即可永久占住唯一实例，heal-agent／
+         * install-lock 被堵死直至服务重启（QFRLEA／USH 同类问题已按 #14
+         * 修为 30s deadline，此处未修）。修法与 USH #14 同口径：实例以
+         * FILE_FLAG_OVERLAPPED 创建，重叠读 30s deadline、重叠写 10s
+         * 超时；超时即断开，不处理半行。ConnectNamedPipe 仍阻塞等待
+         * （停止时主线程自唤醒连接，见 service_main）。 */
+        HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (ev) {
+            char buf[QF_MAX_REQUEST + 1];
+            DWORD read = 0;
+            OVERLAPPED ov;
+            memset(&ov, 0, sizeof(ov));
+            ov.hEvent = ev;
+            BOOL ok = FALSE;
+            BOOL r = ReadFile(pipe, buf, QF_MAX_REQUEST, &read, &ov);
+            if (!r && GetLastError() == ERROR_IO_PENDING) {
+                if (WaitForSingleObject(ev, QF_PIPE_READ_TIMEOUT_MS) == WAIT_OBJECT_0)
+                    ok = GetOverlappedResult(pipe, &ov, &read, FALSE);
+                else {
+                    CancelIo(pipe);
+                    log_line("TIMEOUT read no data in %lu ms, disconnecting",
+                             (unsigned long)QF_PIPE_READ_TIMEOUT_MS);
+                }
+            } else {
+                ok = r;
+            }
+            if (ok && read > 0) {
+                buf[read] = '\0';
+                char *nl = strchr(buf, '\n');
+                if (nl) *nl = '\0';
+                char resp[512];
+                handle_request(buf, resp, sizeof(resp));
+                size_t resp_len = strlen(resp);
+                size_t sent = 0;
+                ResetEvent(ev);
+                while (sent < resp_len) {
+                    OVERLAPPED wov;
+                    memset(&wov, 0, sizeof(wov));
+                    wov.hEvent = ev;
+                    DWORD written = 0;
+                    BOOL wr = WriteFile(pipe, resp + sent, (DWORD)(resp_len - sent), &written, &wov);
+                    if (!wr && GetLastError() == ERROR_IO_PENDING) {
+                        if (WaitForSingleObject(ev, QF_PIPE_WRITE_TIMEOUT_MS) != WAIT_OBJECT_0) {
+                            CancelIo(pipe);
+                            log_line("TIMEOUT write response, disconnecting");
+                            break;
+                        }
+                        if (!GetOverlappedResult(pipe, &wov, &written, FALSE)) break;
+                    } else if (!wr) {
+                        break;
+                    }
+                    sent += written;
+                }
+            }
+            CloseHandle(ev);
         }
         FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);
@@ -293,7 +360,7 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!g_stop_event) {
         report_status(SERVICE_STOPPED, 0);
-        return 1;
+        return;
     }
     log_line("SERVICE started");
     report_status(SERVICE_RUNNING, 0);

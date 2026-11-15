@@ -8,7 +8,7 @@
 # install-lea.ps1 的 SHA-256（H20：5 件），hash 不对绝不拉起；LEA 段
 # 执行前再把 install-lea.ps1 的哈希对一次 -LeaScriptHash（双重门）。
 # 本脚本自身只做固定动作：停旧服务→拷文件→sc create→sc start→调锁安装，
-# 不接受除 -Owner/-HelperExe/-LockDir/-LeaScriptHash 之外的任何参数，
+# 不接受除 -Owner/-HelperExe/-LockDir/-LeaDir/-LeaScriptHash/-MainVersion 之外的任何参数，
 # 不执行任何其他脚本。
 # 失败能回滚：helper 安装失败时 sc delete＋删文件；锁安装失败时
 # helper 保留（可独立重试），只记日志＋exit 1。
@@ -18,7 +18,8 @@ param(
   [Parameter(Mandatory = $true)][string]$HelperExe,
   [Parameter(Mandatory = $true)][string]$LockDir,
   [string]$LeaDir = '', # LEA 随包暂存目录（$INSTDIR\LEA）；未传时按 HelperExe 旁的 LEA 目录推导；缺失即跳过 LEA，不阻塞
-  [string]$LeaScriptHash = '' # H20：install-lea.ps1 的期望 SHA-256（main.js 按 whitelist.json 传来）；提供时本段执行前再验一次，不对则跳过 LEA 段；未提供时记日志后继续（保兼容旧版 main.js）
+  [string]$LeaScriptHash = '', # H20：install-lea.ps1 的期望 SHA-256（main.js 按 whitelist.json 传来）；提供时本段执行前再验一次，不对则跳过 LEA 段；未提供时记日志后继续（保兼容旧版 main.js）
+  [string]$MainVersion = '' # r13 minor ②：主程序版本号（main.js 传来），转传 install-lea.ps1 写 version.json 的 main_version；未传时沿用 install-lea.ps1 默认 ''（保兼容旧版 main.js；旧版 backfill 会把 main_version 写空，r12 实证）
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,7 +124,25 @@ try {
   }
   if (-not $LeaDir) { $LeaDir = Join-Path (Split-Path -Parent $HelperExe) 'LEA' }
   $leaScript = Join-Path $LeaDir 'install-lea.ps1'
-  if (-not (Test-Path -LiteralPath $leaScript)) {
+  # A1（2026-11-13）：安装器已在首装时装好 LEA 服务且健康时跳过本段——
+  # 本段是登录后补装／修复路径，健康时重装一遍只是无谓停服。判据：
+  # 服务 RUNNING＋无 LEA_DEGRADED 标记＋注册表版本＝包内 version.txt。
+  $leaAlreadyHealthy = $false
+  try {
+    $leaSvcOut = (sc.exe query QFRLEA 2>$null)
+    $leaSvcRunning = ($LASTEXITCODE -eq 0) -and ($leaSvcOut -match 'STATE\s+:\s+4\s+RUNNING')
+    $leaMarkerGone = -not (Test-Path -LiteralPath (Join-Path $env:ProgramData 'QFR\LEA\LEA_DEGRADED'))
+    $leaRegVer = ''
+    try { $leaRegVer = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\QFR\LEA' -ErrorAction Stop).version } catch { }
+    if (-not $leaRegVer) { try { $leaRegVer = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\QFRemote\LEA' -ErrorAction Stop).QFR_LEA_Version } catch { } }
+    $leaPkgVer = ''
+    $leaVf = Join-Path $LeaDir 'version.txt'
+    if (Test-Path -LiteralPath $leaVf) { $leaPkgVer = (Get-Content -LiteralPath $leaVf -TotalCount 1).Trim() }
+    $leaAlreadyHealthy = $leaSvcRunning -and $leaMarkerGone -and $leaRegVer -and $leaPkgVer -and ($leaRegVer -eq $leaPkgVer)
+  } catch { $leaAlreadyHealthy = $false }
+  if ($leaAlreadyHealthy) {
+    Write-InstallLog ('LEA install skipped: already installed by setup (version ' + $leaRegVer + ')')
+  } elseif (-not (Test-Path -LiteralPath $leaScript)) {
     Write-InstallLog ('LEA install skipped: install-lea.ps1 not found at ' + $leaScript)
   } else {
     $leaHashOk = $true
@@ -163,8 +182,8 @@ try {
         }
       }
       $leaInvokeAt = Get-Date
-      Write-InstallLog 'installing QFRLEA'
-      & $leaScript -LeaDir $LeaDir
+      Write-InstallLog ('installing QFRLEA mainVersion=' + $MainVersion)
+      & $leaScript -LeaDir $LeaDir -MainVersion $MainVersion
       $leaExit = $LASTEXITCODE
       # T21/D2（5ad5bc6 问题 6 已改口径）：install-lea.ps1 失败 exit 1，
       # 退出码即失败信号；本段仍显式读 LEA_DEGRADED 标记与 install-report.json

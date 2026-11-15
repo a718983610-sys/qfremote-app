@@ -82,6 +82,12 @@ class CredentialStore {
   static const _kPassword = 'qf_saved_password';
   static const _kSession = 'qf_session_snapshot';
 
+  /// R-A8：手动退出持久闸——clearAll 落盘后写 '1'。下次冷启读凭据／
+  /// 会话先查闸：闸在即按无存处理并尽力扫尾残留，哪怕某 key 删失败
+  /// 留下的残留也不会被拿去自动登录。用户重新登录成功落盘新凭据／
+  /// 会话时清闸（见 saveCredentials／saveSession）。
+  static const _kManualLogout = 'qf_manual_logout';
+
   final SecureKvStore _kv;
 
   CredentialStore([SecureKvStore? kv]) : _kv = kv ?? FlutterSecureKvStore();
@@ -97,6 +103,8 @@ class CredentialStore {
   Future<void> saveCredentials(String username, String password) async {
     await _kv.write(
         _kCreds, jsonEncode({'username': username, 'password': password}));
+    // R-A8：新凭据落盘＝用户重新登录成功，清掉手动退出闸，下次冷启可正常恢复。
+    await _quietDelete(_kManualLogout);
     // 旧版分开的 key 不再写新值，残留的旧值清掉，免得新旧两份打架。
     // 尽力清：新凭据已落盘，删旧失败不能反噬本次保存。
     await _quietDelete(_kUsername);
@@ -105,16 +113,34 @@ class CredentialStore {
 
   /// 尽力删一个 key：失败只吞掉（调用方已保证主写已完成，或读侧
   /// 已拿到有效值），不许删除失败反噬主流程。
+  /// R-A8：删失败先有界重试（3 次、间隔 50ms）再吞——Keystore 瞬时
+  /// 不可用常在一次重试内恢复；重试后仍失败才按残留处理（读侧查闸）。
   Future<void> _quietDelete(String key) async {
-    try {
-      await _kv.delete(key);
-    } catch (_) {
-      // 残留旧 key 由下次 loadCredentials 扫尾再清，不在这里报错。
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await _kv.delete(key);
+        return;
+      } catch (_) {
+        if (attempt < 2) {
+          await Future.delayed(const Duration(milliseconds: 50));
+        }
+      }
     }
+    // 残留旧 key 由下次 loadCredentials 扫尾再清，不在这里报错。
   }
 
   /// 取已存凭据：账号密码缺任一项（或为空）都按没存处理，绝不回半截。
+  /// 新 key 损坏（JSON 解析失败或字段缺失）时落到旧 key 兼容读（F2：
+  /// 旧版 catch 后直接 `return null`，注释写的兼容读从未执行）。
   Future<SavedCredentials?> loadCredentials() async {
+    // R-A8：已手动退出——残留凭据一律不回（哪怕删失败留下的也不回）；
+    // 顺手再清一次残留（尽力而为），下次读还查闸。
+    if (await _isManualLogout()) {
+      unawaited(_quietDelete(_kCreds));
+      unawaited(_quietDelete(_kUsername));
+      unawaited(_quietDelete(_kPassword));
+      return null;
+    }
     final raw = await _kv.read(_kCreds);
     if (raw != null && raw.isNotEmpty) {
       try {
@@ -134,10 +160,16 @@ class CredentialStore {
           }
         }
       } catch (_) {
-        // 新 key 损坏：落到旧 key 兼容读
+        // 新 key 损坏：落到旧 key 兼容读（见方法末尾的旧 key 分支）。
       }
-      return null;
+      // 新 key 存在但损坏或缺字段：落到旧 key 兼容读，不直接返回 null。
+      return _loadLegacyCredentials();
     }
+    return _loadLegacyCredentials();
+  }
+
+  /// 旧版分开的 key（qf_saved_username / qf_saved_password）兼容读。
+  Future<SavedCredentials?> _loadLegacyCredentials() async {
     final u = await _kv.read(_kUsername);
     final p = await _kv.read(_kPassword);
     if (u == null || u.isEmpty || p == null || p.isEmpty) return null;
@@ -155,10 +187,18 @@ class CredentialStore {
     await _quietDelete(_kPassword);
   }
 
-  Future<void> saveSession(SessionSnapshot snapshot) =>
-      _kv.write(_kSession, snapshot.toJson());
+  Future<void> saveSession(SessionSnapshot snapshot) async {
+    await _kv.write(_kSession, snapshot.toJson());
+    // R-A8：新会话落盘＝用户重新登录成功，清掉手动退出闸。
+    await _quietDelete(_kManualLogout);
+  }
 
   Future<SessionSnapshot?> loadSession() async {
+    // R-A8：已手动退出——残留快照一律不回；顺手再清一次。
+    if (await _isManualLogout()) {
+      unawaited(_quietDelete(_kSession));
+      return null;
+    }
     final raw = await _kv.read(_kSession);
     if (raw == null || raw.isEmpty) return null;
     return SessionSnapshot.fromJson(raw);
@@ -167,8 +207,21 @@ class CredentialStore {
   Future<void> clearSession() => _quietDelete(_kSession);
 
   /// 一次清干净：凭据 + 会话快照全清（手动退出账号专用）。
+  /// R-A8：删失败时除重试外另持久化“已手动退出”闸——下次冷启读凭据／
+  /// 会话先查闸，闸在即按无存处理，杜绝“退了又自动登回来”。
   Future<void> clearAll() async {
     await clearCredentials();
     await clearSession();
+    try {
+      await _kv.write(_kManualLogout, '1');
+    } catch (_) {
+      // 闸写失败：本次退出流程仍须完成；残留凭据靠下次读时扫尾，
+      // 闸缺失时退化为旧行为（读侧仍尽力清残留）。
+    }
   }
+
+  /// 手动退出闸是否在位。读失败时抛错，交由调用方处理——与现行
+  /// loadCredentials／loadSession 的读错行为一致，不另造降级。
+  Future<bool> _isManualLogout() async =>
+      await _kv.read(_kManualLogout) == '1';
 }

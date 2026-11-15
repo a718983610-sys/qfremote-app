@@ -1,8 +1,8 @@
 'use strict';
 /*
  * QFRemote 站长管理页（自包含单页，内联 CSS/JS，无外部资源）。
- * 冻结令牌：底 #F4F7FB、卡片白底圆角 14 发丝边 #DFE7F2、平涂品牌蓝
- * #2470E0 按钮、深蓝 #0B2B5B 标题、危险操作红色描边、行高不小于 44px。
+ * 冻结令牌：底 #FFFFFF、卡片白底圆角 14 发丝边 #E4E4E7、平涂黑白主色（重做 2026-11-14 A §3.0：主文 #111113、次文 #4B4B55、分割线 #E4E4E7）
+ * #111113 按钮、#111113 标题、危险操作红色描边、行高不小于 44px。（2026-11-13 黑白化：品牌蓝 #2470E0 / 深蓝 #0B2B5B 退役；2026-11-14 按大肥鱼定夺 token 修订）
  * 注意：本文件是模板字符串，页内脚本一律用字符串拼接，不用模板字面量。
  */
 function adminPageHtml() {
@@ -14,56 +14,56 @@ function adminPageHtml() {
 <title>站长管理 · QFRemote</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#FFFFFF;color:#111113}
 .wrap{max-width:860px;margin:0 auto;padding:22px 14px 48px}
-h1{font-size:21px;color:#0B2B5B;margin:6px 2px 2px}
-.sub{font-size:13px;color:#5b6b7d;margin:0 2px 16px;line-height:1.7}
-.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:18px 16px;margin-bottom:16px}
-.card h2{font-size:16px;color:#0B2B5B;margin:0 0 6px}
-.card .hint{font-size:13px;color:#5b6b7d;line-height:1.7;margin:0 0 10px}
-.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-height:44px;padding:9px 0;border-top:1px solid #EDF1F7}
+h1{font-size:21px;color:#111113;margin:6px 2px 2px}
+.sub{font-size:13px;color:#4B4B55;margin:0 2px 16px;line-height:1.7}
+.card{background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:18px 16px;margin-bottom:16px}
+.card h2{font-size:16px;color:#111113;margin:0 0 6px}
+.card .hint{font-size:13px;color:#4B4B55;line-height:1.7;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-height:44px;padding:9px 0;border-top:1px solid #F0F0F2}
 .row:first-of-type{border-top:0}
 .who{flex:1 1 200px;min-width:170px}
-.login{font-size:15px;font-weight:600;color:#0B2B5B;word-break:break-all}
-.meta{font-size:12.5px;color:#5b6b7d;line-height:1.65;word-break:break-all}
-.tag{display:inline-block;font-size:11.5px;border:1px solid #DFE7F2;border-radius:6px;padding:1px 6px;margin-right:4px;color:#43536a;background:#F4F7FB}
-.tag.frozen{color:#a40000;border-color:#f0c4c4;background:#fdf3f3}
-.tag.banned{color:#a40000;border-color:#f0c4c4;background:#fdf3f3}
-.tag.owner{color:#0B2B5B;border-color:#bcd2f2;background:#eaf2fd}
-.tag.test{color:#0d6e2e;border-color:#9ed3ae;background:#e7f7ec}
-.btn{border:1px solid #2470E0;background:#2470E0;color:#fff;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 14px;cursor:pointer}
-.btn.ghost{background:#fff;color:#2470E0}
-.btn.danger{background:#fff;color:#c0271a;border-color:#d9534a}
+.login{font-size:15px;font-weight:600;color:#111113;word-break:break-all}
+.meta{font-size:12.5px;color:#4B4B55;line-height:1.65;word-break:break-all}
+.tag{display:inline-block;font-size:11.5px;border:1px solid #E4E4E7;border-radius:6px;padding:1px 6px;margin-right:4px;color:#111113;background:#F7F7F8}
+.tag.frozen{color:#DC2626;border-color:rgba(220,38,38,.35);background:rgba(220,38,38,.06)}
+.tag.banned{color:#DC2626;border-color:rgba(220,38,38,.35);background:rgba(220,38,38,.06)}
+.tag.owner{color:#111113;border-color:#E4E4E7;background:#F0F0F2}
+.tag.test{color:#15803D;border-color:rgba(21,128,61,.35);background:rgba(21,128,61,.06)}
+.btn{border:1px solid #111113;background:#111113;color:#fff;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 14px;cursor:pointer}
+.btn.ghost{background:#fff;color:#111113}
+.btn.danger{background:#fff;color:#DC2626;border-color:#DC2626}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .owner-row{opacity:.55}
-.empty{font-size:14px;color:#5b6b7d;line-height:1.8;padding:8px 0}
-.appeal-desc{font-size:13.5px;color:#33465e;line-height:1.7;white-space:pre-wrap;word-break:break-all}
-.modal-mask{position:fixed;inset:0;background:rgba(8,18,38,.5);display:none;align-items:center;justify-content:center;z-index:99;padding:16px}
+.empty{font-size:14px;color:#4B4B55;line-height:1.8;padding:8px 0}
+.appeal-desc{font-size:13.5px;color:#111113;line-height:1.7;white-space:pre-wrap;word-break:break-all}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.56);/* 六项②：遮罩与主站 token --overlay-scrim 对齐 */display:none;align-items:center;justify-content:center;z-index:99;padding:16px}
 .modal{background:#fff;border-radius:14px;max-width:92vw;width:440px;padding:22px 20px}
-.modal h3{margin:0 0 8px;font-size:16px;color:#0B2B5B}
-.modal p{font-size:14px;line-height:1.8;color:#33465e;margin:6px 0}
+.modal h3{margin:0 0 8px;font-size:16px;color:#111113}
+.modal p{font-size:14px;line-height:1.8;color:#111113;margin:6px 0}
 #m-text{white-space:pre-line}
-.modal input{box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:11px;font-size:15px;margin-top:8px;min-height:44px}
+.modal input{box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:11px;font-size:15px;margin-top:8px;min-height:44px}
 .modal .btns{display:flex;gap:8px;margin-top:16px}
 .modal .btns .btn{flex:1}
-.newpass{font-size:19px;font-weight:700;color:#0B2B5B;background:#F4F7FB;border:1px solid #DFE7F2;border-radius:9px;padding:12px;text-align:center;word-break:break-all;margin-top:10px}
-.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#0B2B5B;color:#fff;font-size:14px;border-radius:9px;padding:11px 18px;display:none;z-index:100;max-width:90vw;text-align:center;line-height:1.6}
-.stickyhead{position:sticky;top:0;z-index:60;background:#F4F7FB}
+.newpass{font-size:19px;font-weight:700;color:#111113;background:#F7F7F8;border:1px solid #E4E4E7;border-radius:9px;padding:12px;text-align:center;word-break:break-all;margin-top:10px}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#111113;color:#fff;font-size:14px;border-radius:9px;padding:11px 18px;display:none;z-index:100;max-width:90vw;text-align:center;line-height:1.6}
+.stickyhead{position:sticky;top:0;z-index:60;background:#FFFFFF}
 .stickyhead .in{max-width:860px;margin:0 auto;padding:10px 14px 2px}
 .topbar{display:flex;align-items:center;gap:8px;padding:0 2px 6px}
-.topbar .ttl{font-size:15px;font-weight:700;color:#0B2B5B}
+.topbar .ttl{font-size:15px;font-weight:700;color:#111113}
 .topbar .sp{flex:1}
 a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .adminnav{padding:8px 0 4px}
 .adminnav .nrow{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
-.adminnav a{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid #2470E0;background:#fff;color:#2470E0;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 13px;text-decoration:none}
-.adminnav a.on{background:#2470E0;color:#fff}
-.adminnav .cnt{min-width:20px;text-align:center;font-size:11.5px;line-height:1.6;border-radius:10px;padding:0 6px;background:#c0271a;color:#fff}
-.adminnav a.on .cnt{background:#fff;color:#c0271a}
+.adminnav a{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;border:1px solid #E4E4E7;background:#fff;color:#111113;border-radius:9px;font-size:13.5px;min-height:44px;padding:8px 13px;text-decoration:none}
+.adminnav a.on{background:#111113;color:#fff}
+.adminnav .cnt{min-width:20px;text-align:center;font-size:11.5px;line-height:1.6;border-radius:10px;padding:0 6px;background:#DC2626;color:#fff}
+.adminnav a.on .cnt{background:#fff;color:#DC2626}
 .view{display:none}
 .view.on{display:block}
 .foldhead{cursor:pointer}
-.foldhead .foldchev{float:right;font-size:13px;font-weight:400;color:#2470E0}
+.foldhead .foldchev{float:right;font-size:13px;font-weight:400;color:#111113}
 .foldbody{display:none}
 .foldbody.open{display:block}
 </style>
@@ -94,10 +94,10 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <div class="card" id="create-card">
     <h2>创建账号</h2>
     <p class="hint">站长手动开户：创建即发放 3 天试用（与自助注册同待遇，试用期内网页版可登录使用）；设备与权限请按分发规矩另行分配。站长创建不占注册名额、不计注册失败次数。账号须为字母与数字的组合、至少 8 位；密码至少 8 位。</p>
-    <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="create-user" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qfnew2510a"></div></div>
-    <div class="row"><div class="who"><div class="meta">初始密码</div><input id="create-pass" type="password" autocomplete="new-password" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="至少 8 位，创建后交付对方"></div></div>
+    <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="create-user" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qfnew2510a"></div></div>
+    <div class="row"><div class="who"><div class="meta">初始密码</div><input id="create-pass" type="password" autocomplete="new-password" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="至少 8 位，创建后交付对方"></div></div>
     <label style="display:block;font-size:14px;line-height:2"><input type="checkbox" id="create-show"> 显示密码（交付前核对）</label>
-    <div class="row"><div class="who"><div class="meta">显示名（可选）</div><input id="create-name" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="不填则只显示账号名"></div></div>
+    <div class="row"><div class="who"><div class="meta">显示名（可选）</div><input id="create-name" type="text" autocomplete="off" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="不填则只显示账号名"></div></div>
     <button class="btn" id="create-btn" type="button">创建账号</button></div>
   </div>
   <div class="card">
@@ -111,8 +111,8 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <div class="card">
     <h2>密钥发放</h2>
     <p class="hint">给账号发放密钥（入许可台账）。来源必须选：付费购买入账＝真实付费，开通网页版；免费发放＝赠送、活动发放、积分兑换类，不开通网页版（注册自动发放的试用密钥不在此面，试用期内网页版可登录使用）。此处不设默认，选错会影响对方网页权益。</p>
-    <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="lic-user" type="text" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qflic2510a"></div></div>
-    <div class="row"><div class="who"><div class="meta">套餐</div><select id="lic-plan" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
+    <div class="row"><div class="who"><div class="meta">账号（登录名）</div><input id="lic-user" type="text" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px" placeholder="如 qflic2510a"></div></div>
+    <div class="row"><div class="who"><div class="meta">套餐</div><select id="lic-plan" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
     <div class="row"><div class="who"><div class="meta">来源（必选）</div>
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="lic-source" value="paid"> 付费购买入账（开通网页版）</label>
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="lic-source" value="free"> 免费发放（不开通网页版）</label></div>
@@ -122,7 +122,7 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <div class="card" id="genkey-card">
     <h2>生成密钥（不绑账号）</h2>
     <p class="hint">生成一把不绑定任何账号的密钥串：选套餐、选来源后点「生成密钥」，把完整串复制给对方即可。对方在「我的账户 · 兑换 KEY」处粘贴，或在登录拦截页粘贴提交，首个兑换的账号即为归属，兑换当时开始计时。来源口径与上方发放一致，必须选：付费购买入账＝开通网页版；免费发放＝不开通网页版。此处不设默认，选错会影响对方网页权益。</p>
-    <div class="row"><div class="who"><div class="meta">套餐</div><select id="gen-plan" style="box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
+    <div class="row"><div class="who"><div class="meta">套餐</div><select id="gen-plan" style="box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;min-height:44px"><option value="permanent">QFRemote 永久套餐（18 元）</option><option value="d30">QFRemote 30日套餐（9.9 元）</option><option value="d7">QFRemote 7日套餐（6 元）</option><option value="d1">QFRemote 1日套餐（2 元）</option></select></div></div>
     <div class="row"><div class="who"><div class="meta">来源（必选）</div>
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="gen-source" value="paid"> 付费购买入账（开通网页版）</label>
       <label style="display:block;font-size:14px;line-height:2"><input type="radio" name="gen-source" value="free"> 免费发放（不开通网页版）</label></div>
@@ -140,9 +140,9 @@ a.btn{display:inline-flex;align-items:center;text-decoration:none}
   <section class="view" data-view="bans">
   <div class="card">
     <h2>封禁台账</h2>
-    <div id="lic-bans"></div>
+    <div id="lic-bans"><p class="empty">正在加载…</p></div>
     <h2 style="margin-top:18px" id="lic-devices-h">设备异常待审（B6 新规）</h2>
-    <div id="lic-devices"></div>
+    <div id="lic-devices"><p class="empty">正在加载…</p></div>
   </div>
   </section>
 
@@ -216,10 +216,38 @@ var $ = function(id){ return document.getElementById(id); };
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 var toastTimer = null;
 function toast(msg){ var t = $('toast'); t.textContent = msg; t.style.display = 'block'; if (toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(function(){ t.style.display = 'none'; }, 4200); }
+/* 站长管理加载超时（2026-11-13 修）：原 api() 无超时、无重试——fetch 一旦
+   挂起（弱网、服务端校验抖动），全部「正在加载…」占位符永久残留，无报错
+   无重试入口，站长真机 iPhone 实证卡死即此状。现 30 秒超时（与控制台
+   app.js API_TIMEOUT_MS 同值；服务端无本站会话时 MC 校验最长约 2×8 秒，
+   30 秒可覆盖），超时按 {ok:false} 回落到各加载器的失败分支显示并可重试。 */
+var API_TIMEOUT_MS = 30000;
 function api(path, body){
   var opt = { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' } };
   if (body) opt.body = JSON.stringify(body);
+  if (typeof AbortController === 'function') {
+    var ctl = new AbortController();
+    opt.signal = ctl.signal;
+    var timer = setTimeout(function(){ try { ctl.abort(); } catch (e) {} }, API_TIMEOUT_MS);
+    return fetch(path, opt).then(function(r){
+      clearTimeout(timer);
+      return r.json().catch(function(){ return { ok:false, msg:'服务器没有返回内容，请稍后再试。' }; });
+    }).catch(function(e){
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') return { ok:false, timeout:true, msg:'请求超时（30 秒无响应），请检查网络后重试。' };
+      throw e;
+    });
+  }
   return fetch(path, opt).then(function(r){ return r.json().catch(function(){ return { ok:false, msg:'服务器没有返回内容，请稍后再试。' }; }); });
+}
+/* 失败盒：替换占位符为错误文案＋「重新加载」按钮（点按重跑对应加载器）。
+   凡一处接口带多个显示区，失败时须全部写掉，不许留兄弟区继续「正在加载…」。 */
+function failBox(id, msg, retryFn){
+  var box = $(id);
+  if (!box) return;
+  box.innerHTML = '<p class="empty">' + esc(msg) + '</p><button class="btn ghost" type="button">重新加载</button>';
+  var b = box.querySelector('button');
+  if (b) b.onclick = retryFn;
 }
 var modalCb = null;
 var modalValidate = null;
@@ -260,7 +288,7 @@ function userRow(u){
   if (!u.exists) tags += '<span class="tag">账号已删除</span>';
   var meta = [];
   if (u.nickname) meta.push('昵称：' + esc(u.nickname));
-  var thumb = u.hasAvatar ? '<img alt=\"\" src=\"/profile/' + encodeURIComponent(u.login) + '/avatar?v=' + (u.avatarUpdatedAt || 0) + '\" style=\"width:30px;height:30px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:8px\" onerror=\"this.style.display=\'none\'\">' : '';
+  var thumb = u.hasAvatar ? '<img alt=\"\" src=\"/profile/' + encodeURIComponent(u.login) + '/avatar?v=' + (u.avatarUpdatedAt || 0) + '\" style=\"width:30px;height:30px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:8px\" onerror=\"this.style.display=\\'none\\'\">' : '';
   if (u.displayName && u.displayName !== u.login) meta.push('显示名：' + esc(u.displayName));
   if (u.label) meta.push('称呼：' + esc(u.label));
   if (u.template) meta.push('模板：' + esc(u.template));
@@ -307,12 +335,13 @@ function userRow(u){
 
 function loadUsers(){
   api('/admin/api/users').then(function(r){
-    if (!r.ok) { $('users').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; return; }
+    if (!r.ok) { failBox('users', r.msg || '加载失败。', loadUsers); return; }
+    if (!Array.isArray(r.users)) { failBox('users', '账号列表返回的数据格式不正确，请重新加载。', loadUsers); return; }
     if (!r.users.length) { $('users').innerHTML = '<p class="empty">暂时没有账号。</p>'; return; }
     $('users').innerHTML = r.users.map(userRow).join('');
     var btns = document.querySelectorAll('#users button[data-act]');
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onUserAction;
-  }).catch(function(){ $('users').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ failBox('users', '加载失败，请刷新页面重试。', loadUsers); });
 }
 
 function onUserAction(){
@@ -419,7 +448,7 @@ function appealRow(a, pending){
   var h = '<div class="row"><div class="who"><div class="login">' + esc(a.username || '') + (a.type === 'rebind' ? ' <span class="tag owner">换绑设备</span>' : '') + '</div>'
     + '<div class="meta">' + (a.email ? '联系邮箱：' + esc(a.email) + '<br>' : '') + '提交时间：' + esc(fmtTime(a.createdAt)) + '</div>'
     + (a.type === 'rebind' ? '<div class="meta">换绑槽位：' + (a.platform === 'mobile' ? '手机' : '电脑') + ' · 提交通道：' + esc(adminLabel(TXT_CHANNEL, a.channel || '')) + '<br>旧设备码（哈希前 12 位）：' + esc(String(a.oldDeviceCode || '').slice(0, 12)) + '<br>新设备码（哈希前 12 位）：' + esc(String(a.newDeviceCodeHash || '').slice(0, 12)) + '</div>' : '')
-    + (a.executionNote ? '<div class="meta" style="color:#a40000">审核备注：' + esc(a.executionNote) + '</div>' : '')
+    + (a.executionNote ? '<div class="meta" style="color:#DC2626">审核备注：' + esc(a.executionNote) + '</div>' : '')
     + (a.desc ? '<div class="appeal-desc">' + esc(a.desc) + '</div>' : '')
     + (a.reasonCode ? '<div class="meta">事由：' + esc(a.reasonCode) + ' · 申诉编号：' + esc(a.id || '') + '</div>' : '') + '</div>';
   if (pending) {
@@ -448,11 +477,12 @@ function profileAppealRow(a){
 }
 function loadProfileAppeals(){
   api('/admin/api/profile-appeals').then(function(r){
-    if (!r.ok) { $('profileAppeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; return; }
+    if (!r.ok) { failBox('profileAppeals', r.msg || '加载失败。', loadProfileAppeals); return; }
+    if (!Array.isArray(r.appeals)) { failBox('profileAppeals', '资料申诉返回的数据格式不正确，请重新加载。', loadProfileAppeals); return; }
     $('profileAppeals').innerHTML = r.appeals.length ? r.appeals.map(profileAppealRow).join('') : '<p class="empty">现在没有待审的资料申诉。</p>';
     var btns = document.querySelectorAll('#profileAppeals button[data-pmappeal-act]');
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onProfileAppealDecide;
-  }).catch(function(){ $('profileAppeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ failBox('profileAppeals', '加载失败，请刷新页面重试。', loadProfileAppeals); });
 }
 function onProfileAppealDecide(){
   var act = this.getAttribute('data-pmappeal-act'), id = this.getAttribute('data-id');
@@ -469,9 +499,19 @@ function onProfileAppealDecide(){
   } });
 }
 
+/* 申诉失败须四区同写（2026-11-13 修）：原 catch 与 !r.ok 只写 #appeals，
+   #appeals-done / #rebind-list / #rebind-done 遇失败永久残留「正在加载…」。 */
+function appealsFail(msg){
+  failBox('appeals', msg, loadAppeals);
+  $('appeals-done').innerHTML = '<p class="empty">' + esc(msg) + '</p>';
+  $('rebind-list').innerHTML = '<p class="empty">' + esc(msg) + '</p>';
+  $('rebind-done').innerHTML = '<p class="empty">' + esc(msg) + '</p>';
+  setPill('appeals', 0); setPill('rebind', 0);
+}
 function loadAppeals(){
   api('/admin/api/appeals').then(function(r){
-    if (!r.ok) { $('appeals').innerHTML = '<p class="empty">' + esc(r.msg || '加载失败。') + '</p>'; setPill('appeals', 0); setPill('rebind', 0); return; }
+    if (!r.ok) { appealsFail(r.msg || '加载失败。'); return; }
+    if (!Array.isArray(r.pending) || !Array.isArray(r.recent)) { appealsFail('申诉返回的数据格式不正确，请重新加载。'); return; }
     var pendLogin = r.pending.filter(function(a){ return a.type !== 'rebind'; });
     var pendRebind = r.pending.filter(function(a){ return a.type === 'rebind'; });
     var doneLogin = r.recent.filter(function(a){ return a.type !== 'rebind'; });
@@ -486,7 +526,7 @@ function loadAppeals(){
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onAppealAction;
     var obtns = document.querySelectorAll('button[data-appeal-override]');
     for (var j = 0; j < obtns.length; j++) obtns[j].onclick = onAppealOverride;
-  }).catch(function(){ $('appeals').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; setPill('appeals', 0); setPill('rebind', 0); });
+  }).catch(function(){ appealsFail('加载失败，请刷新页面重试。'); });
 }
 function onAppealAction(){
   var act = this.getAttribute('data-appeal-act'), u = this.getAttribute('data-u');
@@ -521,9 +561,18 @@ function onAppealOverride(){
   }
 }
 
+/* 许可失败须三区同写（2026-11-13 修）：原 !r.ok 把 #lic-bans / #lic-devices
+   置空无文案、catch 只写 #lic-keys，封禁台账遇失败即空白卡片。 */
+function licenseFail(msg){
+  failBox('lic-keys', msg, loadLicense);
+  $('lic-bans').innerHTML = '<p class="empty">' + esc(msg) + '</p>';
+  $('lic-devices').innerHTML = '<p class="empty">' + esc(msg) + '</p>';
+  setPill('devices', 0);
+}
 function loadLicense(){
   api('/admin/api/license/overview').then(function(r){
-    if (!r.ok) { $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; $('lic-bans').innerHTML = ''; $('lic-devices').innerHTML = ''; return; }
+    if (!r.ok) { licenseFail(r.msg || '许可概览加载失败。'); return; }
+    if (!Array.isArray(r.keys)) { licenseFail('许可概览返回的数据格式不正确，请重新加载。'); return; }
     var shownKeys = r.keys.slice(-20).reverse();
     var kh = '';
     if (!shownKeys.length) kh = '<p class="empty">暂无密钥记录。</p>';
@@ -580,6 +629,7 @@ function loadLicense(){
         hd += '</div>';
       });
     }
+    if (!r.deviceReviews || !r.deviceReviews.length) hd = '<p class="empty">当前没有待审的设备异常。</p>';
     $('lic-devices').innerHTML = hd;
     setPill('devices', pendDevices);
     var rbtns = document.querySelectorAll('button[data-review-act]');
@@ -607,7 +657,7 @@ function loadLicense(){
         api('/admin/api/license/unban', { banId: bid }).then(function(r){ toast(r.msg || (r.ok ? '已解封。' : '解封未成功。')); loadLicense(); loadUsers(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
       }});
     };
-  }).catch(function(){ $('lic-keys').innerHTML = '<p class="empty">许可概览加载失败。</p>'; });
+  }).catch(function(){ licenseFail('许可概览加载失败，请重新加载。'); });
 }
 $('create-show').onclick = function(){ $('create-pass').type = this.checked ? 'text' : 'password'; };
 $('create-btn').onclick = function(){
@@ -696,7 +746,8 @@ function resetFolds(){
 bindFold('gen-fold-head', 'gen-list');
 function loadGenerated(){
   api('/admin/api/license/generated').then(function(r){
-    if (!r.ok) { $('gen-list').innerHTML = '<p class="empty">生成记录加载失败。</p>'; return; }
+    if (!r.ok) { failBox('gen-list', r.msg || '生成记录加载失败。', loadGenerated); return; }
+    if (!Array.isArray(r.records)) { failBox('gen-list', '生成记录返回的数据格式不正确，请重新加载。', loadGenerated); return; }
     $('gen-count').textContent = '（' + r.records.length + ' 条）';
     if (!r.records.length) { $('gen-list').innerHTML = '<p class="empty">还没有生成记录。</p>'; return; }
     var label = { unclaimed: '未认领', claimed: '已认领', voided: '已作废', 'claimed-revoked': '已认领（已回收）', revoked: '已回收' };
@@ -723,7 +774,7 @@ function loadGenerated(){
         }).catch(function(){ toast('网络连接异常，请稍后再试。'); });
       }});
     };
-  }).catch(function(){ $('gen-list').innerHTML = '<p class="empty">生成记录加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ failBox('gen-list', '生成记录加载失败，请重新加载。', loadGenerated); });
 }
 
 function supportTicketRow(t){
@@ -743,7 +794,8 @@ function supportTicketRow(t){
 }
 function loadSupportInbox(){
   api('/support/api/admin/tickets').then(function(r){
-    if (!r.ok) { $('supportInbox').innerHTML = '<p class="empty">' + esc(r.msg || '收件箱暂时无法打开。请确认已在同一浏览器中登录站长账号后刷新。') + '</p>'; return; }
+    if (!r.ok) { failBox('supportInbox', r.msg || '收件箱暂时无法打开。请确认已在同一浏览器中登录站长账号后刷新。', loadSupportInbox); setPill('support', 0); return; }
+    if (!Array.isArray(r.tickets)) { failBox('supportInbox', '收件箱返回的数据格式不正确，请重新加载。', loadSupportInbox); setPill('support', 0); return; }
     var open = r.tickets.filter(function(t){ return t.status === 'open'; });
     setPill('support', open.length);
     var closed = r.tickets.filter(function(t){ return t.status !== 'open'; }).slice(0, 10);
@@ -752,7 +804,7 @@ function loadSupportInbox(){
     $('supportInbox').innerHTML = h;
     var btns = document.querySelectorAll('#supportInbox button[data-support-act]');
     for (var i = 0; i < btns.length; i++) btns[i].onclick = onSupportAction;
-  }).catch(function(){ $('supportInbox').innerHTML = '<p class="empty">收件箱加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ failBox('supportInbox', '收件箱加载失败，请重新加载。', loadSupportInbox); setPill('support', 0); });
 }
 function onSupportAction(){
   var act = this.getAttribute('data-support-act'), tid = this.getAttribute('data-t');
@@ -777,42 +829,51 @@ $('btnExtLogout').onclick = function(){
 function loadPayOrders(){
   api('/admin/api/orders').then(function(r){
     var box = $('payOrders');
-    if (!r.ok) { box.innerHTML = '<p class="empty">订单加载失败。</p>'; return; }
+    if (!r.ok) { failBox('payOrders', r.msg || '订单加载失败。', loadPayOrders); setPill('orders', 0); return; }
     var list = (r.orders || []).filter(function(o){ return o.status === 'reviewing' || o.status === 'pending_pay'; });
     var done = (r.orders || []).filter(function(o){ return o.status !== 'reviewing' && o.status !== 'pending_pay'; }).slice(0, 8);
     setPill('orders', list.filter(function(o){ return o.status === 'reviewing'; }).length);
     var h = '<p class="hint">截图付款通道：' + (r.enabled ? '已开放' : '未开放（点火时开启）') + '。审核中 ' + list.filter(function(o){return o.status==='reviewing';}).length + ' 单。</p>';
     if (!list.length) h += '<p class="empty">暂无待处理订单。</p>';
     list.forEach(function(o){
-      h += '<div class="row"><div class="who"><div class="meta">' + esc(o.username || '') + ' · ' + esc(o.planName || '') + ' · ' + o.amount + ' 元 · ' + (o.method === 'wechat' ? '微信' : '支付宝') + ' · ' + esc(o.statusText || '') + (o.stage ? '（第 ' + o.stage + ' 审）' : '') + '</div>'
+      /* 金额/渠道缺字段时不许原样印出 undefined（2026-11-13 修）：缺金额显 —，
+         非微信/支付宝的渠道原样显示、不再默认写成「支付宝」。 */
+      var amt = (o.amount == null ? '—' : o.amount);
+      var meth = o.method === 'wechat' ? '微信' : (o.method === 'alipay' ? '支付宝' : (o.method ? esc(o.method) : '—'));
+      h += '<div class="row"><div class="who"><div class="meta">' + esc(o.username || '') + ' · ' + esc(o.planName || '') + ' · ' + amt + ' 元 · ' + meth + ' · ' + esc(o.statusText || '') + (o.stage ? '（第 ' + o.stage + ' 审）' : '') + '</div>'
         + '<div class="meta">单号 ' + esc(o.id) + (o.orderNo ? ' · 付款订单号 ' + esc(o.orderNo) : '') + ' · ' + fmtTime(o.createdAt) + '</div></div>';
       if (o.status === 'reviewing') {
         h += '<a class="btn ghost" href="/admin/api/orders/' + encodeURIComponent(o.id) + '/screenshot" target="_blank" rel="noopener">看截图</a>'
-          + '<button class="btn" data-po-act="approve" data-id="' + esc(o.id) + '">' + (o.stage === 2 ? '二审通过（结案）' : '一审通过（发钥）') + '</button>'
-          + '<button class="btn danger" data-po-act="reject" data-id="' + esc(o.id) + '">驳回</button>';
-        if (o.stage === 2) h += '<button class="btn danger" data-po-act="fake" data-id="' + esc(o.id) + '">判假封禁</button>';
+          + '<button class="btn" data-po-act="approve" data-id="' + esc(o.id) + '" data-stage="' + (o.stage || '') + '">' + (o.stage === 2 ? '二审通过（结案）' : '一审通过（发钥）') + '</button>'
+          + '<button class="btn danger" data-po-act="reject" data-id="' + esc(o.id) + '" data-stage="' + (o.stage || '') + '">驳回</button>';
+        if (o.stage === 2) h += '<button class="btn danger" data-po-act="fake" data-id="' + esc(o.id) + '" data-stage="2">判假封禁</button>';
       }
       h += '</div>';
     });
     if (done.length) {
       h += '<h2 style="margin-top:14px">近期已结束</h2>';
-      done.forEach(function(o){ h += '<div class="row"><div class="who"><div class="meta">' + esc(o.username || '') + ' · ' + esc(o.planName || '') + ' · ' + o.amount + ' 元 · ' + esc(o.statusText || '') + (o.fakeFlag ? ' · 已判假' : '') + '</div></div></div>'; });
+      done.forEach(function(o){ h += '<div class="row"><div class="who"><div class="meta">' + esc(o.username || '') + ' · ' + esc(o.planName || '') + ' · ' + (o.amount == null ? '—' : o.amount) + ' 元 · ' + esc(o.statusText || '') + (o.fakeFlag ? ' · 已判假' : '') + '</div></div></div>'; });
     }
     box.innerHTML = h;
     box.querySelectorAll('[data-po-act]').forEach(function(el){
       el.onclick = function(){
+        if (el.disabled) return;
         var act = el.getAttribute('data-po-act'), id = el.getAttribute('data-id');
+        var st = parseInt(el.getAttribute('data-stage') || '0', 10);
         var label = act === 'approve' ? '确认裁定通过？' : (act === 'fake' ? '确认判假？将封禁该账号并回收其密钥。' : '确认驳回该订单？');
         if (!confirm(label)) return;
-        api('/admin/api/orders/decide', { orderId: id, decision: act }).then(function(rr){ toast(rr.ok ? '已处理。' : (rr.msg || '处理未成功。')); loadPayOrders(); loadLicense(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); })
+        // 阶段随请求同发（服务端 expectStage 强制核对：重复点「一审通过」
+        // 不得越级走到二审结案）；请求在途禁用本钮，防双击重复裁决。
+        el.disabled = true;
+        api('/admin/api/orders/decide', { orderId: id, decision: act, stage: st }).then(function(rr){ toast(rr.ok ? '已处理。' : (rr.msg || '处理未成功。')); loadPayOrders(); loadLicense(); }).catch(function(){ el.disabled = false; toast('网络连接异常，请稍后再试。'); })
       };
     });
-  }).catch(function(){ $('payOrders').innerHTML = '<p class="empty">订单加载失败，请刷新页面重试。</p>'; });
+  }).catch(function(){ failBox('payOrders', '订单加载失败，请重新加载。', loadPayOrders); setPill('orders', 0); });
 }
 function loadAssistantApi(){
   api('/admin/api/assistant').then(function(r){
     var box = $('assistantApi');
-    if (!r.ok) { box.innerHTML = '<p class="empty">加载失败。</p>'; return; }
+    if (!r.ok) { failBox('assistantApi', r.msg || '加载失败。', loadAssistantApi); return; }
     var names = { order: '付款订单', appeal: '申诉', rebind: '换绑申请', device_review: '设备异常', forum: '论坛待审', support: '客服工单', profile_mod: '资料审核' };
     var h = '<div class="row"><div class="who"><div class="meta">待处理计数</div><div>' + Object.keys(names).map(function(k){ return names[k] + ' ' + (r.counts[k] || 0); }).join(' · ') + '</div></div></div>';
     var t = r.token || {};
@@ -827,9 +888,9 @@ function loadAssistantApi(){
       r.recentDone.forEach(function(e){ h += '<div class="row"><div class="who"><div class="meta">' + esc(names[e.type] || e.type) + ' · ' + esc(e.refId) + ' · ' + esc(e.handledBy || '') + ' · ' + esc(adminLabel(TXT_RESULT, e.result || '')) + ' · ' + (e.handledAt ? fmtTime(e.handledAt) : '') + '</div></div></div>'; });
     }
     box.innerHTML = h;
-    var g = $('tokGen'); if (g) g.onclick = function(){ if (!confirm('生成/重置令牌后，旧令牌立即失效，助手需重新经 SSH 领取新令牌。继续？')) return; api('/admin/api/assistant/token', { action: 'generate' }).then(function(rr){ toast(rr.ok ? '令牌已生成，明文已写入服务器文件。' : '生成失败。'); loadAssistantApi(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); }) };
-    var v = $('tokRev'); if (v) v.onclick = function(){ if (!confirm('吊销后助手接口立即不可用。继续？')) return; api('/admin/api/assistant/token', { action: 'revoke' }).then(function(rr){ toast(rr.ok ? '已吊销。' : '吊销失败。'); loadAssistantApi(); }).catch(function(){ toast('网络连接异常，请稍后再试。'); }) };
-  }).catch(function(){ $('assistantApi').innerHTML = '<p class="empty">加载失败，请刷新页面重试。</p>'; });
+    var g = $('tokGen'); if (g) g.onclick = function(){ if (g.disabled) return; if (!confirm('生成/重置令牌后，旧令牌立即失效，助手需重新经 SSH 领取新令牌。继续？')) return; g.disabled = true; api('/admin/api/assistant/token', { action: 'generate' }).then(function(rr){ toast(rr.ok ? '令牌已生成，明文已写入服务器文件。' : '生成失败。'); loadAssistantApi(); }).catch(function(){ g.disabled = false; toast('网络连接异常，请稍后再试。'); }) };
+    var v = $('tokRev'); if (v) v.onclick = function(){ if (v.disabled) return; if (!confirm('吊销后助手接口立即不可用。继续？')) return; v.disabled = true; api('/admin/api/assistant/token', { action: 'revoke' }).then(function(rr){ toast(rr.ok ? '已吊销。' : '吊销失败。'); loadAssistantApi(); }).catch(function(){ v.disabled = false; toast('网络连接异常，请稍后再试。'); }) };
+  }).catch(function(){ failBox('assistantApi', '加载失败，请重新加载。', loadAssistantApi); });
 }
 
 loadUsers();
@@ -878,7 +939,13 @@ var navAs = document.querySelectorAll('.adminnav a[data-nav]');
 for (var ni = 0; ni < navAs.length; ni++) navAs[ni].addEventListener('click', function(e){
   e.preventDefault();
   var nv = this.getAttribute('data-nav');
-  if (location.hash !== '#' + nv) history.replaceState(null, '', '#' + nv);
+  /* replaceState 在受限 webview/沙箱里可抛异常（2026-11-13 修）：一旦抛在
+     applyView() 之前，页签点击即死（preventDefault 已拦住默认跳转）。
+     失败时改走 location.hash（触发 hashchange 同样切视图），视图切换本身不死。 */
+  if (location.hash !== '#' + nv) {
+    try { history.replaceState(null, '', '#' + nv); }
+    catch (err) { try { location.hash = '#' + nv; } catch (err2) {} }
+  }
   applyView();
 });
 window.addEventListener('hashchange', applyView);

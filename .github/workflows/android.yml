@@ -1,44 +1,68 @@
-name: Android 正式构建
+name: Android 构建
 
-# QFRemote 安卓控制端：云端编译 + 专属签名出 release APK。
-# 手动触发（workflow_dispatch）；推送到 main 且改动 android-app/ 时也自动跑。
+# QFRemote 安卓控制端：云端编译出 release APK。
+# S-100：push 到 main / lea-local-agent 且改动 android-app/ 时自动跑；
+# 目标为 lea-local-agent / main 的 PR 也跑（PR 只产 dev 产物，见下）。
+# S-102：本工作流只产开发产物（channel=dev）与正式产物（channel=production，
+# 仅受信任 release job）；开发产物不进 production manifest、不覆盖官网
+# product.json（本仓库无任何写 product.json 的步骤，正式发布走独立的
+# protected environment，见 release job 与 docs/release/branch-protection.md）。
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, lea-local-agent]
     paths:
       - 'android-app/**'
+      - 'version.json'
+      - 'tools/check-release-version.js'
+      - '.github/workflows/android.yml'
+  pull_request:
+    branches: [lea-local-agent, main]
+    paths:
+      - 'android-app/**'
+      - 'version.json'
+      - 'tools/check-release-version.js'
       - '.github/workflows/android.yml'
 
-# 产物版本号（2.4.5 返修 CI①）：单点参数化——改这里即改产物名
-# （QFRemote-v<APP_VERSION>.apk / QFRemote-v<APP_VERSION>-apk），
-# 不再写死旧版号；与 android-app/pubspec.yaml 的 version 保持一致。
+# S-100/S-101：最小权限。actions: write 是上传构建产物所必需的最小写权限。
+permissions:
+  contents: read
+  actions: write
+
+# S-096/S-098：Flutter 版本与产物版本均单一来源——Flutter 版只改这里；
+# 产物版只读 version.json（tools/check-release-version.js 全值校验）。
 env:
-  APP_VERSION: '3.0.0'
+  FLUTTER_VERSION: '3.47.8'
 
 jobs:
   build:
+    # S-102：开发构建——无任何 Secret，不注入签名密钥，产物统一标 dev。
     # CI②：ubuntu-latest 迁移告警消除——钉死 ubuntu-24.04，不再跟随
-    # latest 浮动；checkout/setup-java/upload-artifact 升到 v5
-    #（Node 24 运行时，消除 Node 20 deprecation 告警）；flutter-action
-    # 保持 v2（当前最新主版本，无 v3 可升）。
+    # latest 浮动。
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      # S-101：第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Flutter 3.47.8（2026-10 最新稳定版，Dart 3.13.7）
-        uses: subosito/flutter-action@v2
+      - name: Flutter ${{ env.FLUTTER_VERSION }}（Dart 3.13.7）
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: 读取 version.json（唯一版本源）并全值校验
+        run: |
+          node tools/check-release-version.js
+          echo "APP_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
       - name: 写入构建日期（北京时间）
         working-directory: android-app
@@ -47,7 +71,90 @@ jobs:
           sed -i "s/const String kBuildDate = '.*';/const String kBuildDate = '$D';/" lib/build_info.dart
           grep kBuildDate lib/build_info.dart
 
-      - name: 放入签名密钥（仓库 Secret 解码，不进仓库）
+      - name: 拉依赖
+        working-directory: android-app
+        run: flutter pub get
+
+      - name: 静态检查
+        working-directory: android-app
+        run: flutter analyze
+
+      - name: 单元测试
+        working-directory: android-app
+        run: flutter test
+
+      - name: 更新链实测（假清单：全流程＋失败注入）
+        working-directory: android-app
+        run: flutter test test/updater_chain_test.dart --dart-define=QF_CHAIN_TEST=true --dart-define=QF_RELEASE_URL=http://127.0.0.1:18791/release.json
+
+      - name: 构建 release APK（dev：无正式签名，Gradle 回退调试签名）
+        working-directory: android-app
+        run: flutter build apk --release
+
+      - name: 验包（包名/版本/签名指纹）并写 channel sidecar
+        working-directory: android-app
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          echo "build-tools: $BT"
+          "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
+          cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-dev-$SHORT_SHA.apk"
+          cat > "build/app/outputs/flutter-apk/build-channel.json" <<EOF
+          {"version": "$APP_VERSION", "channel": "dev", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION-dev-$SHORT_SHA.apk"}
+          EOF
+          cat build/app/outputs/flutter-apk/build-channel.json
+          ls -la build/app/outputs/flutter-apk/
+
+      - name: 上传 dev 产物
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: QFRemote-v${{ env.APP_VERSION }}-dev-${{ env.SHORT_SHA }}-apk
+          path: |
+            android-app/build/app/outputs/flutter-apk/QFRemote-v${{ env.APP_VERSION }}-dev-${{ env.SHORT_SHA }}.apk
+            android-app/build/app/outputs/flutter-apk/build-channel.json
+          if-no-files-found: error
+
+  release:
+    # S-100/S-101/S-102：受信任 release job——只有非 PR、且推到 main 或打
+    # v* tag 时才跑；挂 protected environment `production`（审批规则由
+    # GitHub 管理员在仓库 Settings → Environments 配，见
+    # docs/release/branch-protection.md）；签名 Secret 只在这里出现。
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Flutter ${{ env.FLUTTER_VERSION }}（Dart 3.13.7）
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 读取 version.json（唯一版本源）并全值校验
+        run: |
+          node tools/check-release-version.js
+          echo "APP_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: 写入构建日期（北京时间）
+        working-directory: android-app
+        run: |
+          D=$(TZ=Asia/Shanghai date +%F)
+          sed -i "s/const String kBuildDate = '.*';/const String kBuildDate = '$D';/" lib/build_info.dart
+          grep kBuildDate lib/build_info.dart
+
+      - name: 放入签名密钥（仓库 Secret 解码，不进仓库；仅 release job 可见）
         working-directory: android-app
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -84,7 +191,7 @@ jobs:
         working-directory: android-app
         run: flutter build apk --release
 
-      - name: 验包（包名/版本/签名指纹）
+      - name: 验包（包名/版本/签名指纹）并写 channel sidecar
         working-directory: android-app
         run: |
           APK=build/app/outputs/flutter-apk/app-release.apk
@@ -93,11 +200,17 @@ jobs:
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION.apk"
+          cat > "build/app/outputs/flutter-apk/build-channel.json" <<EOF
+          {"version": "$APP_VERSION", "channel": "production", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION.apk"}
+          EOF
+          cat build/app/outputs/flutter-apk/build-channel.json
           ls -la build/app/outputs/flutter-apk/
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v5
+      - name: 上传正式产物
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: QFRemote-v${{ env.APP_VERSION }}-apk
-          path: android-app/build/app/outputs/flutter-apk/QFRemote-v${{ env.APP_VERSION }}.apk
+          path: |
+            android-app/build/app/outputs/flutter-apk/QFRemote-v${{ env.APP_VERSION }}.apk
+            android-app/build/app/outputs/flutter-apk/build-channel.json
           if-no-files-found: error

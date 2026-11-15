@@ -1,0 +1,86 @@
+/* QFRemote 网页端全局 token 注册表（W-01，2026-11-15）
+   全站色值字面量唯一允许出现的位置：本文件内 :root / [data-theme="dark"] 的变量定义。
+   其余一切位置（app.css / session.css 用法、注释、HTML、JS）一律用 var() 引用，字面量归零。
+   原 app.css 头部 :root＋dark 块移入，下方追加 W-01 新 token；状态色已按 B 组定稿迁移（RL-C02，2026-11-15），A 组旧值废止。
+   既有行为保留：深色主题下无深色规则的卡片（--paper）仍为白色，见 W-01 报告。 */
+:root{
+/* 唯一全局 token 源；浅色为默认，深色值以 --dark-* 常量与 [data-theme="dark"] 提供。
+   圆角定夺：控件 8px（--radius-1）、卡片 12px（--r）、弹窗 16px、胶囊 999px；卡片圆角定夺 6 的 8px 已按大肥鱼定夺改为 12px。 */
+--bg:#FFFFFF;--brand:#111113;--navy:#111113;--tx:#111113;--sub:#4B4B55;--line:#E4E4E7;--card:#FFFFFF;--tint:#F7F7F8;--hover:#E8E8EB;--ok:#16A34A;--okbg:rgba(22,163,74,.08);--err:#DC2626;--errbg:rgba(220,38,38,.04);--warn:#EA580C;--warnbg:rgba(234,88,12,.08);
+/* REWORK A §3.0：表面角色 BG0–BG5（全局 6 级结构灰，单视图 ≤4）。浅：BG0–BG5 六级＋分割线（值见下方变量）。 */
+--bg0:#FFFFFF;--bg1:#F7F7F8;--bg2:#F0F0F2;--bg3:#E8E8EB;--bg4:#DFDFE3;--bg5:#D6D6DB;--hairline:#E4E4E7;
+/* REWORK A §3.0：交互叠色（不新增结构灰）。hover 浅黑 4%／深白 6%；selected 6%/9%；pressed 10%/13%。 */
+--state-hover:rgba(17,17,19,.04);--state-selected:rgba(17,17,19,.06);--state-pressed:rgba(17,17,19,.10);
+/* REWORK A §3.0：文字 4 角色独立，不参与结构灰计数。主／次／三／禁用（值见下方变量）。 */
+--surface-0:#FFFFFF;--surface-1:#F7F7F8;--surface-2:#F0F0F2;--surface-3:#E8E8EB;
+--border:#E4E4E7;--border-strong:#E4E4E7;--border-hover:#E4E4E7;
+--text-1:#111113;--text-2:#4B4B55;--text-3:#6E6E78;/* REWORK：浅三级恢复独立角色（六项②“并入次级”按 A §4 废止） */--text-4:#A1A1AA;
+--success:#16A34A;--success-light:#16A34A;--danger:#DC2626;--danger-light:#DC2626;--warning:#EA580C;--warning-light:#EA580C;--info:#3F3F46;--info-light:#3F3F46;
+--success-bg:rgba(22,163,74,.08);--success-ring:rgba(22,163,74,.30);--danger-bg:rgba(220,38,38,.04);--danger-ring:rgba(220,38,38,.30);--warning-bg:rgba(234,88,12,.08);--warning-ring:rgba(234,88,12,.30);--info-bg:rgba(0,0,0,.06);
+/* B 组 Toast 成功图标例外（RL-C02）：仅用于“成功 Toast 图标”本身，不用于边线／正文／普通状态点；控制台当前无图标元素，token 先行注册备用。 */
+--toast-ok-icon:#16A34A;
+--dark-bg:#08090A;--dark-surface-0:#08090A;--dark-surface-1:#0D0E10;--dark-surface-2:#111113;--dark-surface-3:#17181A;
+--dark-text-1:#F5F5F7;--dark-text-2:#B9B9C2;--dark-text-3:#8A8A93;/* 六项定夺①：深色三级（对比度已核，见下方变量） */--dark-text-4:#5A5B64;
+--dark-border:#2E2F34;--dark-border-strong:#2E2F34;--dark-border-hover:#2E2F34;
+--brand-lt:#111113;--brand-soft:rgba(0,0,0,.06);--brand-ring:#111113;
+--r:12px;--radius-1:8px;--radius-2:16px;--radius-modal:16px;--radius-pop:8px;--radius-chat:16px;--radius-chat-tail:4px;
+--r-pill:999px;--r-round:50%;
+--fs-11:11px;--fs-12:12px;--fs-13:13px;--fs-14:14px;--fs-15:15px;--fs-16:16px;--fs-18:18px;--fs-20:20px;--fs-22:22px;--fs-24:24px;--fs-26:26px;--fs-29:29px;
+/* REWORK A §2.2 字阶：11/16、12/18、13/20、14/22、16/24、20/28、24/32、28/36；字重只用 400/500/600。 */
+--type-11:11px/16px;--type-12:12px/18px;--type-13:13px/20px;--type-14:14px/22px;--type-16:16px/24px;--type-20:20px/28px;--type-24:24px/32px;--type-28:28px/36px;
+--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-7:32px;--sp-8:40px;--sp-9:48px;--sp-10:64px;
+--space-0:0;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--space-7:48px;--space-8:64px;
+--lh-btn:1.2;--lh-tight:1.25;--lh-title:1.35;--lh-body:1.55;--lh-copy:1.7;--lh-relax:1.8;
+--ls-tight:-0.02em;--ls-normal:0;--ls-wide:0.06em;
+--col:1280px;--col-wide:1280px;--col-max:1280px;--prose:480px;--section-gap:32px;--gutter:32px;
+--font-sans:"Inter Variable","Inter","SF Pro","Segoe UI Variable","PingFang SC","Microsoft YaHei UI","Noto Sans SC",system-ui,sans-serif;
+--font-mono:"JetBrains Mono","SF Mono","Geist Mono","SFMono-Regular","Cascadia Code","Roboto Mono",monospace;
+/* REWORK A §2.1：浅 e1／浮层 e2（值见下方变量）。 */
+--shadow-none:none;--shadow-1:0 1px 2px rgba(17,17,19,.06);--shadow-2:0 1px 2px rgba(17,17,19,.06),0 8px 24px rgba(17,17,19,.08);--shadow-3:0 1px 2px rgba(17,17,19,.06),0 8px 24px rgba(17,17,19,.08);
+--overlay-scrim:rgba(17,17,19,.32);
+/* REWORK B §0 动效 tokens：D0 60／D1 110／D2 140／D3 170／D4 210／D5 250／D6 290ms；退出＝进入×0.72（夹 100–190ms）。 */
+--d0:60ms;--d1:110ms;--d2:140ms;--d3:170ms;--d4:210ms;--d5:250ms;--d6:290ms;
+--e-s:cubic-bezier(.16,1,.3,1);--e-l:cubic-bezier(.19,1,.22,1);--e-x:cubic-bezier(.32,0,.78,.14);--e-q:cubic-bezier(.4,0,1,1);--e-c:cubic-bezier(.22,1,.36,1);--e-ov:cubic-bezier(.34,1.08,.64,1);
+--dur-1:60ms;--dur-2:110ms;--dur-3:140ms;--dur-4:170ms;--dur-5:210ms;--dur-6:250ms;--dur-reveal:250ms;
+--ease-out:cubic-bezier(.16,1,.3,1);--ease-std:cubic-bezier(.22,1,.36,1);--ease-in:cubic-bezier(.4,0,1,1);
+--fw-400:400;--fw-500:500;--fw-600:600;--fw-700:600;
+--z-side:50;--z-acct:70;--z-top:60000;--z-drawer:70000;--z-scrim:65000;--z-bnav:50000;--z-modal:90000;--z-toast:100000;
+--safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px)}
+/* 深色主题（深色阴影不用重黑：内高光 + 柔和黑影）。由 <html data-theme="dark"> 开启，默认跟随系统主题（见 index.html 预应用脚本与 app.js getTheme）。状态色按 B 组定稿（RL-C02），A 组旧值已废止。 */
+[data-theme="dark"]{--bg:#08090A;--brand:#FFFFFF;--brand-lt:#FFFFFF;--brand-soft:rgba(255,255,255,.09);--brand-ring:#FFFFFF;--navy:#F5F5F7;--tx:#F5F5F7;--sub:#B9B9C2;--line:#2E2F34;--card:#111113;--tint:#0D0E10;--hover:#17181A;--bg0:#08090A;--bg1:#0D0E10;--bg2:#111113;--bg3:#17181A;--bg4:#1F2023;--bg5:#27272A;--hairline:#2E2F34;--state-hover:rgba(255,255,255,.06);--state-selected:rgba(255,255,255,.09);--state-pressed:rgba(255,255,255,.13);--overlay-scrim:rgba(0,0,0,.56);
+--surface-0:#08090A;--surface-1:#0D0E10;--surface-2:#111113;--surface-3:#17181A;
+--border:#2E2F34;--border-strong:#2E2F34;--border-hover:#2E2F34;
+--text-1:#F5F5F7;--text-2:#B9B9C2;--text-3:#8A8A93;--text-4:#5A5B64;
+--success:#22C55E;--success-light:#22C55E;--danger:#F87171;--danger-light:#F87171;--warning:#FB923C;--warning-light:#FB923C;--info:#D4D4D8;--info-light:#D4D4D8;
+--success-bg:rgba(34,197,94,.12);--success-ring:rgba(34,197,94,.30);--danger-bg:rgba(248,113,113,.12);--danger-ring:rgba(248,113,113,.30);--warning-bg:rgba(251,146,60,.12);--warning-ring:rgba(251,146,60,.30);--info-bg:rgba(255,255,255,.08);
+--ok:#22C55E;--okbg:rgba(34,197,94,.12);--err:#F87171;--errbg:rgba(248,113,113,.12);--warn:#FB923C;--warnbg:rgba(251,146,60,.12);
+--toast-ok-icon:#166534;
+--shadow-1:inset 0 1px 0 rgba(255,255,255,.04);--shadow-2:inset 0 1px 0 rgba(255,255,255,.04),0 8px 24px rgba(0,0,0,.36);--shadow-3:inset 0 1px 0 rgba(255,255,255,.04),0 8px 24px rgba(0,0,0,.36)}
+/* W-01 新增 token（2026-11-15）：用法字面量收敛。浅色为默认，深色在 [data-theme="dark"] 中覆盖。
+   既有行为保留：深色主题下无深色规则的卡片（--paper）仍为白色；头像 canvas 底（--paper）两主题同白。 */
+:root{
+--on-brand:#FFFFFF;--on-danger:#FFFFFF;--danger-solid:#DC2626;
+--paper:#FFFFFF;--auth-bg:#FFFFFF;--bub-bg:#FFFFFF;--me-meta:#F5F5F7;
+--line-on-brand:rgba(255,255,255,.05);--av-sys-bg:#4B4B55;
+--sv-canvas:#08090A;--sv-bar-bg:#17181A;--sv-bar-fg:#F5F5F7;
+--scrim:rgba(0,0,0,.45);--drawer-shadow:rgba(0,0,0,.12);--drawer-shadow-desk:rgba(17,17,19,.12);
+--card-shadow:0 1px 2px rgba(17,17,19,.06);
+--focus-ring:rgba(0,0,0,.35);--disconnect-fg:#B91C1C;--disconnect-bg:#FFFFFF;--alert-bg:#B91C1C;
+--link:#111113;--chrome-bg:#FFFFFF;--bnav-bg:#FFFFFF;
+--wall-glow-1:rgba(255,255,255,.07);--wall-glow-2:rgba(255,255,255,.04);--wall-glow-3:rgba(255,255,255,.03);
+--wall-grid:rgba(255,255,255,.028);--mask-black:#000;--glass-10:rgba(255,255,255,.10);--glass-16:rgba(255,255,255,.16);--glass-08:rgba(255,255,255,.08);
+--mark-bg:#FFFFFF;--mark-fg:#000000;--seg-sel-fg:#111113;
+}
+[data-theme="dark"]{
+--on-brand:#08090A;--on-danger:#FFFFFF;--danger-solid:#DC2626;
+--paper:#FFFFFF;--auth-bg:#0D0E10;--bub-bg:#111113;--me-meta:#4B4B55;
+--line-on-brand:rgba(255,255,255,.05);--av-sys-bg:#1F2023;
+--sv-canvas:#08090A;--sv-bar-bg:#17181A;--sv-bar-fg:#F5F5F7;
+--scrim:rgba(0,0,0,.45);--drawer-shadow:rgba(0,0,0,.12);--drawer-shadow-desk:rgba(0,0,0,.48);
+--card-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 1px 2px rgba(0,0,0,.36);
+--focus-ring:rgba(0,0,0,.35);--disconnect-fg:#FF6B61;--disconnect-bg:#111113;--alert-bg:#B91C1C;
+--link:#FFFFFF;--chrome-bg:#08090A;--bnav-bg:#17181A;
+--wall-glow-1:rgba(255,255,255,.07);--wall-glow-2:rgba(255,255,255,.04);--wall-glow-3:rgba(255,255,255,.03);
+--wall-grid:rgba(255,255,255,.028);--mask-black:#000;--glass-10:rgba(255,255,255,.10);--glass-16:rgba(255,255,255,.16);--glass-08:rgba(255,255,255,.08);
+--mark-bg:#FFFFFF;--mark-fg:#000000;--seg-sel-fg:#F7F7F8;
+}

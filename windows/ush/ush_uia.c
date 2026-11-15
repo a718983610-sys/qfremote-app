@@ -483,6 +483,17 @@ static void bring_window_forward(HWND hwnd) {
     Sleep(50);
 }
 
+/* BoundingRectangle 回退中心点：UIA_BoundingRectanglePropertyId 返回的
+ * SAFEARRAY 是 UiaRect [left, top, width, height]（不是 [l,t,r,b]），
+ * 中心须为 left + width/2、top + height/2。N-10（2026-11-15）：旧代码
+ * 把 width/height 当右／下边沿算 (left+width)/2，点落在元素之外
+ * （如 left=100、width=50 时真中心 x=125，旧代码得 75），可能误触
+ * 别的控件。抽成独立函数供单测直验。 */
+static void bounding_rect_center(const double rect[4], POINT *pt) {
+    pt->x = (LONG)(rect[0] + rect[2] / 2.0);
+    pt->y = (LONG)(rect[1] + rect[3] / 2.0);
+}
+
 /* 取元素可点击点（ClickablePoint，失败则用 BoundingRectangle 中心）。 */
 static int clickable_point(IUIAutomationElement *el, POINT *pt) {
     if (!el || !pt) return 0;
@@ -507,8 +518,7 @@ static int clickable_point(IUIAutomationElement *el, POINT *pt) {
                     double d = 0;
                     if (SafeArrayGetElement(sa, &(LONG){lb + i}, &d) == S_OK) rect[i] = d;
                 }
-                pt->x = (LONG)((rect[0] + rect[2]) / 2.0);
-                pt->y = (LONG)((rect[1] + rect[3]) / 2.0);
+                bounding_rect_center(rect, pt);
                 ok = 1;
             }
         }

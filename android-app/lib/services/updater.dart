@@ -37,6 +37,11 @@ class UpdateService {
   /// 未注入时回落 kAppVersion。
   final String? clientVersion;
 
+  /// 清单验签公钥（F-05）：仅单元测试可注入测试公钥（与 releaseUrl /
+  /// trustedOrigin 的 H-8 测试注入口径同款）；生产构造点（main.dart）
+  /// 保持无参，恒用内嵌的生产公钥，不许注入。
+  final String? verifyPublicKeyB64;
+
   UpdateService({
     this.responseTimeout = const Duration(seconds: 30),
     this.stallTimeout = const Duration(seconds: 30),
@@ -44,11 +49,16 @@ class UpdateService {
     String? releaseUrl,
     String? trustedOrigin,
     this.clientVersion,
+    this.verifyPublicKeyB64,
   })  : releaseUrl = releaseUrl ?? kReleaseUrl,
         trustedOrigin = trustedOrigin ?? kTrustedOrigin;
 
   /// 取清单（默认 8 秒超时）。失败抛异常，调用方安静处理。
   /// [timeout] 可缩短：启动门无落盘待更时只为核强更线短探，不拖住离线启动。
+  /// F-05：返回前必验签——ReleaseManifest.parse 在结构校验通过后验
+  /// 清单 Ed25519 签名，验签不过直接抛 FormatException，fetchManifest
+  /// 拿不到“带病清单”；唯一能返回 signatureVerified:false 的是 r11③
+  /// 垫片放行的 ≤2.4.4 无签名旧清单（线上现行清单即此情况）。
   Future<ReleaseManifest> fetchManifest({
     Duration timeout = const Duration(seconds: 8),
   }) async {
@@ -77,7 +87,17 @@ class UpdateService {
             '更新清单类型不正确（Content-Type：${res.headers.contentType}），请稍后重试。');
       }
       final body = await utf8.decodeStream(res).timeout(timeout);
-      return ReleaseManifest.parse(body, trustedOrigin: trustedOrigin);
+      final manifest = ReleaseManifest.parse(
+        body,
+        trustedOrigin: trustedOrigin,
+        verifyPublicKeyB64: verifyPublicKeyB64,
+      );
+      if (!manifest.signatureVerified) {
+        // r11③ 垫片放行（≤2.4.4 无签名旧清单）：只记日志，不静默——
+        // 调用方按原口径继续走版本比对与下载四重核对。
+        debugPrint('QFUPDATE 清单无签名（≤2.4.4 兼容垫片放行），signatureVerified=false');
+      }
+      return manifest;
     } finally {
       client.close(force: true);
     }

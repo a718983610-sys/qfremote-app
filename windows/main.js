@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, session, ipcMain, screen, clipboard, shell, safeStorage, dialog } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, webContents, session, ipcMain, screen, clipboard, shell, safeStorage, dialog, Menu, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -20,6 +20,16 @@ const deviceCodeMod = require('./device-code');
 const devicesMod = require('./devices');
 const clientVersion = require('./client-version');
 const extRetryMod = require('./ext-retry');
+const ipcTrust = require('./ipc-trust'); // F-08：IPC sender 来源统一校验
+const viewRegistryMod = require('./view-registry'); // S-001：视图统一登记与释放
+const permissionPolicy = require('./permission-policy'); // S-003：权限 deny-by-default
+const sysPrograms = require('./sys-programs'); // D-09：系统程序一律绝对路径
+const crashHandler = require('./crash-handler'); // D-06：崩溃处理（OBS 全套）
+const settingsStore = require('./settings-store'); // D-10：设置分层＋冲突可见＋快照回滚
+const startupStages = require('./startup-stages'); // D-08：分阶段初始化
+const trayManager = require('./tray-manager'); // D-07：托盘专项
+const reconnectTicketMod = require('./reconnect-ticket'); // RC-04 票据恢复层（L1 票据规范 v1）
+const qfProtocolMod = require('./qf-protocol'); // RC-03/07/08/09/10 画面与传输协议客户端（QF-VIDEO/RELAY/STREAM/QUALITY/REC-1 规范 v1）
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
 
@@ -70,6 +80,9 @@ function bootLogPath() { try { if (bootLogLastPath) return bootLogLastPath; retu
 // 绝不静默常驻成僵尸进程。dialog 在 app 未就绪时可能失败，包 try/catch。
 process.on('uncaughtException', (e) => {
   try { bootLog('uncaughtException', e && e.stack || String(e)); } catch (err) { /* ignore */ }
+  // D-06：未捕获异常先落一份崩溃报告（150KB 上限，见 crash-handler.js），
+  // 再弹提示退出；app.exit 不触发 before-quit，哨兵残留，下次启动进二选一。
+  try { crashHandler.writeCrashReport(app.getPath('userData'), { version: app.getVersion(), kind: 'uncaughtException', module: 'main', stack: e && e.stack || String(e) }); } catch (err) { /* ignore */ }
   try {
     if (app.isReady()) dialog.showMessageBoxSync({ type: 'error', title: 'QFRemote', message: 'QFRemote 遇到未处理错误，请重启软件。如果反复出现，请联系客服。', buttons: ['确定'], defaultId: 0, noLink: true });
   } catch (err) { /* ignore */ }
@@ -77,6 +90,7 @@ process.on('uncaughtException', (e) => {
 });
 process.on('unhandledRejection', (reason) => {
   try { bootLog('unhandledRejection', reason && reason.stack || String(reason)); } catch (err) { /* ignore */ }
+  try { crashHandler.writeCrashReport(app.getPath('userData'), { version: app.getVersion(), kind: 'unhandledRejection', module: 'main', stack: reason && reason.stack || String(reason) }); } catch (err) { /* ignore */ }
   try {
     if (app.isReady()) dialog.showMessageBoxSync({ type: 'error', title: 'QFRemote', message: 'QFRemote 遇到未处理错误，请重启软件。如果反复出现，请联系客服。', buttons: ['确定'], defaultId: 0, noLink: true });
   } catch (err) { /* ignore */ }
@@ -112,16 +126,34 @@ const ALLOWED_HOST = 'app.qfremote.top';
 // 注：这组常量只作「是不是自家页面」的识别，不再作证书放行依据（见下方
 // certificate-error 处理：正式域名是公共 CA 证书，不放行任何证书错误）。
 const ALLOWED_PORTS = ['443', ''];
-const TOOLBAR_HEIGHT = 48;
+const TOOLBAR_HEIGHT = 52; // 重做 A §3.2：工具栏 52px（原 48px）
 const PREVIEW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
 const PREVIEW_DIR = process.env.QFREMOTE_PREVIEW_DIR || '';
-const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'blue' | 'dark'
+const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'blue' | 'dark'（'blue' 为历史键名，含义是浅色白底黑字，不对应蓝色）
 // 仅预览自检：探活目标可经环境变量改指（与生产相同的探活代码、仅路由不同）；
 // 生产环境恒用正式域名源（2026-10-29 审计 J-2 定案，见下方探活节口径）
 const PROBE_URL = (PREVIEW && process.env.QFREMOTE_PROBE_URL) ? process.env.QFREMOTE_PROBE_URL : 'https://app.qfremote.top/release.json';
-const BG_DEEP = '#f4f7fb'; // 窗口底色与新版令牌底色对齐（亮主题页面底 #F4F7FB；深色仍 #17181c）
+const BG_DEEP = '#ffffff'; // 窗口底色（黑白化 2026-11-13：浅色白底 #FFFFFF；深色 #08090A，与 shared.css --bg 对齐）
 
 app.setName('QFRemote');
+// 重做 B §6.2：Windows reduced motion 显式接线——Chromium 的 prefers-reduced-motion
+// 本就映射 Windows UISettings.AnimationsEnabled；此处再显式兜底：任一 webContents
+// 载入完成时，若系统动画已关，给 html 加 .reduced-motion（shared.css 内 instant 降级）。
+function animationsEnabled() {
+  try {
+    const sp = require('electron').systemPreferences;
+    if (sp && typeof sp.getAnimationSettings === 'function') {
+      const st = sp.getAnimationSettings();
+      if (st && typeof st.shouldRenderRichAnimation === 'boolean') return st.shouldRenderRichAnimation;
+    }
+  } catch (e) {}
+  return true;
+}
+app.on('web-contents-created', (e, wc) => {
+  wc.on('did-finish-load', () => {
+    if (!animationsEnabled()) wc.executeJavaScript("document.documentElement.classList.add('reduced-motion')", true).catch(() => {});
+  });
+});
 // 2.3.2 互联窗第一步：把运行时版本注入统一版本头模块（各请求出口共用，
 // 服务端本版只记录观察；见 client-version.js 文件头口径）。
 try { clientVersion.setClientVersion(app.getVersion()); } catch (e) { /* 回落 package.json 版本 */ }
@@ -178,10 +210,29 @@ if (!PREVIEW) {
 }
 
 // ---------- 设置（自启、窗口位置、缩放、置顶共用一份） ----------
+function userDataDir() { try { return app.getPath('userData'); } catch (e) { return ''; } }
 function settingsFile() { return path.join(app.getPath('userData'), 'qf-settings.json'); }
+// D-10：设置分层——账号级（theme，跟人走，qf-account-settings.json）与
+// 本机级（窗口/托盘/自启等，qf-settings.json）分开存、合并读；冲突时账号级
+// 获胜并记冲突记录（settings-conflicts.json），不静默覆盖。
 function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch (e) { return {}; }
+  try {
+    const layers = settingsStore.loadLayers(userDataDir());
+    const merged = settingsStore.mergeLayers(layers);
+    if (merged.conflicts.length) {
+      settingsStore.recordConflicts(userDataDir(), merged.conflicts);
+      try { bootLog('settings.conflict', merged.conflicts.map((c) => c.key).join(',')); } catch (e) { /* ignore */ }
+    }
+    return merged.settings;
+  } catch (e) { return {}; }
 }
+// D-06/D-07 共用状态：safeMode（崩溃后二选一或 --safe-mode）；
+// suppressShowMain（启动最小化到托盘时不弹主窗）；appQuitting（点 X 托盘
+// 判定用：真正退出时不再拦截 close 事件）。
+let safeMode = false;
+let suppressShowMain = false;
+let appQuitting = false;
+let trayMgr = null;
 let settings = loadSettings();
 // 服务地址解析器：缓存进 qf-settings.svcUrls（经 saveSettings 落盘）
 const svcUrls = svcUrlsMod.createSvcUrls({
@@ -297,7 +348,7 @@ function safeLoad(wc, url) {
   } catch (e) { /* ignore */ }
 }
 let pendingManualClear = false; // 已命中退出、等回到登录页时把会话 cookie 清干净
-function authSession() { return session.fromPartition('persist:qfremote'); }
+function authSession() { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }
 let cookieFlushTimer = null;
 function flushConsoleCookies() {
   try {
@@ -320,6 +371,10 @@ function handleManualLogout() {
   viewMgr.noteLogout();
   // H07：登出通知 LEA，撤销当前绑定（best-effort，不阻塞登出）。
   notifyLeaLogout().catch(() => {});
+  // RC-04 票据层：登出即作废内存票据与会话 id（不跨账号、不跨登录会话复用）。
+  try { reconnectTicketStore.stopSession('logout'); } catch (e) { /* ignore */ }
+  // RC-03/07/08/09/10：登出即解绑协议客户端会话（停探针、清绑定）。
+  try { qfProtocol.unbindSession('logout'); } catch (e) { /* ignore */ }
   settings.auth.manualLogout = true;
   settings.auth.rememberDevice = false;
   pendingManualClear = true;
@@ -487,7 +542,7 @@ function showAuthNotice(wc, text) {
   const js = "(function(){ if (document.getElementById('qfAuthNotice')) return false;" +
     " var d=document.createElement('div'); d.id='qfAuthNotice';" +
     " d.textContent=" + JSON.stringify(noticeText) + ";" +
-    " d.style.cssText='box-sizing:border-box;width:280px;margin:0 auto 8px auto;border-radius:4px;padding:8px;background:#FFF3CD;color:#664d03;font-size:13px;text-align:left';" +
+    " d.style.cssText='box-sizing:border-box;width:280px;margin:0 auto 8px auto;border-radius:8px;padding:8px;background:#111113;border:1px solid #2E2F34;border-left:3px solid #FB923C;color:#F5F5F7;font-size:13px;text-align:left';" +
     " var m=document.getElementById('message1');" +
     " var p=(m&&m.parentNode)?m.parentNode:(document.querySelector('form')||document.body);" +
     " if(!p) return false;" +
@@ -602,8 +657,12 @@ async function processAuthPage() {
       runLicenseGateCheck().catch(() => {});
       // W-11：登录成功后触发锁组件＋SYSTEM helper 首装（每版本一次 UAC）。
       maybeInstallSystemServices().catch(() => {});
+      // A1：登录后 LEA 健康检查（健康即不打扰；不健康走修复路径）。
+      maybeCheckLeaHealth().catch(() => {});
       // H07：登录／换号通知 LEA，绑定跟随当前账号（best-effort，不阻塞登录）。
       notifyLeaLogin(currentGateUsername()).catch(() => {});
+      // RC-04 票据层：登录成功后申领一张重连票据（best-effort，不阻塞登录）。
+      refreshReconnectTicketAfterLogin().catch(() => {});
       flushConsoleCookies();
       try { await wc.executeJavaScript(autologinMod.GUARD_JS, true); } catch (e) { /* ignore */ }
     } else if (det.state === 'login') {
@@ -699,6 +758,8 @@ async function processAuthPage() {
 }
 async function startupAuthFlow() {
   try {
+    // D-06 安全模式：不做静默登录，用户在登录页手动登。
+    if (safeMode) return;
     if (settings.auth.manualLogout) return;
 
     let header = '';
@@ -761,9 +822,16 @@ async function startupAuthFlow() {
   } catch (e) { /* ignore */ }
 }
 function saveSettings() {
+  // D-10：保存前先给两层文件各拍一份快照（settings-snapshots/，最近 12 份），
+  // 再按 ACCOUNT_KEYS 拆回两层文件写盘；其余调用点只认平铺 settings 视图，不变。
   try {
-    fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-    fs.writeFileSync(settingsFile(), JSON.stringify(settings));
+    const dir = userDataDir();
+    settingsStore.snapshotFile(dir, settingsStore.MACHINE_FILE);
+    settingsStore.snapshotFile(dir, settingsStore.ACCOUNT_FILE);
+    const split = settingsStore.splitLayers(settings);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, settingsStore.MACHINE_FILE), JSON.stringify(split.machine));
+    fs.writeFileSync(path.join(dir, settingsStore.ACCOUNT_FILE), JSON.stringify(split.account));
   } catch (e) { /* ignore */ }
 }
 function applyAutoLaunchDefault() {
@@ -776,17 +844,53 @@ function applyAutoLaunchDefault() {
   }
 }
 
-// ---------- 主题（亮蓝 / 深灰深色，工具栏与三页联动，选择持久化） ----------
-function currentTheme() {
+// ---------- 主题（浅色 / 深色 / 跟随系统，工具栏与各页联动，选择持久化） ----------
+// W1 定夺（2026-11-14，大肥鱼）：settings.theme 合法值 'system' | 'blue' | 'dark'；
+// 无键／空值／非法值统一按 'system'（默认跟随系统，与安卓一致）；只有用户
+// 点三态按钮才写盘，启动时不把无键老用户写死。'blue' 仍表示浅色，不新增 'light'。
+function currentThemeMode() {
   if (PREVIEW_THEME === 'dark' || PREVIEW_THEME === 'blue') return PREVIEW_THEME;
-  return settings.theme === 'dark' ? 'dark' : 'blue';
+  const m = settings.theme;
+  return (m === 'system' || m === 'blue' || m === 'dark') ? m : 'system';
 }
-function themeBg() { return currentTheme() === 'dark' ? '#17181c' : BG_DEEP; }
-function contentBg() { return currentTheme() === 'dark' ? '#22242a' : '#0d2f66'; }
+// 解析后的实际主题，只返回 'dark' | 'blue'（渲染端只认识这两值，绝不下发 'system'）。
+function currentTheme() {
+  const mode = currentThemeMode();
+  if (mode === 'dark') return 'dark';
+  if (mode === 'blue') return 'blue';
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'blue';
+}
+function themeBg() { return currentTheme() === 'dark' ? '#08090A' : BG_DEEP; }
+function contentBg() { return currentTheme() === 'dark' ? '#08090A' : BG_DEEP; }
+// W9 定夺（2026-11-14，大肥鱼）：Mica 透明底默认不做，只留默认关闭的试验开关
+// QFREMOTE_MICA_TRANSPARENT=1（11/15 真机通过后再开）；任一异常立即回退
+// backgroundColor: themeBg()＋backgroundMaterial: 'none'（手动回退，见交卷报告）。
+function windowBgColor() {
+  if (process.env.QFREMOTE_MICA_TRANSPARENT === '1' && windowBackgroundMaterial() === 'mica') return '#00000000';
+  return themeBg();
+}
+// F-Win1（A §3.2）：Win11（build ≥ 22000）窗口用 Mica；其余平台/版本返回
+// undefined，Electron 忽略该项，窗口走 backgroundColor: themeBg() 纯色
+// fallback（深 #08090A／浅 #FFFFFF，与 shared.css --bg0 一致；A §3.2 写
+// 的浅色 fallback #F7F7F8 与页面底色 #FFFFFF 差一级，未擅自改——见修复报告）。
+// 只接窗口创建参数，不改其他逻辑。
+function windowBackgroundMaterial() {
+  if (process.platform !== 'win32') return undefined;
+  try {
+    const parts = String(os.release()).split('.');
+    if (Number(parts[0]) >= 10 && Number(parts[2] || 0) >= 22000) return 'mica';
+  } catch (e) { /* 取不到版本时不用 Mica，走纯色 fallback */ }
+  return undefined;
+}
 
 let win = null;
 let view = null;
 let toolbarView = null;
+// S-001：视图统一登记（view-registry.js）：创建时登记，closed 时先停
+// timer／watchers、再逐个 removeChildView＋webContents.close()、清空引用；
+// 临时窗口（splash／about／force／lock）走同一 disposer。
+const viewRegistry = viewRegistryMod.createViewRegistry();
+function registryParent() { try { return (win && !win.isDestroyed()) ? win.contentView : null; } catch (e) { return null; } }
 let splash = null;
 let mainShown = false;
 let splashBornAt = 0;
@@ -914,6 +1018,13 @@ function handleRenderProcessGone(event, details) {
 
 function showMain() {
   if (mainShown || !win) return;
+  // D-07：启动最小化到托盘时不弹主窗，只关启动画面、留在托盘里；
+  // 托盘“打开主窗口”会把 suppressShowMain 清掉再调 showMain。
+  if (suppressShowMain) {
+    try { if (splash && !splash.isDestroyed()) splash.close(); } catch (e) { /* ignore */ }
+    splash = null;
+    return;
+  }
   mainShown = true;
   if (splash && !splash.isDestroyed()) splash.close();
   splash = null;
@@ -938,11 +1049,14 @@ function createSplash() {
     movable: false,
     center: true,
     show: true,
-    backgroundColor: themeBg(),
+    backgroundColor: windowBgColor(),
+    backgroundMaterial: windowBackgroundMaterial(),
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false }
   });
   splash.loadFile(path.join(__dirname, 'splash.html'), { query: { v: app.getVersion(), t: currentTheme() } });
+  viewRegistry.register('splash', splash, { kind: 'window' }); // S-001
+  splash.on('closed', () => viewRegistry.unregister('splash'));
   if (PREVIEW === 'splash') {
     splash.webContents.once('did-finish-load', () => setTimeout(captureSplashPreview, 700));
   }
@@ -988,6 +1102,92 @@ function isTargetUrl(raw) {
     const u = new URL(raw);
     return u.hostname === ALLOWED_HOST && ALLOWED_PORTS.includes(u.port);
   } catch (e) { return false; }
+}
+
+// ---------- F-08：IPC sender 来源统一校验（GPT 第二轮审计 F-08，P2） ----------
+// 此前 59 处 ipcMain.handle/on 只认 channel 名、不认 sender：任意拿到
+// bridge 的渲染进程（控制台页 XSS、被导航到外站的视图、注入的 iframe）
+// 都能调 qf-gate-claim / qf-license-bind / qf-admin-open 等敏感通道。
+// 此后全部 IPC 注册走 trustedHandle/trustedOn（本文件再无裸 ipcMain.
+// handle/on，见 test/ipc-sender-test.js 静态断言），逐条过
+// ipc-trust.js 的 assertTrustedSender：sender 存活、主框架、sender URL
+// 与能力表一致（本地页＝__dirname 下固定文件绝对路径；控制台页＝自家
+// 服务源 https origin 精确集合）、sender 在现存窗口树内且宿主窗口存活。
+// 任一不过即 fail-closed：handle 侧抛错（invoke rejected）、on 侧丢弃
+// （并置 event.returnValue = undefined，防 sendSync 挂死），记一行
+// bootLog('ipc-untrusted', channel)，绝不执行原 handler。校验与日志
+// 本身包 try/catch：日志失败不能放行、不能崩溃。
+// 附注（2026-11-14 实测结论）：
+//  - 初始化顺序：除 toolbarView 是同 tick 内先 loadFile 后 addChildView
+//   （loadFile 只发起异步加载，addChildView 紧随其后同步执行，渲染进程
+//    在主进程让出当前任务前不可能发 IPC），其余视图一律先 addChildView
+//    后加载；独立 BrowserWindow（about/lock/force）构造完成即进
+//    getAllWindows。活窗口树检查没有误杀窗口；
+//  - 校验在 IPC 分发任务内同步执行，不让出事件循环，导航不能插队改掉
+//    正在校验的 frame.url；另有各视图 will-navigate 守门作纵深防御；
+//  - 本地页无合法 iframe IPC（devices.html 静态断言无 iframe），
+//    parent === null 的主框架要求不会误杀正常调用；
+//  - webviewTag / nodeIntegration 全站未开启（默认 false），无通用
+//    invoke(channel) 桥，各 preload 只暴露固定函数。
+function trustedConsoleOrigins() {
+  const origins = new Set();
+  const add = (u) => { try { if (u) origins.add(new URL(u).origin); } catch (e) { /* ignore */ } };
+  add(CONSOLE_URL); add(FRIENDS_URL); add(CHAT_URL); add(FORUM_URL);
+  try { add(svcUrls.extOrigin()); } catch (e) { /* ignore */ }
+  try { add(svcUrls.get('friendsUrl')); } catch (e) { /* ignore */ }
+  try { add(svcUrls.get('forumUrl')); } catch (e) { /* ignore */ }
+  try { add(svcUrls.get('pointsUrl')); } catch (e) { /* ignore */ }
+  if (FRIENDS_FALLBACK_URL) add(FRIENDS_FALLBACK_URL);
+  return origins;
+}
+function ipcTrustCtx() {
+  return {
+    dirname: __dirname,
+    platform: process.platform,
+    trustedOrigins: trustedConsoleOrigins,
+    allWindows: () => { try { return BaseWindow.getAllWindows() || []; } catch (e) { return []; } }
+  };
+}
+function trustedHandle(channel, listener) {
+  ipcMain.handle(channel, function (event, ...args) {
+    let ok = false;
+    try { ok = ipcTrust.assertTrustedIpcSender(event, channel, ipcTrustCtx()); } catch (e) { ok = false; }
+    if (!ok) {
+      try { bootLog('ipc-untrusted', channel); } catch (e) { /* ignore */ }
+      throw new Error('untrusted IPC sender');
+    }
+    // S-020：高危 IPC 另过参数校验（类型／长度／枚举／路径／数字范围），
+    // 不过即 fail-closed（handle 侧抛错），绝不执行原 handler；校验器
+    // 本身抛错也按不过处理，绝不 fail-open。
+    let argsOk = false;
+    try { argsOk = ipcTrust.validateIpcArgs(channel, args).ok; } catch (e) { argsOk = false; }
+    if (!argsOk) {
+      try { bootLog('ipc-bad-args', channel); } catch (e) { /* ignore */ }
+      throw new Error('invalid IPC args');
+    }
+    return listener.call(this, event, ...args);
+  });
+}
+function trustedOn(channel, listener) {
+  ipcMain.on(channel, function (event, ...args) {
+    let ok = false;
+    try { ok = ipcTrust.assertTrustedIpcSender(event, channel, ipcTrustCtx()); } catch (e) { ok = false; }
+    if (!ok) {
+      try { bootLog('ipc-untrusted', channel); } catch (e) { /* ignore */ }
+      try { event.returnValue = undefined; } catch (e) { /* ignore */ }
+      return;
+    }
+    // S-020：高危 IPC 另过参数校验，不过即丢弃（on 侧），不执行原 handler；
+    // 校验器本身抛错也按不过处理，绝不 fail-open。
+    let argsOk = false;
+    try { argsOk = ipcTrust.validateIpcArgs(channel, args).ok; } catch (e) { argsOk = false; }
+    if (!argsOk) {
+      try { bootLog('ipc-bad-args', channel); } catch (e) { /* ignore */ }
+      try { event.returnValue = undefined; } catch (e) { /* ignore */ }
+      return;
+    }
+    return listener.call(this, event, ...args);
+  });
 }
 
 // ---------- 诊断计数（轻量持久计数，进既有设置存储，供「复制诊断信息」用） ----------
@@ -1215,7 +1415,8 @@ function createWindow() {
     minHeight: 600,
     frame: false,
     title: 'QFRemote',
-    backgroundColor: themeBg(),
+    backgroundColor: windowBgColor(),
+    backgroundMaterial: windowBackgroundMaterial(),
     icon: path.join(__dirname, 'build', 'icon.png'),
     show: false
   });
@@ -1230,11 +1431,13 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
-  toolbarView.webContents.loadFile(path.join(__dirname, 'toolbar.html'));
+  toolbarView.webContents.loadFile(path.join(__dirname, 'toolbar.html'), { query: { t: currentTheme() } });
   toolbarView.webContents.on('did-finish-load', () => broadcastAdmin());
   win.contentView.addChildView(toolbarView);
+  viewRegistry.register('toolbar', toolbarView, { parent: win.contentView }); // S-001
 
   const ses = session.fromPartition('persist:qfremote');
+  permissionPolicy.installPermissionPolicy(ses); // S-003：新 session 创建时自动安装
   consoleSes = ses;
   // 会话 cookie 有变动就及时刷盘：崩溃/强退也不丢登录态（自动恢复第一顺位）
   try { ses.cookies.on('changed', () => scheduleCookieFlush()); } catch (e) { /* ignore */ }
@@ -1297,6 +1500,7 @@ function createWindow() {
   });
   view.setBackgroundColor(contentBg()); // 内容还没画出来时先垫主题底色，杜绝白屏闪烁
   win.contentView.addChildView(view);
+  viewRegistry.register('console', view, { parent: win.contentView }); // S-001
 
   view.webContents.on('render-process-gone', handleRenderProcessGone);
   attachViewEvents();
@@ -1310,21 +1514,42 @@ function createWindow() {
   win.on('unmaximize', persistBounds);
   win.on('enter-full-screen', broadcastFs);
   win.on('leave-full-screen', broadcastFs);
-  win.on('close', () => {
+  win.on('close', (event) => {
     if (!PREVIEW && win && !win.isDestroyed()) {
       settings.windowMaximized = win.isMaximized();
       if (!win.isMaximized() && !win.isFullScreen()) settings.windowBounds = win.getBounds();
       saveSettings();
     }
+    // D-07：点 X 最小化到托盘（显式开关；未定过时首次弹一次明确选择，
+    // 不学 Joplin 的不声不响默认进托盘）；真正退出（托盘“退出”/before-quit）
+    // 时 appQuitting 为真，不再拦截。
+    if (!PREVIEW && !appQuitting && win && !win.isDestroyed() && event) {
+      const t = trayManager.traySettings(settings);
+      if (t.closeToTray) { event.preventDefault(); win.hide(); return; }
+      if (!t.closeToTrayDecided) {
+        const choice = dialog.showMessageBoxSync({
+          type: 'question', title: 'QFRemote',
+          message: '关闭 QFRemote 时，是最小化到托盘、还是完全退出？',
+          detail: '最小化到托盘后，程序仍在后台运行，可从托盘图标重新打开。',
+          buttons: ['最小化到托盘', '完全退出'], defaultId: 0, cancelId: 1, noLink: true
+        });
+        settings.tray = Object.assign({}, settings.tray, { closeToTray: choice === 0, enabled: true });
+        saveSettings();
+        if (choice === 0) { ensureTray(); event.preventDefault(); win.hide(); }
+      }
+    }
   });
   win.on('closed', () => {
     bootLog('mainWindow.closed');
-    win = null; view = null; toolbarView = null; socialViews.friends = null; socialViews.chat = null; socialViews.forum = null; homeView = null; gateView = null; extBarView = null;
     // W-22：主窗关闭后停掉看护/探活/积分心跳定时器，不空转；变量置空以便重建窗时重起。
     try { if (watchdog) { watchdog.stop(); watchdog = null; } } catch (e) { /* ignore */ }
     if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (preloadTimer) { clearTimeout(preloadTimer); preloadTimer = null; }
+    // S-001：timer/watchers 已停，再逐个释放已登记视图（先 removeChildView
+    // 再 webContents.close()），临时窗口走同一 disposer；失败只记日志。
+    try { const r = viewRegistry.disposeAll(); bootLog('mainWindow.views-disposed', JSON.stringify(r)); } catch (e) { /* ignore */ }
+    win = null; view = null; toolbarView = null; socialViews.friends = null; socialViews.chat = null; socialViews.forum = null; homeView = null; gateView = null; extBarView = null; devicesView = null; sessionView = null; sessionBarView = null;
   });
 
   if (PREVIEW === 'main' || PREVIEW === 'update') {
@@ -1347,12 +1572,11 @@ function createWindow() {
     setTimeout(showMain, 15000); // 兜底：无论如何不把用户卡在启动画面
     setTimeout(() => { if (PREVIEW === 'offline') { captureWindowPreview(); } }, 25000);
     if (!PREVIEW) {
-      // 先走启动恢复（探活持久会话/静默直提），再加载控制台，恢复不闪登录页
-      startupAuthFlow().then(() => {
-        if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL);
-      }).catch(() => {
-        if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL);
-      });
+      // D-08：界面先出、数据后到——控制台立即首载，启动恢复（探活持久
+      // 会话/静默直提）在后台并行跑，不再串行堵住首载；启动画面盖住窗口，
+      // 静默登录完成前登录页不会闪给用户（processAuthPage 仍会兜底裁定）。
+      if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL);
+      if (!safeMode) startupAuthFlow().catch(() => {});
     } else {
       view.webContents.loadURL(CONSOLE_URL);
     }
@@ -1360,8 +1584,9 @@ function createWindow() {
 
   layout();
   startWatchdog();
-  startProbeLoop();
-  startPointsHeartbeat();
+  // D-08：探活与积分心跳是 deferred 阶段，窗口建好 2 秒后再起，不在启动
+  // 关键路径上发网络请求；安全模式下心跳停掉、探活保留（只做状态显示）。
+  setTimeout(() => { startProbeLoop(); if (!safeMode) startPointsHeartbeat(); }, 2000);
   bootLog('createWindow.done');
   return true;
   } catch (e) {
@@ -1371,19 +1596,159 @@ function createWindow() {
   }
 }
 
+// RC-04：重连状态广播——工具栏状态行与托盘菜单首行共用同一 payload
+// { state, attempt, maxAttempts }；旧版只认字符串的接收方仍兼容（见
+// toolbar.html onStatus：字符串与对象都接受）。
+function broadcastConnStatus(state, info) {
+  const payload = Object.assign({ state: state }, info || {});
+  if (toolbarView && !toolbarView.webContents.isDestroyed()) {
+    toolbarView.webContents.send('qf-conn-status', payload);
+  }
+}
+
+// D-07 托盘接线（tray-manager.js）：回调与创建。ensureTray 幂等：
+// 已有 live 实例时只刷新状态，不重建（图标不闪）；实例被销毁
+// （如 Explorer 重启）时才重建，保证图标唯一。
+function trayCallbacks() {
+  return {
+    onShow: () => {
+      suppressShowMain = false;
+      try {
+        if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+        else createWindow();
+      } catch (e) { /* ignore */ }
+    },
+    onReconnect: () => {
+      try { if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(CONSOLE_URL); } catch (e) { /* ignore */ }
+    },
+    onOpenLog: () => { try { shell.openPath(bootLogPath()); } catch (e) { /* ignore */ } },
+    onCheckUpdate: () => { runUpdateCheck(5000).catch(() => {}); },
+    onAbout: () => { try { openAbout(); } catch (e) { /* ignore */ } },
+    onQuit: () => { appQuitting = true; try { app.quit(); } catch (e) { /* ignore */ } }
+  };
+}
+function ensureTray() {
+  const t = trayManager.traySettings(settings);
+  if (!t.enabled && !t.closeToTray && !t.minimizeToTray) return false;
+  if (!trayMgr) trayMgr = trayManager.createTrayManager(require('electron'), { iconPath: path.join(__dirname, 'build', 'icon.png') });
+  if (trayMgr.isAlive()) { trayMgr.setStatus(trayMgr.getStatus(), trayCallbacks()); return true; }
+  const r = trayMgr.ensureTray(trayCallbacks());
+  if (r.created) bootLog('tray.created', r.reason);
+  else bootLog('tray.create-failed', r.reason);
+  return r.created;
+}
+function syncTrayStatus(state) {
+  try {
+    if (!trayMgr || !trayMgr.isAlive()) return;
+    const label = state === 'reconnecting' ? '重连中'
+      : state === 'reconnect-failed' ? '重连失败'
+      : state === 'reconnect-stopped' ? '重连已停'
+      : state === 'reconnect-cancelled' ? '重连已取消'
+      : state === 'ok' ? (lastProbe.ok ? '在线' : '离线') : trayMgr.getStatus();
+    trayMgr.setStatus(label, trayCallbacks());
+  } catch (e) { /* ignore */ }
+}
+
+// RC-04 票据恢复层（L1 票据规范 v1）：票据只存本模块内存（见
+// reconnect-ticket.js），不落盘、不进设置、不进日志（日志只记
+// resume 前 8 位与 Key id）。request 走 extRequest（带控制台会话
+// cookie，/issue 接受控制台会话鉴权；/resume 以票据本身为 bearer）。
+// 服务端 /reconnect/* 端点尚未实现（规范 §7 后续项）时 issue/resume
+// 一律 404 → unavailable，票据层静默退回点击重连，不阻塞、不报错。
+const reconnectTicketStore = reconnectTicketMod.createReconnectTicketStore({
+  baseUrl: CONSOLE_URL,
+  request: (method, url, body) => extRequest(method, url, body),
+  log: (msg) => bootLog(msg)
+});
+
+// RC-03/07/08/09/10 画面与传输协议客户端（QF-VIDEO/RELAY/STREAM/
+// QUALITY/REC-1 规范 v1）：登录成功后创建，会话级实例；request 走
+// extRequest（带控制台会话 cookie），下载走 extRequestRaw（原始字节）。
+// 创建时不发任何网络请求、不启动任何定时器；探针与录制不自动启动
+//（测量值与事件捕获埋点不在壳内，须会话层显式传入）；会话绑定在
+// openSession、解绑在 closeSession/登出（见 qf-protocol.js 文件头）。
+const qfProtocol = qfProtocolMod.createQfProtocolClients({
+  baseUrl: CONSOLE_URL,
+  request: (method, url, body) => extRequest(method, url, body),
+  requestRaw: (method, url, headers) => extRequestRaw(method, url, headers),
+  log: (msg) => bootLog(msg)
+});
+
+// 登录成功后申领一张重连票据（best-effort，不阻塞登录）：无会话 id
+// 时先开新会话（session_id 由客户端生成，规范 §1）；无本机设备 id
+// 时跳过（不编假 id 上报）。失败只记 bootLog，票据缺失不影响使用。
+async function refreshReconnectTicketAfterLogin() {
+  try {
+    if (!reconnectTicketStore.getSessionId()) reconnectTicketStore.startSession();
+    let deviceId = null;
+    try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
+    if (!deviceId) { bootLog('ticket.issue-skip', 'no-device-id'); return; }
+    const r = await reconnectTicketStore.ensureTicket({ deviceId });
+    bootLog('ticket.issue', r.ok ? 'ok ' + reconnectTicketStore.describeForLog()
+      : 'fail kind=' + r.kind + ' code=' + (r.code || ''));
+  } catch (e) { bootLog('ticket.issue-throw', e && e.message || String(e)); }
+}
+
+// watchdog 每次点击“连接”前的票据恢复尝试：已有可用票据时直接 resume，
+// 无票据时先试领一张再 resume。凭据类（吊销/过期/重放/换绑/授权撤销）
+// 即停（{ stop:true }，watchdog 报 reconnect-stopped，不再点按钮）；
+// 其余（成功／无票据／网络失败／端点未实现）一律继续点按钮——票据层
+// 是加法，不阻塞原有重连路径。resolveOwnNodeId 只在无可用票据时跑
+// （有票据时不为领票多做一次设备模型探针）。
+async function ticketResumeBeforeReconnect() {
+  try {
+    if (reconnectTicketStore.hasUsableTicket()) {
+      const r = await reconnectTicketStore.attemptResume({});
+      if (r.ok) { bootLog('ticket.resume-ok', reconnectTicketStore.describeForLog()); return { proceed: true, resumed: true }; }
+      if (r.kind === 'credential') {
+        bootLog('ticket.resume-credential-stop', r.code || '');
+        return { stop: true, kind: 'credential', code: r.code || 'QFR_API_KEY_REVOKED', reason: 'ticket-credential' };
+      }
+      return { proceed: true };
+    }
+    let deviceId = null;
+    try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
+    const r = await reconnectTicketStore.attemptResume(deviceId ? { deviceId } : {});
+    if (r.ok) { bootLog('ticket.resume-ok', reconnectTicketStore.describeForLog()); return { proceed: true, resumed: true }; }
+    if (r.kind === 'credential') {
+      bootLog('ticket.resume-credential-stop', r.code || '');
+      return { stop: true, kind: 'credential', code: r.code || 'QFR_API_KEY_REVOKED', reason: 'ticket-credential' };
+    }
+    return { proceed: true };
+  } catch (e) { return { proceed: true }; }
+}
+
+// 重连恢复后：工具栏 Toast“已恢复连接”（规范 §5.2），并为同一会话
+// 续领一张新票据（resume 成功时旧票据已消费；纯点击恢复时复用旧票据）。
+function ticketRecoveredToastAndReissue() {
+  try {
+    if (toolbarView && !toolbarView.webContents.isDestroyed()) {
+      toolbarView.webContents.send('qf-shot-feedback', { ok: true, text: '已恢复连接' });
+    }
+  } catch (e) { /* ignore */ }
+  refreshReconnectTicketAfterLogin().catch(() => {});
+}
+
 function startWatchdog() {
   if (PREVIEW || watchdog) return;
   // W-17：看护盯「当前活动视图」（控制台/会话），会话视图断线同样自动重连。
   watchdog = createWatchdog(() => activeWc(), {
     enabled: () => !!activeWc() && !offlineActive && (activeKey() === 'session' || activeKey() === 'console'),
-    onStatus: (state) => {
-      if (toolbarView) toolbarView.webContents.send('qf-conn-status', state);
-    },
+    maxAttempts: 5,
+    onStatus: (state, info) => { broadcastConnStatus(state, info); syncTrayStatus(state); },
+    onAttempt: (info) => { broadcastConnStatus('reconnecting', info); },
     onReconnect: () => bumpStat('watchdogReconnectCount'),
+    onBeforeReconnect: () => ticketResumeBeforeReconnect(),
+    onRecovered: () => ticketRecoveredToastAndReissue(),
     log: (msg) => { if (process.env.QFREMOTE_DEBUG) console.log('[watchdog]', msg); }
   });
   watchdog.start();
 }
+
+// RC-04：工具栏“取消重连”按钮（qf-reconnect-cancel，toolbar.html 状态行）。
+trustedOn('qf-reconnect-cancel', () => {
+  try { if (watchdog) watchdog.cancel(); } catch (e) { /* ignore */ }
+});
 
 // ---------- 服务器探活（工具栏状态灯与关于面板的数据来源） ----------
 // 只做一件事：定时向自家正式域名源发一个不带任何凭据的 HTTPS GET，看它
@@ -1399,6 +1764,13 @@ function broadcastProbe() {
   if (toolbarView && !toolbarView.webContents.isDestroyed()) {
     toolbarView.webContents.send('qf-probe-state', lastProbe);
   }
+  // D-07：探活结果同步到托盘 tooltip/菜单首行（在线/离线）；重连中时
+  // 不覆盖看护的状态（syncTrayStatus 只在看护回调里改重连态）。
+  try {
+    if (trayMgr && trayMgr.isAlive() && (!watchdog || !watchdog.isReconnecting())) {
+      trayMgr.setStatus(lastProbe.ok ? '在线' : '离线', trayCallbacks());
+    }
+  } catch (e) { /* ignore */ }
 }
 function runProbe() {
   if (probeInFlight) return Promise.resolve(lastProbe);
@@ -1451,7 +1823,7 @@ function startProbeLoop() {
 // ---------- 扩展服务（积分 / 站长管理，v2.2.0） ----------
 // 会话 cookie 取自控制台所在的 persist 会话分区（控制台页就跑在这个分区里）；
 // 请求只发往 svc-urls 解析出的自家服务地址，失败一律安静忽略，不弹窗不打断。
-function consoleSession() { return session.fromPartition('persist:qfremote'); }
+function consoleSession() { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }
 // DS-4（M-C 中组，DS-REVIEW §3.4）：只发目标 URL 域/路径下有效的 cookie——
 // 整罐不分域发给白名单子域会绕过同源边界。过滤逻辑在 svc-urls.js
 // （filterCookiesForUrl，纯函数可单测），此处只传目标地址。
@@ -1505,6 +1877,37 @@ async function extRequest(method, urlStr, bodyObj, opts) {
   });
   return extRetryMod.requestWithRetry(requestOnce, opts, method);
 }
+// 原始字节请求（extRequest 的二进制版，供文件/录像下载用）：extRequest
+// 只回 utf8 文本，二进制经它会损坏。与 extRequest 同口径——只许 https、
+// 主机白名单、附控制台会话 cookie、Node 默认证书校验；8 秒超时、无重试
+//（续传由调用方经 Range/分片状态机做，不在传输层重试）。返回
+// { status, headers, body: Buffer }；失败返回 { status: 0, headers: {}, body: Buffer.alloc(0) }。
+async function extRequestRaw(method, urlStr, headers) {
+  const cookie = await getConsoleCookieHeader(urlStr);
+  let u;
+  try { u = new URL(urlStr); } catch (e) { return { status: 0, headers: {}, body: Buffer.alloc(0) }; }
+  if (u.protocol !== 'https:') { return { status: 0, headers: {}, body: Buffer.alloc(0) }; }
+  if (!svcUrlsMod.isAllowedSvcHost(urlStr)) {
+    bootLog('extRequest.rejected-host', u.hostname);
+    return { status: 0, headers: {}, body: Buffer.alloc(0) };
+  }
+  const reqHeaders = clientVersion.clientVersionHeaders();
+  if (cookie) reqHeaders.Cookie = cookie;
+  if (headers && typeof headers === 'object') {
+    for (const k of Object.keys(headers)) reqHeaders[k] = headers[k];
+  }
+  return new Promise((resolve) => {
+    const req = https.request(u, { method, headers: reqHeaders, timeout: 8000 }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers || {}, body: Buffer.concat(chunks) }));
+      res.on('error', () => resolve({ status: 0, headers: {}, body: Buffer.alloc(0) }));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve({ status: 0, headers: {}, body: Buffer.alloc(0) }));
+    req.end();
+  });
+}
 // 积分心跳：每 60 秒一次，只在主窗口在、控制台已加载时发。
 // 2.3.1：心跳响应带 forceLogout 信号（契约 §7.5.7，转赠领取后原主人
 // 即时强制下线）时立即执行登出＋落 G1 拦截，不许延迟到下次冷启动。
@@ -1543,7 +1946,7 @@ async function fetchMyPoints() {
   if (points === null && displayText === null) return null;
   return { points, displayText };
 }
-ipcMain.handle('qf-points-me', async () => {
+trustedHandle('qf-points-me', async () => {
   try { return await fetchMyPoints(); } catch (e) { return null; }
 });
 
@@ -1625,6 +2028,7 @@ function ensureGateView() {
     }
   });
   win.contentView.addChildView(gateView);
+  viewRegistry.register('gate', gateView, { parent: win.contentView }); // S-001
   gateView.webContents.loadFile(path.join(__dirname, 'license-gate.html'), { query: { t: currentTheme() } });
   gateView.webContents.on('did-finish-load', () => sendGateState());
   attachShortcuts(gateView.webContents);
@@ -1767,8 +2171,8 @@ async function afterClaimSuccess() {
   }
   if (gateDecision) await recheckLicense();
 }
-ipcMain.handle('qf-gate-get', () => gateStatePayload());
-ipcMain.handle('qf-gate-claim', async (event, key) => {
+trustedHandle('qf-gate-get', () => gateStatePayload());
+trustedHandle('qf-gate-claim', async (event, key) => {
   const input = String(key == null ? '' : key);
   if (!licenseMod.isKeyFormatValid(input)) {
     return { ok: false, display: licenseMod.claimDisplayText(input, null) };
@@ -1778,14 +2182,14 @@ ipcMain.handle('qf-gate-claim', async (event, key) => {
   if (result && result.ok) await afterClaimSuccess();
   return { ok: !!(result && result.ok), display };
 });
-ipcMain.on('qf-gate-open', (event, target) => { openExtPage(target).catch(() => {}); });
-ipcMain.handle('qf-gate-recheck', async () => {
+trustedOn('qf-gate-open', (event, target) => { openExtPage(target).catch(() => {}); });
+trustedHandle('qf-gate-recheck', async () => {
   try { return await recheckLicense(); } catch (e) { return { ok: false, error: '许可信息读取失败，请检查网络后重试。' }; }
 });
 // 拦截面「退出账号」：与正式退出登录（qf-logout-request）同一段口径——
 // 原生确认（同文案）-> 级联终止 -> handleManualLogout（内含许可门复位）
 // -> 控制台回登录页；取消则什么都不发生。
-ipcMain.handle('qf-gate-logout', async () => {
+trustedHandle('qf-gate-logout', async () => {
   const owner = (aboutWin && !aboutWin.isDestroyed()) ? aboutWin : win;
   let r = null;
   try {
@@ -1817,7 +2221,7 @@ ipcMain.handle('qf-gate-logout', async () => {
 });
 // 关于页「付费与激活」区（与 /license/api/me 同源数据；取不到回 null，
 // 页面显示诚实错误态，不填假状态）
-ipcMain.handle('qf-license-me', async () => {
+trustedHandle('qf-license-me', async () => {
   try {
     const me = await fetchLicenseMe();
     if (!me) return null;
@@ -1829,14 +2233,14 @@ ipcMain.handle('qf-license-me', async () => {
     });
   } catch (e) { return null; }
 });
-ipcMain.handle('qf-license-bind', async (event, key) => {
+trustedHandle('qf-license-bind', async (event, key) => {
   const input = String(key == null ? '' : key);
   if (!licenseMod.isKeyFormatValid(input)) return { ok: false, display: '密钥格式不正确，请检查后重新输入。' };
   const result = await bindLicenseKey(input.trim());
   if (!result) return { ok: false, display: '网络异常，请稍后再试。' };
   return { ok: result.ok, display: result.msg ? result.msg : (result.ok ? '绑定成功。' : '绑定未成功，请核对后重试。') };
 });
-ipcMain.handle('qf-license-claim', async (event, key) => {
+trustedHandle('qf-license-claim', async (event, key) => {
   const input = String(key == null ? '' : key);
   if (!licenseMod.isKeyFormatValid(input)) {
     return { ok: false, display: licenseMod.claimDisplayText(input, null) };
@@ -1846,7 +2250,7 @@ ipcMain.handle('qf-license-claim', async (event, key) => {
   if (result && result.ok) await afterClaimSuccess();
   return { ok: !!(result && result.ok), display };
 });
-ipcMain.on('qf-license-open', (event, target) => {
+trustedOn('qf-license-open', (event, target) => {
   openExtPage(target).catch(() => {});
   if (aboutWin && !aboutWin.isDestroyed()) aboutWin.close();
 });
@@ -1873,7 +2277,7 @@ async function checkAdminStatus() {
     broadcastAdmin();
   } catch (e) { /* 安静忽略 */ }
 }
-ipcMain.on('qf-admin-open', async () => {
+trustedOn('qf-admin-open', async () => {
   if (!view || view.webContents.isDestroyed()) return;
   showView('console');
   try {
@@ -1896,11 +2300,13 @@ function showClassified(k, fromKey) {
 function createSocialView(key) {
   if (socialViews[key] || !win || !consoleSes) return socialViews[key];
   const v = new WebContentsView({
-    webPreferences: { session: consoleSes, contextIsolation: true, sandbox: true, backgroundThrottling: false }
+    webPreferences: { session: consoleSes, contextIsolation: true, sandbox: true, backgroundThrottling: false,
+      preload: path.join(__dirname, 'console-preload.js') }
   });
   v.setBackgroundColor(contentBg()); // 未加载完先垫主题底色，不露白屏
   win.contentView.addChildView(v);
   socialViews[key] = v;
+  viewRegistry.register('social:' + key, v, { parent: win.contentView }); // S-001
   viewMgr.markCreated(key);
   const wc = v.webContents;
   wc.setWindowOpenHandler(({ url }) => {
@@ -1962,11 +2368,13 @@ async function transplantSessionToExt() {
 function createHomeView() {
   if (homeView || !win || !consoleSes) return homeView;
   const v = new WebContentsView({
-    webPreferences: { session: consoleSes, contextIsolation: true, sandbox: true, backgroundThrottling: false }
+    webPreferences: { session: consoleSes, contextIsolation: true, sandbox: true, backgroundThrottling: false,
+      preload: path.join(__dirname, 'console-preload.js') }
   });
   v.setBackgroundColor(contentBg());
   win.contentView.addChildView(v);
   homeView = v;
+  viewRegistry.register('home', v, { parent: win.contentView }); // S-001
   viewMgr.markCreated('home');
   const wc = v.webContents;
   wc.setWindowOpenHandler(({ url }) => {
@@ -2021,6 +2429,7 @@ function ensureExtBarView(title) {
     }
   });
   win.contentView.addChildView(extBarView);
+  viewRegistry.register('extBar', extBarView, { parent: win.contentView }); // S-001
   extBarView.webContents.loadFile(path.join(__dirname, 'ext-bar.html'), { query: { t: currentTheme(), title } });
   layout();
   return extBarView;
@@ -2052,7 +2461,7 @@ async function openExtPage(target) {
   await loadHomeView(def().url);
   if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); }
 }
-ipcMain.on('qf-extbar-back', async () => {
+trustedOn('qf-extbar-back', async () => {
   const toGate = extReturnGate && !!gateDecision;
   const recheck = extReturnRecheck;
   browsingExt = false;
@@ -2140,6 +2549,7 @@ function createDevicesView() {
   v.setBackgroundColor(themeBg());
   win.contentView.addChildView(v);
   devicesView = v;
+  viewRegistry.register('devices', v, { parent: win.contentView }); // S-001
   viewMgr.markCreated('devices');
   const wc = v.webContents;
   wc.setWindowOpenHandler(() => ({ action: 'deny' })); // 本地页不许开新窗
@@ -2164,6 +2574,7 @@ function createSessionView() {
   v.setBackgroundColor(contentBg());
   win.contentView.addChildView(v);
   sessionView = v;
+  viewRegistry.register('session', v, { parent: win.contentView }); // S-001
   viewMgr.markCreated('session');
   const wc = v.webContents;
   wc.setWindowOpenHandler(({ url }) => {
@@ -2210,6 +2621,7 @@ function ensureSessionBarView(title, modeLabel) {
     }
   });
   win.contentView.addChildView(sessionBarView);
+  viewRegistry.register('sessionBar', sessionBarView, { parent: win.contentView }); // S-001
   sessionBarView.webContents.loadFile(path.join(__dirname, 'session-bar.html'), {
     query: { t: currentTheme(), title: title || '', mode: modeLabel || '' }
   });
@@ -2226,6 +2638,13 @@ function openSession(nodeId, name, mode) {
   if (!url) return;
   if (browsingExt) { browsingExt = false; extReturnGate = false; extReturnRecheck = false; }
   sessionCtx = { nodeId: devicesMod.bareNodeId(nodeId), name: String(name || ''), mode, url };
+  // RC-03/07/08/09/10：会话绑定（sessionId 取票据会话 id，agentId 取
+  // 被控端节点 id）；绑定失败只记 bootLog，不阻塞开会话。
+  try {
+    const sid = reconnectTicketStore.getSessionId();
+    if (sid) qfProtocol.bindSession({ sessionId: sid, agentId: sessionCtx.nodeId });
+    else bootLog('qfprotocol.bind-skip', 'no-session-id');
+  } catch (e) { bootLog('qfprotocol.bind-throw', e && e.message || String(e)); }
   createSessionView();
   ensureSessionBarView(sessionCtx.name || '远程会话', devicesMod.MODE_LABELS[mode] || '');
   viewMgr.switchTo('session');
@@ -2241,6 +2660,8 @@ function openSession(nodeId, name, mode) {
 
 // 断开会话并返回：卸载会话页（relay 随页关闭真正断开），回设备页。
 function closeSession() {
+  // RC-03/07/08/09/10：会话解绑（停探针、尝试结束录制 best-effort、清绑定）。
+  try { qfProtocol.unbindSession('session-close'); } catch (e) { /* ignore */ }
   sessionCtx = null;
   if (sessionView && !sessionView.webContents.isDestroyed()) {
     try { sessionView.webContents.loadURL('about:blank'); } catch (e) { /* ignore */ }
@@ -2283,16 +2704,18 @@ async function fetchDevicesModel() {
   } catch (e) { return { ok: false, reason: 'probe-exec-failed' }; }
   return { ok: true, model: devicesMod.normalizeNodes(raw.nodes, raw.meshes) };
 }
-ipcMain.handle('qf-devices-list', () => fetchDevicesModel());
-ipcMain.on('qf-devices-open', (event, payload) => {
+trustedHandle('qf-devices-list', () => fetchDevicesModel());
+trustedOn('qf-devices-open', (event, payload) => {
   if (!payload || !payload.nodeId) return;
   openSession(payload.nodeId, payload.name, payload.mode);
 });
-ipcMain.on('qf-sessionbar-back', () => closeSession());
+trustedOn('qf-sessionbar-back', () => closeSession());
 
 // 预加载：登录成功后空闲分批创建（步间 1200ms），只建不切，
 // 用户点击时多半已是加载完成的登录态页面。
 function schedulePreload() {
+  // D-06 安全模式：不预加载社交视图（好友/聊天/论坛）。
+  if (safeMode) return;
   if (PREVIEW || preloadTimer) return;
   const step = () => {
     preloadTimer = null;
@@ -2395,7 +2818,8 @@ function openAbout() {
     resizable: false,
     center: true,
     title: '关于 QFRemote',
-    backgroundColor: themeBg(),
+    backgroundColor: windowBgColor(),
+    backgroundMaterial: windowBackgroundMaterial(),
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'about-preload.js'),
@@ -2407,7 +2831,8 @@ function openAbout() {
   aboutWin.loadFile(path.join(__dirname, 'about.html'), {
     query: { v: app.getVersion(), d: BUILD_INFO.buildDate || '—', u: CONSOLE_URL, t: currentTheme() }
   });
-  aboutWin.on('closed', () => { aboutWin = null; });
+  viewRegistry.register('about', aboutWin, { kind: 'window' }); // S-001
+  aboutWin.on('closed', () => { viewRegistry.unregister('about'); aboutWin = null; });
 }
 
 // ---------- 预览截图（开发自检用，产物由外部脚本拼版） ----------
@@ -2490,7 +2915,7 @@ async function captureSplashPreview() {
 }
 
 // ---------- 工具栏 IPC ----------
-ipcMain.on('qf-nav', (event, action) => {
+trustedOn('qf-nav', (event, action) => {
   if (!view) return;
   const wc = activeWc() || view.webContents;
   switch (action) {
@@ -2515,39 +2940,52 @@ ipcMain.on('qf-nav', (event, action) => {
   }
 });
 
-ipcMain.on('qf-win', (event, action) => {
+trustedOn('qf-win', (event, action) => {
   if (!win) return;
   if (action === 'min') win.minimize();
   else if (action === 'max') { win.isMaximized() ? win.unmaximize() : win.maximize(); }
   else if (action === 'close') win.close();
 });
 
-ipcMain.handle('qf-autolaunch-get', () => {
+trustedHandle('qf-autolaunch-get', () => {
   try { return app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
 });
-ipcMain.on('qf-autolaunch-set', (event, on) => {
+trustedOn('qf-autolaunch-set', (event, on) => {
   try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { bootLog('autolaunch.set-failed', e && e.message || String(e)); }
 });
 
-ipcMain.handle('qf-version', () => app.getVersion());
-ipcMain.handle('qf-ui-state', () => ({
+trustedHandle('qf-version', () => app.getVersion());
+trustedHandle('qf-ui-state', () => ({
   zoomPercent: Math.round(currentZoom() * 100),
   fullScreen: win ? win.isFullScreen() : false,
   alwaysOnTop: win ? win.isAlwaysOnTop() : false,
   theme: currentTheme(),
+  // W1：工具栏冷启动要一次拿到 mode＋resolved，不能只靠 ?t=（只含 resolved）。
+  themeMode: currentThemeMode(),
+  themeResolved: currentTheme(),
   probe: lastProbe
 }));
-ipcMain.on('qf-zoom', (event, action) => zoomStep(action));
-ipcMain.on('qf-fs-toggle', () => toggleFullscreen());
-ipcMain.on('qf-top-toggle', () => toggleTop());
+// P0-2：控制台页初次加载同步主题（只读：mode＋resolved，无任何设置写操作）。
+trustedHandle('qf-theme-state-get', () => ({ mode: currentThemeMode(), resolved: currentTheme() }));
+trustedOn('qf-zoom', (event, action) => zoomStep(action));
+trustedOn('qf-fs-toggle', () => toggleFullscreen());
+trustedOn('qf-top-toggle', () => toggleTop());
 
-// ---------- 主题切换 ----------
-ipcMain.on('qf-theme-toggle', () => {
-  const next = currentTheme() === 'dark' ? 'blue' : 'dark';
-  settings.theme = next;
-  saveSettings();
-  if (win && !win.isDestroyed()) win.setBackgroundColor(themeBg());
-  // W-32：全部 WebContentsView 统一改底色＋发状态，不只发状态等各页自己换肤。
+// ---------- 主题切换（三态：跟随系统 → 浅色 → 深色 → 跟随系统，W1 定夺） ----------
+// applyThemeBroadcast：重算解析主题后统一落地——全部 BrowserWindow 改底色
+// （W9 开关打开时走透明底）、全部 WebContentsView 改底色、向全部 webContents
+// 发 resolved（qf-theme-state，内容页只认识 dark/blue）＋向工具栏发 mode
+// （qf-theme-mode {mode, resolved}，工具栏三态按钮要区分“跟随系统且深色”
+// 与“手动深色”）。广播走 webContents.getAllWebContents() 去重，不再手写
+// 视图清单（旧清单会漏 about/lock 独立窗口与 splash 存活态）。
+function applyThemeBroadcast() {
+  const resolved = currentTheme();
+  const mode = currentThemeMode();
+  if (win && !win.isDestroyed()) win.setBackgroundColor(windowBgColor());
+  for (const w of BrowserWindow.getAllWindows()) {
+    try { if (!w.isDestroyed()) w.setBackgroundColor(windowBgColor()); } catch (e) { /* ignore */ }
+  }
+  // W-32：全部 WebContentsView 统一改底色，不只发状态等各页自己换肤。
   const allViews = [];
   if (view) allViews.push(view);
   for (const k of Object.keys(socialViews)) if (socialViews[k]) allViews.push(socialViews[k]);
@@ -2559,18 +2997,84 @@ ipcMain.on('qf-theme-toggle', () => {
   if (extBarView) allViews.push(extBarView);
   for (const v of allViews) {
     try { v.setBackgroundColor(contentBg()); } catch (e) { /* ignore */ }
-    try { if (!v.webContents.isDestroyed()) v.webContents.send('qf-theme-state', next); } catch (e) { /* ignore */ }
   }
-  if (toolbarView) toolbarView.webContents.send('qf-theme-state', next);
-  if (aboutWin && !aboutWin.isDestroyed()) aboutWin.webContents.send('qf-theme-state', next);
-  if (lockWin && !lockWin.isDestroyed()) lockWin.webContents.send('qf-theme-state', next);
+  const seen = new Set();
+  for (const wc of webContents.getAllWebContents()) {
+    try {
+      if (!wc || wc.isDestroyed() || seen.has(wc.id)) continue;
+      seen.add(wc.id);
+      wc.send('qf-theme-state', resolved);
+      wc.send('qf-theme-mode', { mode, resolved });
+    } catch (e) { /* ignore */ }
+  }
   // 正停在断线页的话，立刻按新主题重画（不增加失败计数）
   if (offlineActive && view) showOfflinePage(true);
+}
+function cycleThemeMode() {
+  const mode = currentThemeMode();
+  const nextMode = mode === 'system' ? 'blue' : mode === 'blue' ? 'dark' : 'system';
+  settings.theme = nextMode;
+  saveSettings();
+  applyThemeBroadcast();
+}
+trustedOn('qf-theme-toggle', () => cycleThemeMode());
+// 系统深浅变化时，只有 mode 为 system（或无键）才跟随；手动 blue/dark 不动。
+// 注册一次（app ready 后），退出时移除，防热重载重复注册。
+let themeUpdatedRegistered = false;
+function registerThemeUpdatedListener() {
+  if (themeUpdatedRegistered) return;
+  themeUpdatedRegistered = true;
+  nativeTheme.on('updated', () => {
+    if (currentThemeMode() !== 'system') return;
+    applyThemeBroadcast();
+  });
+  app.once('will-quit', () => {
+    try { nativeTheme.removeAllListeners('updated'); } catch (e) { /* ignore */ }
+    themeUpdatedRegistered = false;
+  });
+}
+
+// ---------- 工具栏溢出菜单（W2 定夺＋死区定夺 A，2026-11-14，大肥鱼） ----------
+// DOM 下拉菜单在 52px 工具栏视图里会被裁掉（视图本身只有 52px 高，且 body
+// overflow:hidden），故溢出菜单走原生 Electron Menu（主进程建菜单、按钮位置
+// 弹出；键盘导航／Escape／点外部关闭均为原生行为）。渲染端（toolbar.html）
+// 量测溢出后决定进菜单的控件集合，点“更多”时把 id 清单＋按钮位置发过来；
+// 主进程只认白名单 id，标签与动作一律由主进程定，不信任渲染端传来的文案。
+// 菜单项顺序＝移入优先级（关于→论坛→注册→还原→截图→隐私锁→主题）。
+const OVERFLOW_MENU_ITEMS = {
+  aboutBtn: { label: '关于 QFRemote', run: () => openAbout() },
+  navForum: { label: '论坛', run: () => { if (view) showView('forum'); } },
+  registerBtn: { label: '注册新账号', run: () => { if (view) { showView('console'); view.webContents.loadURL(REGISTER_URL); } } },
+  zoomReset: { label: '重置缩放（100%）', run: () => zoomStep('reset') },
+  shotBtn: { label: '截图', run: () => doScreenshot() },
+  lockBtn: { label: '隐私锁', run: () => openLockWindow() }
+};
+trustedOn('qf-overflow-menu', (event, payload) => {
+  if (!win || win.isDestroyed()) return;
+  const p = payload || {};
+  const ids = Array.isArray(p.items)
+    ? p.items.filter((id) => id === 'themeBtn' || Object.prototype.hasOwnProperty.call(OVERFLOW_MENU_ITEMS, id))
+    : [];
+  if (ids.length === 0) return;
+  // 主题项标签按当前档动态化（写下一档动作）：跟随系统→切浅色，浅色→切深色，深色→切跟随系统。
+  const mode = currentThemeMode();
+  const themeLabel = mode === 'system' ? '切换主题：切到浅色' : mode === 'blue' ? '切换主题：切到深色' : '切换主题：切到跟随系统';
+  const template = ids.map((id) => {
+    if (id === 'themeBtn') return { label: themeLabel, click: () => cycleThemeMode() };
+    return { label: OVERFLOW_MENU_ITEMS[id].label, click: () => OVERFLOW_MENU_ITEMS[id].run() };
+  });
+  const menu = Menu.buildFromTemplate(template);
+  const x = Number(p.x), y = Number(p.y);
+  // x/y 是工具栏视图内的按钮位置（视图在窗口 (0,0)，即窗口客户区坐标）；
+  // Menu.popup 有 window 时按窗口坐标定位（官方 Context Menu 指南同款写法）；
+  // A1 真机须核对菜单落在按钮正下方。
+  if (Number.isFinite(x) && Number.isFinite(y)) menu.popup({ window: win, x: Math.round(x), y: Math.round(y) });
+  else menu.popup({ window: win });
 });
 
 // ---------- 探活 ----------
-ipcMain.handle('qf-probe-get', () => lastProbe);
-ipcMain.handle('qf-probe-now', async () => runProbe());
+trustedHandle('qf-probe-get', () => lastProbe);
+trustedHandle('qf-probe-now', async () => runProbe());
 
 // ---------- 一键截图：当前控制台画面存到下载文件夹（工具栏按钮与 F9 共用） ----------
 async function doScreenshot() {
@@ -2594,7 +3098,7 @@ async function doScreenshot() {
     feedback(false, '截图失败：' + e.message);
   }
 }
-ipcMain.on('qf-screenshot', () => doScreenshot());
+trustedOn('qf-screenshot', () => doScreenshot());
 
 // ---------- 软件内更新（v1.0.3，机制在 update.js） ----------
 // 启动自动查一次 + 关于面板手动查；失败一律安静（只记状态，不弹任何框）。
@@ -2605,6 +3109,28 @@ ipcMain.on('qf-screenshot', () => doScreenshot());
 let updateState = { phase: 'idle', available: false, checkedAt: null, manifest: null, error: null, download: null };
 let updateChecking = false;
 let updateDownloading = false;
+// D-04/D-05：本机安装方式（启动时判定一次）：installed=安装版，portable=便携版
+// （install-mode.txt；无标记即老版本安装版）。便携版只提示＋下 ZIP，不走
+// 安装包、不进启动强更门、不转安装版。
+const updateInstallMode = updater.detectInstallMode(path.dirname(process.execPath));
+// D-05：更新设置（qf-settings.update）：enabled 总开关（默认开；只关自动
+// 检查，手动检查仍可用）、askBeforeDownload 下载前先问（默认关；开时下载
+// 须经一次显式确认）。集中管理环境变量 QFREMOTE_DISABLE_UPDATE=1 关全部
+// 检查（含手动），见 update.js。
+function updateSettings() {
+  const u = (settings && settings.update && typeof settings.update === 'object') ? settings.update : {};
+  return { enabled: u.enabled !== false, askBeforeDownload: u.askBeforeDownload === true };
+}
+// D-03：有无进行中的远程会话（sessionCtx 非空即会话中）。更新检查/下载/
+// 安装三道门共用这一判定。
+function hasActiveSession() { return !!sessionCtx; }
+let updateFailures = 0; // 连续自动检查失败次数（D-03 退避用；成功或手动检查清零）
+let updateRetryTimer = null;
+function scheduleAutoUpdateCheck(delayMs) {
+  if (updateRetryTimer) clearTimeout(updateRetryTimer);
+  if (!delayMs || delayMs <= 0) return;
+  updateRetryTimer = setTimeout(() => { updateRetryTimer = null; runUpdateCheck(5000, { auto: true }).catch(() => {}); }, delayMs);
+}
 // 待更新落盘：只存清单要点 + 发现时的本机版本，够启动门复核与强更页展示用
 function persistPendingUpdate(manifest) {
   if (!manifest || !manifest.version) return;
@@ -2648,14 +3174,31 @@ function broadcastUpdate() {
   }
 }
 let forceSnoozed = false; // W-12③：强更放行后，本会话内不再重复弹强更提醒
-async function runUpdateCheck(timeoutMs) {
+async function runUpdateCheck(timeoutMs, opts) {
   if (updateChecking) return updateState;
   if (forceSnoozed) return updateState;
+  const auto = !!(opts && opts.auto);
   updateChecking = true;
   updateState = Object.assign({}, updateState, { phase: 'checking', error: null });
   broadcastUpdate();
-  const r = await updater.checkForUpdate(app.getVersion(), timeoutMs);
+  // D-03/D-05：自动检查走三道跳过门（总开关关／会话中／计费连接），跳过不记
+  // 错误、不弹提醒，按退避间隔再约；手动检查（关于面板）只查清单，不下载，
+  // 跳过会话与计费两道门。
+  const r = await updater.checkForUpdate(app.getVersion(), timeoutMs, {
+    manual: !auto,
+    hasActiveSession: hasActiveSession,
+    updateEnabled: updateSettings().enabled
+  });
   updateChecking = false;
+  if (r.skipped) {
+    updateState = Object.assign({}, updateState, { phase: 'skipped', available: false, error: null, skipped: r.skipped });
+    broadcastUpdate();
+    // 总开关关闭时不再约（等用户手动开）；其余跳过按退避间隔再约。
+    if (auto && r.skipped !== 'disabled') {
+      scheduleAutoUpdateCheck(updater.nextRetryDelayMs({ activeSession: r.skipped === 'active-session', metered: r.skipped === 'metered', consecutiveFailures: 0 }));
+    }
+    return updateState;
+  }
   updateState = {
     phase: r.error ? 'error' : (r.available ? 'available' : 'latest'),
     available: r.available,
@@ -2668,14 +3211,44 @@ async function runUpdateCheck(timeoutMs) {
   // 本会话内查到新版也只落盘 + 提醒，绝不在运行中转强制——强制只在启动门执行。
   if (r.available && r.manifest) persistPendingUpdate(r.manifest);
   else if (!r.error) dropStalePending();
+  // D-03：失败退避——自动检查连续失败时 30 分钟后再约，不立即反复查；
+  // 成功或手动检查清零。
+  if (r.error) {
+    updateFailures++;
+    if (auto) scheduleAutoUpdateCheck(updater.nextRetryDelayMs({ consecutiveFailures: updateFailures }));
+  } else updateFailures = 0;
   broadcastUpdate();
   return updateState;
 }
-ipcMain.handle('qf-update-get', () => updateState);
-ipcMain.handle('qf-update-check', async () => runUpdateCheck(8000));
-ipcMain.on('qf-update-download', async () => {
+trustedHandle('qf-update-get', () => Object.assign({}, updateState, { installMode: updateInstallMode, updateSettings: updateSettings() }));
+trustedHandle('qf-update-check', async () => runUpdateCheck(8000));
+trustedHandle('qf-update-settings-get', () => ({ installMode: updateInstallMode, policy: updater.getUpdatePolicy(updateInstallMode, updateSettings()), settings: updateSettings() }));
+trustedHandle('qf-update-settings-set', (event, patch) => {
+  const p = (patch && typeof patch === 'object') ? patch : {};
+  if (!settings.update || typeof settings.update !== 'object') settings.update = {};
+  if (typeof p.enabled === 'boolean') settings.update.enabled = p.enabled;
+  if (typeof p.askBeforeDownload === 'boolean') settings.update.askBeforeDownload = p.askBeforeDownload;
+  saveSettings();
+  return updateSettings();
+});
+trustedOn('qf-update-download', async (event, opts) => {
   if (updateDownloading || !updateState.manifest) return;
   updateDownloading = true;
+  // D-03：会话中不下载（update.js downloadUpdate 里另有同一道门）。
+  if (hasActiveSession()) {
+    updateDownloading = false;
+    updateState = Object.assign({}, updateState, { phase: 'download-failed', error: '有进行中的远程会话，暂不下载更新。请先结束会话再下载。' });
+    broadcastUpdate();
+    return;
+  }
+  // D-05：下载前先问——开时第一次点只进确认态，等用户再点一次确认才真下。
+  const policy = updater.getUpdatePolicy(updateInstallMode, updateSettings());
+  if (policy.askBeforeDownload && !(opts && opts.confirmed)) {
+    updateDownloading = false;
+    updateState = Object.assign({}, updateState, { phase: 'confirm-download', error: null });
+    broadcastUpdate();
+    return;
+  }
   // 下载中显式置 downloading 阶段并广播：关于窗据此禁用按钮、显示进度条与百分比，
   // 不再只靠 progress 事件刷文本（无事件间隙时界面像卡住）。
   updateState = Object.assign({}, updateState, { phase: 'downloading', error: null, percent: 0 });
@@ -2685,10 +3258,11 @@ ipcMain.on('qf-update-download', async () => {
     if (aboutWin && !aboutWin.isDestroyed()) aboutWin.webContents.send('qf-update-progress', p);
   };
   try {
-    const r = await updater.downloadUpdate(updateState.manifest, app.getPath('downloads'), sendProgress);
+    // D-04/D-05：便携版下 ZIP（kind='portable'），安装版下安装包。
+    const r = await updater.downloadUpdate(updateState.manifest, app.getPath('downloads'), sendProgress, { kind: policy.downloadKind === 'portable-zip' ? 'portable' : 'installer', hasActiveSession: hasActiveSession() });
     updateState = Object.assign({}, updateState, {
       phase: 'downloaded',
-      download: { file: r.file, name: path.basename(r.file), sha256: r.sha256, size: r.size }
+      download: { file: r.file, name: path.basename(r.file), sha256: r.sha256, size: r.size, kind: policy.downloadKind }
     });
   } catch (e) {
     updateState = Object.assign({}, updateState, { phase: 'download-failed', error: e.message });
@@ -2709,8 +3283,19 @@ function quitForInstaller() {
   try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
   try { app.exit(0); } catch (e) { try { app.quit(); } catch (e2) { /* ignore */ } }
 }
-ipcMain.on('qf-update-open', () => {
+trustedOn('qf-update-open', () => {
   if (!updateState.download || !updateState.download.file) return;
+  // D-03：会话中不安装（装了要退应用，会断会话）。
+  if (hasActiveSession()) {
+    updateState = Object.assign({}, updateState, { phase: 'download-failed', error: '有进行中的远程会话，暂不安装更新。请先结束会话再安装。' });
+    broadcastUpdate();
+    return;
+  }
+  // D-04：便携版下的 ZIP 不安装，只打开所在文件夹，用户自行解压覆盖。
+  if (updateInstallMode === 'portable' || (updateState.download.kind && updateState.download.kind === 'portable-zip')) {
+    try { shell.showItemInFolder(updateState.download.file); } catch (e) { /* ignore */ }
+    return;
+  }
   let launched = null;
   try { launched = launchDownloadedInstaller(updateState.download.file); } catch (e) { launched = null; }
   if (!launched) return;
@@ -2750,7 +3335,8 @@ function openForceWindow(manifest) {
       resizable: false,
       center: true,
       title: 'QFRemote 更新',
-      backgroundColor: themeBg(),
+      backgroundColor: windowBgColor(),
+      backgroundMaterial: windowBackgroundMaterial(),
       icon: path.join(__dirname, 'build', 'icon.png'),
       webPreferences: {
         preload: path.join(__dirname, 'force-preload.js'),
@@ -2766,7 +3352,8 @@ function openForceWindow(manifest) {
         t: currentTheme()
       }
     });
-    forceWin.on('closed', () => { forceWin = null; });
+    viewRegistry.register('force', forceWin, { kind: 'window' }); // S-001
+    forceWin.on('closed', () => { viewRegistry.unregister('force'); forceWin = null; });
     // W-12④：强更窗 Alt+F4/任务栏关闭视为放行（phase 未到 downloaded/
     // installing 时），绝不直接 app.quit() 把人锁在窗外。
     forceWin.on('close', () => {
@@ -2799,8 +3386,8 @@ function releaseForceWindow() {
   if (!win || win.isDestroyed()) createWindow();
   else { try { if (win.isMinimized()) win.restore(); if (!win.isVisible()) win.show(); win.focus(); } catch (e) { /* ignore */ } }
 }
-ipcMain.handle('qf-force-get', () => forceState);
-ipcMain.on('qf-force-download', async () => {
+trustedHandle('qf-force-get', () => forceState);
+trustedOn('qf-force-download', async () => {
   if (forceDownloading || !forceState.manifest) return;
   forceDownloading = true;
   forceState = Object.assign({}, forceState, { phase: 'downloading', error: null, percent: 0 });
@@ -2820,7 +3407,7 @@ ipcMain.on('qf-force-download', async () => {
   forceDownloading = false;
   sendForceState();
 });
-ipcMain.on('qf-force-open', () => {
+trustedOn('qf-force-open', () => {
   if (forceState.download && forceState.download.file) {
     let launched = null;
     try { launched = launchDownloadedInstaller(forceState.download.file); } catch (e) { launched = null; }
@@ -2834,11 +3421,16 @@ ipcMain.on('qf-force-open', () => {
 // 强更失败放行（M2 线追加，站长 2026-10-25 13:06 令）：强更下载失败时用户可点
 // 「先进入软件」——关掉强更窗、按正常流程建主窗口，不许把人锁死在更新窗里。
 // pendingUpdate 不清（下次启动仍走启动门再提醒），本会话不再重复拦截。
-ipcMain.on('qf-force-release', () => { releaseForceWindow(); });
+trustedOn('qf-force-release', () => { releaseForceWindow(); });
 // 启动门：返回 true 表示强更页已接管（不要再建主窗口）
 async function startupUpdateGate() {
   bootLog('startupUpdateGate.begin');
   dropStalePending(); // 新版装好后首启：待更版本已 <= 本机版本，自动清除
+  // （须在 D-05 跳过之前：清过期待更只是本地状态清理，不取清单、不检查。）
+  // D-05：总开关关时启动门不取清单（总开关=不检查）；便携版不进启动强更门
+  // （便携版只提示＋下 ZIP，永不静默装、不转安装版）。
+  if (!updateSettings().enabled || process.env.QFREMOTE_DISABLE_UPDATE === '1') { bootLog('startupUpdateGate.disabled'); return false; }
+  if (updateInstallMode === 'portable') { bootLog('startupUpdateGate.portable-skip'); return false; }
   let manifest = null;
   try {
     // W-02③：fetchManifest 外再包一层 Promise.race 硬超时——内部 Promise
@@ -3164,7 +3756,7 @@ function sha256File(p) {
 // 版本对齐是正确行为（强制对齐：旧应用未必理解新 LEA 协议）。
 // 三文件约 600KB 级，哈希毫秒级，每启一次不构成负担。LEA_DEGRADED
 // 标记与服务注册检查保留不动。
-function leaServiceInstalled() {
+function leaServiceInstalled(quiet) {
   try {
     const pf = process.env.ProgramFiles || '';
     if (!pf) return false;
@@ -3176,7 +3768,7 @@ function leaServiceInstalled() {
     if (pd && fs.existsSync(path.join(pd, 'QFR', 'LEA', 'LEA_DEGRADED'))) return false;
     try {
       const cp = require('child_process');
-      const r = cp.spawnSync('sc.exe', ['query', 'QFRLEA'], { windowsHide: true, timeout: 10000, encoding: 'utf8' });
+      const r = cp.spawnSync(sysPrograms.scPath(), ['query', 'QFRLEA'], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
       if (!r || r.status !== 0) return false;
     } catch (e) { return false; }
     for (const name of ['QFRLEA.exe', 'qf-lea-client.exe', 'QFUserHelper.exe']) {
@@ -3185,19 +3777,171 @@ function leaServiceInstalled() {
       const live = path.join(dir, name);
       const liveHash = sha256File(live);
       if (!liveHash) {
-        if (fs.existsSync(live)) bootLog('system-services.lea-hash-read-error', name);
-        else bootLog('system-services.lea-hash-mismatch', name);
+        // r13 minor ①：quiet 轮询时不记行（见 scheduleLeaBackfillRecheck）。
+        if (!quiet) {
+          if (fs.existsSync(live)) bootLog('system-services.lea-hash-read-error', name);
+          else bootLog('system-services.lea-hash-mismatch', name);
+        }
         return false;
       }
       // DS diff 复核问题 A：随包载荷存在但读失败（杀毒瞬锁等）时 sha256File
       // 返 ''，若直接比对会误报 mismatch 并触发补装；单记一行并跳过该件
       // （与载荷缺失同口径），其余件照常比对。
       const pkgHash = sha256File(pkg);
-      if (!pkgHash) { bootLog('system-services.lea-pkg-hash-read-error', name); continue; }
-      if (liveHash !== pkgHash) { bootLog('system-services.lea-hash-mismatch', name); return false; }
+      if (!pkgHash) { if (!quiet) bootLog('system-services.lea-pkg-hash-read-error', name); continue; }
+      if (liveHash !== pkgHash) { if (!quiet) bootLog('system-services.lea-hash-mismatch', name); return false; }
     }
     return true;
   } catch (e) { return false; }
+}
+// ---------- A1：LEA 健康检查（登录时） ----------
+// 首装由安装器完成（QFRLEA.exe --install-service）；登录只做健康检查，
+// 不再每版本弹 UAC 装 LEA。健康＝服务已注册且 RUNNING、注册表版本＝包内
+// version.txt、关键文件哈希与随包载荷一致、无 PendingRepair／LEA_DEGRADED。
+// 读注册表用 reg.exe query（只读、无需提权）；服务状态用 sc.exe query。
+function leaRegistryValue(name) {
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync(sysPrograms.regPath(), ['query', 'HKLM\\SOFTWARE\\QFR\\LEA', '/v', name], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
+    if (!r || r.status !== 0 || !r.stdout) return '';
+    const m = String(r.stdout).match(/REG_SZ\s+(.+?)\s*$/m);
+    return m ? m[1].trim() : '';
+  } catch (e) { return ''; }
+}
+function leaServiceState() {
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync(sysPrograms.scPath(), ['query', 'QFRLEA'], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
+    if (!r || r.status !== 0 || !r.stdout) return '';
+    const m = String(r.stdout).match(/STATE\s*:\s*\d+\s+(\w+)/);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+function leaHealthCheck() {
+  const reasons = [];
+  let registryVersion = '';
+  let packagedVersion = '';
+  try {
+    registryVersion = leaRegistryValue('version');
+    const installState = leaRegistryValue('installState');
+    if (installState === 'PendingRepair') reasons.push('pending-repair');
+    const pd = process.env.ProgramData || '';
+    if (pd && fs.existsSync(path.join(pd, 'QFR', 'LEA', 'LEA_DEGRADED'))) reasons.push('degraded-marker');
+    const state = leaServiceState();
+    if (!state) reasons.push('service-not-registered');
+    else if (state !== 'RUNNING') reasons.push('service-not-running:' + state);
+    const vf = leaPayloadPath('version.txt');
+    if (vf && fs.existsSync(vf)) {
+      try { packagedVersion = String(fs.readFileSync(vf, 'utf8')).split(/\r?\n/)[0].trim(); } catch (e) { packagedVersion = ''; }
+    }
+    if (packagedVersion && registryVersion && packagedVersion !== registryVersion) reasons.push('version-mismatch:reg=' + registryVersion + ',pkg=' + packagedVersion);
+    if (!registryVersion) reasons.push('registry-version-missing');
+    // 关键文件哈希与注册检查（与 leaServiceInstalled 同款；随包载荷缺失时跳过）。
+    if (!leaServiceInstalled(true)) reasons.push('files-or-registration');
+  } catch (e) { reasons.push('check-throw:' + (e && e.message || String(e))); }
+  return {
+    healthy: reasons.length === 0,
+    pendingRepair: reasons.indexOf('pending-repair') >= 0 || reasons.indexOf('degraded-marker') >= 0,
+    reasons, registryVersion, packagedVersion
+  };
+}
+// A1 登录修复：仅不健康时触发。
+// 顺序：① SYSTEM helper 命名管道（零 UAC）——现 helper 只有 heal-agent／
+// install-lock 两个命令、无 LEA 修复命令，故本步目前恒为 unavailable，
+// 直接记日志走 ②（helper 补 repair-lea 命令＋QFRLEA.exe 路径规则后此处
+// 自动生效；补命令是特权服务端改动，须另行评审，不在本轮改 helper）；
+// ② 一次 UAC 调 QFRLEA.exe --install-service --repair（先验白名单哈希，
+// 校验不过绝不拉起）；失败则 UI 可见提示＋60 秒后自动重试一次；仍失败
+// 留 PendingRepair，下次登录再试。
+let leaRepairRunning = false;
+let leaRepairRetried = false;
+async function showLeaRepairFailure() {
+  const shownKey = 'lea-repair-failed';
+  if (lastHealShownKey === shownKey) return;
+  showHealFailure('本地代理服务修复失败：请重新运行安装包，或稍后重试；远程控制暂不可用。', shownKey);
+}
+async function repairLeaService() {
+  if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
+  if (leaRepairRunning) return { ok: false, reason: 'already-running' };
+  leaRepairRunning = true;
+  try {
+    const leaExe = leaPayloadPath('QFRLEA.exe');
+    if (!leaExe || !fs.existsSync(leaExe)) { bootLog('lea-repair.no-payload', ''); return { ok: false, reason: 'no-payload' }; }
+    // ① helper（零 UAC）：无 repair-lea 命令即 unavailable，不阻塞。
+    if (sysHelper.COMMANDS.indexOf('repair-lea') < 0) {
+      bootLog('lea-repair.helper-unavailable', 'no-repair-lea-command');
+    } else {
+      try {
+        const hr = await sysHelper.callHelper('repair-lea', null, { path: leaExe });
+        if (hr && hr.ok) {
+          const h = leaHealthCheck();
+          if (h.healthy) { bootLog('lea-repair.helper-ok', ''); return { ok: true, reason: 'helper' }; }
+        }
+        bootLog('lea-repair.helper-failed', (hr && hr.code) || 'unknown');
+      } catch (e) { bootLog('lea-repair.helper-throw', e && e.message || String(e)); }
+    }
+    // ② 一次 UAC：先验白名单哈希，校验不过绝不拉起。
+    try {
+      const wl = sysHelper.loadWhitelist({ resourcesPath: process.resourcesPath || '', dirname: path.join(__dirname, 'syshelper') });
+      if (!sysHelper.verifyFileHash(leaExe, wl)) {
+        bootLog('lea-repair.hash-mismatch', 'QFRLEA.exe');
+        return { ok: false, reason: 'hash-mismatch' };
+      }
+    } catch (e) {
+      bootLog('lea-repair.whitelist-throw', e && e.message || String(e));
+      return { ok: false, reason: 'hash-mismatch' };
+    }
+    const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+    const inner = "Start-Process -FilePath " + q(leaExe) + " -ArgumentList '--install-service','--repair' -Verb RunAs -WindowStyle Hidden";
+    const childProcess = require('child_process');
+    let child = null;
+    try {
+      child = childProcess.spawn(sysPrograms.powershellPath(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner], { windowsHide: true, cwd: sysPrograms.safeCwd() });
+    } catch (e) {
+      bootLog('lea-repair.spawn-throw', e && e.message || String(e));
+      showLeaRepairFailure();
+      if (!leaRepairRetried) {
+        leaRepairRetried = true;
+        setTimeout(() => { repairLeaService().catch(() => {}); }, 60000);
+      }
+      return { ok: false, reason: 'repair-failed' };
+    }
+    if (!child || typeof child.on !== 'function' || !child.stdout || !child.stderr) {
+      bootLog('lea-repair.launched-unobserved', '');
+      scheduleLeaBackfillRecheck();
+      return { ok: true, reason: 'launched-unobserved' };
+    }
+    const r = await waitInstallResult(child, INSTALL_WAIT_MS);
+    if (r.timedOut) { bootLog('lea-repair.timeout', ''); }
+    else if (r.error) { bootLog('lea-repair.launch-failed', String((r.error && r.error.message) || r.error)); }
+    else if (r.code !== 0) { bootLog('lea-repair.install-failed', 'code=' + r.code); }
+    else bootLog('lea-repair.launched', '');
+    // UAC 派发后真修复须等用户点确认（r13 minor ① 同款时序）：不立即复核，
+    // 记 pending＋延迟重评；成功记 lea-installed，耗尽记 lea-degraded。
+    bootLog('lea-repair.pending', '');
+    scheduleLeaBackfillRecheck();
+    if (r.timedOut || r.error || r.code !== 0) {
+      showLeaRepairFailure();
+      if (!leaRepairRetried) {
+        leaRepairRetried = true;
+        setTimeout(() => { repairLeaService().catch(() => {}); }, 60000);
+      }
+      return { ok: false, reason: 'repair-failed' };
+    }
+    return { ok: true, reason: 'launched' };
+  } finally {
+    leaRepairRunning = false;
+  }
+}
+// A1 登录健康检查入口（console 分支登录成功后调用，非阻塞）：
+// 健康即什么都不做；不健康才走一次修复（repairLeaService）。
+async function maybeCheckLeaHealth() {
+  if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
+  let h;
+  try { h = leaHealthCheck(); } catch (e) { bootLog('lea-health.throw', e && e.message || String(e)); return { ok: false, reason: 'throw' }; }
+  if (h.healthy) { bootLog('lea-health.ok', h.registryVersion || ''); return { ok: true, reason: 'healthy' }; }
+  bootLog('lea-health.unhealthy', h.reasons.join(';'));
+  return repairLeaService();
 }
 // ---------- LEA 本地代理：登录／登出／换号通知（H07／pkg4 DS-2） ----------
 // 绑定跟随当前登录账号：登录成功（processAuthPage 的 console 分支）调
@@ -3206,14 +3950,20 @@ function leaServiceInstalled() {
 // （服务只认安装目录下的客户端二进制，见 QFRLEA.c internal_caller_allowed）。
 // 全程 best-effort：LEA 未装／服务未起／服务端拒绝都不阻塞登录登出，
 // 只记 bootLog；换号后绑定留在 PENDING，等站长授权或下次登录重取票据。
+// H1（2026-11-15，v6 必修，FI 调查结论 19:42）：候选顺序改优先自家目录——
+// ① 运行目录旁 LEA\（process.execPath 旁，即当前安装目录），② __dirname\lea，
+// ③ %ProgramFiles%\QFR\LEA（旧全机安装残留，只作最后兜底）。
+// 旧顺序先查 ProgramFiles，升级残留的旧版客户端被拉起即 caller-not-allowed
+// （QFRLEA 只认安装目录下的客户端），本地绑定激活不了。只调顺序，
+// 存在性检查与返回逻辑不变；旧目录独存时仍能兜底找到。
 let leaLastNotifiedAccount = '';
 function leaClientExePath() {
   try {
     const pf = process.env.ProgramFiles || '';
     const cands = [];
-    if (pf) cands.push(path.join(pf, 'QFR', 'LEA', 'qf-lea-client.exe'));
     try { cands.push(path.join(path.dirname(process.execPath), 'LEA', 'qf-lea-client.exe')); } catch (e) { /* ignore */ }
     cands.push(path.join(__dirname, 'lea', 'qf-lea-client.exe'));
+    if (pf) cands.push(path.join(pf, 'QFR', 'LEA', 'qf-lea-client.exe'));
     for (const c of cands) { if (fs.existsSync(c)) return c; }
   } catch (e) { /* ignore */ }
   return null;
@@ -3230,6 +3980,100 @@ function leaNotifyInternal(obj) {
     try { return JSON.parse(lines[lines.length - 1]); } catch (e) { return { ok: false, reason: 'bad-json' }; }
   } catch (e) { return { ok: false, reason: 'throw' }; }
 }
+/* C1：异步版内部命令（不冻结主进程）。deliver-ticket 要等 USH 做 CNG
+ * 签名＋一次 WinHTTP 服务端往返（QFRLEA 侧 30 秒预算），同步 spawnSync
+ * 会冻住主进程 30 秒，故自助绑定一律走异步版；超时即杀进程回 reason。
+ * 返回与同步版同形：QFRLEA 响应 JSON，或 { ok:false, reason }。 */
+function leaNotifyInternalAsync(obj, timeoutMs) {
+  const exe = leaClientExePath();
+  if (!exe) return Promise.resolve({ ok: false, reason: 'lea-client-missing' });
+  const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 35000;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let child;
+    try {
+      const cp = require('child_process');
+      child = cp.spawn(exe, ['--internal', JSON.stringify(obj)], { windowsHide: true });
+    } catch (e) { finish({ ok: false, reason: 'spawn-failed' }); return; }
+    let out = '';
+    const timer = setTimeout(() => { try { child.kill(); } catch (e) { /* ignore */ } finish({ ok: false, reason: 'timeout' }); }, timeout);
+    child.stdout.on('data', (d) => { out += String(d); if (out.length > 1024 * 1024) { try { child.kill(); } catch (e) { /* ignore */ } } });
+    child.stderr.on('data', () => { /* 内部命令不读 stderr */ });
+    child.on('error', () => { clearTimeout(timer); finish({ ok: false, reason: 'spawn-failed' }); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const lines = String(out || '').trim().split(/\r?\n/).filter(Boolean);
+      if (!lines.length) { finish({ ok: false, reason: 'empty-stdout' }); return; }
+      try { finish(JSON.parse(lines[lines.length - 1])); }
+      catch (e) { finish({ ok: false, reason: 'bad-json' }); }
+    });
+  });
+}
+/* C1：静默续期检查（登录成功后 best-effort 跑一次）。本机凭据在效且
+ * 剩余有效期 ≤7 天时，经 USH 续期 90 天；未链接／在效期还长／USH 不
+ * 可用时静默跳过，不打扰登录、不弹任何提示，只记 bootLog。 */
+async function maybeRenewSelfBind() {
+  try {
+    const st = await leaNotifyInternalAsync({ cmd: 'selfbind.status' }, 10000);
+    if (!st || st.ok !== true || !st.result || st.result.linked !== true) return;
+    const exp = st.result.expires_at;
+    if (typeof exp !== 'number' || exp - Date.now() > 7 * 24 * 3600 * 1000) return;
+    let deviceId = null;
+    try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
+    const r = await leaNotifyInternalAsync({ cmd: 'selfbind.renew', device_id: deviceId || '' }, 35000);
+    if (r && r.ok === true) bootLog('lea.selfbind-renew-ok');
+    else bootLog('lea.selfbind-renew-failed', (r && (r.code || r.reason)) || 'unknown');
+  } catch (e) { /* best-effort：续期失败不影响登录 */ }
+}
+/* C1：桌面桥 IPC（console-preload.js 的 window.qfLea 调这些）。
+ * 票据／挑战／nonce 只在内存里过一遍交 QFRLEA→USH；Key 明文永不经
+ * 此处（USH 直接调 complete，响应 data 里也不含明文）。 */
+trustedHandle('qf-lea-device-info', async () => {
+  let deviceId = null;
+  try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
+  return { ok: true, device_id: deviceId || '', device_name: os.hostname(), platform: 'windows' };
+});
+trustedHandle('qf-lea-selfbind-deliver', async (event, args) => {
+  try {
+    const a = (args && typeof args === 'object') ? args : {};
+    const ticket = String(a.ticket || '');
+    const challenge = String(a.challenge || '');
+    const accountId = String(a.account_id || '');
+    const deviceId = String(a.device_id || '');
+    const nonce = String(a.nonce || '');
+    const expiresAt = Number(a.expires_at);
+    if (!ticket.startsWith('sbt_') || !challenge || !accountId || !deviceId ||
+        !nonce || nonce.length < 8 || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+      return { ok: false, reason: 'bad-args' };
+    }
+    return await leaNotifyInternalAsync({
+      cmd: 'selfbind.deliver-ticket', ticket, challenge, account_id: accountId,
+      device_id: deviceId, nonce, device_name: String(a.device_name || ''),
+      platform: String(a.platform || 'windows'), expires_at: expiresAt,
+      server_base: String(a.server_base || ''),
+    }, 35000);
+  } catch (e) { return { ok: false, reason: 'throw' }; }
+});
+trustedHandle('qf-lea-ush-status', async () => {
+  try { return await leaNotifyInternalAsync({ cmd: 'selfbind.ush-status' }, 10000); }
+  catch (e) { return { ok: false, reason: 'throw' }; }
+});
+trustedHandle('qf-lea-selfbind-status', async () => {
+  try { return await leaNotifyInternalAsync({ cmd: 'selfbind.status' }, 10000); }
+  catch (e) { return { ok: false, reason: 'throw' }; }
+});
+trustedHandle('qf-lea-selfbind-renew', async (event, deviceId) => {
+  try {
+    const id = String(deviceId || '');
+    if (!id) return { ok: false, reason: 'bad-args' };
+    return await leaNotifyInternalAsync({ cmd: 'selfbind.renew', device_id: id }, 35000);
+  } catch (e) { return { ok: false, reason: 'throw' }; }
+});
+trustedHandle('qf-lea-selfbind-clear', async () => {
+  try { return await leaNotifyInternalAsync({ cmd: 'selfbind.clear-credential' }, 15000); }
+  catch (e) { return { ok: false, reason: 'throw' }; }
+});
 async function notifyLeaLogin(account) {
   try {
     if (!account || account === leaLastNotifiedAccount) return { ok: false, reason: 'skip' };
@@ -3307,6 +4151,8 @@ async function notifyLeaLogin(account) {
     }
     // H25：锁组件 device.json 跟随新账号（见 syncLockOwner）。
     try { await syncLockOwner(String(account)); } catch (e) { /* ignore */ }
+    // C1：登录成功后静默续期检查（best-effort，不阻塞登录返回）。
+    try { await maybeRenewSelfBind(); } catch (e) { /* ignore */ }
     return { ok: true };
   } catch (e) { bootLog('lea.login-notify-throw', (e && e.message) || String(e)); return { ok: false, reason: 'throw' }; }
 }
@@ -3422,8 +4268,8 @@ async function syncLockOwner(account) {
       const perFile = needUac.map((p) =>
         "$j = Get-Content " + q(p) + " -Raw | ConvertFrom-Json; $j.ownerUsername = " + q(account) + "; [IO.File]::WriteAllText(" + q(p) + ", ($j | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)));").join(' ');
       const inner = perFile + " Restart-Service -Name 'QFLockSvc' -ErrorAction SilentlyContinue";
-      cp.spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-        "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command'," + q(inner) + " -Verb RunAs -WindowStyle Hidden"], { windowsHide: true });
+      cp.spawn(sysPrograms.powershellPath(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "Start-Process -FilePath '" + sysPrograms.powershellPath() + "' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command'," + q(inner) + " -Verb RunAs -WindowStyle Hidden"], { windowsHide: true, cwd: sysPrograms.safeCwd() });
       bootLog('lea.lock-owner-uac', needUac.join(';'));
       // UAC 是异步的（用户要点允许），这里不阻塞登录；8 秒后重读校验，
       // 写上了记 uac-done，没写上记 uac-unconfirmed——下次登录再试一次。
@@ -3465,6 +4311,47 @@ function waitInstallResult(child, timeoutMs) {
   });
 }
 
+// r13 minor ①：backfill 复核 verdict 时序。UAC 提权是异步派发——外层
+// powershell 一 Start-Process -Verb RunAs 即退出，waitInstallResult 等到的
+// 只是派发完成；提权后的真安装（install-lea.ps1 停服／换件／重启）须等用户
+// 点 UAC 确认后才跑，实测约 30–60 秒（r12：14:08:46 开始、14:09:16 完成）。
+// 旧代码在 launched 后立即同步复核，必然撞上尚未替换的旧文件，记
+// mismatch＋degraded，本启 verdict 粘滞（r12 14:08:34 实证：backfill 发起
+// 后 1 秒又记一次 mismatch＋degraded，全程无 lea-installed 行）。
+// 改为延迟重评：launched 后只记 lea-backfill-pending，不立即判；用
+// setTimeout 链每 10 秒 quiet 复核一次（不记 mismatch 行，免刷屏），
+// 哈希一致即记 lea-installed，耗尽（默认 180 次 ≈ 30 分钟，覆盖 UAC 慢点
+// 与 install-lea.ps1 的 5s/15s/45s 重试退避）才记 lea-degraded。
+// 不以 LEA_DEGRADED 标记提前停表：轮询期内标记可能是 UAC 未确认前的旧标记
+// （install-lea.ps1 成功路径会清标记，启动时也会清旧标记），只以哈希复核为准。
+// 仍非阻塞（setTimeout 链，返回值与 launched 语义不变）；同启内只调度一次。
+let leaBackfillRecheckRunning = false;
+function scheduleLeaBackfillRecheck(intervalMs, maxAttempts) {
+  if (leaBackfillRecheckRunning) return false;
+  leaBackfillRecheckRunning = true;
+  const interval = (typeof intervalMs === 'number' && intervalMs > 0) ? intervalMs : 10000;
+  const max = (typeof maxAttempts === 'number' && maxAttempts > 0) ? maxAttempts : 180;
+  let attempts = 0;
+  const tick = () => {
+    attempts++;
+    let installed = false;
+    try { installed = leaServiceInstalled(true); } catch (e) { installed = false; }
+    if (installed) {
+      leaBackfillRecheckRunning = false;
+      bootLog('system-services.lea-installed', '');
+      return;
+    }
+    if (attempts >= max) {
+      leaBackfillRecheckRunning = false;
+      bootLog('system-services.lea-degraded', '');
+      return;
+    }
+    setTimeout(tick, interval);
+  };
+  setTimeout(tick, interval);
+  return true;
+}
+
 async function maybeInstallSystemServices(force) {
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
@@ -3503,17 +4390,17 @@ async function maybeInstallSystemServices(force) {
     bootLog('system-services.no-component', 'install-system-services.ps1');
     return { ok: false, reason: 'no-component' };
   }
-  let leaBackfill = false; // B-LEA：本轮是否为 LEA 升级补装（供结果日志打标）。
+  // A1：LEA 不再经本函数 UAC 补装（首装由安装器 QFRLEA.exe
+  // --install-service 完成；登录只做健康检查，见 maybeCheckLeaHealth）。
   if (lockServiceInstalled()) {
     // H25：锁组件已装也不盲返——ownerUsername 须跟随当前登录账号。
     const sync = await syncLockOwner(owner);
-    // B-LEA（3.0.0 升级补装）：锁已装≠LEA 已装。老版本升级上来的用户锁在、
-    // LEA 不在；此处若直接返 already-installed，install-system-services.ps1
-    // 永不拉起，LEA 永不补装（违反站长 13:44 定）。LEA 缺失／降级时不返回，
-    // 落到下面的白名单校验＋一次 UAC 拉起，由 install-system-services.ps1
-    // ③段补装 LEA（helper／锁重装是该脚本既有幂等分支）；LEA 齐全时才按原路返回。
-    // DS-R1 Q4 串行化：syncLockOwner 的 UAC 还在飞时不拉第二次 UAC——本轮
-    // defer（恢复每版本守门，下次登录再试；owner UAC 完成后 device.json 已
+    // A1（2026-11-13）：锁已装＋LEA 缺失时也不再拉 wrapper 补装——
+    // 首装 LEA 由安装器负责；本轮只记一行，由登录分支的健康检查
+    // （maybeCheckLeaHealth）走修复路径（helper→一次 UAC --repair）。
+    // wrapper 的 LEA 段仍在（锁未装时的一次 UAC 里顺带跑），但其内有
+    // A1 跳过守卫：安装器已装好且健康时直接跳过，不无谓停服。
+    // DS-R1 Q4 串行化：syncLockOwner 的 UAC 还在飞时本轮 defer（恢复每版本守门，下次登录再试；owner UAC 完成后 device.json 已
     // 是新账号，下次即走直接补装），避免两次 UAC 叠加与两个提权脚本并发改服务。
     if (!leaServiceInstalled()) {
       if (sync.uacDispatched) {
@@ -3524,8 +4411,12 @@ async function maybeInstallSystemServices(force) {
         bootLog('system-services.lea-backfill-deferred', 'owner-uac-pending');
         return { ok: false, reason: 'owner-uac-pending' };
       }
-      leaBackfill = true;
-      bootLog('system-services.lea-missing', 'backfill');
+      bootLog('system-services.lea-missing', 'health-check');
+      // A1：锁已装即返回（不再落到下面的 wrapper 拉起——LEA 补装已移出
+      // 本函数，见 maybeCheckLeaHealth／repairLeaService）。
+      const reason2 = sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : 'already-installed');
+      bootLog('system-services.already-installed', sync.changed ? 'owner-updated' : (sync.uacDispatched ? 'owner-uac-pending' : undefined));
+      return { ok: true, reason: reason2 };
     } else {
       // DS 第二轮 #3：直接写成功报 owner-updated；只发起了 UAC 报
       // owner-uac-pending（结果见 8 秒后校验日志），不谎报已更新。
@@ -3559,20 +4450,26 @@ async function maybeInstallSystemServices(force) {
     for (const f of [sysPs1, helperExe, installPs1, leaPs1]) {
       if (fs.existsSync(f) && !sysHelper.verifyFileHash(f, wl)) bad.push(path.basename(f));
     }
-    if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); if (leaBackfill) bootLog('system-services.lea-backfill-failed', 'hash-mismatch'); return { ok: false, reason: 'hash-mismatch' }; }
+    if (bad.length) { bootLog('system-services.hash-mismatch', bad.join(',')); return { ok: false, reason: 'hash-mismatch' }; }
     if (fs.existsSync(leaPs1) && wl && wl.files && typeof wl.files['install-lea.ps1'] === 'string') {
       leaScriptHash = wl.files['install-lea.ps1'];
     }
-  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); if (leaBackfill) bootLog('system-services.lea-backfill-failed', 'whitelist-throw'); return { ok: false, reason: 'hash-mismatch' }; }
+  } catch (e) { bootLog('system-services.whitelist-throw', e && e.message || String(e)); return { ok: false, reason: 'hash-mismatch' }; }
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
-  const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
+  // D-09：内嵌 Start-Process 的 -FilePath 同样用绝对路径（裸名劫持）。
+  const inner = "Start-Process -FilePath '" + sysPrograms.powershellPath() + "' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File'," +
     q(sysPs1) + ",'-Owner'," + q(owner) + ",'-HelperExe'," + q(helperExe) + ",'-LockDir'," + q(srcDir) +
     (packagedLeaDir ? ",'-LeaDir'," + q(packagedLeaDir) : '') +
+    // r13 minor ②：把当前应用版本号传给 wrapper，再由 wrapper 转传
+    // install-lea.ps1 写 version.json 的 main_version；旧版不传时
+    // install-lea.ps1 默认 ''，backfill 会把 main_version 写空（r12 实证
+    // "3.0.0"→""）。
+    ",'-MainVersion'," + q(app.getVersion()) +
     (leaScriptHash ? ",'-LeaScriptHash'," + q(leaScriptHash) : '') + " -Verb RunAs -WindowStyle Hidden";
   try {
     const childProcess = require('child_process');
-    const child = childProcess.spawn('powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner], { windowsHide: true });
+    const child = childProcess.spawn(sysPrograms.powershellPath(),
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner], { windowsHide: true, cwd: sysPrograms.safeCwd() });
     // DS-6：spawn 后等结果、读 exit 码，UAC 被拒／脚本非零退出即报失败，
     // 不再一拉起就返 launched。reason 仍为 'launched'（调用方与 B-LEA 测试
     // 约定的成功串），但此时已是退出码为 0 后的确认，不再是仅拉起。
@@ -3587,12 +4484,6 @@ async function maybeInstallSystemServices(force) {
     if (r.error) { bootLog('system-services.launch-failed', String((r.error && r.error.message) || r.error)); return { ok: false, reason: 'launch-failed' }; }
     if (r.code !== 0) { bootLog('system-services.install-failed', 'code=' + r.code + (r.stderr ? ' ' + r.stderr : '')); return { ok: false, reason: 'install-failed' }; }
     bootLog('system-services.launched', 'owner-set');
-    if (leaBackfill) {
-      // T21/D2：wrapper 与 install-lea.ps1 失败仍 exit 0（DESIGN §9.2）——
-      // 退出码 0 不代表 LEA 已装好；以 leaServiceInstalled()（含
-      // LEA_DEGRADED 标记）复核并留一条明确日志，仍非阻塞（返回值不变）。
-      bootLog(leaServiceInstalled() ? 'system-services.lea-installed' : 'system-services.lea-degraded', '');
-    }
     return { ok: true, reason: 'launched' };
   } catch (e) {
     bootLog('system-services.launch-throw', e && e.message || String(e));
@@ -3687,7 +4578,7 @@ function buildDiagnostics() {
   ];
   return lines.join('\n');
 }
-ipcMain.handle('qf-diagnostics-copy', () => {
+trustedHandle('qf-diagnostics-copy', () => {
   const text = buildDiagnostics();
   clipboard.writeText(text);
   return text;
@@ -3697,7 +4588,7 @@ ipcMain.handle('qf-diagnostics-copy', () => {
 // 口径写死：手动开关、默认关、开锁必须先设密码、非机主不显示开关（服务端判
 // owner、面板只呈现）。壳不存任何密码，密码只在提交瞬间过桥。
 const lockBridge = lockBridgeMod.createLockBridge(
-  () => session.fromPartition('persist:qfremote'),
+  () => { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }, // S-003
   { mock: PREVIEW === 'lock' || process.env.QFREMOTE_LOCK_MOCK === '1', clientVersion: () => clientVersion.getClientVersion() }
 );
 let lockWin = null;
@@ -3711,7 +4602,8 @@ function openLockWindow() {
     resizable: false,
     center: true,
     title: 'QFRemote 隐私锁',
-    backgroundColor: themeBg(),
+    backgroundColor: windowBgColor(),
+    backgroundMaterial: windowBackgroundMaterial(),
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'lock-preload.js'),
@@ -3723,7 +4615,8 @@ function openLockWindow() {
   lockWin.loadFile(path.join(__dirname, 'lock.html'), {
     query: { t: currentTheme() }
   });
-  lockWin.on('closed', () => { lockWin = null; });
+  viewRegistry.register('lock', lockWin, { kind: 'window' }); // S-001
+  lockWin.on('closed', () => { viewRegistry.unregister('lock'); lockWin = null; });
   if (PREVIEW === 'lock') {
     lockWin.webContents.once('did-finish-load', () => setTimeout(captureLockPreview, 1600));
   }
@@ -3741,7 +4634,7 @@ async function lockCall(fn) {
   try { return Object.assign({ ok: true }, await fn()); }
   catch (e) { return { ok: false, code: (e && e.code) || null, error: (e && e.message) || '操作失败，请稍后再试。' }; }
 }
-ipcMain.handle('qf-lock-devices', async () => {
+trustedHandle('qf-lock-devices', async () => {
   try {
     const devices = await lockBridge.listDevices();
     // W-11：每台设备附 presence 在线态（online true/false/null=未知）与
@@ -3767,59 +4660,59 @@ ipcMain.handle('qf-lock-devices', async () => {
   }
 });
 // W-11：锁面板离线「一键修复」——走统一自愈阶梯（手动，不受每日封顶限）。
-ipcMain.handle('qf-lock-repair', async () => {
+trustedHandle('qf-lock-repair', async () => {
   try {
     const r = await runStartupAgentHeal({ manual: true });
     return { ok: true, outcome: (r && r.outcome) || 'unknown', code: (r && r.code) || null };
   } catch (e) { return { ok: false, outcome: 'unknown' }; }
 });
 // W-11：锁面板「立即安装锁组件」——再试一次系统服务首装。
-ipcMain.handle('qf-lock-install-component', async () => {
+trustedHandle('qf-lock-install-component', async () => {
   try { return await maybeInstallSystemServices(true); } catch (e) { return { ok: false, reason: 'throw' }; }
 });
 // W-11：NEED_LOGIN 时「去登录」——关面板、切控制台登录页。
-ipcMain.on('qf-lock-go-login', () => {
+trustedOn('qf-lock-go-login', () => {
   try { if (lockWin && !lockWin.isDestroyed()) lockWin.close(); } catch (e) { /* ignore */ }
   try { showView('console'); } catch (e) { /* ignore */ }
   try { if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); } } catch (e) { /* ignore */ }
 });
 // W-11：未登记时「打开设备页」——关面板、回设备列表。
-ipcMain.on('qf-lock-open-devices', () => {
+trustedOn('qf-lock-open-devices', () => {
   try { if (lockWin && !lockWin.isDestroyed()) lockWin.close(); } catch (e) { /* ignore */ }
   try { showView('devices'); } catch (e) { /* ignore */ }
   try { if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); } } catch (e) { /* ignore */ }
 });
 // W-14：关于面板「重新尝试修复」——手动触发自愈，不受每日 3 次封顶限。
-ipcMain.handle('qf-heal-retry', async () => {
+trustedHandle('qf-heal-retry', async () => {
   try {
     const r = await runStartupAgentHeal({ manual: true });
     return { ok: true, outcome: (r && r.outcome) || 'unknown', code: (r && r.code) || null };
   } catch (e) { return { ok: false, outcome: 'unknown' }; }
 });
-ipcMain.handle('qf-lock-enable', (e, id, password) => lockCall(() => lockBridge.enable(id, password)));
-ipcMain.handle('qf-lock-disable', (e, id) => lockCall(() => lockBridge.disable(id)));
-ipcMain.handle('qf-lock-reset', (e, id, loginPassword, newPassword) => lockCall(() => lockBridge.reset(id, loginPassword, newPassword)));
-ipcMain.on('qf-lock-open', () => openLockWindow());
-ipcMain.on('qf-lock-close', (event) => {
+trustedHandle('qf-lock-enable', (e, id, password) => lockCall(() => lockBridge.enable(id, password)));
+trustedHandle('qf-lock-disable', (e, id) => lockCall(() => lockBridge.disable(id)));
+trustedHandle('qf-lock-reset', (e, id, loginPassword, newPassword) => lockCall(() => lockBridge.reset(id, loginPassword, newPassword)));
+trustedOn('qf-lock-open', () => openLockWindow());
+trustedOn('qf-lock-close', (event) => {
   const w = BrowserWindow.fromWebContents(event.sender);
   if (w) w.close();
 });
-ipcMain.on('qf-lock-open-friends', () => {
+trustedOn('qf-lock-open-friends', () => {
   showView('friends');
   if (lockWin && !lockWin.isDestroyed()) lockWin.close();
   if (win && !win.isDestroyed()) { win.show(); win.focus(); }
 });
 
 // ---------- 关于 ----------
-ipcMain.on('qf-about-open', () => openAbout());
+trustedOn('qf-about-open', () => openAbout());
 // 注册入口同框（2.3.1 阶段 E，阶段 A 点名修正）：关于窗的注册入口不再
 // 打开外部浏览器，改与工具栏注册同口径——回主窗控制台视图内打开注册页。
-ipcMain.on('qf-open-register', () => {
+trustedOn('qf-open-register', () => {
   try { showView('console'); } catch (e) { /* ignore */ }
   try { if (view && !view.webContents.isDestroyed()) view.webContents.loadURL(REGISTER_URL); } catch (e) { /* ignore */ }
   try { if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); } } catch (e) { /* ignore */ }
 });
-ipcMain.on('qf-about-close', (event) => {
+trustedOn('qf-about-close', (event) => {
   const w = BrowserWindow.fromWebContents(event.sender);
   if (w) w.close();
 });
@@ -3827,7 +4720,7 @@ ipcMain.on('qf-about-close', (event) => {
 // 会话 -> 走既有手动退出 machinery（清保险箱/标记）-> 控制台回登录页。
 // 许可拦截面的退出按钮（qf-gate-logout）走同一段口径（确认文案、级联
 // 终止、handleManualLogout、回登录页逐项一致，不另造平行退出）。
-ipcMain.handle('qf-logout-request', async () => {
+trustedHandle('qf-logout-request', async () => {
   const owner = (aboutWin && !aboutWin.isDestroyed()) ? aboutWin : win;
   let r = null;
   try {
@@ -3860,11 +4753,83 @@ ipcMain.handle('qf-logout-request', async () => {
 
 app.whenReady().then(async () => {
   bootLog('whenReady.begin', 'version=' + app.getVersion());
+  // W1：系统深浅监听只注册一次（跟随系统时才跟随，手动档不动）。
+  registerThemeUpdatedListener();
   // r10：启动即打解析后的 boot log 实际路径（含 per-session Temp\1 这一层），
   // 验证者按行取路径，不再猜目录。
   bootLog('bootlog.path', bootLogPath());
   try {
   if (!gotSingleLock) return;
+  // D-06：崩溃哨兵——启动时立哨兵；上次残留即非正常退出（崩溃/强杀），
+  // 下次启动弹二选一（正常启动 / 安全模式）；--safe-mode 直接进安全模式。
+  // 安全模式：跳过静默登录、启动 agent 自愈、自动更新检查、社交预加载、
+  // 积分心跳，只开主窗口（OBS 安全模式口径：禁第三方插件/实验功能）。
+  try {
+    safeMode = crashHandler.safeModeFromArgv(process.argv);
+    if (!PREVIEW) {
+      const hadCrash = crashHandler.markStartup(app.getPath('userData'));
+      if (hadCrash && !safeMode) {
+        const latest = crashHandler.latestCrashReport(app.getPath('userData'));
+        const choice = dialog.showMessageBoxSync({
+          type: 'warning', title: 'QFRemote',
+          message: '上次 QFRemote 未正常退出（可能是崩溃）。',
+          detail: '安全模式会跳过静默登录、启动自愈、自动更新检查与社交预加载，只开主窗口。' +
+            (latest ? '已保存一份崩溃报告（' + latest.name + '）。' : ''),
+          buttons: ['正常启动', '安全模式启动'], defaultId: 0, cancelId: 0, noLink: true
+        });
+        if (choice === 1) safeMode = true;
+      }
+      if (hadCrash) bootLog('crash.previous-abnormal-exit', 'safeMode=' + safeMode);
+      // 上传同意：只在有最新报告且未定过同意时问一次；未同意绝不上传。
+      // 接收端点见 CRASH-REPORT-SPEC.md（POST /api/lea/v1/crash-report，
+      // 匿名接收＋强防护）；同意后由下面 decideUpload 判定放行再 POST。
+      if (hadCrash && settings.crashUploadConsent === undefined) {
+        const latest = crashHandler.latestCrashReport(app.getPath('userData'));
+        if (latest) {
+          const up = dialog.showMessageBoxSync({
+            type: 'question', title: 'QFRemote',
+            message: '是否把最近一份崩溃报告发给我们，帮助定位问题？',
+            detail: '只发最新一份技术报告（版本号、系统版本、崩溃堆栈），不含账号、密码、聊天与屏幕内容。不同意也不会再问。',
+            buttons: ['发送', '不发送'], defaultId: 1, cancelId: 1, noLink: true
+          });
+          settings.crashUploadConsent = up === 0 ? 'granted' : 'denied';
+          saveSettings();
+        }
+      }
+      if (hadCrash) {
+        const crashEndpoint = CONSOLE_URL.replace(/\/+$/, '') + crashHandler.CRASH_REPORT_PATH;
+        const dec = crashHandler.decideUpload({
+          consented: settings.crashUploadConsent === 'granted',
+          endpoint: crashEndpoint,
+          latest: crashHandler.latestCrashReport(app.getPath('userData'))
+        });
+        bootLog('crash.upload-decision', dec.action + '/' + dec.reason);
+        if (dec.action === 'upload' && dec.file) {
+          // 上传不阻塞启动：fire-and-forget；只有 2xx 才删本地报告，
+          // 其它状态／超时一律保留本地文件，不重试、不伪装成功。
+          try {
+            const text = fs.readFileSync(dec.file, 'utf8');
+            const payload = crashHandler.buildCrashUploadPayload(text, { arch: process.arch });
+            if (!payload) { bootLog('crash.upload-skip', 'payload-unparseable'); }
+            else {
+              // L-09：崩溃上报匿名接收，上传不附控制台会话 Cookie
+              // （服务端忽略 Cookie、不记日志，客户端多发一次无意义）。
+              Promise.resolve(extRequest('POST', crashEndpoint, payload, { noCookie: true })).then((r) => {
+                // F-WIN-11（2026-11-15）：服务端 2xx 均为上传成功，只认 200
+                // 会把 201/202 的已上报报告误记失败并残留本地文件。
+                if (r && r.status >= 200 && r.status < 300) {
+                  try { fs.unlinkSync(dec.file); } catch (e) {}
+                  bootLog('crash.upload-ok', payload.report_id);
+                } else {
+                  bootLog('crash.upload-failed', 'status=' + (r ? r.status : 0));
+                }
+              }).catch((e) => { bootLog('crash.upload-failed', 'throw=' + (e && e.message || String(e))); });
+            }
+          } catch (e) { bootLog('crash.upload-failed', 'throw=' + (e && e.message || String(e))); }
+        }
+      }
+    }
+  } catch (e) { bootLog('crash.startup-check.throw', e && e.message || String(e)); }
   try {
     app.setAboutPanelOptions({
       applicationName: 'QFRemote',
@@ -3878,7 +4843,6 @@ app.whenReady().then(async () => {
   applyAutoLaunchDefault();
   if (PREVIEW === 'splash') { createSplash(); return; }
   seedUpdateStateFromPending();
-  svcUrls.refresh().then(() => applySvcUrls()).catch(() => {});
   if (PREVIEW === 'lock') {
     // 自测专用：只开隐私锁面板（mock 桥），截图后退出，不建主窗口
     openLockWindow();
@@ -3901,31 +4865,44 @@ app.whenReady().then(async () => {
     }
     return;
   }
-  if (!PREVIEW) {
-    // 正常启动：先过启动更新门，被强更页接管就不建主窗口
-    const gated = await startupUpdateGate();
-    if (gated) {
-      // W-02④：gated=true 后复核——强更窗没出来就建主窗，绝不留无窗口僵尸。
-      if (!forceWin || forceWin.isDestroyed()) {
-        bootLog('whenReady.gated-no-forceWin.fallback');
-        createWindow();
-      }
-      return;
-    }
-  }
+  // D-08 stage1：窗口先出——建主窗在任何网络请求之前（更新门、服务地址
+  // 刷新、更新检查、agent 自愈全在窗口出现之后跑）；出错也出窗口。
+  // D-07：启动最小化到托盘时，主窗不弹出来（showMain 内 suppress）。
+  suppressShowMain = !PREVIEW && trayManager.traySettings(settings).minimizeToTray;
   if (!createWindow()) {
     bootLog('whenReady.createWindow.failed');
     try { app.exit(1); } catch (e) { /* ignore */ }
     return;
   }
+  // D-07：托盘随主窗建（开关全关时不建）；Explorer 重启丢图标时每 60 秒
+  // 巡检一次，实例已销毁即重建（Electron 未暴露 Explorer 重启事件）。
+  ensureTray();
+  setInterval(() => { try { if (trayMgr && !trayMgr.isAlive()) ensureTray(); } catch (e) { /* ignore */ } }, 60000);
+  if (!PREVIEW) {
+    // D-08 stage2：启动更新门移到窗口出现之后跑，带 8 秒硬超时（门内已有
+    // 4s/10s 硬超时）；超时/出错即放行进主窗，绝不卡启动。
+    const gateRes = await startupStages.runStep(() => startupUpdateGate(), 8000, (m) => bootLog('startup-gate', m));
+    if (gateRes.ok && gateRes.value) {
+      // W-02④：强更窗没出来就留主窗，绝不留无窗口僵尸；出来了才销毁主窗。
+      if (forceWin && !forceWin.isDestroyed()) {
+        try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+        return;
+      }
+      bootLog('whenReady.gated-no-forceWin.fallback');
+    } else if (gateRes.timedOut) {
+      bootLog('startupUpdateGate.timeout-fallback', 'gate timed out, main window proceeds');
+    }
+  }
+  // D-08 stage3：服务地址刷新是 deferred 阶段，窗口出现后再跑。
+  svcUrls.refresh().then(() => applySvcUrls()).catch(() => {});
   // 软件内更新：启动后自动查一次（失败安静无提示，见 update.js 文件头；
-  // W-26：自动检查用 5s 超时）
-  setTimeout(() => { runUpdateCheck(5000).catch(() => {}); }, 2000);
+  // W-26：自动检查用 5s 超时）；安全模式下跳过。
+  setTimeout(() => { if (!safeMode) runUpdateCheck(5000, { auto: true }).catch(() => {}); }, 2000);
   // 本机 agent 自愈兜底（2.4.4）：启动后异步自检 .msh，发现地址过期
   // 即提权修复（弹一次 UAC），不拦启动、不影响更新检查。
   // 延迟 5 秒（原 3 秒）：给安装器刚拉完的自愈留出写入日志的时间，
-  // 让进行中守卫（120 秒）能看到启动行，避免双弹 UAC。
-  setTimeout(() => { runStartupAgentHeal().catch(() => {}); }, 5000);
+  // 让进行中守卫（120 秒）能看到启动行，避免双弹 UAC。安全模式下跳过。
+  setTimeout(() => { if (!safeMode) runStartupAgentHeal().catch(() => {}); }, 5000);
   } catch (e) {
     // W-02④：whenReady 任何一步抛错都记日志后兜底建主窗；建不出则干净退出，
     // 宁可退出让用户能再双击，也不留僵尸进程占单实例锁。
@@ -3939,7 +4916,14 @@ app.whenReady().then(async () => {
   }
 });
 
-app.on('before-quit', () => flushConsoleCookies());
+app.on('before-quit', () => {
+  appQuitting = true;
+  flushConsoleCookies();
+  // D-06：干净退出拆哨兵（app.exit 的崩溃路径不走这里，哨兵残留）；
+  // D-07：退出时销毁托盘图标，不留幽灵图标。
+  try { if (!PREVIEW) crashHandler.markCleanShutdown(app.getPath('userData')); } catch (e) { /* ignore */ }
+  try { if (trayMgr) trayMgr.destroyTray(); } catch (e) { /* ignore */ }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

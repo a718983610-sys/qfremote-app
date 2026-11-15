@@ -18,41 +18,44 @@
     <title>{{{title}}} - 登录</title>
     <style>
         #body {
-            background-color: cadetblue;
-            background: linear-gradient(to bottom right, #369, #036);
+            background-color: #08090A;
+            background: linear-gradient(to bottom right, #111113, #08090A); /* 2026-11-14 大肥鱼定夺：原蓝渐变 #369/#036 退役，深色主背景 #08090A */
         }
 
         #flink a:link {
-            color: #c8c8c8;
+            color: #8A8A93;
         }
 
         #flink a:visited {
-            color: #c8c8c8;
+            color: #8A8A93;
         }
 
         #flink a:hover {
-            color: #c8c8c8;
+            color: #8A8A93;
         }
 
         #flink a:active {
-            color: #c8c8c8;
+            color: #8A8A93;
         }
 
         #welcomeText a:link {
-            color: #FFF;
+            color: #F5F5F7;
         }
 
         #welcomeText a:visited {
-            color: #FFF;
+            color: #F5F5F7;
         }
 
         #welcomeText a:hover {
-            color: #FFF;
+            color: #F5F5F7;
         }
 
         #welcomeText a:active {
-            color: #FFF;
+            color: #F5F5F7;
         }
+
+        input::placeholder{color:#4B4B55}/* 六项②：占位符不用浏览器默认 #757575 */
+        #qfBuyKeyRow a::after{content:"";position:absolute;top:-4px;bottom:-4px;left:0;right:0;}/* 六项遗留②：购买密钥行 36px 视觉，伪元素保 44px 触控 */
     </style>
 </head>
 <body id="body" onload="if (typeof(startup) !== 'undefined') startup();" class="arg_hide login">
@@ -62,7 +65,7 @@
             <td id="logincell">
                 {{{titlehtml}}}
                 <img id="loginPicture" />
-                <div style="font-size:46px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;padding-bottom:10px;color:#c8c8c8;text-shadow: 2px 2px 2px #000;">{{{title1}}}<sup style="font-size:20px"> {{{title2}}}</sup></div>
+                <div style="font-size:46px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;padding-bottom:10px;color:#8A8A93;text-shadow: 2px 2px 2px #000;">{{{title1}}}<sup style="font-size:20px"> {{{title2}}}</sup></div>
                 <div id=loginpanel style="display:none;box-shadow:1px 1px 4px #000">
                     <form id=loginpanelform method=post>
                         <input type=hidden name=action value=login />
@@ -71,12 +74,12 @@
                             <table style="width:100%">
                                 <tr>
                                     <td>
-                                        <input id=username title="账号" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="账号" type=text maxlength=64 name=username required onchange=validateLogin(1) onkeyup=validateLogin(1,event) />
+                                        <input id=username title="账号" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF" {{{autocomplete}}}="username" placeholder="账号" type=text maxlength=64 name=username required onchange=validateLogin(1) onkeyup=validateLogin(1,event) />
                                     </td>
                                 </tr>
                                 <tr>
                                     <td>
-                                        <input id=password title="密码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="current-password" placeholder="密码" type=password maxlength=256 name=password required onchange=validateLogin(2) onkeyup=validateLogin(2,event) />
+                                        <input id=password title="密码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF" {{{autocomplete}}}="current-password" placeholder="密码" type=password maxlength=256 name=password required onchange=validateLogin(2) onkeyup=validateLogin(2,event) />
                                     </td>
                                 </tr>
                                 <tr>
@@ -93,7 +96,7 @@
                                 </tr>
                                 <tr>
                                     <td>
-                                        <div id=showPassHintLink title="密码提示" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC;display:none"><a onclick="return showPassHint(event);" href="#" style="cursor:pointer">显示密码提示</a></div>
+                                        <div id=showPassHintLink title="密码提示" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF;display:none"><a onclick="return showPassHint(event);" href="#" style="cursor:pointer">显示密码提示</a></div>
                                     </td>
                                 </tr>
                                 <tr>
@@ -118,17 +121,17 @@
                                 </tr>
                                 <tr id="qfBuyKeyRow">
                                     <td>
-                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;color:#fff;font-size:14px;font-weight:600;padding:9px 6px;margin-top:10px;cursor:pointer;text-decoration:none">购买密钥</a>
+                                        <a href="/purchase" style="box-sizing:border-box;width:280px;display:block;text-align:center;color:#F5F5F7;font-size:14px;font-weight:600;padding:8px 6px;margin-top:10px;cursor:pointer;text-decoration:none;position:relative">购买密钥</a>
                                     </td>
                                 </tr>
                                 <tr id="qfQueryKeyRow">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:7px 2px 0 2px"><a href="/license/status" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">查询密钥</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:7px 2px 0 2px"><a href="/license/status" style="color:#F5F5F7;font-size:13.5px;cursor:pointer;text-decoration:none">查询密钥</a></div>
                                     </td>
                                 </tr>
                                 <tr id="qfRebindRow">
                                     <td>
-                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:5px 2px 0 2px"><a href="/license/rebind" style="color:#2470E0;font-size:13.5px;cursor:pointer;text-decoration:none">申诉换绑设备</a></div>
+                                        <div style="box-sizing:border-box;width:280px;text-align:center;padding:5px 2px 0 2px"><a href="/license/rebind" style="color:#F5F5F7;font-size:13.5px;cursor:pointer;text-decoration:none">申诉换绑设备</a></div>
                                     </td>
                                 </tr>
                                 <tr id="topLanguageSelectRow" style="display:none"><td id="topLanguageSelect"></td></tr>
@@ -221,7 +224,7 @@
                         <table style="width:100%;margin-top:4px;margin-bottom:4px">
                             <tr>
                                 <td>
-                                    <input id=remail title="邮箱" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" {{{autocomplete}}}="username" placeholder="邮箱" type=text maxlength=256 name=email onchange=validateReset() onkeyup=validateReset(event) />
+                                    <input id=remail title="邮箱" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF" {{{autocomplete}}}="username" placeholder="邮箱" type=text maxlength=256 name=email onchange=validateReset() onkeyup=validateReset(event) />
                                 </td>
                             </tr>
                             <tr>
@@ -242,7 +245,7 @@
                         <table style="width:100%">
                             <tr>
                                 <td>
-                                    <input id=tokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="验证码" type=text maxlength=50 name=token onchange=checkToken(event) onpaste=checkToken(event) onkeyup=checkToken(event) onkeydown=checkToken(event) /><br />
+                                    <input id=tokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF" placeholder="验证码" type=text maxlength=50 name=token onchange=checkToken(event) onpaste=checkToken(event) onkeyup=checkToken(event) onkeydown=checkToken(event) /><br />
                                     <input id=hwtokenInput type=text name=hwtoken style="display:none" />
                                 </td>
                             </tr>
@@ -283,7 +286,7 @@
                         <table style="width:100%">
                             <tr>
                                 <td>
-                                    <input id=resetTokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFF8CC" placeholder="验证码" type=text maxlength=50 name=token onchange=resetCheckToken(event) onpaste=resetCheckToken(event) onkeyup=resetCheckToken(event) onkeydown=resetCheckToken(event) /><br />
+                                    <input id=resetTokenInput {{{autocomplete}}}="one-time-code" title="验证码" style="box-sizing:border-box;width:280px;border:0;border-radius:4px;padding:8px;background-color:#FFFFFF" placeholder="验证码" type=text maxlength=50 name=token onchange=resetCheckToken(event) onpaste=resetCheckToken(event) onkeyup=resetCheckToken(event) onkeydown=resetCheckToken(event) /><br />
                                     <input id=resetHwtokenInput type=text name=hwtoken style="display:none" />
                                 </td>
                             </tr>
@@ -395,8 +398,8 @@
         <tr style="height:20px">
             <td>
                 <div>
-                    <div id="flink" style="float:right;margin-right:4px;color:#c8c8c8">{{{rootCertLink}}}&nbsp;<a href=terms>条款与隐私</a></div>
-                    <div id="flink" style="margin-left:4px;color:#c8c8c8">{{{footer}}}</div>
+                    <div id="flink" style="float:right;margin-right:4px;color:#8A8A93">{{{rootCertLink}}}&nbsp;<a href=terms>条款与隐私</a></div>
+                    <div id="flink" style="margin-left:4px;color:#8A8A93">{{{footer}}}</div>
                 </div>
             </td>
         </tr>
@@ -479,7 +482,7 @@
                 if ((messageid < 100) && (messageid < okmessages.length)) { msg = okmessages[messageid]; }
                 else if ((messageid >= 100) && ((messageid - 100) < failmessages.length)) { msg = failmessages[messageid - 100]; }
                 if (msg != '') {
-                    if (messageid >= 100) { msg = ('<span class="msg error"><b style=color:#8C001A>' + msg + '<b></span><br /><br />'); } else { msg = ('<span class="msg success"><b>' + msg + '</b></span><br /><br />'); }
+                    if (messageid >= 100) { msg = ('<span class="msg error"><b style=color:#FF453A>' + msg + '<b></span><br /><br />'); } else { msg = ('<span class="msg success"><b>' + msg + '</b></span><br /><br />'); }
                     for (i = 1; i < 9; i++) { QH('message' + i, msg); }
                 }
             }
@@ -490,7 +493,7 @@
                 var msg = '';
                 for (i = 0; i < flashErrors.length; i++) {
                     if (flashErrors[i]) {
-                        msg += '<span class="msg error"><b style=color:#8C001A>' + flashErrors[i] + '<b></span><br /><br />';
+                        msg += '<span class="msg error"><b style=color:#FF453A>' + flashErrors[i] + '<b></span><br /><br />';
                     }
                 }
                 QH('message1', msg);
@@ -648,7 +651,7 @@
                         QH('message8', '<span class="msg success"><b>' + format("请求已发送，{0}。", r.code) + '</b></span><br /><br />');
                     } else if (r.sent === false) {
                         // Request failed to send
-                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "请求发送失败。" + '<b></span><br /><br />');
+                        QH('message8', '<span class="msg error"><b style=color:#FF453A>' + "请求发送失败。" + '<b></span><br /><br />');
                         QV('tokenInputRememberLabel2', false);
                         this.close();
                     } else if (r.approved === true) {
@@ -660,14 +663,14 @@
                         Q('pushOkButton').click();
                     } else {
                         // Request rejected
-                        QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "请求被拒绝。" + '<b></span><br /><br />');
+                        QH('message8', '<span class="msg error"><b style=color:#FF453A>' + "请求被拒绝。" + '<b></span><br /><br />');
                         QV('tokenInputRememberLabel2', false);
                         this.close();
                     }
                 }
                 websocket.onclose = function (e) { QS('waitpushpanelimage')['opacity'] = '0.3'; }
                 websocket.onerror = function (e) {
-                    QH('message8', '<span class="msg error"><b style=color:#8C001A>' + "连接出错，请检查后重试。" + '<b></span><br /><br />');
+                    QH('message8', '<span class="msg error"><b style=color:#FF453A>' + "连接出错，请检查后重试。" + '<b></span><br /><br />');
                     QS('waitpushpanelimage')['opacity'] = '0.5';
                 }
             }
@@ -864,12 +867,12 @@
             var ok = (userok && emailok && pass1ok && pass2ok && newAccOk);
 
             // Color the fields
-            QS('nuUser').color = userok ? 'black' : '#7b241c';
-            QS('nuEmail').color = emailok ? 'black' : '#7b241c';
-            QS('nuPass1').color = pass1ok ? 'black' : '#7b241c';
-            QS('nuPass2').color = pass2ok ? 'black' : '#7b241c';
-            QS('nuToken').color = newAccOk ? 'black' : '#7b241c';
-            QS('nuCaptcha').color = newCaptchaOk ? 'black' : '#7b241c';
+            QS('nuUser').color = userok ? '#F5F5F7' : '#FF453A';
+            QS('nuEmail').color = emailok ? '#F5F5F7' : '#FF453A';
+            QS('nuPass1').color = pass1ok ? '#F5F5F7' : '#FF453A';
+            QS('nuPass2').color = pass2ok ? '#F5F5F7' : '#FF453A';
+            QS('nuToken').color = newAccOk ? '#F5F5F7' : '#FF453A';
+            QS('nuCaptcha').color = newCaptchaOk ? '#F5F5F7' : '#FF453A';
 
             if (Q('apassword1').value == '') {
                 QH('passWarning', '');
@@ -878,17 +881,17 @@
                 if (!passRequirementsEx) {
                     // No password requirements, display password strength
                     var passStrength = checkPasswordStrength(Q('apassword1').value);
-                    if (passStrength >= 80) { QH('passWarning', '<span style=color:green><b>' + "密码强度：强" + '</b><span>'); }
-                    else if (passStrength >= 60) { QH('passWarning', '<span style=color:blue><b>' + "密码强度：良好" + '</b><span>'); }
-                    else { QH('passWarning', '<span style=color:red><b>' + "密码强度：弱" + '</b><span>'); }
+                    if (passStrength >= 80) { QH('passWarning', '<span style=color:#30D158><b>' + "密码强度：强" + '</b><span>'); }
+                    else if (passStrength >= 60) { QH('passWarning', '<span style=color:#FF9F0A><b>' + "密码强度：良好" + '</b><span>'); }
+                    else { QH('passWarning', '<span style=color:#FF453A><b>' + "密码强度：弱" + '</b><span>'); }
                 } else {
                     // Password requirements provided, use that
                     var passReq = checkPasswordRequirements(Q('apassword1').value, passRequirements);
                     if (passReq == false) {
                         ok = false;
-                        QS('nuPass1').color = '#7b241c';
-                        QS('nuPass2').color = '#7b241c';
-                        QH('passWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
+                        QS('nuPass1').color = '#FF453A';
+                        QS('nuPass2').color = '#FF453A';
+                        QH('passWarning', '<div style=color:#FF453A;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
                         QV('passwordPolicyCallout', true);
                         QH('passwordPolicyCallout', passwordPolicyText(Q('apassword1').value));
                     } else {
@@ -917,8 +920,8 @@
             var ok = (pass1ok && pass2ok);
 
             // Color the fields
-            QS('rnuPass1').color = pass1ok ? 'black' : '#7b241c';
-            QS('rnuPass2').color = pass2ok ? 'black' : '#7b241c';
+            QS('rnuPass1').color = pass1ok ? '#F5F5F7' : '#FF453A';
+            QS('rnuPass2').color = pass2ok ? '#F5F5F7' : '#FF453A';
 
             if (Q('rapassword1').value == '') {
                 QH('rpassWarning', '');
@@ -927,17 +930,17 @@
                 if (!passRequirementsEx) {
                     // No password requirements, display password strength
                     var passStrength = checkPasswordStrength(Q('rapassword1').value);
-                    if (passStrength >= 80) { QH('rpassWarning', '<span style=color:green><b>' + "密码强度：强" + '</b><span>'); }
-                    else if (passStrength >= 60) { QH('rpassWarning', '<span style=color:blue><b>' + "密码强度：良好" + '</b><span>'); }
-                    else { QH('rpassWarning', '<span style=color:red><b>' + "密码强度：弱" + '</b><span>'); }
+                    if (passStrength >= 80) { QH('rpassWarning', '<span style=color:#30D158><b>' + "密码强度：强" + '</b><span>'); }
+                    else if (passStrength >= 60) { QH('rpassWarning', '<span style=color:#FF9F0A><b>' + "密码强度：良好" + '</b><span>'); }
+                    else { QH('rpassWarning', '<span style=color:#FF453A><b>' + "密码强度：弱" + '</b><span>'); }
                 } else {
                     // Password requirements provided, use that
                     var passReq = checkPasswordRequirements(Q('rapassword1').value, passRequirements);
                     if (passReq == false) {
                         ok = false;
-                        QS('rnuPass1').color = '#7b241c';
-                        QS('rnuPass2').color = '#7b241c';
-                        QH('rpassWarning', '<div style=color:red;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
+                        QS('rnuPass1').color = '#FF453A';
+                        QS('rnuPass2').color = '#FF453A';
+                        QH('rpassWarning', '<div style=color:#FF453A;cursor:pointer onclick=showPasswordPolicy()><b>' + "密码规则" + '</b><div>'); // This is also a link to the password policy
                         QV('rpasswordPolicyCallout', true);
                         QH('rpasswordPolicyCallout', passwordPolicyText(Q('rapassword1').value));
                     } else {

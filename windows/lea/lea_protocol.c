@@ -17,18 +17,52 @@ static const char *json_skip_ws(const char *p);
 
 /* ---------------- 命令表（DESIGN §4.4；超时见 §4.3） ---------------- */
 static const lea_command_spec_t k_commands[] = {
-    { "app.open",    LEA_EXEC_LEA,    15000,  60000, 0, NULL },
-    { "app.close",   LEA_EXEC_LEA,     5000,  15000, 0, NULL },
-    { "ui.click",    LEA_EXEC_USH,     5000,  15000, 0, NULL },
-    { "ui.input",    LEA_EXEC_USH,     5000,  15000, 0, NULL },
-    { "ui.snapshot", LEA_EXEC_USH,     5000,  15000, 0, NULL },
-    { "ui.tree",     LEA_EXEC_USH,     5000,  15000, 0, NULL },
-    { "script.run",  LEA_EXEC_LEA,    30000, 300000, 1, "muse.execute.dangerous" },
-    { "file.read",   LEA_EXEC_LEA,    10000,  30000, 0, NULL },
-    { "file.write",  LEA_EXEC_LEA,    10000,  60000, 1, "muse.execute.dangerous" },
-    { "sys.info",    LEA_EXEC_INLINE,  5000,   5000, 0, NULL },
-    { NULL, 0, 0, 0, 0, NULL },
+    { "app.open",    LEA_EXEC_LEA,    15000,  60000, 0, NULL, 1 },
+    { "app.close",   LEA_EXEC_LEA,     5000,  15000, 0, NULL, 1 },
+    { "ui.click",    LEA_EXEC_USH,     5000,  15000, 0, NULL, 1 },
+    { "ui.input",    LEA_EXEC_USH,     5000,  15000, 0, NULL, 1 },
+    { "ui.snapshot", LEA_EXEC_USH,     5000,  15000, 0, NULL, 1 },
+    { "ui.tree",     LEA_EXEC_USH,     5000,  15000, 0, NULL, 1 },
+    { "script.run",  LEA_EXEC_LEA,    30000, 300000, 1, "muse.execute.dangerous", 2 },
+    { "file.read",   LEA_EXEC_LEA,    10000,  30000, 0, NULL, 1 },
+    { "file.write",  LEA_EXEC_LEA,    10000,  60000, 1, "muse.execute.dangerous", 2 },
+    { "sys.info",    LEA_EXEC_INLINE,  5000,   5000, 0, NULL, 0 },
+    /* B1：短命令独立 lane（内联，不进队列，不被长任务占用）。 */
+    { "sys.ping",    LEA_EXEC_INLINE,  5000,   8000, 0, NULL, 0 },
+    { "sys.reset",   LEA_EXEC_INLINE,  5000,   8000, 0, NULL, 0 },
+    /* RC-01：握手命令（tier 0 内联；门在 QFRLEA.c handle_envelope）。 */
+    { "sys.handshake", LEA_EXEC_INLINE, 5000,  5000, 0, NULL, 0 },
+    { NULL, 0, 0, 0, 0, NULL, 0 },
 };
+
+int lea_command_tier(const char *name) {
+    const lea_command_spec_t *spec = lea_command_spec(name);
+    return spec ? spec->tier : -1;
+}
+
+long lea_job_deadline_ms(const lea_envelope_t *env) {
+    long eff = lea_effective_timeout_ms(env);
+    long cap;
+    switch (lea_command_tier(env->command)) {
+        case LEA_TIER_INLINE: cap = LEA_B1_TIER0_DEADLINE_MAX_MS; break;
+        case LEA_TIER_LONG: cap = LEA_B1_TIER2_DEADLINE_MAX_MS; break;
+        case LEA_TIER_NORMAL: cap = LEA_B1_TIER1_DEADLINE_MAX_MS; break;
+        default: return 5000;
+    }
+    /* B1：deadline_ms 是调用方期望的强杀时限（调度提示），取
+     * min(deadline_ms, timeout_ms) 后再夹 tier 上限；未提供（老信封）
+     * 时用 timeout_ms。提示值不得放宽分级上限。 */
+    long want = (env->has_deadline && env->deadline_ms > 0) ? (long)env->deadline_ms : eff;
+    long d = want < eff ? want : eff;
+    return d < cap ? d : cap;
+}
+
+int lea_params_has_true(const char *params_raw, const char *key) {
+    int v = 0;
+    if (!params_raw || !key) return 0;
+    if (!lea_json_bool(params_raw, key, &v)) return 0;
+    return v == 1;
+}
 
 const lea_command_spec_t *lea_command_spec(const char *name) {
     if (!name) return NULL;
@@ -48,6 +82,53 @@ int lea_command_is_dangerous(const lea_envelope_t *env) {
         if (lea_json_bool(env->params_raw, "dangerous", &d) && d) return 1;
     }
     return 0;
+}
+
+/* S-022：按命令的可取消性（见 lea_protocol.h）。 */
+int lea_command_is_cancellable(const lea_envelope_t *env) {
+    const lea_command_spec_t *spec = lea_command_spec(env->command);
+    if (!spec) return 0;
+    if (spec->executor == LEA_EXEC_INLINE) return 0; /* 不进队列，无从取消 */
+    if (lea_command_is_dangerous(env)) return 0;
+    return 1;
+}
+
+/* ---------------- RC-01 握手态（纯函数，见 lea_protocol.h） ---------------- */
+void lea_handshake_init(lea_handshake_state_t *s) {
+    if (!s) return;
+    memset(s, 0, sizeof(*s));
+}
+
+int lea_handshake_is_complete(const lea_handshake_state_t *s, const char *fp,
+                              long long binding_epoch, long long grant_epoch) {
+    if (!s || !s->completed || !fp || !fp[0]) return 0;
+    if (strcmp(s->fp, fp) != 0) return 0;
+    if (s->binding_epoch != binding_epoch) return 0;
+    if (s->grant_epoch != grant_epoch) return 0;
+    return 1;
+}
+
+void lea_handshake_mark_complete(lea_handshake_state_t *s, const char *fp,
+                                 long long binding_epoch, long long grant_epoch) {
+    if (!s || !fp || !fp[0]) return;
+    s->completed = 1;
+    snprintf(s->fp, sizeof(s->fp), "%s", fp);
+    s->binding_epoch = binding_epoch;
+    s->grant_epoch = grant_epoch;
+}
+
+void lea_handshake_invalidate(lea_handshake_state_t *s) {
+    if (!s) return;
+    s->completed = 0;
+    s->fp[0] = '\0';
+    s->binding_epoch = 0;
+    s->grant_epoch = 0;
+}
+
+int lea_handshake_check_params(const char *fp, const char *params_fp, long long protocol_version) {
+    if (!fp || !fp[0] || !params_fp) return 0;
+    if (protocol_version != LEA_PROTOCOL_VERSION) return 0;
+    return strcmp(fp, params_fp) == 0;
 }
 
 /* ---------------- JSON 取值（平铺字段；只认 \" 与 \\ 转义） ---------------- */
@@ -400,22 +481,32 @@ int lea_envelope_canonical(const lea_envelope_t *env, char *out, size_t out_size
     if (!lea_validate_id_field(env->device_id) ||
         !lea_validate_id_field(env->account_id) ||
         !lea_validate_id_field(env->api_key_id)) return 0;
-    if (env->seq < 1) return 0; /* v1：seq 必填且 ≥1（解析层已拒绝缺失／0） */
+    if (env->seq < 1) return 0; /* v2：seq 必填且 ≥1（解析层已拒绝缺失／0） */
     if (!lea_command_spec(env->command)) return 0;
     if (env->params_raw[0] == '\0') return 0;
+    /* F-02：grant_epoch 为无符号整数，上限 2^53-1（JS 安全整数界，
+     * 与 JS envelopeSigningBytes 同界；超界／负数即构造失败，不得
+     * 入串——否则 JS 侧 String() 结果与 C 端 long long 解析值
+     * 不一致，规范串逐字节一致即被破坏）。 */
+    if (env->grant_epoch < 0 || env->grant_epoch > 9007199254740991LL) return 0;
     /* params 只签 stable JSON 的 SHA-256：线上 params 子串即 stable JSON，
      * 此处对收到的 params_raw 原文算哈希（见规范 §2.1）。 */
+    /* F-02：规范串 20 行（v1 的 19 行＋binding_epoch 之后一行
+     * grant_epoch，与 JS envelopeSigningBytes 同序；缺省值与解析缺省
+     * 一致：job_id 缺省 ''、mode 缺省 ''、deadline_ms 缺省 0；
+     * 签信封原文值，不是派生值）。行尾：LF 连接、无结尾换行。 */
     char params_hash[65];
     lea_sha256_hex((const unsigned char *)env->params_raw, strlen(env->params_raw), params_hash);
     long timeout_ms = lea_effective_timeout_ms(env);
     if (timeout_ms < 1) return 0;
     size_t off = 0;
     if (!append_canonical(out, out_size, &off,
-            "qfr-lea-envelope-v1\n%d\n%s\n%s\n%lld\n%s\n%s\n%s\n%lld\n%s\n%lld\n%lld\n%s\n%s\n%s\n%ld",
+            "qfr-lea-envelope-v2\n%d\n%s\n%s\n%lld\n%s\n%s\n%s\n%lld\n%lld\n%s\n%lld\n%lld\n%s\n%s\n%s\n%ld\n%s\n%s\n%lld",
             env->version, env->request_id, env->batch_id, env->seq,
             env->device_id, env->account_id, env->api_key_id,
-            env->binding_epoch, env->nonce, env->issued_at, env->expires_at,
-            env->idempotency_key, env->command, params_hash, timeout_ms))
+            env->binding_epoch, env->grant_epoch, env->nonce, env->issued_at, env->expires_at,
+            env->idempotency_key, env->command, params_hash, timeout_ms,
+            env->job_id, env->mode, (long long)env->deadline_ms))
         return 0;
     return 1;
 }
@@ -642,6 +733,29 @@ static int json_long_from_slice(const char *val, size_t vlen, long long *out) {
     *out = v;
     return 1;
 }
+/* F-02：grant_epoch 严格无符号解析（规范 §2.1）。值切片须为最短十进制
+ * 无符号整数：全数字、无符号位、无前导零（"0" 本身除外）、无空格／
+ * 小数／指数／尾随字符；数值须 ≤ 9007199254740991（2^53-1，JS 安全
+ * 整数界，两端同一上限，规范串十进制表示逐字节一致）。前导零与
+ * 尾随字符已由 json_find_member 的严格 JSON 数字文法先拦一道，
+ * 此处再显式校验（双保险）。strtoll 溢出即失败，不得钳制。 */
+static int json_uint53_from_slice(const char *val, size_t vlen, long long *out) {
+    if (!val || !out || vlen < 1 || vlen > 16) return 0;
+    if (vlen > 1 && val[0] == '0') return 0; /* 前导零 */
+    for (size_t i = 0; i < vlen; i++) {
+        if (val[i] < '0' || val[i] > '9') return 0;
+    }
+    char num[32];
+    memcpy(num, val, vlen);
+    num[vlen] = '\0';
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(num, &end, 10);
+    if (end == num || *end != '\0' || errno == ERANGE) return 0;
+    if (v < 0 || v > 9007199254740991LL) return 0;
+    *out = v;
+    return 1;
+}
 /* 取整数成员：值须为 JSON 整数（-?[0-9]+，无小数／指数），strtoll 溢出即失败。
  * 返回 1=成功，0=失败（缺失／类型错／溢出）。 */
 static int ticket_get_long(const char *text, const char *key, long long *out) {
@@ -834,7 +948,8 @@ int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size) 
     LEA_RB_STR(env->account_id);
     LEA_RB_APPEND("\",\"api_key_id\":\"");
     LEA_RB_STR(env->api_key_id);
-    LEA_RB_APPEND("\",\"binding_epoch\":%lld,\"nonce\":\"", env->binding_epoch);
+    LEA_RB_APPEND("\",\"binding_epoch\":%lld,\"grant_epoch\":%lld,\"nonce\":\"",
+                  env->binding_epoch, env->grant_epoch);
     LEA_RB_STR(env->nonce);
     LEA_RB_APPEND("\",\"issued_at\":%lld,\"expires_at\":%lld,\"idempotency_key\":\"",
                   env->issued_at, env->expires_at);
@@ -877,6 +992,68 @@ int lea_check_time_window(const lea_envelope_t *env, long long now_unix,
     return 1;
 }
 
+/* F-02：信封顶层键白名单普查（未知字段／重复字段一律拒绝）。
+ * json_find_member 只查找指定键，未知键会被静默忽略；此处在解析前
+ * 对顶层对象做一次完整遍历：键须在白名单内且恰好出现一次，值须为
+ * 合法 JSON 值，对象闭合后不得有尾部内容。键按解码后比较（含转义键
+ * "vers\u0069on" 解码后即 "version"，与 json_find_member 同语义）。
+ * 白名单＝服务端 buildEnvelope 发出的 20 个字段＋trace_id（服务端
+ * 不签发、设备端只接收）。 */
+static int envelope_top_level_keys_ok(const char *text) {
+    static const char *allowed[] = {
+        "version", "request_id", "batch_id", "seq", "device_id",
+        "account_id", "api_key_id", "binding_epoch", "grant_epoch",
+        "nonce", "issued_at", "expires_at", "idempotency_key",
+        "command", "params", "timeout_ms", "job_id", "mode",
+        "deadline_ms", "signature", "trace_id",
+    };
+    const int n_allowed = (int)(sizeof(allowed) / sizeof(allowed[0]));
+    char seen[21][32];
+    int n_seen = 0;
+    const char *p = json_skip_ws(text);
+    if (*p != '{') return 0;
+    p = json_skip_ws(p + 1);
+    if (*p == '}') {
+        p = json_skip_ws(p + 1);
+        return *p == '\0';
+    }
+    for (;;) {
+        p = json_skip_ws(p);
+        if (*p != '"') return 0;
+        const char *after_key = json_parse_string(p);
+        if (!after_key) return 0;
+        char kbuf[128];
+        size_t klen = 0;
+        if (!json_decode_string(p, kbuf, sizeof(kbuf), &klen)) return 0;
+        int known = 0;
+        for (int i = 0; i < n_allowed; i++) {
+            if (klen == strlen(allowed[i]) && memcmp(kbuf, allowed[i], klen) == 0) {
+                known = 1;
+                break;
+            }
+        }
+        if (!known) return 0;
+        for (int i = 0; i < n_seen; i++) {
+            if (strcmp(seen[i], kbuf) == 0) return 0; /* 重复键 */
+        }
+        if (n_seen >= 21 || klen >= sizeof(seen[0])) return 0;
+        memcpy(seen[n_seen], kbuf, klen);
+        seen[n_seen][klen] = '\0';
+        n_seen++;
+        p = json_skip_ws(after_key);
+        if (*p != ':') return 0;
+        const char *vend = json_parse_value(json_skip_ws(p + 1), 0);
+        if (!vend) return 0;
+        p = json_skip_ws(vend);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') {
+            p = json_skip_ws(p + 1);
+            return *p == '\0';
+        }
+        return 0;
+    }
+}
+
 /* ---------------- 信封解析 ---------------- */
 static void set_err(lea_envelope_t *out, const char *code, const char *detail) {
     snprintf(out->error, sizeof(out->error), "%s", code);
@@ -889,56 +1066,91 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
         set_err(out, LEA_ERR_BAD_ENVELOPE, "empty-or-oversize");
         return 0;
     }
+    /* F-02：顶层未知字段／重复字段／尾部垃圾一律拒绝（普查先行）。 */
+    if (!envelope_top_level_keys_ok(text)) {
+        set_err(out, LEA_ERR_BAD_ENVELOPE, "unknown-or-duplicate-field");
+        return 0;
+    }
     long long v = 0;
-    if (!lea_json_long(text, "version", &v) || v != LEA_PROTOCOL_VERSION) {
+    /* F-02：v2-only。整数字段一律用严格顶层解析（json_find_member 全
+     * 量遍历：重复键／嵌套同名键／尾部字符／溢出即拒），不用全文子串
+     * 查找（lea_json_long／lea_json_string 会命中 params 内嵌套值）。 */
+    if (lea_json_top_level_long(text, "version", &v) != 1 || v != LEA_PROTOCOL_VERSION) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "version");
         return 0;
     }
     out->version = (int)v;
-    if (!lea_json_string(text, "request_id", out->request_id, sizeof(out->request_id)) ||
+    if (!lea_json_top_level_string(text, "request_id", out->request_id, sizeof(out->request_id)) ||
         !lea_validate_token(out->request_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "request_id");
         return 0;
     }
-    /* batch_id 可选；seq 必填且 ≥1（v1 语义：单条为 1、批量单调递增；
-     * 缺失或 0 即拒绝，不得缺省为 0 后签名／验签）。 */
-    lea_json_string(text, "batch_id", out->batch_id, sizeof(out->batch_id));
-    if (out->batch_id[0] && !lea_validate_id_field(out->batch_id)) {
-        set_err(out, LEA_ERR_BAD_ENVELOPE, "batch_id");
-        return 0;
+    /* batch_id 可选；seq 必填且 ≥1（v2 语义：单条为 1、批量单调递增；
+     * 缺失或 0 即拒绝，不得缺省为 0 后签名／验签）。batch_id 显式出现
+     * 但非字符串即拒绝，不得当缺失静默放过；空串沿用旧义（等同缺失）。 */
+    {
+        const char *bval = NULL;
+        size_t bvlen = 0;
+        int br = json_find_member(text, "batch_id", &bval, &bvlen);
+        if (br < 0) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "batch_id");
+            return 0;
+        }
+        if (br == 1) {
+            if (!lea_json_top_level_string(text, "batch_id", out->batch_id, sizeof(out->batch_id))) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "batch_id");
+                return 0;
+            }
+            if (out->batch_id[0] && !lea_validate_id_field(out->batch_id)) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "batch_id");
+                return 0;
+            }
+        }
     }
     long long seq = 0;
-    if (!lea_json_long(text, "seq", &seq) || seq < 1) {
+    if (lea_json_top_level_long(text, "seq", &seq) != 1 || seq < 1) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "seq");
         return 0;
     }
     out->seq = seq;
-    if (!lea_json_string(text, "device_id", out->device_id, sizeof(out->device_id)) ||
+    if (!lea_json_top_level_string(text, "device_id", out->device_id, sizeof(out->device_id)) ||
         out->device_id[0] == '\0' || !lea_validate_id_field(out->device_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "device_id");
         return 0;
     }
-    if (!lea_json_string(text, "account_id", out->account_id, sizeof(out->account_id)) ||
+    if (!lea_json_top_level_string(text, "account_id", out->account_id, sizeof(out->account_id)) ||
         out->account_id[0] == '\0' || !lea_validate_id_field(out->account_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "account_id");
         return 0;
     }
-    if (!lea_json_string(text, "api_key_id", out->api_key_id, sizeof(out->api_key_id)) ||
+    if (!lea_json_top_level_string(text, "api_key_id", out->api_key_id, sizeof(out->api_key_id)) ||
         out->api_key_id[0] == '\0' || !lea_validate_id_field(out->api_key_id)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "api_key_id");
         return 0;
     }
-    if (!lea_json_long(text, "binding_epoch", &out->binding_epoch)) {
+    if (lea_json_top_level_long(text, "binding_epoch", &out->binding_epoch) != 1) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "binding_epoch");
         return 0;
     }
-    if (!lea_json_string(text, "nonce", out->nonce, sizeof(out->nonce)) ||
+    /* F-02：grant_epoch 必填、无符号整数（0..2^53-1，最短十进制、
+     * 无前导零、无符号位、无空格／小数／尾随字符）。缺失／非法／
+     * 超界一律拒绝，不得缺省为 0 后签名／验签。 */
+    {
+        const char *gval = NULL;
+        size_t gvlen = 0;
+        int gr = json_find_member(text, "grant_epoch", &gval, &gvlen);
+        if (gr != 1 || !json_uint53_from_slice(gval, gvlen, &out->grant_epoch)) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "grant_epoch");
+            return 0;
+        }
+    }
+    if (!lea_json_top_level_string(text, "nonce", out->nonce, sizeof(out->nonce)) ||
         !lea_validate_token(out->nonce)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "nonce");
         return 0;
     }
-    if (!lea_json_long(text, "issued_at", &out->issued_at) ||
-        !lea_json_long(text, "expires_at", &out->expires_at)) {
+    if (lea_json_top_level_long(text, "issued_at", &out->issued_at) != 1 ||
+        lea_json_top_level_long(text, "expires_at", &out->expires_at) != 1) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "issued_at/expires_at");
         return 0;
     }
@@ -947,13 +1159,13 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
         set_err(out, tw_err, "time-window");
         return 0;
     }
-    if (!lea_json_string(text, "idempotency_key", out->idempotency_key,
+    if (!lea_json_top_level_string(text, "idempotency_key", out->idempotency_key,
                          sizeof(out->idempotency_key)) ||
         !lea_validate_token(out->idempotency_key)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "idempotency_key");
         return 0;
     }
-    if (!lea_json_string(text, "command", out->command, sizeof(out->command)) ||
+    if (!lea_json_top_level_string(text, "command", out->command, sizeof(out->command)) ||
         !lea_command_spec(out->command)) {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "command");
         return 0;
@@ -1006,12 +1218,69 @@ int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out
             }
         }
     }
-    if (!lea_json_string(text, "signature", out->signature, sizeof(out->signature)) ||
+    /* B1 信封新字段（全部可选；老版本不发即缺省，老版本收到新字段时
+     * 按未知键忽略——本解析只按已知键查找，不拒未知字段，故双向兼容。
+     * job_id 非法／mode 非法／deadline_ms 越界即整单拒绝，不静默回退。 */
+    out->job_id[0] = '\0';
+    out->mode[0] = '\0';
+    out->deadline_ms = 0;
+    out->has_deadline = 0;
+    {
+        const char *jval = NULL;
+        size_t jvlen = 0;
+        int jr = json_find_member(text, "job_id", &jval, &jvlen);
+        if (jr < 0) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "job_id");
+            return 0;
+        }
+        if (jr == 1) {
+            char jid[64] = { 0 };
+            if (!lea_json_top_level_string(text, "job_id", jid, sizeof(jid)) ||
+                !lea_validate_token(jid)) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "job_id");
+                return 0;
+            }
+            snprintf(out->job_id, sizeof(out->job_id), "%s", jid);
+        }
+        const char *mval = NULL;
+        size_t mvlen = 0;
+        int mr = json_find_member(text, "mode", &mval, &mvlen);
+        if (mr < 0) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "mode");
+            return 0;
+        }
+        if (mr == 1) {
+            char md[16] = { 0 };
+            if (!lea_json_top_level_string(text, "mode", md, sizeof(md)) ||
+                (strcmp(md, "sync") != 0 && strcmp(md, "async") != 0)) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "mode");
+                return 0;
+            }
+            snprintf(out->mode, sizeof(out->mode), "%s", md);
+        }
+        const char *dval = NULL;
+        size_t dvlen = 0;
+        int dr = json_find_member(text, "deadline_ms", &dval, &dvlen);
+        if (dr < 0) {
+            set_err(out, LEA_ERR_BAD_ENVELOPE, "deadline_ms");
+            return 0;
+        }
+        if (dr == 1) {
+            long long dl = 0;
+            if (!json_long_from_slice(dval, dvlen, &dl) || dl < 1 || dl > 120000) {
+                set_err(out, LEA_ERR_BAD_ENVELOPE, "deadline_ms");
+                return 0;
+            }
+            out->deadline_ms = dl;
+            out->has_deadline = 1;
+        }
+    }
+    if (!lea_json_top_level_string(text, "signature", out->signature, sizeof(out->signature)) ||
         out->signature[0] == '\0') {
         set_err(out, LEA_ERR_BAD_ENVELOPE, "signature");
         return 0;
     }
-    lea_json_string(text, "trace_id", out->trace_id, sizeof(out->trace_id));
+    lea_json_top_level_string(text, "trace_id", out->trace_id, sizeof(out->trace_id));
     out->valid = 1;
     return 1;
 }
@@ -1026,14 +1295,18 @@ long lea_effective_timeout_ms(const lea_envelope_t *env) {
 
 /* ---------------- 路径规范化 ---------------- */
 /* 词法规范化：把 / 视为分隔符；折叠 "."；解析 ".."（越界根返回 0）。
- * 保留盘符前缀（C:）与开头的 \\（UNC）。输出用输入的主导分隔符。 */
+ * 保留盘符前缀（C:）与开头的 \\（UNC）。输出用输入的主导分隔符。
+ * 所有权（N-01 修复，2026-11-15）：段数组 segs[] 只由函数末尾的单
+ * 一 cleanup 出口释放，拼接循环内绝不 free；任何失败路径都走
+ * fail:，不再有裸 return 0。拼接前先算清所需输出长度，超
+ * out_size 直接拒绝，不进入部分拼接。 */
 int lea_normalize_path(const char *path, char *out, size_t out_size) {
     if (!path || !out || out_size < 4 || path[0] == '\0') return 0;
     int use_backslash = strchr(path, '\\') != NULL;
     char sep = use_backslash ? '\\' : '/';
     /* 分段 */
     char tmp[1024];
-    if (strlen(path) >= sizeof(tmp)) return 0;
+    if (strlen(path) >= sizeof(tmp)) return 0; /* 入参上限：tmp 含 NUL */
     snprintf(tmp, sizeof(tmp), "%s", path);
     for (char *p = tmp; *p; p++) if (*p == '/' || *p == '\\') *p = sep;
 
@@ -1054,7 +1327,7 @@ int lea_normalize_path(const char *path, char *out, size_t out_size) {
     /* 切分并解析 */
     char *segs[128];
     int nseg = 0;
-    char *save = NULL;
+    int ok = 0;
     /* 手动切分（strtok_r 在 MSVC 下为 strtok_s；这里手写避免可移植性问题）。 */
     char *cur = rest;
     while (*cur) {
@@ -1065,41 +1338,57 @@ int lea_normalize_path(const char *path, char *out, size_t out_size) {
         size_t slen = (size_t)(cur - start);
         if (slen == 1 && start[0] == '.') continue;
         if (slen == 2 && start[0] == '.' && start[1] == '.') {
-            if (nseg == 0) return 0; /* 越界 */
-            nseg--;
+            if (nseg == 0) goto fail; /* 越界 */
+            /* 弹出段时一并释放（旧代码只 nseg--，每 ".." 漏一次 malloc）。 */
+            free(segs[--nseg]);
+            segs[nseg] = NULL;
             continue;
         }
-        if (nseg >= 128) return 0;
+        if (nseg >= 128) goto fail; /* 段数上限，直接拒绝 */
         char *s = (char *)malloc(slen + 1);
-        if (!s) return 0;
+        if (!s) goto fail;
         memcpy(s, start, slen);
         s[slen] = '\0';
         segs[nseg++] = s;
     }
-    (void)save;
-    size_t off = 0;
-    off += (size_t)snprintf(out + off, out_size - off, "%s", prefix);
-    for (int i = 0; i < nseg; i++) {
-        if (off > 0 && out[off - 1] != sep) {
-            if (off + 1 >= out_size) goto fail;
-            out[off++] = sep;
+    /* 拼接前先算清所需输出长度（含 NUL），超 out_size 直接拒绝，不
+     * 进入部分拼接（fail-closed）。输出 = 前缀＋每段前一个分隔符
+     * （当前末字符已是分隔符时不加）＋段本身。 */
+    {
+        size_t need = strlen(prefix);
+        for (int i = 0; i < nseg; i++) {
+            if (need > 0) {
+                char last = (i == 0) ? prefix[need - 1]
+                                     : segs[i - 1][strlen(segs[i - 1]) - 1];
+                if (last != sep) need += 1;
+            }
+            need += strlen(segs[i]);
+        }
+        if (need + 1 > out_size) goto fail;
+    }
+    if (nseg == 0 && prefix[0] == '\0') goto fail; /* 空路径 */
+    {
+        size_t off = 0;
+        off += (size_t)snprintf(out + off, out_size - off, "%s", prefix);
+        for (int i = 0; i < nseg; i++) {
+            if (off > 0 && out[off - 1] != sep) {
+                out[off++] = sep;
+                out[off] = '\0';
+            }
+            size_t l = strlen(segs[i]);
+            memcpy(out + off, segs[i], l);
+            off += l;
             out[off] = '\0';
         }
-        size_t l = strlen(segs[i]);
-        if (off + l >= out_size) goto fail;
-        memcpy(out + off, segs[i], l);
-        off += l;
-        out[off] = '\0';
-        free(segs[i]);
     }
-    if (nseg == 0 && prefix[0] == '\0') {
-        /* 空路径 */
-        goto fail;
-    }
-    return 1;
+    ok = 1;
 fail:
-    for (int i = 0; i < nseg; i++) free(segs[i]);
-    return 0;
+    for (int i = 0; i < nseg; i++) {
+        free(segs[i]);
+        segs[i] = NULL;
+    }
+    if (!ok) out[0] = '\0'; /* 失败不留部分输出 */
+    return ok;
 }
 
 static int ci_startswith(const char *s, const char *prefix) {

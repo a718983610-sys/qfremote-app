@@ -2,7 +2,7 @@
 /*
  * 本机 agent 自愈（2.4.3/2.4.4）本地自检：
  *  A. installer.nsi 静态断言：预检函数在位、装后段接线、runas 提权只走
- *     助手脚本、安装器本体仍为 user 级（不动既有安装/静默更新口径）、
+ *     助手脚本、A1 两段式分层（内层 admin／外层 user，目录页在外层）、
  *     预检函数内无 Abort（fail-soft）、目录页与 InstallDirRegKey 未动；
  *  B. qf-agent-heal.ps1 静态断言：目标地址、.qfbak 备份守卫、只改
  *     MeshServer 行、重启 Mesh Agent 服务、fail-soft（静默继续＋
@@ -35,6 +35,10 @@ const result = { cases: {}, pass: false };
 const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !!cond }, extra || {}); };
 
 const NSI = fs.readFileSync(path.join(__dirname, '..', 'installer.nsi'), 'utf8');
+// A1（2026-11-13，两段式）：外层 installer-outer.nsi（user 级，只启动＋
+// 报错）＋内层 installer.nsi（admin 级，真正释放文件、装服务）。目录页／
+// 完成页／OutFile 名／user 级在外层；admin 级／服务安装／注册表写在内层。
+const NSI_OUTER = fs.readFileSync(path.join(__dirname, '..', 'installer-outer.nsi'), 'utf8');
 const PS1 = fs.readFileSync(path.join(__dirname, '..', 'qf-agent-heal.ps1'), 'utf8');
 const TARGET = 'wss://app.qfremote.top:8443/agent.ashx';
 const OLD_IP = '54.248.9.192';
@@ -50,6 +54,7 @@ try {
   // ---- A. installer.nsi ----
   ok('A1-heal-function-present', NSI.includes('Function QFHealAgentMsh'));
   const secMain = segment(NSI, 'Section "QFRemote" SEC_MAIN', 'SectionEnd');
+  const secA1 = segment(NSI, 'Section "A1 首装：文件校验与 LEA 服务安装" SEC_A1', 'SectionEnd');
   ok('A2-heal-called-in-section', secMain.includes('Call QFHealAgentMsh'));
   ok('A3-helper-staged-in-section',
     secMain.includes('File "/oname=$TEMP\\qf-agent-heal.ps1" "qf-agent-heal.ps1"'));
@@ -58,8 +63,11 @@ try {
   ok('A5-runas-only-for-helper',
     (NSI.match(/ExecShell "runas"/g) || []).length === 1 &&
     NSI.includes('ExecShell "runas" "powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File \'$TEMP\\qf-agent-heal.ps1\'"'));
-  ok('A6-installer-stays-user-level',
-    NSI.includes('RequestExecutionLevel user') && !NSI.includes('RequestExecutionLevel admin'));
+  // A1 两段式：内层 admin（真正装服务）、外层 user（只启动＋报错）。
+  // 内层第 95 行注释里还提到 user 级，故指令行须用 ^ 锚定。
+  ok('A6-installer-two-stage-levels',
+    /^RequestExecutionLevel admin$/m.test(NSI) && !/^RequestExecutionLevel user$/m.test(NSI) &&
+    /^RequestExecutionLevel user$/m.test(NSI_OUTER) && !/^RequestExecutionLevel admin$/m.test(NSI_OUTER));
   const healFn = segment(NSI, 'Function QFHealAgentMsh', 'FunctionEnd');
   ok('A7-heal-function-no-abort', !/Abort/.test(healFn));
   ok('A8-heal-delegates-to-ps1-detect',
@@ -68,8 +76,10 @@ try {
     !healFn.includes('sc query "Mesh Agent"'));
   ok('A9-no-target-hardcoded-in-nsi',
     !healFn.includes('MeshServer=wss://') && PS1.includes(TARGET));
+  // A1 两段式：目录页在外层，InstallDirRegKey 内外层各一（内层写卸载注册表）。
   ok('A10-directory-page-and-regkey-intact',
-    NSI.includes('MUI_PAGE_DIRECTORY') && NSI.includes('InstallDirRegKey HKCU'));
+    NSI_OUTER.includes('MUI_PAGE_DIRECTORY') && NSI.includes('InstallDirRegKey HKCU') &&
+    NSI_OUTER.includes('InstallDirRegKey HKCU'));
   ok('A11-heal-skips-when-correct',
     healFn.includes('alreadyCorrect:') &&
     healFn.includes('INSTALLER: skip already correct and running'));
@@ -210,21 +220,38 @@ try {
      'privacy-lock\\app\\qf-lockctl.exe', 'privacy-lock\\app\\qf-lockupdater.exe']
       .every((s) => lockSec.includes('File "' + s + '"')) &&
     lockSec.includes('DetailPrint "隐私锁组件 v2.0.3'));
+  // A1 两段式：对外安装包名在外层 OutFile，内层 OutFile 是 QFRSetupAdmin.exe；
+  // 版本字符串与卸载注册表写仍在内层。
   ok('G3-version-245',
-    NSI.includes('QFRemote-Setup-v3.0.0.exe') &&
+    NSI_OUTER.includes('OutFile "${OUT_DIR}/QFRemote-Setup-v${BUILD_VERSION}.exe"') &&
+    NSI.includes('OutFile "${OUT_DIR}/QFRSetupAdmin.exe"') &&
     NSI.includes('VIProductVersion "3.0.0.0"') &&
     NSI.includes('"DisplayVersion" "3.0.0"') &&
     NSI.includes('"DisplayName" "QFRemote 3.0.0"'));
+  // A1：app.7z 改由 SEC_A1 校验通过后删（校验失败要从它重放），SEC_MAIN
+  // 内解压失败仍是 IfErrors 紧跟、Abort 收尾。注意 SEC_MAIN 开头的 A1
+  // 备份块也有一个 IfErrors 0 +2（读旧版本号），故从解压处起找后续那处。
+  const extIdx = secMain.indexOf('Nsis7z::Extract');
+  const errIdx = secMain.indexOf('IfErrors 0 +2', extIdx);
   ok('G4-iferrors-right-after-extract',
-    secMain.indexOf('Nsis7z::Extract') < secMain.indexOf('IfErrors 0 +2') &&
-    secMain.indexOf('IfErrors 0 +2') < secMain.indexOf('Delete "$PLUGINSDIR\\app.7z"'));
+    extIdx >= 0 && errIdx > extIdx &&
+    secMain.indexOf('Abort "解压失败，请重新运行安装包。"', errIdx) > errIdx &&
+    secA1.includes('Delete "$PLUGINSDIR\\app.7z"'));
   ok('G5-wait-old-process-before-extract',
     secMain.includes('waitOldProc:') &&
     secMain.includes('tasklist /FI "IMAGENAME eq QFRemote.exe"') &&
     secMain.indexOf('waitOldProcDone:') < secMain.indexOf('Nsis7z::Extract'));
+  // G6（2026-11-15，陈旧断言修复）：installer.nsi:43 现行文案为“卸载将彻底清除
+  // 本机上的 QFRemote，包括登录信息、设置、服务、全部数据与残留文件。同时注销
+  // 本设备在服务端的登记与绑定（付费密钥不受影响）。”——语义覆盖且强于旧断言
+  // 的字面短语“将同时清除本机保存的登录信息与设置”。断言改为语义要点全在，
+  // 且限定在 MUI_UNCONFIRMPAGE_TEXT_TOP 这一行内（避免全文件 includes 误命中）。
+  const unconfirmLine = (NSI.match(/!define MUI_UNCONFIRMPAGE_TEXT_TOP[^\n]*/) || [''])[0];
   ok('G6-uninstall-warns-login-data',
-    NSI.includes('MUI_UNCONFIRMPAGE_TEXT_TOP') &&
-    NSI.includes('将同时清除本机保存的登录信息与设置'));
+    unconfirmLine.includes('登录信息') && unconfirmLine.includes('设置') &&
+    unconfirmLine.includes('服务') && unconfirmLine.includes('全部数据与残留文件') &&
+    unconfirmLine.includes('注销本设备在服务端的登记与绑定') &&
+    unconfirmLine.includes('付费密钥不受影响'));
   ok('G7-ps1-detect-mode',
     PS1.includes('param(') && PS1.includes('$Mode') &&
     PS1.includes("if ($Mode -eq 'Detect')") &&
@@ -253,7 +280,11 @@ try {
   ok('G12-pending-fail-has-result',
     pendingBlk.includes('$okPending = Restart-AgentServiceOnce') &&
     pendingBlk.includes('RESULT: service_restart_failed'));
-  const uninst = segment(NSI, 'Section "Uninstall"', 'SectionEnd');
+  // G9（2026-11-15，陈旧断言修复）：segment() 用 indexOf('Section "Uninstall"')
+  // 会先命中 installer.nsi:341 的注释行（"; Section \"Uninstall\" 绝不在此跑…"），
+  // 截到 :385 的 SectionEnd，该段内无 sc 命令故误报。真实 Uninstall 段在 :614-730，
+  // 行首即 Section "Uninstall"（全文件仅一处行首命中）。改用行首锚定起截。
+  const uninst = segment(NSI, '\nSection "Uninstall"', 'SectionEnd');
   ok('G9-uninstall-stops-helper-services',
     uninst.includes("sc stop QFLockSvc") && uninst.includes("sc delete QFLockSvc") &&
     uninst.includes("sc stop QFSysHelper") && uninst.includes("sc delete QFSysHelper"));

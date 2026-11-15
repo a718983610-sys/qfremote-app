@@ -1,0 +1,16 @@
+{
+  "name": "qfremote-webapp-tests",
+  "private": true,
+  "version": "3.0.0",
+  "description": "QFRemote 网页端测试：Playwright E2E + node 单测（W-07 发版门）。安装：cd server/webapp/tests && npm install",
+  "scripts": {
+    "test": "node ./run.mjs",
+    "test:unit": "node --test ./unit/*.test.mjs",
+    "test:e2e": "npx playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "acorn": "^8.19.0",
+    "axe-core": "^4.10.3"
+  }
+}

@@ -388,6 +388,83 @@ static void snapshot_dir(char *out, size_t out_size) {
     ush_snapshot_prune_dir(out, USH_SNAPSHOT_MAX_FILES, USH_SNAPSHOT_MAX_AGE_DAYS);
 }
 
+/* ---------- file 模式：WIC 工厂＋文件流 ---------- */
+/* N-09（2026-11-15）：file 模式在 USH 管道线程上跑，管道线程从未初始
+ * 化 COM——旧代码在 ush_ui_snapshot 内直接 CoCreateInstance 建 WIC
+ * 工厂，恒返 CO_E_NOTINITIALIZED（0x800401F0），默认 mode=file 截图
+ * 恒败（encode 内的 CoInitializeEx 根本没机会跑到）。修法：本函数入
+ * 口即按需 CoInitializeEx（MTA，与 encode 内同款）；只有本次调用真
+ * 由我们初始化时才置 *com_init_out=1，调用方在 encode 完成后凭此配
+ * 对 CoUninitialize（本函数自身绝不反初始化——流与编码器须在初始化
+ * 的线程上用完再反初始化）。不做 pipe_loop 入口常驻初始化（UIA 对
+ * 象建在主线程 STA，常驻初始化会走跨套间封送、主线程不泵消息会挂死
+ * click/tree/input，见 encode 注释）。RPC_E_CHANGED_MODE 等失败时
+ * 不置位，照常往下尝试创建（线程已被别处以另一模式初始化时工厂
+ * 创建仍可成功）。
+ * 成功返回 1（factory／wstream／istream 均已建出，调用方释放）；
+ * 失败返回 0 并带回步骤＋HRESULT（步骤口径与旧内联代码一致）；
+ * 失败时已建出的对象由本函数自行释放，调用方无需再释放。
+ * 供单测直验：无 COM 初始化的线程上调本函数须成功建出工厂＋流。 */
+static int snapshot_open_file_stream(const char *path_utf8,
+                                     IWICImagingFactory **factory_out,
+                                     IWICStream **wstream_out,
+                                     IStream **istream_out,
+                                     int *com_init_out,
+                                     HRESULT *hr_out, const char **step_out,
+                                     HRESULT *hr_init_out) {
+    if (factory_out) *factory_out = NULL;
+    if (wstream_out) *wstream_out = NULL;
+    if (istream_out) *istream_out = NULL;
+    if (com_init_out) *com_init_out = 0;
+    if (hr_out) *hr_out = E_FAIL;
+    if (step_out) *step_out = "handler/stream-setup";
+    HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (hr_init_out) *hr_init_out = hr_init;
+    int com_init_here = SUCCEEDED(hr_init);
+    if (com_init_out) *com_init_out = com_init_here;
+    IWICImagingFactory *factory = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICImagingFactory, (void **)&factory);
+    if (FAILED(hr) || !factory) {
+        if (hr_out) *hr_out = FAILED(hr) ? hr : E_POINTER;
+        if (step_out) *step_out = "handler/CoCreateInstance";
+        return 0;
+    }
+    IWICStream *wstream = NULL;
+    HRESULT hr2 = factory->lpVtbl->CreateStream(factory, &wstream);
+    if (FAILED(hr2) || !wstream) {
+        if (hr_out) *hr_out = FAILED(hr2) ? hr2 : E_POINTER;
+        if (step_out) *step_out = "handler/CreateStream";
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    WCHAR wpath[MAX_PATH + 64];
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, wpath, MAX_PATH + 64);
+    hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
+    if (FAILED(hr2)) {
+        if (hr_out) *hr_out = hr2;
+        if (step_out) *step_out = "handler/InitializeFromFilename";
+        wstream->lpVtbl->Release(wstream);
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    IStream *istream = NULL;
+    hr2 = wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream);
+    if (FAILED(hr2) || !istream) {
+        if (hr_out) *hr_out = FAILED(hr2) ? hr2 : E_POINTER;
+        if (step_out) *step_out = "handler/QueryInterface";
+        wstream->lpVtbl->Release(wstream);
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    if (factory_out) *factory_out = factory;
+    if (wstream_out) *wstream_out = wstream;
+    if (istream_out) *istream_out = istream;
+    if (hr_out) *hr_out = S_OK;
+    if (step_out) *step_out = "ok";
+    return 1;
+}
+
 int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                     char *err_code, size_t err_code_size,
                     char *err_text, size_t err_text_size) {
@@ -440,36 +517,26 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
             st.wMilliseconds, (unsigned long)GetCurrentProcessId());
         /* WIC 直接写文件：用 IWICStream::InitializeFromFilename。
          * r9-diag：handler 自身的工厂创建与流搭建失败时同样带回步骤＋HRESULT；
-         * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。 */
+         * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。
+         * N-09：工厂＋流搭建抽到 snapshot_open_file_stream（入口即按需
+         * CoInitializeEx，见该函数注释）。 */
         HRESULT diag_hr = E_FAIL;
         const char *diag_step = "handler/stream-setup";
-        /* 0xFFFFFFFF＝哨兵：CoInitializeEx 尚未在本路径调用（encode 未被调
-         * 到时沿用此值）；切勿默认为 S_OK，那会谎称“初始化已成功”。 */
+        /* 0xFFFFFFFF＝哨兵：CoInitializeEx 尚未在本路径调用（open 失败且
+         * encode 未被调到时沿用此值）；切勿默认为 S_OK，那会谎称“初始化
+         * 已成功”。open 成功时 diag_init 为 open 的初始化结果，encode 被
+         * 调到后由其覆写为真实步骤。 */
         HRESULT diag_init = (HRESULT)0xFFFFFFFF;
+        int com_init_here = 0;
         IWICImagingFactory *factory = NULL;
-        HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-                                      &IID_IWICImagingFactory, (void **)&factory);
-        if (SUCCEEDED(hr) && factory) {
-            IWICStream *wstream = NULL;
-            HRESULT hr2 = factory->lpVtbl->CreateStream(factory, &wstream);
-            if (SUCCEEDED(hr2) && wstream) {
-                WCHAR wpath[MAX_PATH + 64];
-                MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH + 64);
-                hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
-                if (SUCCEEDED(hr2)) {
-                    IStream *istream = NULL;
-                    hr2 = wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream);
-                    if (SUCCEEDED(hr2) && istream) {
-                        ok = encode_png_to_stream(&cap, istream, &diag_hr, &diag_step, &diag_init);
-                        istream->lpVtbl->Release(istream);
-                    } else { diag_step = "handler/QueryInterface"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
-                } else { diag_step = "handler/InitializeFromFilename"; diag_hr = hr2; }
-                wstream->lpVtbl->Release(wstream);
-            } else { diag_step = "handler/CreateStream"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
+        IWICStream *wstream = NULL;
+        IStream *istream = NULL;
+        if (snapshot_open_file_stream(path, &factory, &wstream, &istream,
+                                      &com_init_here, &diag_hr, &diag_step, &diag_init)) {
+            ok = encode_png_to_stream(&cap, istream, &diag_hr, &diag_step, &diag_init);
+            istream->lpVtbl->Release(istream);
+            wstream->lpVtbl->Release(wstream);
             factory->lpVtbl->Release(factory);
-        } else {
-            diag_step = "handler/CoCreateInstance";
-            diag_hr = FAILED(hr) ? hr : E_POINTER;
         }
         if (ok) {
             /* 文件大小 */
@@ -491,6 +558,10 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                      diag_step, (unsigned long)diag_hr, (unsigned long)diag_init,
                      cap.width, cap.height, cap.stride);
         }
+        /* N-09：与 snapshot_open_file_stream 内的 CoInitializeEx 配对
+         * （仅本次调用真由我们初始化时反初始化；RPC_E_CHANGED_MODE 等
+         * 失败时不反初始化）。 */
+        if (com_init_here) CoUninitialize();
     } else {
         /* 内联：编到内存流 → 读 HGLOBAL → Base64 */
         HGLOBAL hg = NULL;

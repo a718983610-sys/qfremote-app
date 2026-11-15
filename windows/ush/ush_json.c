@@ -125,6 +125,17 @@ int ush_json_get_long(const char *json, const char *key, long *out) {
     return 1;
 }
 
+int ush_json_get_llong(const char *json, const char *key, long long *out) {
+    const char *p = find_key_value(json, key);
+    if (!p) return 0;
+    if (!((*p >= '0' && *p <= '9') || *p == '-')) return 0;
+    char *end = NULL;
+    long long v = strtoll(p, &end, 10);
+    if (end == p) return 0;
+    *out = v;
+    return 1;
+}
+
 int ush_json_get_bool(const char *json, const char *key, int *out) {
     const char *p = find_key_value(json, key);
     if (!p) return 0;
@@ -262,6 +273,10 @@ int ush_parse_request(const char *text, ush_request_t *out) {
     else if (strcmp(cmd, "ui.input") == 0) out->cmd = USH_CMD_INPUT;
     else if (strcmp(cmd, "ui.snapshot") == 0) out->cmd = USH_CMD_SNAPSHOT;
     else if (strcmp(cmd, "ui.tree") == 0) out->cmd = USH_CMD_TREE;
+    else if (strcmp(cmd, "selfbind.deliver-ticket") == 0) out->cmd = USH_CMD_SELFBIND;
+    else if (strcmp(cmd, "selfbind.clear-credential") == 0) out->cmd = USH_CMD_SELFBIND_CLEAR;
+    else if (strcmp(cmd, "selfbind.status") == 0) out->cmd = USH_CMD_SELFBIND_STATUS;
+    else if (strcmp(cmd, "selfbind.renew") == 0) out->cmd = USH_CMD_SELFBIND_RENEW;
     else { strcpy(out->error, USH_ERR_UNKNOWN_COMMAND); return 0; }
 
     /* params 缺失时视为空对象；params 不是对象时拒绝 */

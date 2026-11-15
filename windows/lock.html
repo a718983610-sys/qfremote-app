@@ -2,123 +2,120 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; }
+  html, body { height:100%; }
   body { overflow-y:auto; }
   body {
-    background: #f4f7fb;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    background: var(--bg);
+    -webkit-user-select:none; user-select:none; color:var(--text-1); position:relative;
     display:flex; flex-direction:column;
   }
-  html[data-theme="dark"] body {
-    background: #17181c; color:#eceff3;
-  }
-  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:20px 22px 0; }
+  /* 重做 A §4：撤销六项②深色合并——卡片用 BG2（--surface-3 别名），与页面 BG0 靠
+     hairline + e1 分离；单视图结构灰 BG0/BG2/BG3 ≤4 级，不再为“≤6”压平层级。 */
+  body { animation: win-in var(--d5) var(--e-l) both; }
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:24px 24px 0; }
   .tile {
-    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    width:60px; height:60px; border-radius:14px; padding:4px; flex:none; background:var(--tile-bg);
     box-sizing:border-box;
   }
-  html[data-theme="dark"] .tile { background:#ffffff; }
-  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
-  .tt { margin-left:14px; padding-top:5px; }
-  .tt .nm { font-size:21px; font-weight:700; letter-spacing:.8px; line-height:1.1; }
-  .tt .ds { font-size:12px; color:#5d6e84; margin-top:5px; }
-  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .tile img { width:100%; height:100%; border-radius:10px; display:block; }
+  .tt { margin-left:16px; padding-top:4px; }
+  .tt .nm { font-size:24px; font-weight:600; letter-spacing:.8px; line-height:32px; }
+  .tt .ds { font-size:12px; color:var(--text-2); margin-top:4px; } /* W5：5→4（4pt 网格） */
   .x {
     -webkit-app-region: no-drag; margin-left:auto; appearance:none; border:none; cursor:pointer;
-    background:transparent; color:#5d6e84; width:30px; height:30px; border-radius:8px;
+    background:transparent; color:var(--text-2); width:32px; height:32px; border-radius:8px;
     display:flex; align-items:center; justify-content:center;
-    transition: background .13s ease, color .13s ease;
+    transition: background var(--d1) var(--e-c), color var(--d1) var(--e-c);
   }
-  .x:hover { background:#d3382c; color:#fff; }
+  .x:hover { background:var(--danger); color:var(--on-status); }
+  /* 实色 danger 底＋白字用浅色版定夺值 #DC2626（白字 4.83:1） */
+  html[data-theme="dark"] .x:hover { background:#DC2626; }
   .x svg { width:14px; height:14px; }
   .intro {
-    margin:18px 22px 0; padding:13px 16px; border-radius:14px; font-size:13px; line-height:1.7;
-    background: #ffffff; border:1px solid #dfe7f2; color:#1f2d47;
+    margin:16px 24px 0; padding:16px 20px; border-radius:12px; font-size:13px; line-height:20px;
+    background: var(--bg2); border:1px solid var(--line); color:var(--text-1);
   }
-  html[data-theme="dark"] .intro { background: #22262e; border-color: rgba(255,255,255,.08);
-    color:#c9cdd4; }
   .dev {
-    margin:14px 22px 0; padding:14px 16px; border-radius:14px;
-    background: #ffffff;
-    border:1px solid #dfe7f2;
+    margin:16px 24px 0; padding:16px 20px; border-radius:12px;
+    background: var(--bg2);
+    border:1px solid var(--line);
   }
-  html[data-theme="dark"] .dev { background: #22262e; border-color: rgba(255,255,255,.08); }
   .drow { display:flex; align-items:center; gap:10px; }
-  .drow::before { content:""; flex:none; width:34px; height:34px; border-radius:9px; background:#eef3fb url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232470e0' stroke-width='2' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E") center/19px no-repeat; }
-  html[data-theme="dark"] .drow::before { background-color:rgba(255,255,255,.07); background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238fb8f5' stroke-width='2' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E"); }
-  ::-webkit-scrollbar { width:10px; }
-  ::-webkit-scrollbar-track { background:transparent; }
-  ::-webkit-scrollbar-thumb { background:#c9d6ea; border-radius:6px; border:2px solid #f4f7fb; }
-  html[data-theme="dark"] ::-webkit-scrollbar-thumb { background:#3a3f49; border-color:#17181c; }
-  .dname { font-size:15px; font-weight:600; flex:1; word-break:break-all; color:#1f2d47; }
-  html[data-theme="dark"] .dname { color:#eceff3; }
-  .dstat { font-size:12px; color:#5d6e84; white-space:nowrap; }
-  html[data-theme="dark"] .dstat { color:#9aa1ab; }
-  .dstat.locked { color:#b45309; font-weight:600; }
-  .note { font-size:12px; color:#5d6e84; margin-top:8px; line-height:1.6; }
-  html[data-theme="dark"] .note { color:#9aa1ab; }
+  .drow::before { content:""; flex:none; width:34px; height:34px; border-radius:8px; background:var(--bg3) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000000' stroke-width='1.5' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E") center/19px no-repeat; }
+  html[data-theme="dark"] .drow::before { background-color:var(--line); background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23FFFFFF' stroke-width='1.5' stroke-linecap='round'%3E%3Crect x='2' y='3' width='20' height='14' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4'/%3E%3C/svg%3E"); }
+  .dname { font-size:14px; font-weight:600; flex:1; word-break:break-all; color:var(--text-1); }
+  .dstat { font-size:12px; color:var(--text-2); white-space:nowrap; }
+  /* Q1-2(a)（2026-11-15）：状态文一律中性墨色，状态色只做 6px 点 */
+  .dstat.locked { color:var(--text-1); font-weight:600; }
+  .dstat.locked::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--warning); margin-right:5px; vertical-align:middle; }
+  .note { font-size:12px; color:var(--text-2); margin-top:8px; line-height:1.6; }
   /* 开关（手动，默认关） */
-  .sw { -webkit-app-region: no-drag; flex:none; width:46px; height:26px; border-radius:99px; cursor:pointer;
-    border:none; background: #c9d6ea; position:relative; padding:0; appearance:none;
-    transition: background .15s ease; }
-  html[data-theme="dark"] .sw { background: rgba(255,255,255,.18); }
-  .sw i { position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%;
-    background:#fff; box-shadow: 0 1px 3px rgba(11,43,91,.25); transition: left .15s ease; display:block; }
-  .sw.on { background: #2470e0; }
-  html[data-theme="dark"] .sw.on { background: #2470e0; }
-  .sw.on i { left:23px; background:#fff; }
-  .sw:disabled { opacity:.45; cursor:default; }
-  .form { display:none; margin-top:12px; border-top:1px solid #dfe7f2; padding-top:12px; }
-  html[data-theme="dark"] .form { border-top-color: rgba(255,255,255,.08); }
+  .sw { -webkit-app-region: no-drag; flex:none; width:56px; height:32px; border-radius:99px; cursor:pointer;
+    border:none; background: var(--line); position:relative; padding:0; appearance:none;
+    transition: background var(--d1) var(--e-c); }
+  .sw i { position:absolute; top:2px; left:2px; width:28px; height:28px; border-radius:50%;
+    background:var(--on-brand); box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left var(--d3) var(--e-ov); display:block; }
+  /* 六项遗留③：关闭态旋钮改主文字色（深色对轨道 13.91:1、浅色 15.68:1），开启态不变 */
+  .sw:not(.on) i { background: var(--text-1); }
+  /* 六项遗留③：开关视觉 56×32，::after 透明区把触控补到 68×44 */
+  .sw::after { content:""; position:absolute; top:-6px; bottom:-6px; left:-6px; right:-6px; }
+  .sw.on { background: var(--brand); }
+  .sw.on i { left:26px; background:var(--on-brand); }
+  /* W6 定夺：禁用开关不用整体透明度（会把旋钮也压暗）；轨道改 bg3、旋钮改
+     text-disabled，保留 disabled 语义。轨道色与启用态轨道（var(--line)）同值，
+     与页底色已可辨，不另加内描边。 */
+  .sw:disabled { opacity:1; background:var(--bg3); cursor:default; }
+  .sw:disabled i { background:var(--text-disabled); }
+  .form { display:none; margin-top:12px; border-top:1px solid var(--line); padding-top:12px; }
   .form.show { display:block; }
-  .form label { display:block; font-size:12px; color:#5d6e84; margin:9px 0 5px; }
-  html[data-theme="dark"] .form label { color:#9aa1ab; }
+  .form label { display:block; font-size:12px; font-weight:500; line-height:18px; color:var(--text-2); margin:8px 0 4px; }
   .form input {
-    width:100%; box-sizing:border-box; padding:9px 11px; border-radius:10px; font-size:14px;
-    border:1px solid #dfe7f2; background: #f4f7fb; color:#1f2d47; outline:none;
-    font-family:inherit; transition: border-color .13s ease, box-shadow .13s ease;
+    width:100%; height:40px; box-sizing:border-box; padding:8px 12px; border-radius:var(--radius-1); font-size:14px; line-height:22px;
+    border:1px solid var(--line); background: var(--surface-3); color:var(--text-1); outline:none;
+    font-family:inherit; transition: border-color var(--d1) var(--e-c), box-shadow var(--d1) var(--e-c);
   }
-  html[data-theme="dark"] .form input { background: #1b1e24; border-color: rgba(255,255,255,.14); color:#eceff3; }
-  .form input:focus { border-color:#2470e0; box-shadow: 0 0 0 3px rgba(36,112,224,.18); }
+  html[data-theme="dark"] .form input { border-color: var(--line); }
+  .form input:focus { border-color:var(--brand); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text-1); }
   .btn {
     width:100%; border:none; cursor:pointer; font-family:inherit; margin-top:13px;
-    font-size:14px; font-weight:600; color:#fff; letter-spacing:1px;
-    padding:12px 0; border-radius:12px;
-    background: #2470e0;
-    transition: filter .15s ease, opacity .15s;
+    font-size:14px; font-weight:600; color:var(--on-brand); letter-spacing:1px;
+    padding:12px 0; border-radius:var(--radius-1);
+    background: var(--brand);
+    transition: background var(--d1) var(--e-c), transform var(--d0) var(--e-s), opacity var(--d1) var(--e-c);
   }
-  .btn:hover { filter: brightness(1.07); }
-  .btn:disabled { opacity:.55; cursor:default; filter:none; }
-  .btn.ghost { background: #ffffff; color:#2470e0;
-    border:1px solid #c9d6ea; }
-  .btn.ghost:hover { filter:none; background:#eef3fb; }
-  .btn.ghost:active { background:#e1ecfc; }
-  html[data-theme="dark"] .btn.ghost { background: #2b2f36; color:#eceff3;
-    border-color: rgba(255,255,255,.16); }
-  html[data-theme="dark"] .btn.ghost:hover { background:#32363f; }
-  html[data-theme="dark"] .btn.ghost:active { background:#3a3f49; }
-  .btn.danger { background: #d3382c; }
+  .btn:hover { filter:none; background:var(--brand-press); }
+  .btn:active { transform: scale(.985); }
+  .btn:disabled { background:var(--bg3); color:var(--text-disabled); cursor:default; filter:none; transform:none; }
+  .btn.ghost { background: var(--surface-3); color:var(--brand);
+    border:1px solid var(--line); }
+  .btn.ghost:hover { filter:none; background:var(--sel-bg); }
+  .btn.ghost:active { background:var(--sel-bg); }
+  html[data-theme="dark"] .btn.ghost { background: var(--surface-3); color:var(--text-1);
+    border-color: var(--line); }
+  html[data-theme="dark"] .btn.ghost:hover { background:var(--sel-bg); }
+  html[data-theme="dark"] .btn.ghost:active { background:var(--line); }
+  .btn.danger { background: var(--danger); }
+  /* 实色 danger 底＋白字用浅色版定夺值 #DC2626（白字 4.83:1） */
+  html[data-theme="dark"] .btn.danger { background:#DC2626; }
+  /* 忘记密码链接（定夺 §3.3）：主文字色＋始终下划线，hover 下划线变主文字色 */
   .linkbtn { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit;
-    color:#2470e0; font-size:13px; padding:0; margin-top:11px; text-decoration:underline; }
-  html[data-theme="dark"] .linkbtn { color:#8fb8f5; }
-  .msg { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center; color:#5d6e84; }
-  html[data-theme="dark"] .msg { color:#a7adb8; }
-  .msg .ok { color:#128a43; font-weight:600; }
-  .msg .bad { color:#d3382c; font-weight:600; }
-  html[data-theme="dark"] .msg .ok { color:#5eeaa0; }
-  html[data-theme="dark"] .msg .bad { color:#ff9d8f; }
-  .statebox { margin:18px 22px 0; text-align:center; font-size:14px; line-height:1.8; color:#1f2d47; }
-  html[data-theme="dark"] .statebox { color:#c9cdd4; }
+    color:var(--link); font-size:13px; padding:0; margin-top:12px; text-decoration:underline;
+    text-decoration-color:var(--link-underline); }
+  .linkbtn:hover { text-decoration-color:var(--link); }
+  .msg { margin:16px 24px 0; font-size:13px; line-height:22px; min-height:22px; text-align:center; color:var(--text-2); }
+  /* C §1.2：错误文案带 6px 红点，不只变色；错误触发 shake（JS 重启 .shake） */
+  .msg .bad::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .msg .ok { color:var(--text-1); font-weight:600; } /* Q1-2(a)：文字中性墨色，状态色只做点 */
+  .msg .ok::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--success); margin-right:6px; vertical-align:middle; }
+  .msg .bad { color:var(--text-1); font-weight:600; }
+  .statebox { margin:16px 24px 0; text-align:center; font-size:14px; line-height:1.6; color:var(--text-1); }
+  html[data-theme="dark"] .statebox { color:var(--text-2); }
   .statebox .btn { max-width:260px; margin-left:auto; margin-right:auto; }
-  .foot { margin-top:auto; padding:16px 22px 15px; text-align:center;
-    font-size:12px; color:#5d6e84; }
-  html[data-theme="dark"] .foot { color:#9aa1ab; }
+  .foot { margin-top:auto; padding:16px 24px; text-align:center;
+    font-size:12px; color:var(--text-2); }
 
-  /* 排版批1（P19）：焦点环与减动效 */
-  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
@@ -128,7 +125,7 @@
       <div class="nm">隐私锁</div>
       <div class="ds">QFRemote · 只锁电脑跟前</div>
     </div>
-    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
 
   <div class="intro">打开后，这台电脑屏幕变黑、只留输密码的框，坐在跟前的人看不见也动不了，必须输对密码才能用。远程控制不受影响。密码只用这一次：本地解锁成功后自动作废，下次打开重新设置。不想锁就不打开，关着一切照常。</div>
@@ -159,6 +156,8 @@
   function say(html, bad) {
     msgEl.innerHTML = html || '';
     msgEl.className = 'msg' + (bad ? ' badwrap' : '');
+    // B §3.2：锁页错误 shake——210ms、幅度 ≤6px、仅一次、无竖向
+    if (bad) { msgEl.classList.remove('shake'); void msgEl.offsetWidth; msgEl.classList.add('shake'); }
   }
   function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

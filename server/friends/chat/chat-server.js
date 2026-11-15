@@ -33,7 +33,12 @@
  *    不落盘、不进日志。会话令牌随机生成、只存哈希、12 小时过期。
  *
  * 配置（QFCHAT_CONFIG，默认 ./config.json）：
- *  { port, bind, tlsKey, tlsCert, mcUrl, dataFile, friendsFile, logFile }
+ *  { port, bind, tlsKey, tlsCert, mcUrl, dataFile, friendsFile, logFile,
+ *    inboxCap, pollPageSize, inboxDir }
+ *  inboxCap：每收件人 inbox 上限（默认 2000，夹 50..10000）；pollPageSize：
+ *  每轮 poll 最多返回事件数（默认 500，夹 10..2000）。
+ *  inboxDir：inbox 分片目录（默认 <dataFile 同级>/inbox/by-user，S-079）。
+ *  clientMsgIndex：clientMessageId 去重索引（S-086）；reactions：每消息表态（S-084）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -41,6 +46,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const { FriendsGate, norm, peerType } = require('./friends-gate');
+const inboxStore = require('./chat-inbox-store'); // S-079：每收件人持久 inbox 分片
 const OWNER_ACCOUNT = '718983610'; // 站长本人账号：限制只约束他人、不约束本人（2026-10-25 站长令）
 
 const CONFIG_PATH = process.env.QFCHAT_CONFIG || path.join(__dirname, 'config.json');
@@ -62,13 +68,23 @@ function loadConfig() {
     mcUrl: 'wss://127.0.0.1:8443/control.ashx',
     dataFile: path.join(__dirname, 'data', 'chat-data.json'),
     friendsFile: path.join(__dirname, 'data', 'friends.json'),
-    logFile: path.join(__dirname, 'data', 'chat.log')
+    logFile: path.join(__dirname, 'data', 'chat.log'),
+    inboxCap: 2000, // S-048/S-053：每收件人 inbox 上限（夹 50..10000）
+    pollPageSize: 500 // S-048/S-053：每轮 poll 最多返回事件数（夹 10..2000）
   }, cfg);
 }
 
 // ---------- 数据层（单文件 JSON，原子落盘；体量小，够用） ----------
+// S-048/S-053（与 B-08 同一方案，C-3 落地事件流部分）：
+//  - 全局 events 仍保留（会话列表 lastSeq 扫描与旧客户端兼容），但不再是
+//    轮询的唯一来源；轮询读每收件人持久 inbox（d.inbox[用户]），
+//    全局 5000 条截断不再悄悄丢掉长离线用户的消息。
+//  - inbox 按用户分桶、上限 inboxCap（默认 2000/人，配置可调）；超限只
+//    丢该用户最旧条目，并记 inboxFloor[用户] = 仍保留的最早 seq，供 poll
+//    的 gap 判定用。持久化仍走现有 Store.save() 全量落盘（增量写/分片
+//    存储是 C-4 的 S-079，不在本处动）。
 function emptyData() {
-  return { keys: {}, sessions: {}, messages: {}, graveyard: {}, vault: {}, readMarks: {}, traces: {}, events: [], eventSeq: 0 };
+  return { keys: {}, sessions: {}, messages: {}, graveyard: {}, vault: {}, readMarks: {}, traces: {}, events: [], eventSeq: 0, inbox: {}, inboxFloor: {}, clientMsgIndex: {}, reactions: {} };
 }
 class Store {
   constructor(file) {
@@ -100,7 +116,11 @@ class Store {
   }
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file + '.tmp', JSON.stringify(this.data));
+    // S-079：inbox 数组不再进单文件（已分片到 inbox/by-user/*.jsonl，
+    // 见 chat-inbox-store.js）；序列化时剔除，只留 inboxFloor 等小元数据。
+    // messages／vault／graveyard 仍在单文件全量保存（残留，下一阶段分片化）。
+    const { inbox, ...rest } = this.data;
+    fs.writeFileSync(this.file + '.tmp', JSON.stringify(rest));
     fs.renameSync(this.file + '.tmp', this.file);
   }
 }
@@ -396,6 +416,8 @@ function createChatHandler(configOverrides) {
   }
   try { loadMasterKey(); } catch (e) { /* 生成失败不拦服务启动，首次托管操作时再试 */ }
   const sendWindows = {}; // user -> [timestamps]，发送限频 60/分钟（照 QFClash 聊天限频）
+  const typingMap = new Map(); // S-085：`${from}\n${to}` -> {from, to, typing, at}，6 秒过期，内存型，不持久化
+  const presenceMap = new Map(); // S-085：user -> {status, at}，90 秒无心跳判 offline；与设备探活分开建模（无设备字段、无设备端点）
   const PAGE = fs.readFileSync(path.join(__dirname, 'chat.html'), 'utf8');
   const CLIENT_JS = fs.readFileSync(path.join(__dirname, 'chat-client.js'), 'utf8');
   const CRYPTO_JS = fs.readFileSync(path.join(__dirname, 'crypto-core.js'), 'utf8');
@@ -466,10 +488,117 @@ function createChatHandler(configOverrides) {
     return rec.user;
   }
   function nextEvent(ev) { ev.seq = ++store.data.eventSeq; store.data.events.push(ev); return ev; }
+  // S-048/S-053：事件分发唯一入口——全局流与每收件人 inbox 同写。
+  // 收件方：msg 事件给 from 与 to 双方；tomb/recall 事件给 parties 双方。
+  // S-079：内存 inbox 同写后，再向各收件人的分片文件追加一行（O(1)）；
+  // 追加失败只记日志——消息正本在 d.messages 里（随 save 落盘），
+  // poll 漏的事件可由 catchup 按 seq 补回，不丢消息。
+  function emitEvent(ev) {
+    const saved = nextEvent(ev);
+    const parties = ev.type === 'msg' ? [ev.msg.from, ev.msg.to] : (Array.isArray(ev.parties) ? ev.parties : []);
+    const seen = new Set();
+    for (const u of parties) {
+      const name = norm(u);
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const box = (store.data.inbox[name] = store.data.inbox[name] || []);
+      box.push(saved);
+      if (!inboxStore.appendInboxEvents(INBOX_DIR, name, [saved])) {
+        try { log({ ev: 'chat-inbox-append-failed', user: name, seq: saved.seq }); } catch (e) {}
+      }
+    }
+    pruneEvents();
+    return saved;
+  }
   function pruneEvents() {
     // 事件流只保留最近 5000 条（墓碑与新消息的增量拉取窗口）；保险库是历史正本，不受影响
     if (store.data.events.length > 5000) store.data.events = store.data.events.slice(-5000);
+    // S-048/S-053：每收件人 inbox 各自封顶，超限只丢该用户最旧条目；
+    // 丢弃后记 floor（仍保留的最早 seq），poll 靠它判定长离线缺口。
+    const cap = Math.max(50, Math.min(10000, parseInt(cfg.inboxCap, 10) || 2000));
+    for (const name of Object.keys(store.data.inbox)) {
+      const box = store.data.inbox[name];
+      if (Array.isArray(box) && box.length > cap) {
+        store.data.inbox[name] = box.slice(-cap);
+        store.data.inboxFloor[name] = store.data.inbox[name][0] ? store.data.inbox[name][0].seq : (store.data.eventSeq + 1);
+        // S-079：内存剪枝后分片文件同步重写（原子 tmp+rename），floor 与分片一致。
+        if (!inboxStore.rewriteInbox(INBOX_DIR, name, store.data.inbox[name])) {
+          try { log({ ev: 'chat-inbox-rewrite-failed', user: name }); } catch (e) {}
+        }
+      }
+    }
   }
+  // S-048/S-053：旧数据文件只有全局 events、无 inbox 时，从全局流重建
+  // 各收件人 inbox（只建一次，记 inboxBuilt；重建本身不丢任何事件）。
+  function rebuildInboxIfNeeded() {
+    const d0 = store.data;
+    if (!d0.inbox || typeof d0.inbox !== 'object') d0.inbox = {};
+    if (!d0.inboxFloor || typeof d0.inboxFloor !== 'object') d0.inboxFloor = {};
+    if (d0.inboxBuilt) return false;
+    let added = 0;
+    for (const ev of (d0.events || [])) {
+      const parties = ev.type === 'msg' ? [ev.msg.from, ev.msg.to] : (Array.isArray(ev.parties) ? ev.parties : []);
+      const seen = new Set();
+      for (const u of parties) {
+        const name = norm(u);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        const box = (d0.inbox[name] = d0.inbox[name] || []);
+        if (!box.some((e) => e.seq === ev.seq)) { box.push(ev); added++; }
+      }
+      // S-048/S-053：旧数据消息无 seq 时，从事件流回填（供 catchup 用）。
+      if (ev.type === 'msg' && ev.msg && ev.msg.id && d0.messages[ev.msg.id] && typeof d0.messages[ev.msg.id].seq !== 'number') {
+        d0.messages[ev.msg.id].seq = ev.seq;
+      }
+      if ((ev.type === 'tomb' || ev.type === 'recall') && Array.isArray(ev.msgIds)) {
+        for (const id of ev.msgIds) { if (d0.graveyard[id] && typeof d0.graveyard[id].seq !== 'number') d0.graveyard[id].seq = ev.seq; }
+      }
+    }
+    const cap = Math.max(50, Math.min(10000, parseInt(cfg.inboxCap, 10) || 2000));
+    for (const name of Object.keys(d0.inbox)) {
+      const box = d0.inbox[name];
+      if (Array.isArray(box) && box.length > cap) d0.inbox[name] = box.slice(-cap);
+      if (box.length) d0.inboxFloor[name] = box[0].seq;
+    }
+    d0.inboxBuilt = true;
+    store.save(); // 重建只跑一次：inboxBuilt 标志与 seq 回填须落盘，下次启动不再重建
+    return added > 0;
+  }
+  // S-079：inbox 分片持久化——启动时分片与内存对齐：
+  //  - 某用户的分片文件存在时，以分片为准（权威），覆盖内存 inbox，floor 取分片首条 seq；
+  //  - 分片不存在、内存 inbox 有内容时（旧单文件数据或上方 legacy 重建结果），
+  //    把内存 inbox 写一份分片（一次性迁移），此后只追加写分片。
+  //  - 用户集合取 keys／messages／graveyard／sessions／inbox 的并集：
+  //    inbox 事件只发给消息的 from／to 双方，该并集覆盖全部可能的 inbox 属主。
+  const INBOX_DIR = inboxStore.inboxDirOf(cfg.dataFile, cfg.inboxDir);
+  function syncInboxShards() {
+    const d0 = store.data;
+    const users = new Set();
+    const add = (u) => { const n = norm(u); if (n) users.add(n); };
+    Object.keys(d0.keys || {}).forEach(add);
+    Object.values(d0.messages || {}).forEach((m) => { add(m.from); add(m.to); });
+    Object.values(d0.graveyard || {}).forEach((g) => { add(g.from); add(g.to); });
+    Object.values(d0.sessions || {}).forEach((s) => { add(s.user); });
+    Object.keys(d0.inbox || {}).forEach(add);
+    let loaded = 0, migrated = 0, bad = 0;
+    for (const name of users) {
+      const got = inboxStore.loadInbox(INBOX_DIR, name);
+      if (got.exists) {
+        d0.inbox[name] = got.events;
+        if (got.events.length) d0.inboxFloor[name] = got.events[0].seq;
+        else if (d0.inboxFloor[name] === undefined) d0.inboxFloor[name] = d0.eventSeq + 1;
+        loaded++;
+        bad += got.bad;
+      } else {
+        const box = Array.isArray(d0.inbox[name]) ? d0.inbox[name] : [];
+        if (box.length && inboxStore.rewriteInbox(INBOX_DIR, name, box)) migrated++;
+      }
+    }
+    if (bad) { try { log({ ev: 'chat-inbox-shard-bad-lines', bad }); } catch (e) {} }
+    if (loaded || migrated) store.save(); // floor 落盘（inbox 数组本身不进单文件）
+  }
+  rebuildInboxIfNeeded();
+  syncInboxShards();
 
   async function readBody(req) {
     let body = '';
@@ -735,29 +864,108 @@ function createChatHandler(configOverrides) {
       if (to === 'qf-support') return sendJson(res, 410, { ok: false, msg: '官方客服已迁移至智能客服，本会话保留只读，请从好友页顶部进入智能客服咨询。' });
       if (!gate.areFriends(me, to)) { log({ ev: 'send-rejected-notfriend', user: me, to }); return sendJson(res, 403, { ok: false, msg: '双方还不是好友，无法发送消息。' }); }
       if (!d.keys[to]) return sendJson(res, 409, { ok: false, msg: '对方尚未开启聊天，暂时无法发送。' });
+      // S-086：clientMessageId（客户端生成，cm-＋32 位 hex）——先行校验＋
+      // 同发送者去重：客户端超时重试重发时返回已有 id/seq，不再建第二条，
+      // 且不消耗发送限频额度（去重判定在限频之前）。
+      // replyTo 须是同会话已存在消息；type 现阶段只收 text。
+      const cmid = body.clientMessageId === undefined ? '' : String(body.clientMessageId);
+      if (cmid && !/^[A-Za-z0-9_-]{8,128}$/.test(cmid)) return sendJson(res, 400, { ok: false, msg: '消息标识不正确。' });
+      const type = body.type === undefined ? 'text' : String(body.type);
+      if (type !== 'text') return sendJson(res, 400, { ok: false, msg: '暂不支持该消息类型。' });
+      const replyTo = body.replyTo === undefined ? '' : String(body.replyTo);
+      if (replyTo) {
+        const target = d.messages[replyTo];
+        if (!target || target.conv !== convOf(me, to)) return sendJson(res, 400, { ok: false, msg: '回复的消息不存在。' });
+      }
+      if (cmid) {
+        const prevId = (d.clientMsgIndex || {})[me + '\n' + cmid];
+        const prev = prevId ? d.messages[prevId] : null;
+        if (prev) return sendJson(res, 200, { ok: true, id: prev.id, seq: prev.seq, at: prev.at, clientMessageId: cmid, duplicate: true });
+      }
       const now = Date.now();
       const win = (sendWindows[me] || []).filter(t => now - t < 60000);
       if (win.length >= 60) return sendJson(res, 429, { ok: false, msg: '发送过于频繁，请稍后再试。' });
       win.push(now); sendWindows[me] = win;
       const id = crypto.randomBytes(12).toString('hex');
-      const msg = { id, from: me, to, conv: convOf(me, to), at: now, nonce: String(body.nonce), cipher: String(body.cipher) };
+      // S-086：消息对象带 clientMessageId／replyTo／edited／type；
+      // clientMessageId 建 (发送者, 值) -> id 索引（d.clientMsgIndex）。
+      const msg = { id, from: me, to, conv: convOf(me, to), at: now, nonce: String(body.nonce), cipher: String(body.cipher), type, edited: false };
+      if (cmid) msg.clientMessageId = cmid;
+      if (replyTo) msg.replyTo = replyTo;
       d.messages[id] = msg;
-      const ev = nextEvent({ type: 'msg', msg });
-      pruneEvents(); store.save();
+      if (cmid) { d.clientMsgIndex = d.clientMsgIndex || {}; d.clientMsgIndex[me + '\n' + cmid] = id; }
+      const ev = emitEvent({ type: 'msg', msg });
+      msg.seq = ev.seq; // S-048/S-053：消息记事件序号，供 catchup 按 seq 补齐
+      store.save();
       log({ ev: 'send', user: me, to, id });
-      return sendJson(res, 200, { ok: true, id, seq: ev.seq, at: now });
+      const out = { ok: true, id, seq: ev.seq, at: now };
+      if (cmid) out.clientMessageId = cmid;
+      return sendJson(res, 200, out);
     }
 
     // ---------- 增量拉取（新消息＋墓碑＋已读标记） ----------
+    // S-048/S-053：读本人的持久 inbox（不再读全局流）；返回 gap 判定与
+    // 分页信息，客户端据此补齐——
+    //  - gap=true：since 已早于本 inbox 仍保留的最早 seq（长离线期间 inbox
+    //    已剪枝），本页事件不完整；客户端须调 /chat/api/catchup 按 seq
+    //    补回错过的消息密文（并重拉保险库取撤回痕迹），再把游标推到
+    //    maxSeq，不得静默跳号。
+    //  - hasMore=true：本页未取完，按 nextSince 继续拉，直到 hasMore=false。
+    // 旧客户端（不认新字段）仍可按原方式消费 events，本次不破坏兼容。
     if (req.method === 'GET' && p === '/chat/api/poll') {
       const since = parseInt(u.searchParams.get('since') || '0', 10) || 0;
-      const events = d.events.filter(e => e.seq > since && (
+      const pageSize = Math.max(10, Math.min(2000, parseInt(cfg.pollPageSize, 10) || 500));
+      const box = Array.isArray(d.inbox[me]) ? d.inbox[me] : [];
+      const earliestSeq = box.length ? box[0].seq : (d.eventSeq + 1);
+      const maxSeq = d.eventSeq;
+      const gap = since > 0 && since < earliestSeq;
+      const fresh = box.filter(e => e.seq > since && (
         (e.type === 'msg' && !d.graveyard[e.msg.id] && (e.msg.from === me || e.msg.to === me)) ||
         (e.type === 'tomb' && e.parties.includes(me)) ||
-        (e.type === 'recall' && e.parties.includes(me))));
+        (e.type === 'recall' && e.parties.includes(me)) ||
+        (e.type === 'edit' && e.parties.includes(me)) || // S-086：编辑事件
+        (e.type === 'reaction' && e.parties.includes(me)))); // S-084：表态事件
+      const page = fresh.slice(0, pageSize);
+      const hasMore = fresh.length > page.length;
+      const nextSince = page.length ? page[page.length - 1].seq : since;
       const read = {};
       Object.keys(d.readMarks).forEach(cv => { const pair = JSON.parse(cv); if (pair.includes(me)) read[cv] = d.readMarks[cv]; });
-      return sendJson(res, 200, { ok: true, events, read, now: d.eventSeq });
+      // S-085：正在输入是 6 秒过期的内存型临时事件，不进 inbox、不持久化，
+      // 随 poll 以 ephemeral 下发（不占 seq，客户端不推进游标）。
+      const ephemeral = [];
+      const nowTs = Date.now();
+      for (const [k, t] of typingMap) {
+        if (t.to !== me || !t.typing) continue;
+        if (nowTs - t.at > 6000) { typingMap.delete(k); continue; }
+        ephemeral.push({ type: 'typing', from: t.from, typing: true, at: t.at });
+      }
+      return sendJson(res, 200, { ok: true, events: page, read, now: maxSeq, earliestSeq, maxSeq, gap, hasMore, nextSince, ephemeral });
+    }
+
+    // ---------- 补齐端点（S-048/S-053：poll 报 gap 后走这里补消息） ----------
+    // 只返回与我有关的、事件序号在 (since, maxSeq] 内的消息密文（仍存活的）
+    // 与已删消息 id（墓碑）。客户端解密后写入保险库与历史，再把游标推到
+    // maxSeq。保险库是“已收到的记录副本”，离线期间从未到达的消息不在其
+    // 中——只重拉保险库补不回丢消息，必须走本端点按 messages 正本补。
+    // 撤回痕迹随保险库重拉取回（vault GET 恒附 traces）。
+    if (req.method === 'GET' && p === '/chat/api/catchup') {
+      const since = parseInt(u.searchParams.get('since') || '0', 10) || 0;
+      const limitRaw = parseInt(u.searchParams.get('limit') || '100', 10) || 100;
+      const limit = Math.max(1, Math.min(500, limitRaw));
+      const maxSeq = d.eventSeq;
+      const live = Object.values(d.messages)
+        .filter(m => (m.from === me || m.to === me) && (typeof m.seq === 'number' ? m.seq : 0) > since && (typeof m.seq === 'number' ? m.seq : 0) <= maxSeq)
+        .sort((a, b) => (a.seq - b.seq) || (a.at - b.at));
+      const deletedIds = Object.values(d.graveyard)
+        .filter(g => (g.from === me || g.to === me) && (typeof g.seq === 'number' ? g.seq : 0) > since && (typeof g.seq === 'number' ? g.seq : 0) <= maxSeq)
+        .sort((a, b) => (a.seq - b.seq))
+        .map(g => g.id);
+      // 合并分页：消息与墓碑按 seq 统排，页内只取 limit 条（消息优先按 seq；
+      // 墓碑只记 id，客户端按 id 清历史）。
+      const page = live.slice(0, limit);
+      const hasMore = live.length > page.length;
+      const nextSince = page.length ? page[page.length - 1].seq : since;
+      return sendJson(res, 200, { ok: true, messages: page, deletedIds, maxSeq, hasMore, nextSince });
     }
 
     // ---------- 保险库（我的记录副本，只有我能取；条目全是密文） ----------
@@ -778,7 +986,19 @@ function createChatHandler(configOverrides) {
       // traces：撤回痕迹（元数据，非内容，可明文下发）；只给与我相关的会话
       const traces = {};
       Object.keys(d.traces || {}).forEach(cv => { const pair = JSON.parse(cv); if (pair.includes(me)) traces[cv] = d.traces[cv]; });
-      return sendJson(res, 200, { ok: true, entries: d.vault[me] || [], traces });
+      // S-051：分页参数 limit（1..500）＋ cursor（上一页末条 msgId）。
+      // 不传 limit 时沿用旧行为全量返回（旧客户端兼容）；传 limit 时按
+      // (at, msgId) 稳定排序分页，客户端按页拉取解密，直到 hasMore=false。
+      const all = (d.vault[me] || []).slice().sort((a, b) => (a.at - b.at) || (String(a.msgId) < String(b.msgId) ? -1 : 1));
+      const limitRaw = parseInt(u.searchParams.get('limit') || '0', 10) || 0;
+      if (!limitRaw) return sendJson(res, 200, { ok: true, entries: all, traces, total: all.length });
+      const limit = Math.max(1, Math.min(500, limitRaw));
+      const cursor = u.searchParams.get('cursor') || '';
+      let start = 0;
+      if (cursor) { const ci = all.findIndex((e) => e.msgId === cursor); start = ci >= 0 ? ci + 1 : 0; }
+      const page = all.slice(start, start + limit);
+      const hasMore = start + page.length < all.length;
+      return sendJson(res, 200, { ok: true, entries: page, traces, total: all.length, nextCursor: hasMore ? page[page.length - 1].msgId : '', hasMore });
     }
 
     // ---------- 已读标记 ----------
@@ -795,6 +1015,10 @@ function createChatHandler(configOverrides) {
     // purge：只清数据不发事件；delete 发 tomb 事件（无痕迹），recall 发 recall 事件并留痕迹。
     function purgeMessage(msg) {
       delete d.messages[msg.id];
+      // S-086：消息删了，clientMessageId 索引一并释放（否则重发同值会
+      // 命中已删消息）；S-084：表态随消息一起清。
+      if (msg.clientMessageId && d.clientMsgIndex) delete d.clientMsgIndex[msg.from + '\n' + msg.clientMessageId];
+      if (d.reactions) delete d.reactions[msg.id];
       d.graveyard[msg.id] = { id: msg.id, from: msg.from, to: msg.to, conv: msg.conv, at: msg.at };
       [msg.from, msg.to].forEach(u2 => {
         if (d.vault[u2]) d.vault[u2] = d.vault[u2].filter(e => e.msgId !== msg.id);
@@ -802,7 +1026,9 @@ function createChatHandler(configOverrides) {
     }
     function deleteMessage(msg) {
       purgeMessage(msg);
-      return nextEvent({ type: 'tomb', conv: msg.conv, parties: [msg.from, msg.to], msgIds: [msg.id], by: me, at: Date.now() });
+      const ev = emitEvent({ type: 'tomb', conv: msg.conv, parties: [msg.from, msg.to], msgIds: [msg.id], by: me, at: Date.now() });
+      if (d.graveyard[msg.id]) d.graveyard[msg.id].seq = ev.seq; // S-048/S-053：墓碑记 seq，供 catchup 补删
+      return ev;
     }
     if (req.method === 'POST' && p === '/chat/api/delete') {
       const body = await readBody(req);
@@ -810,7 +1036,7 @@ function createChatHandler(configOverrides) {
       if (!msg) return sendJson(res, 404, { ok: false, msg: '该消息已不存在。' });
       if (msg.from !== me && msg.to !== me) return sendJson(res, 403, { ok: false, msg: '无权操作该对话。' });
       const ev = deleteMessage(msg);
-      pruneEvents(); store.save();
+      store.save();
       log({ ev: 'delete', user: me, id: msg.id });
       return sendJson(res, 200, { ok: true, seq: ev.seq });
     }
@@ -825,8 +1051,9 @@ function createChatHandler(configOverrides) {
       purgeMessage(msg);
       const trace = { msgId: msg.id, by: me, at: Date.now(), msgAt: msg.at };
       (d.traces[msg.conv] = d.traces[msg.conv] || []).push(trace);
-      const ev = nextEvent({ type: 'recall', conv: msg.conv, parties: [msg.from, msg.to], msgIds: [msg.id], by: me, at: trace.at, msgAt: msg.at, trace });
-      pruneEvents(); store.save();
+      const ev = emitEvent({ type: 'recall', conv: msg.conv, parties: [msg.from, msg.to], msgIds: [msg.id], by: me, at: trace.at, msgAt: msg.at, trace });
+      if (d.graveyard[msg.id]) d.graveyard[msg.id].seq = ev.seq; // S-048/S-053：墓碑记 seq，供 catchup 补删
+      store.save();
       log({ ev: 'recall', user: me, id: msg.id });
       return sendJson(res, 200, { ok: true, seq: ev.seq, at: trace.at, msgAt: msg.at });
     }
@@ -836,9 +1063,92 @@ function createChatHandler(configOverrides) {
       const ids = [];
       Object.values(d.messages).filter(m => m.conv === cv).forEach(m => { ids.push(m.id); deleteMessage(m); });
       if (d.traces) delete d.traces[cv];
-      pruneEvents(); store.save();
+      store.save();
       log({ ev: 'delete-conversation', user: me, with: norm(body.with), count: ids.length });
       return sendJson(res, 200, { ok: true, count: ids.length });
+    }
+
+    // ---------- S-086：按 clientMessageId 查询与编辑 ----------
+    // 查询只查自己的消息（索引键含发送者，他人值查不到）。
+    if (req.method === 'GET' && p === '/chat/api/message/by-client-id') {
+      const cmid = String(u.searchParams.get('clientMessageId') || '');
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(cmid)) return sendJson(res, 400, { ok: false, msg: '消息标识不正确。' });
+      const id = (d.clientMsgIndex || {})[me + '\n' + cmid];
+      const msg = id ? d.messages[id] : null;
+      if (!msg) return sendJson(res, 404, { ok: false, msg: '未找到该消息。' });
+      return sendJson(res, 200, { ok: true, message: msg });
+    }
+    // 编辑：只允许发送者改自己的消息；新密文（nonce/cipher）＋我方保险库
+    // 副本同步换新（myNonce/myCipher）；对方副本由对方收到 edit 事件后
+    // 自行重存，服务端不碰他人保险库。改完发 edit 事件进双方 inbox。
+    if (req.method === 'POST' && p === '/chat/api/edit') {
+      const body = await readBody(req);
+      const msg = d.messages[String(body.msgId || '')];
+      if (!msg) return sendJson(res, 404, { ok: false, msg: '该消息已不存在。' });
+      if (msg.from !== me) return sendJson(res, 403, { ok: false, msg: '只能编辑自己发送的消息。' });
+      if (!body.nonce || !body.cipher) return sendJson(res, 400, { ok: false, msg: '消息不完整，请重试。' });
+      msg.nonce = String(body.nonce); msg.cipher = String(body.cipher);
+      msg.edited = true; msg.editedAt = Date.now();
+      const mine = d.vault[me] || [];
+      const entry = mine.find((e) => e.msgId === msg.id);
+      if (entry && body.myNonce && body.myCipher) { entry.nonce = String(body.myNonce); entry.cipher = String(body.myCipher); }
+      const ev = emitEvent({ type: 'edit', conv: msg.conv, parties: [msg.from, msg.to], msgId: msg.id, nonce: msg.nonce, cipher: msg.cipher, editedAt: msg.editedAt, by: me, at: msg.editedAt });
+      store.save();
+      log({ ev: 'edit', user: me, id: msg.id });
+      return sendJson(res, 200, { ok: true, seq: ev.seq, editedAt: msg.editedAt });
+    }
+
+    // ---------- S-084：表态（reaction） ----------
+    // 每用户每消息一个表情；重复点同一表情即取消，换表情即替换。
+    // 表情为 1–8 字符纯文本（客户端走 textContent 渲染），禁 <>& 与控制符。
+    // 表态记 d.reactions[msgId][user]，随消息删除一并清；同时发 reaction
+    // 事件进双方 inbox，poll 即达。
+    if (req.method === 'POST' && p === '/chat/api/reaction') {
+      const body = await readBody(req);
+      const msg = d.messages[String(body.msgId || '')];
+      if (!msg) return sendJson(res, 404, { ok: false, msg: '该消息已不存在。' });
+      if (msg.from !== me && msg.to !== me) return sendJson(res, 403, { ok: false, msg: '无权操作该对话。' });
+      const emoji = String(body.emoji || '');
+      if (!emoji || emoji.length > 8 || /[<>&]/.test(emoji) || /[\u0000-\u001F\u007F]/.test(emoji)) return sendJson(res, 400, { ok: false, msg: '表情不正确。' });
+      const all = (d.reactions[msg.id] = d.reactions[msg.id] || {});
+      if (all[me] === emoji) delete all[me]; else all[me] = emoji;
+      if (!Object.keys(all).length) delete d.reactions[msg.id];
+      const ev = emitEvent({ type: 'reaction', conv: msg.conv, parties: [msg.from, msg.to], msgId: msg.id, by: me, emoji: all[me] || null, at: Date.now() });
+      store.save();
+      return sendJson(res, 200, { ok: true, seq: ev.seq, reactions: d.reactions[msg.id] || {} });
+    }
+
+    // ---------- S-085：正在输入与在线状态 ----------
+    // typing：6 秒过期内存型，不进 inbox、不持久化，随 poll 的 ephemeral 下发；
+    //   typing=false 即清。只允许发给好友。
+    // presence：与设备探活完全分开建模——独立 Map、独立端点、无设备字段；
+    //   客户端每 ≤60 秒 POST 心跳一次保活，90 秒无心跳判 offline；服务端
+    //   重启后全员 offline，直到下一轮心跳。
+    if (req.method === 'POST' && p === '/chat/api/typing') {
+      const body = await readBody(req);
+      const to = norm(body.with);
+      if (!to) return sendJson(res, 400, { ok: false, msg: '会话对象不正确。' });
+      if (!gate.areFriends(me, to)) return sendJson(res, 403, { ok: false, msg: '双方还不是好友。' });
+      if (body.typing === true) typingMap.set(me + '\n' + to, { from: me, to, typing: true, at: Date.now() });
+      else typingMap.delete(me + '\n' + to);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/chat/api/presence') {
+      const body = await readBody(req);
+      const status = String(body.status || '');
+      if (status !== 'online' && status !== 'away' && status !== 'offline') return sendJson(res, 400, { ok: false, msg: '状态不正确。' });
+      presenceMap.set(me, { status, at: Date.now() });
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && p === '/chat/api/presence') {
+      const names = String(u.searchParams.get('users') || '').split(',').map((s) => norm(s)).filter(Boolean).slice(0, 50);
+      const out = {};
+      const nowTs = Date.now();
+      for (const name of names) {
+        const rec = presenceMap.get(name);
+        out[name] = (rec && rec.status !== 'offline' && nowTs - rec.at <= 90000) ? rec.status : 'offline';
+      }
+      return sendJson(res, 200, { ok: true, presence: out });
     }
 
     // ---------- 会话列表（页面用；只有计数与序号，没有内容） ----------
@@ -906,8 +1216,22 @@ if (require.main === module) main();
 /*
  * 路由表面清单（全部）：
  *  GET  /chat, /chat/crypto-core.js, /chat/chat-client.js, /chat/libsodium-sumo.js, /chat/libsodium-wrappers.js, /chat/health
- *  POST /chat/api/login | keys/setup | keys/rewrap | keys/device | keys/device/revoke | keys/session-copy | send | vault | read | delete | recall | delete-conversation
- *  GET  /chat/api/friends | support-faq | keys/me | keys/:user | keys/device/:deviceId | keys/session-copy | poll | vault | conversations | avatar/:username（同源头像代理，2.3.2）
+ *  POST /chat/api/login | keys/setup | keys/rewrap | keys/device | keys/device/revoke | keys/session-copy | send | vault | read | delete | recall | delete-conversation | edit | reaction | typing | presence
+ *  GET  /chat/api/friends | support-faq | keys/me | keys/:user | keys/device/:deviceId | keys/session-copy | poll | vault | catchup | conversations | avatar/:username（同源头像代理，2.3.2）| message/by-client-id | presence
+ *  send（S-086）：消息带 clientMessageId／replyTo／edited／type；
+ *  同发送者同值去重返已有 id/seq；replyTo 须为同会话已存在消息。
+ *  edit（S-086）：发送者改自己消息的密文，记 edited／editedAt，发 edit 事件。
+ *  reaction（S-084）：每用户每消息一个表情，重复点取消；发 reaction 事件。
+ *  typing／presence（S-085）：typing 6 秒过期内存型，随 poll ephemeral 下发；
+ *  presence 独立建模（online/away/offline，90 秒无心跳判 offline）。
+ *  inbox（S-079）：每收件人分片持久化 inbox/by-user/<sha256(user)>.jsonl，
+ *  发送追加写、剪枝重写；chat-data.json 不再存 inbox 数组。
+ *  poll（S-048/S-053）：读本人 inbox，附 earliestSeq / maxSeq / gap /
+ *  hasMore / nextSince——gap=true 时客户端调 catchup 补消息再把游标推到 maxSeq；
+ *  catchup（S-048/S-053）：GET ?since=<seq>&limit=1..500，返回 (since, maxSeq]
+ *  内与我有关的消息密文与已删 id，供客户端解密后写入保险库与历史；
+ *  vault（S-051）：支持 ?limit=1..500&cursor=<上一页末条 msgId> 分页，
+ *  不传 limit 时全量返回（旧客户端兼容）。
  *  ——没有任何管理端点；聊天内容只以密文经过（support-faq 只返回产品预置
  *    的固定客服文案）。keys/session-copy 是唯一的钥匙原件端点：仅凭本人
  *    有效会话取回本人钥匙，口径见其上方注释。

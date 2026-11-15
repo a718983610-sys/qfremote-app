@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'constants.dart';
+import 'release_signature.dart';
+import 'version.dart';
 
 /// 更新清单（服务器 release.json）里一个平台的条目。
 /// 格式与 Windows 版 update.js 的 fetchManifest 完全一致：
@@ -40,13 +42,36 @@ class ReleaseEntry {
 /// 校验规则与 Windows 版对齐：版本号必须是 x.y.z、必须有下载地址、
 /// 下载地址只许指向可信 origin、SHA256 必须是完整 64 位十六进制。
 /// 任一不合规抛 FormatException，调用方安静处理（不弹错误框）。
+///
+/// F-05（3.0.0 严格阻断项）：清单签名必验。解析在结构校验通过后验
+/// signature={alg:'ed25519',key_id,sig}（规范与 Windows 版 H26 同款，
+/// 见 release_signature.dart）；验签不过即抛 FormatException、整单
+/// 拒绝（fail-closed），不许退回“只核 SHA256”。
+/// 唯一例外是 r11③ 有界兼容垫片（与 Windows 版同款）：缺签名且顶层与
+/// 安卓版本号都 ≤2.4.4（签名机制引入前的最后一个版本）时放行，并记
+/// signatureVerified:false；版本号更新、或签名在场但验不过，一律拒绝。
+/// 垫片日落条件：线上清单含有效签名（届时删垫片、缺签名即拒绝）。
+/// [verifyPublicKeyB64] 仅测试注入用（测试密钥对）；生产恒用内嵌公钥。
 class ReleaseManifest {
   final ReleaseEntry? windows;
   final ReleaseEntry? android;
 
-  const ReleaseManifest({required this.windows, required this.android});
+  /// 清单签名是否验证通过。false 只可能来自 r11③ 垫片放行的旧版
+  /// 无签名清单（≤2.4.4）；验签失败时 parse 直接抛错，不会返回 false
+  /// 之外的任何“带病清单”。
+  final bool signatureVerified;
 
-  static ReleaseManifest parse(String body, {String? trustedOrigin}) {
+  const ReleaseManifest({
+    required this.windows,
+    required this.android,
+    required this.signatureVerified,
+  });
+
+  static ReleaseManifest parse(
+    String body, {
+    String? trustedOrigin,
+    String? verifyPublicKeyB64,
+  }) {
     final origin = trustedOrigin ?? kTrustedOrigin;
     dynamic root;
     try {
@@ -98,9 +123,37 @@ class ReleaseManifest {
       );
     }
 
+    final windowsEntry = parseEntry(root);
+    final androidEntry = parseEntry(root['android']);
+
+    // F-05：结构校验通过后验清单签名（验签不过即整单拒绝）。
+    final vr = verifyReleaseSignature(
+      root,
+      publicKeyB64: verifyPublicKeyB64,
+    );
+    var signatureVerified = false;
+    if (vr.ok) {
+      signatureVerified = true;
+    } else if (vr.code == 'missing-signature' &&
+        windowsEntry != null &&
+        compareVersions(windowsEntry.version, kPreSigningMaxVersion) <= 0 &&
+        (androidEntry == null ||
+            compareVersions(androidEntry.version, kPreSigningMaxVersion) <=
+                0)) {
+      // r11③ 有界兼容垫片：线上现行 release.json 是签名机制引入前
+      // 发布的 2.4.4，本来就没有 signature 字段——它不是被篡改。
+      // 仅当缺签名且两端版本号都 ≤2.4.4 时放行，记 signatureVerified:false；
+      // 放行的唯一后果是“不提供比 2.4.4 更新的版本”，下载仍须
+      // SHA256＋size＋可信 origin＋APK 包名/证书指纹四重核对。
+      signatureVerified = false;
+    } else {
+      throw FormatException('更新清单签名无效（${vr.reason}），拒绝更新');
+    }
+
     return ReleaseManifest(
-      windows: parseEntry(root),
-      android: parseEntry(root['android']),
+      windows: windowsEntry,
+      android: androidEntry,
+      signatureVerified: signatureVerified,
     );
   }
 }

@@ -1,0 +1,790 @@
+/* QFRemote 新控制台 · 三端统一排版尺（2026-10-26）
+   字号 11/12/13/14/15/16/18/20/22/24/26/29
+   间距 4/8/12/16/20/24/32/40/48/64
+   圆角三族：8 面（定夺 6）/ 999 胶囊 / 50% 圆形；弹窗 16（定夺 9）；聊天气泡 16＋尾角 4（定夺 12）
+   黑白 token 定稿：2026-11-14 大肥鱼定夺 DEEPSEEK-DESIGN-DECISION.md（站长令：按全文执行）。
+   重做 2026-11-14（REWORK-REPLY-A/B/C）：BG0–BG5 表面角色＋文字 4 角色独立（A §3.0/§4，单视图结构灰 ≤4，不再为“≤6”合并 token）；
+   浅次／浅三（A 表），深三（六项①定夺，保留）；动效 tokens 按 B §0；字阶／间距按 A §2.2/§2.3。
+   浅 BG0–BG3／主文／次／三；深 BG0–BG3／主文／次／三（重做 A §3.0/§4：六项②“≤6 合并”口径废止，改为全局 6 级结构灰＋单视图 ≤4＋文字 4 角色独立）。值见 qf-tokens.css。
+   浅色主黑、深色主黑；纯黑已退役（遮罩/阴影走 rgba 黑）。禁止即兴灰阶（退役灰一律不用；占位符不用浏览器默认灰）。
+   状态色 B 组（2026-11-15 定稿，唯一色值源见 RL-C02，值见 qf-tokens.css）；A 组旧值已废止。信息色中性灰浅深各一对（值见 qf-tokens.css）。 */
+/* 全局 token 注册表已移至 qf-tokens.css（index.html 首位引入）；本文件只写用法（var()），不写色值字面量。 */
+@media(min-width:1100px){:root{--section-gap:64px;--gutter:32px}}
+*{box-sizing:border-box;margin:0;padding:0}
+/* F2/F3（2026-11-15 深审阻断）：全局 [hidden] 复位。作者样式 display:flex 会压过 UA 的 [hidden] 隐藏规则，致登录／注册页空错误框凭空显示；!important 保证 hidden 语义优先。会话区 .sv-connecting／.sv-strip／.sv-mask 的 [hidden] 过渡态由 session.css 更高特异性规则覆盖，不受影响。 */
+[hidden]{display:none!important}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--tx);font-size:var(--fs-14);line-height:var(--lh-body)}
+a{color:inherit;text-decoration:none;cursor:pointer}button{font-family:inherit;cursor:pointer}
+svg.ic{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+.app{display:flex;min-height:100vh;min-height:100dvh}
+/* ===== 桌面固定边栏 ===== */
+.side{width:240px;flex:0 0 240px;background:var(--chrome-bg);color:var(--tx);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;height:100dvh;padding:22px 18px 18px;display:flex;flex-direction:column;gap:var(--sp-1);z-index:var(--z-side)}
+.brand{display:flex;align-items:center;gap:9px;padding:2px 6px 18px}
+.side .brand::after{content:"";width:24px;height:4px;border-radius:var(--r-pill);background:linear-gradient(90deg,currentColor,var(--text-3));box-shadow:none;margin-left:auto;flex:0 0 auto}
+.side .brand,.drawer .brand{border-bottom:1px solid var(--line)}
+.mark{width:38px;height:38px;display:grid;place-items:center;flex:0 0 38px}
+.mark svg{width:34px;height:34px;display:block}
+.brand b{font-size:17px;font-weight:600;color:inherit;display:block;line-height:var(--lh-title);letter-spacing:.2px}.brand small{font-size:10px;font-weight:500;letter-spacing:2.6px;color:inherit;line-height:var(--lh-tight)}
+.nav{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:11px;color:var(--sub);font-size:var(--fs-14);font-weight:500;width:100%;background:none;border:0;text-align:left;line-height:var(--lh-btn)}
+.nav:hover{background:var(--hover);color:var(--tx)}
+.nav.on{background:var(--hover);color:var(--tx);font-weight:600}
+/* 第 3 项（2026-11-13 大肥鱼定夺，7 项）：登出项危险态——红底白字，红图标放白底圆片；
+   hover 重设危险红底（禁 background:none），覆盖通用 .nav:hover 的 var(--hover)；
+   --danger-bg 作用域收在本规则内（:root 的 --danger-bg 是 session.css 共用的半透明 tint，改全局会坏掉，见报告） */
+.nav.nav-danger{background-color:var(--danger-solid);color:var(--on-danger)}
+.nav.nav-danger .logout-icon{color:var(--err);background:var(--on-danger);border-radius:50%}
+.nav.nav-danger:hover{background-color:var(--danger-solid);color:var(--on-danger);text-decoration:underline}
+.nav.nav-danger:focus-visible{outline:3px solid var(--on-danger);outline-offset:2px}
+.gtitle{font-size:10.5px;font-weight:600;color:var(--sub);padding:16px 10px 6px;letter-spacing:1.6px;line-height:var(--lh-tight)}
+.side .sp{flex:1}.sidefoot{border-top:1px solid var(--line);padding-top:14px;margin-top:6px;font-size:11px;color:var(--sub);letter-spacing:.8px;text-align:center;line-height:var(--lh-body)}
+/* ===== 顶栏（全站一条） ===== */
+.main{flex:1;min-width:0;width:100%;max-width:var(--col-max);margin:0 auto;padding:0 var(--sp-7) var(--sp-8)}
+.top{display:flex;align-items:center;gap:var(--sp-4);padding:calc(var(--sp-4) + var(--safe-t)) 0 var(--sp-4);position:sticky;top:0;background:var(--chrome-bg);color:var(--tx);border-bottom:1px solid var(--line);z-index:var(--z-top)}
+.burger{display:none;width:44px;height:44px;place-items:center;border:1px solid var(--border-strong);border-radius:var(--radius-1);background:var(--tint);color:var(--tx);flex:0 0 auto}
+.search{flex:0 1 420px;min-width:0;background:var(--tint);border:1px solid var(--line);border-radius:var(--r-pill);padding:var(--sp-3) var(--sp-4);color:var(--sub);display:flex;gap:var(--sp-2);align-items:center}
+.search input{border:0;outline:0;font:inherit;color:var(--tx);width:100%;background:none;min-width:0;font-size:var(--fs-16)/* iOS Safari 对 <16px 输入框聚焦自动放大跳版，搜索框此前继承 14px */}
+.search input::placeholder{color:var(--text-3)}
+.top .grow{flex:1}
+.online{color:var(--tx);font-weight:600;font-size:var(--fs-13);white-space:nowrap;line-height:var(--lh-btn)}.online i{display:inline-block;width:9px;height:9px;border-radius:var(--r-round);background:var(--ok);margin-right:var(--sp-2)}
+.online.bad{color:var(--tx)}.online.bad i{background:var(--err)}
+.iconbtn{width:44px;height:44px;border-radius:var(--r-round);border:1px solid var(--border-strong);background:var(--tint);display:grid;place-items:center;color:var(--tx);flex:0 0 auto}
+.acctwrap{position:relative}
+.uchip{display:flex;align-items:center;gap:var(--sp-2);font-weight:600;background:none;border:0;font-size:var(--fs-14);color:var(--tx);line-height:var(--lh-btn);min-height:44px;flex:0 0 auto}
+.uava{width:34px;height:34px;border-radius:var(--r-round);background:var(--brand);color:var(--on-brand);display:grid;place-items:center;font-size:var(--fs-14);flex:0 0 auto;aspect-ratio:1/1}
+.acctmenu{display:none;position:absolute;right:0;top:calc(100% + var(--sp-2));background:var(--card);border:1px solid var(--line);border-radius:var(--r);min-width:196px;padding:var(--sp-2);z-index:var(--z-acct)}
+.acctmenu.open{display:block}
+.acctmenu a{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3);border-radius:var(--r);font-size:var(--fs-14);line-height:var(--lh-btn);color:var(--tx)}
+.acctmenu a:hover{background:var(--tint)}.acctmenu a.on{background:var(--hover);color:var(--tx);font-weight:600}.acctmenu a.red{color:var(--err)}
+/* ===== 抽屉 ===== */
+.drawer{position:fixed;left:0;top:0;bottom:0;width:min(300px,84vw);background:var(--chrome-bg);color:var(--tx);border-right:1px solid var(--line);padding:calc(22px + var(--safe-t)) 18px calc(18px + var(--safe-b));display:flex;flex-direction:column;overflow-y:auto;gap:var(--sp-1);z-index:var(--z-drawer);transform:translateX(-106%);transition:transform .22s ease,visibility 0s linear .22s;box-shadow:24px 0 48px var(--drawer-shadow);visibility:hidden}
+.drawer.open{transform:none;visibility:visible;transition:transform .22s ease}
+.dscrim{position:fixed;inset:0;background:var(--scrim);z-index:var(--z-scrim);opacity:0;visibility:hidden;transition:opacity .22s ease,visibility 0s linear .22s}
+.dscrim.on{opacity:1;visibility:visible;transition:opacity var(--d3) var(--e-c)}/* 返工补修：scrim 进入 .22s ease→D3=170ms/E-C（B §7，复审观察项顺手对齐） */
+/* ===== 抽屉打开态（2026-11-13 黑白化后：侧边＋顶栏走黑白品牌色 --brand；顶栏现常驻品牌色，本块其余规则与顶栏基规则一致、保留作抽屉打开态显式兜底；body.drawer-open 由 setDrawer() 挂载） ===== */
+body.drawer-open .top{background:var(--chrome-bg)}
+body.drawer-open .burger{background:var(--tint);border-color:var(--border-strong);color:var(--tx)}
+body.drawer-open .search{background:var(--tint);border-color:var(--line);color:var(--sub)}
+body.drawer-open .search input{color:var(--tx)}
+body.drawer-open .search input::placeholder{color:var(--text-3)}
+body.drawer-open .iconbtn{background:var(--tint);border-color:var(--border-strong);color:var(--tx)}
+body.drawer-open .uchip{color:var(--tx)}
+/* ===== 通用组件 ===== */
+h1.pt{font-size:var(--fs-24);color:var(--navy);line-height:var(--lh-title);margin:var(--sp-1) 0 var(--sp-2)}
+.psub{color:var(--sub);font-size:var(--fs-14);line-height:var(--lh-body);margin:0 0 var(--sp-6)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-6);margin-bottom:var(--sp-4);transition:border-color var(--dur-3) ease-out,box-shadow var(--dur-3) ease-out}
+.card h3{font-size:var(--fs-18);font-weight:600;color:var(--navy);line-height:26px;letter-spacing:-0.01em;margin-bottom:var(--sp-2)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);align-items:start}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-4);align-items:start}
+/* 网格项须 min-width:0：否则子项 min-content（如 .tblwrap 内 min-width:560px 的表）会把轨道撑出容器，手机端整页横向溢出＋Safari 收缩缩放（2026-11-10 站长报「我的」页卡片只占约 2/3 宽；排版线实测手机布局视口被撑到 627px、820px 宽溢出 196px）；.tblwrap 自带 overflow-x:auto，表在卡片内横滚。 */
+.grid2>*,.grid3>*{min-width:0}
+.row{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-2);border-bottom:1px solid var(--line);width:100%;background:none;border-top:0;border-left:0;border-right:0;text-align:left;font:inherit;color:inherit;min-height:calc(var(--sp-9) + var(--sp-1))}
+.row:last-child{border-bottom:none}
+.tile{width:42px;height:42px;border-radius:var(--r);background:var(--tint);color:var(--brand);display:grid;place-items:center;flex:0 0 42px}.tile svg{width:21px;height:21px}
+.row b{display:block;font-size:var(--fs-15);line-height:var(--lh-tight)}.row small{color:var(--sub);font-size:var(--fs-12);display:block;line-height:var(--lh-title)}
+/* 行标题/副文案遇超长不断词（如 26 字以上连续账号/标题）允许断词：只在词本身溢出容器时断（break-word），不再 anywhere 全段任意断——anywhere 会把正常词组（如“距下一分约 43 分钟”）从中间断开；正常文案仍按词与 CJK 边界换行。 */
+.row b,.row small{overflow-wrap:break-word;word-break:normal}
+/* 行文本列可收缩：图标＋文字＋右侧操作/箭头三段式，文字列须 flex:1/min-width:0，否则长副文案在窄屏下撑行或换行失控（此前只在 #foPosts/.chatlist/#frReqs 局部修过，现全站统一）。 */
+.row>span:nth-child(2){flex:1;min-width:0}
+/* 论坛帖行文本列任何宽度下都可收缩（桌面端亦然，防长标题在 1280px 下仍撑行） */
+#foPosts .row>span:nth-child(2){min-width:0}
+.row .chev{margin-left:auto;color:var(--text-3)}.row.red b{color:var(--err)}
+.btn{display:inline-block;background:var(--brand);color:var(--on-brand);border:1.5px solid transparent;border-radius:var(--radius-1);padding:var(--sp-3) var(--sp-5);font-size:var(--fs-15);font-weight:600;text-align:center;line-height:var(--lh-btn);min-height:36px;min-width:36px;transition:background-color var(--dur-2) ease-out,color var(--dur-2) ease-out,border-color var(--dur-2) ease-out,transform var(--dur-3) ease-out,filter var(--dur-2) ease-out;white-space:nowrap}/* 六项定夺③：普通按钮 36px；页面主 CTA 用 .btn.block 保留 40px */
+.btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn:active{transform:none;filter:brightness(.94);transition-duration:80ms}
+.row .btn:hover,.dev .btn:hover,.cht-comp .btn:hover,.note .btn:hover,.tabs .btn:hover{transform:none}
+/* 排版深查批2：全套按钮变体统一 1.5px 边框（实心用透明边框占位），外尺寸一致，实心/描边/灰描边切换不再差 1.5px。 */
+.btn.ghost{background:var(--card);color:var(--tx);border-color:var(--border-strong)}.btn.grey{background:var(--card);color:var(--tx);border-color:var(--border-strong)}.btn.danger{background:var(--card);color:var(--err);border-color:var(--err)}/* D-02（2026-11-15 深审阻断）：弹窗最终确认态实心危险样式；页面入口仍用非实心 .btn.danger */.btn.danger.solid{background:var(--danger-solid);border-color:var(--danger-solid);color:var(--on-danger)}.btn.black{background:var(--brand);color:var(--on-brand)}
+.btn.sm{padding:var(--sp-2) var(--sp-4);font-size:var(--fs-13);border-radius:var(--radius-1);line-height:var(--lh-btn);min-height:36px}.btn.block{width:100%;padding:var(--sp-3);min-height:40px}/* 六项定夺③：.btn.block 为页面主 CTA，保留 40px */.btn:disabled{opacity:.55;cursor:default}
+/* G8 深色开关（我的页「账号与安全」唯一入口）：44×24 胶囊开关；开态品牌色只引用 token 本身不动 */
+.qf-switch{width:44px;height:24px;border-radius:999px;background:var(--border-strong);border:0;position:relative;flex:0 0 auto;padding:0;transition:background-color var(--dur-2) ease-out}
+.qf-switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--on-brand);box-shadow:var(--shadow-1);transition:transform var(--dur-2) ease-out}
+.qf-switch[aria-checked="true"]{background:var(--brand)}
+.qf-switch[aria-checked="true"]::after{transform:translateX(20px)}
+.qf-switch:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+/* P0-2 遗留：壳手动模式下页内主题开关只读态＋标注（与开关同行，窄屏换行到行下）。 */
+.qf-switch:disabled{opacity:.45;cursor:not-allowed}
+#pf-theme-shell-note{font-size:var(--fs-12);color:var(--sub);line-height:var(--lh-title);max-width:220px;text-align:right}
+.qf-switch::before{content:"";position:absolute;left:0;right:0;top:-6px;bottom:-6px}/* 六项定夺③：开关视觉 44×24 不变，命中区扩到 44×36（桌面 ≥36×36） */
+.pill{display:inline-flex;align-items:center;min-height:20px;border-radius:var(--r-pill);padding:0 var(--sp-2);font-size:var(--fs-12);font-weight:500;line-height:16px}.pill.ok{background:var(--okbg);color:var(--text-1)}.pill.off{background:var(--tint);color:var(--sub)}.pill.warn{background:var(--warnbg);color:var(--text-1)}.pill.err{background:var(--errbg);color:var(--text-1)}.pill.brand{background:var(--tint);color:var(--text-1)}
+.field{margin-bottom:var(--sp-4)}.field label{display:block;font-size:var(--fs-13);font-weight:600;margin-bottom:var(--sp-2);line-height:var(--lh-btn)}
+.field input,.field select,.field textarea{width:100%;border:1px solid var(--line);border-radius:var(--radius-1);padding:var(--sp-3) var(--sp-4);font-size:var(--fs-16);background:var(--paper);color:var(--tx);font-family:inherit;line-height:var(--lh-body)}
+.field input:focus,.field select:focus,.field textarea:focus{outline:2px solid var(--brand-ring);outline-offset:1px;border-color:var(--brand);box-shadow:none}
+/* 六项②：占位符统一走 token（浅三级、深次级），不用浏览器默认灰 */
+input::placeholder,textarea::placeholder{color:var(--text-3)}
+[data-theme="dark"] input::placeholder,[data-theme="dark"] textarea::placeholder{color:var(--text-2)}
+.field .hint{font-size:var(--fs-12);color:var(--sub);margin-top:var(--sp-2);line-height:var(--lh-body)}.field .ferr{font-size:var(--fs-12);color:var(--text-1);margin-top:var(--sp-2);line-height:var(--lh-body)}
+.card .field:last-child{margin-bottom:0}
+/* 排版深查批2：通告不再用整宽实底大色块（多个叠加像补丁、抢过行内容），改白底＋1px 描边＋3px 左侧状态色条＋收紧内边距；Q1-2(a)：颜色类只定左色条，正文一律中性墨色，不再随状态色走。 */
+.note{border-radius:var(--r);padding:var(--sp-2) var(--sp-3);font-size:var(--fs-14);margin-bottom:var(--sp-4);line-height:var(--lh-body);display:flex;align-items:flex-start;gap:var(--sp-3);row-gap:var(--sp-2);flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-left:3px solid currentColor}.note.blue{color:var(--navy)}.note.warn{color:var(--text-1);border-left-color:var(--warn)}.note.err{color:var(--text-1);border-left-color:var(--err)}.note.ok{color:var(--text-1);border-left-color:var(--ok)}
+.note .btn{margin-left:auto;flex:0 0 auto;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-14);table-layout:fixed;font-variant-numeric:tabular-nums}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tblwrap>table{min-width:560px}
+th{text-align:left;color:var(--sub);font-weight:600;font-size:var(--fs-12);padding:var(--sp-3);border-bottom:1px solid var(--line);line-height:var(--lh-btn);vertical-align:middle}
+td{padding:var(--sp-3);border-bottom:1px solid var(--line);line-height:var(--lh-body);vertical-align:middle;word-break:break-word}
+table th:first-child,table td:first-child{width:28%;white-space:nowrap}
+table td:last-child a{display:inline-block;margin-left:var(--sp-2);white-space:nowrap;vertical-align:middle}
+.dev{display:flex;align-items:center;gap:var(--sp-4);padding:var(--sp-4) var(--sp-2);border-bottom:1px solid var(--line);flex-wrap:wrap}.dev:last-child{border:none}
+.devic{width:48px;height:48px;border-radius:var(--r);background:var(--tint);color:var(--brand);display:grid;place-items:center}.dev b{font-size:var(--fs-15);line-height:var(--lh-tight)}.dev small{display:block;color:var(--sub);font-size:var(--fs-12);line-height:var(--lh-title)}.dev .ops{margin-left:auto;display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.stat{display:flex;gap:var(--sp-6);flex-wrap:wrap}.stat div b{display:block;font-size:var(--fs-20);color:var(--navy);line-height:var(--lh-tight)}.stat div span{color:var(--sub);font-size:var(--fs-12);line-height:var(--lh-body)}
+.bar{height:8px;border-radius:var(--r-pill);background:var(--bg2);overflow:hidden;margin-top:var(--sp-2)}.bar i{display:block;height:100%;background:var(--brand);border-radius:var(--r-pill)}
+.tabs{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-4);flex-wrap:wrap}.tabs button{padding:var(--sp-2) var(--sp-4);border-radius:var(--r-pill);border:1px solid var(--line);background:var(--paper);font-weight:600;font-size:var(--fs-13);color:var(--tx);line-height:var(--lh-btn);min-height:36px;min-width:36px}.tabs button.on{background:var(--brand);color:var(--on-brand);border-color:var(--brand)}
+.foot{color:var(--sub);font-size:var(--fs-12);text-align:center;padding:var(--sp-3) 0 var(--sp-1);line-height:var(--lh-body)}
+.skel{border-radius:var(--r);background:var(--bg2);min-height:18px;animation:sk 1.2s ease-in-out infinite alternate}@keyframes sk{from{opacity:.55}to{opacity:1}}
+.statebox{text-align:center;padding:var(--sp-9) var(--sp-6);color:var(--sub)}.statebox b{display:block;font-size:var(--fs-16);color:var(--navy);margin-bottom:var(--sp-2);line-height:var(--lh-title)}.statebox p{max-width:var(--prose);margin:0 auto var(--sp-4);font-size:var(--fs-14);line-height:var(--lh-body)}
+.msg{display:flex;gap:var(--sp-3);margin-bottom:var(--sp-4)}.msg .bub{background:var(--bub-bg);border:1px solid var(--line);border-radius:var(--radius-chat);border-bottom-left-radius:var(--radius-chat-tail);padding:10px 14px;max-width:min(560px,68%);font-size:var(--fs-15);line-height:22px}.msg.me{flex-direction:row-reverse}.msg.me .bub{background:var(--brand);color:var(--on-brand);border-color:var(--line-on-brand);border-radius:var(--radius-chat);border-bottom-right-radius:var(--radius-chat-tail)}
+.msg small{display:block;color:var(--sub);font-size:var(--fs-11);margin-top:var(--sp-1);line-height:var(--lh-body)}.msg.me small{color:var(--me-meta)}/* 六项②：浅色己方气泡时间戳改近白（黑底 18.58:1），次级灰退出浅色页 */
+.chatlist .row{cursor:pointer;min-height:64px;padding:12px;border-radius:var(--radius-1)}
+.chatlist .row.act{background:var(--hover)}
+.cht-badge{display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 6px;border-radius:var(--r-pill);background:var(--brand);color:var(--on-brand);font-family:var(--font-mono);font-size:var(--fs-12);line-height:16px;margin-left:auto;flex:0 0 auto}
+.cht-e2e{display:inline-flex;gap:4px;align-items:center;justify-content:center;width:100%;font-size:var(--fs-12);line-height:16px;color:var(--sub);background:none;border:0;text-align:center}
+.cht-e2e svg{width:12px;height:12px;flex:0 0 auto}.tag{font-size:var(--fs-11);background:var(--tint);color:var(--text-1);border-radius:var(--r-pill);padding:var(--sp-1) var(--sp-2);font-weight:600;line-height:var(--lh-btn);white-space:nowrap}
+.row .tag{margin-left:auto;flex:0 0 auto}.row .tag ~ .chev{margin-left:var(--sp-2)}
+.viewer{background:var(--sv-canvas);border-radius:var(--r);min-height:430px;display:flex;flex-direction:column;overflow:hidden}
+.viewer .vbar{background:var(--sv-bar-bg);color:var(--sv-bar-fg);display:flex;gap:var(--sp-2);align-items:center;padding:var(--sp-2) var(--sp-3);flex-wrap:wrap}.viewer .vbar .btn{padding:var(--sp-2) var(--sp-3);font-size:var(--fs-13);line-height:var(--lh-btn);min-height:32px;min-width:36px}/* 六项定夺③：高密度工具栏 32px */
+.viewer iframe{flex:1;width:100%;border:0;background:var(--sv-canvas);min-height:380px}
+.kbd{font-size:var(--fs-12);background:var(--sv-bar-bg);border-radius:var(--r-pill);padding:var(--sp-1) var(--sp-2);color:var(--sv-bar-fg)}
+.step{display:flex;gap:var(--sp-3);align-items:center;margin-bottom:var(--sp-4);flex-wrap:wrap}.step b{width:26px;height:26px;border-radius:var(--r-round);background:var(--bg2);color:var(--sub);display:grid;place-items:center;font-size:var(--fs-13);line-height:var(--lh-btn)}.step b.on{background:var(--brand);color:var(--on-brand)}.step span{color:var(--sub);font-size:var(--fs-13);line-height:var(--lh-btn)}.step span.on{color:var(--tx);font-weight:600}
+.plans{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-4)}.plan{border:1.5px solid var(--line);border-radius:var(--r);padding:var(--sp-5);text-align:center;background:var(--paper);width:100%;font:inherit;color:inherit}.plan.sel{border-color:var(--brand)}.plan b{font-size:var(--fs-16);color:var(--navy);display:block;line-height:var(--lh-title)}.plan .price{font-size:var(--fs-26);font-weight:800;color:var(--navy);margin:var(--sp-2) 0 var(--sp-1);line-height:var(--lh-tight)}.plan small{color:var(--sub);font-size:var(--fs-12);line-height:var(--lh-body)}
+.paycards{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);margin-top:var(--sp-4)}.paycard{border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-4);text-align:center;background:var(--paper)}.paycard img{max-width:100%;height:auto;border-radius:var(--r)}
+.framebox{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--paper)}.framebox iframe{width:100%;height:640px;border:0;display:block}
+/* ===== 购买页折叠抽屉 ===== */
+.planlist{display:flex;flex-direction:column;gap:var(--sp-4)}
+.planitem{border:1.5px solid var(--line);border-radius:var(--r);background:var(--paper);overflow:hidden}
+.planitem.open{border-color:var(--brand)}
+.planhead{display:flex;align-items:center;gap:var(--sp-3);width:100%;padding:var(--sp-4) var(--sp-5);background:none;border:0;text-align:left;font:inherit;color:inherit}
+.planhead b{font-size:var(--fs-16);color:var(--navy);display:block;line-height:var(--lh-title)}.planhead small{color:var(--sub);font-size:var(--fs-12);display:block;margin-top:var(--sp-1);line-height:var(--lh-body)}
+.planhead .planprice{margin-left:auto;font-size:var(--fs-24);font-weight:800;color:var(--navy);white-space:nowrap;line-height:var(--lh-tight)}
+.planhead .chev{color:var(--text-3);transition:transform .18s ease}.planitem.open .planhead .chev{transform:rotate(90deg)}
+.planhead:disabled{opacity:.5;cursor:default}
+.drawerpay{border-top:1px solid var(--line);padding:var(--sp-5)}
+.paygrid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4)}
+.paycard.sel{border-color:var(--brand)}
+.paytabs{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3)}
+.paytab{flex:1;padding:var(--sp-3) 0;border-radius:var(--r-pill);border:1px solid var(--line);background:var(--paper);font-weight:600;font-size:var(--fs-14);color:var(--sub);cursor:pointer;line-height:var(--lh-btn);min-height:44px}
+.paytab.on{background:var(--brand);color:var(--on-brand);border-color:var(--brand)}
+.paycard.single{max-width:380px;margin:0 auto}
+.paycard.single img{width:100%}
+.qrzoom{cursor:zoom-in}
+.qrzoom-hint{font-size:var(--fs-12);color:var(--sub);margin-top:var(--sp-2);line-height:var(--lh-body)}
+.qrzoom-box{text-align:center}
+.qrzoom-img{display:block;width:min(70vw,300px);max-width:100%;height:auto;margin:0 auto var(--sp-3);border-radius:var(--r)}
+.qrzoom-meta{font-size:var(--fs-15);font-weight:600;color:var(--navy);margin-bottom:var(--sp-2);line-height:var(--lh-tight)}
+.qrzoom-tip{font-size:var(--fs-13);color:var(--sub);line-height:var(--lh-body)}
+.drawerops{display:flex;gap:var(--sp-3);flex-wrap:wrap;margin-top:var(--sp-4)}
+.drawerops .btn{min-height:40px}/* 六项定夺③：支付抽屉主操作行（支付成功／取消）保留 40px */
+/* ===== 未登录区 ===== */
+.authwrap{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:calc(var(--sp-6) + var(--safe-t)) var(--sp-4) calc(var(--sp-6) + var(--safe-b))}
+.auth{width:448px;max-width:100%;background:var(--auth-bg);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-7)}
+.auth .brand{justify-content:center;color:var(--navy);padding-bottom:var(--sp-2)}.auth .brand b,.auth .brand small{color:var(--navy)}/* W-02：白卡品牌字改 navy（浅色）；深色分支见深色覆写表 */.auth h1{font-size:var(--fs-24);color:var(--navy);text-align:center;margin:var(--sp-2) 0 var(--sp-1);line-height:var(--lh-title)}.auth .psub{text-align:center;margin-bottom:var(--sp-6)}
+.authlinks{display:flex;justify-content:space-between;font-size:var(--fs-13);margin:var(--sp-3) 0;line-height:var(--lh-btn)}.authlinks a{color:var(--link);font-weight:600;text-decoration:underline;text-decoration-color:var(--text-3);text-underline-offset:2px}
+.kfrow{display:flex;align-items:center;gap:var(--sp-3);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp-3) var(--sp-4);background:var(--paper);font-weight:600;font-size:var(--fs-14);margin-top:var(--sp-4);width:100%;text-align:left;color:var(--tx);line-height:var(--lh-btn)}.kfrow .tile{width:36px;height:36px;flex-basis:36px;border-radius:var(--r)}.kfrow .chev{margin-left:auto;color:var(--text-3)}
+.txtlink{display:block;text-align:center;color:var(--link);font-weight:600;font-size:var(--fs-14);padding:var(--sp-3) 0 0;background:none;border:0;width:100%;line-height:var(--lh-btn);text-decoration:underline;text-decoration-color:var(--text-3);text-underline-offset:2px}
+/* ===== 底部标签栏 ===== */
+.bnav{display:none}
+/* ===== 提示层 / 弹窗层 ===== */
+#toasts{position:fixed;top:calc(var(--sp-4) + var(--safe-t));left:50%;transform:translateX(-50%);z-index:var(--z-toast);display:flex;flex-direction:column;gap:var(--sp-2);width:min(440px,92vw)}
+.toast{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--brand);border-radius:var(--radius-1);padding:var(--sp-3) var(--sp-4);font-size:var(--fs-14);color:var(--tx);line-height:var(--lh-body);box-shadow:var(--shadow-3)}
+.toast.ok{border-left-color:var(--ok)}.toast.err{border-left-color:var(--err)}.toast.warn{border-left-color:var(--warn)}
+#modalRoot .mask{position:fixed;inset:0;background:var(--overlay-scrim);z-index:var(--z-modal);display:grid;place-items:center;padding:calc(var(--sp-5) + var(--safe-t)) var(--sp-5) calc(var(--sp-5) + var(--safe-b));overflow-y:auto}
+#modalRoot .modal{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-modal);max-width:560px;width:100%;padding:var(--sp-6);max-height:calc(100vh - (var(--sp-5) * 2));max-height:calc(100dvh - (var(--sp-5) * 2));overflow-y:auto;box-shadow:var(--shadow-none)}
+#modalRoot .modal h3{font-size:var(--fs-18);font-weight:600;color:var(--navy);margin-bottom:var(--sp-3);line-height:26px}#modalRoot .modal p{font-size:var(--fs-14);color:var(--tx);margin-bottom:var(--sp-4);line-height:var(--lh-body)}
+#modalRoot .mops{display:flex;gap:var(--sp-3);justify-content:flex-end}
+@media(max-width:1100px) and (min-width:761px){
+.plans{grid-template-columns:repeat(2,1fr)}
+.grid3{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:760px){
+.side{display:none}.main{padding:0 var(--sp-5) calc(var(--sp-10) + var(--sp-5) + var(--safe-b));max-width:none}.grid2,.grid3,.plans,.paycards,.paygrid{grid-template-columns:1fr}
+/* 抽屉全高盖住顶栏：不再下推内容，品牌区置顶（2026-11-10 品牌区改黑白；原 84px 上垫是为躲白顶栏，现顶栏被抽屉盖住） */
+.burger{display:grid}
+.top{gap:var(--sp-2);margin:0 calc(-1 * var(--sp-5));padding-left:var(--sp-5);padding-right:var(--sp-5)}/* r13：手机顶栏通顶通边——此前顶栏缩在 .main 左右 16px 内边距里，左右各留一条底色竖条（站长截图白条根因，抽屉实测在屏外 -318px 并非泄漏）；负边距破出内边距，顶栏贴满屏宽，内容区 16px 内边距保留 */.top .online{display:none}.top .grow{display:none}/* r13：手机顶栏 .grow 占位把搜索框挤到 111px（占位 204px 被夹断）；隐藏后搜索框独占剩余宽 */.uchip b{display:none}
+.bnav{display:flex;position:fixed;left:0;right:0;bottom:0;background:var(--bnav-bg);border-top:1px solid var(--line);z-index:var(--z-bnav)}
+.bnav button{flex:1;text-align:center;padding:var(--sp-2) 0 calc(var(--sp-3) + var(--safe-b));font-size:var(--fs-11);color:var(--sub);background:none;border:0;line-height:var(--lh-btn);min-height:44px}
+.bnav button.on{color:var(--tx);font-weight:600}.bnav svg{width:21px;height:21px;display:block;margin:0 auto var(--sp-1)}
+.search{flex:1}.authwrap{padding:var(--sp-4) var(--sp-3)}.auth{width:100%;padding:var(--sp-6) var(--sp-5)}.authlinks{flex-wrap:wrap;gap:var(--sp-2)}
+.viewer iframe{min-height:320px}.framebox iframe{height:560px}
+}
+
+/* 六项定夺③触控目标：粗指针（移动端）交互控件命中区 ≥44×44px */
+@media (pointer:coarse){
+.btn,.btn.sm,.btn.block,.drawerops .btn,.tabs button,.viewer .vbar .btn{min-height:44px;min-width:44px}
+.nav{min-height:44px}
+.qf-switch::before{top:-10px;bottom:-10px}/* 开关命中区扩到 44×44 */
+}
+
+/* 原生承载 */
+.nativehost{margin-top:var(--sp-1)}
+.nativehost iframe{width:100%;height:calc(100dvh - 148px);min-height:400px;border:0;display:block;background:var(--paper);border-radius:var(--r)}
+@media(max-width:760px){.nativehost iframe{height:calc(100dvh - 132px);min-height:360px}}
+
+/* ===== 聊天页手机单栏 ===== */
+.chatback{display:none}
+@media(max-width:820px){
+  .chatwrap{grid-template-columns:1fr !important}
+  .chatwrap .chatpane-thread{display:none}
+  .chatwrap.showthread .chatpane-thread{display:block}
+  .chatwrap.showthread .chatpane-list{display:none}
+  .chatback{display:inline-flex;align-items:center;gap:var(--sp-2);margin-bottom:var(--sp-3)}
+  .chatback svg{width:16px;height:16px;transform:scaleX(-1)}
+  .chatwrap .framebox iframe{height:max(0px,min(560px,calc(100dvh - 380px)));min-height:min(400px,max(0px,calc(100dvh - 380px)))}
+}
+
+/* 论坛帖子详情 */
+.pf-backrow{margin-bottom:var(--sp-3)}
+.pf-title{font-size:var(--fs-18);line-height:26px;color:var(--navy)}
+.pf-meta{color:var(--sub);font-size:var(--fs-12);margin-top:var(--sp-2);line-height:var(--lh-body)}
+.pf-body{font-size:var(--fs-15);line-height:var(--lh-relax);white-space:pre-wrap;word-break:break-word;margin-top:var(--sp-3)}
+.pf-reply{padding:var(--sp-3) var(--sp-1);border-bottom:1px solid var(--line)}
+.pf-reply:last-child{border-bottom:none}
+.pf-rbody{font-size:var(--fs-14);line-height:var(--lh-copy);white-space:pre-wrap;word-break:break-word;margin-top:var(--sp-1)}
+.pf-off{background:var(--warnbg);color:var(--text-1)}
+.pf-t-pend{background:var(--warnbg);color:var(--text-1)}
+.pf-t-rej{background:var(--errbg);color:var(--text-1)}
+.pf-t-hid{background:var(--tint);color:var(--sub)}
+#foPosts .row{cursor:pointer}
+
+
+/* —— C2 聊天对话区原生组件 —— */
+.cht-udot{width:9px;height:9px;border-radius:var(--r-round);background:var(--warn);flex:0 0 auto;margin-left:auto}
+.cht-head{display:flex;align-items:center;gap:var(--sp-3);padding-bottom:var(--sp-3);border-bottom:1px solid var(--line);margin-bottom:var(--sp-2)}
+.cht-av{width:36px;height:36px;border-radius:var(--r-round);background:var(--brand);/* 六项②：圆盘底改主黑，与 .sys 保持区分 */color:var(--on-brand);display:inline-flex;align-items:center;justify-content:center;font-weight:600;font-size:var(--fs-12);line-height:16px;flex:0 0 auto}
+.cht-av.sys{background:var(--av-sys-bg);color:var(--on-danger)}
+.cht-av.av1{background:var(--av-sys-bg);color:var(--on-danger)}/* F1（2026-11-15 深审阻断）：补显式浅色，与 .sys 对齐；此前只改背景不写颜色，深色黑字黑底不可见 */
+.cht-hmain{flex:1;min-width:0}
+.cht-hmain b{font-size:var(--fs-15);line-height:20px}
+.cht-sub{font-size:var(--fs-15);color:var(--sub);line-height:20px}
+.cht-read{font-size:var(--fs-12);color:var(--sub);white-space:nowrap;line-height:var(--lh-body)}
+.cht-msgs{height:max(0px,min(560px,calc(100dvh - 380px)));min-height:min(320px,max(0px,calc(100dvh - 380px)));overflow-y:auto;padding:var(--sp-3) var(--sp-1)}
+.cht-msg{display:flex;flex-direction:column;margin:var(--sp-3) 0;max-width:100%}
+.cht-msg.me{align-items:flex-end}
+.cht-msg.peer{align-items:flex-start}
+.cht-bub{max-width:min(560px,68%);padding:10px 14px;border-radius:var(--radius-chat);font-size:var(--fs-15);line-height:22px;white-space:pre-wrap;word-break:break-word;background:var(--bub-bg);border:1px solid var(--line);color:var(--tx)}
+.cht-msg.me .cht-bub{background:var(--brand);border-color:var(--line-on-brand);color:var(--on-brand);border-bottom-right-radius:var(--radius-chat-tail)}
+.cht-msg.peer .cht-bub{border-bottom-left-radius:var(--radius-chat-tail)}
+.cht-meta{font-size:var(--fs-12);font-family:var(--font-mono);color:var(--sub);margin-top:var(--sp-1);display:flex;gap:var(--sp-3);line-height:16px}
+.cht-msg{animation:cht-in 180ms cubic-bezier(.2,.8,.2,1)}
+@keyframes cht-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.cht-recall{color:var(--link);cursor:pointer;text-decoration:underline;text-decoration-color:var(--text-3);text-underline-offset:2px}
+.cht-sys{text-align:center;font-size:var(--fs-12);color:var(--sub);margin:var(--sp-3) 0;line-height:var(--lh-body)}
+.cht-comp{display:flex;gap:var(--sp-2);align-items:flex-end;border-top:1px solid var(--line);padding-top:var(--sp-3);margin-top:var(--sp-2)}
+.cht-comp textarea{flex:1;border:1px solid var(--line);border-radius:var(--radius-chat);padding:10px 12px;font:inherit;font-size:var(--fs-15);resize:none;min-height:44px;max-height:120px;background:var(--paper);color:var(--tx);line-height:22px;caret-color:var(--brand)}
+.cht-comp textarea:focus{outline:2px solid var(--focus-ring);outline-offset:1px;border-color:var(--brand);box-shadow:none}
+.cht-unavail{margin:var(--sp-3) 0}
+
+/* ===== 智能客服输入行（2026-11-10 排版深查）：手机 390px 下输入框须 min-width:0 才能收缩、按钮须 nowrap＋不收缩，否则两按钮被压成单字竖排、行体溢出卡片 21px；输入框 16px 防 iOS 聚焦放大跳版 ===== */
+#sup-in{min-width:0;font-size:var(--fs-16)}
+#sup-send,#sup-human{flex:0 0 auto;white-space:nowrap}
+#sv-u,#sv-p{font-size:var(--fs-16)}
+
+/* ===== P7-016 好友申请角标 ===== */
+.fr-bdg{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--danger-solid);color:var(--on-danger);font-size:11px;font-weight:600;margin-left:6px;vertical-align:middle}
+.fr-bdg[hidden]{display:none}
+.fr-bdg.onbtn{position:absolute;top:2px;right:2px;margin-left:0}
+#burgerBtn{position:relative}
+.fr-cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--danger-solid);color:var(--on-danger);font-size:11px;font-weight:600;margin-left:8px;vertical-align:middle}
+.fr-cnt[hidden]{display:none}
+
+/* ===== 回归修复 好友页左卡行挤窄（2026-10-31 原规则）；2026-11-10 扩展：好友申请行与论坛帖行同病——窄屏下文本列不收缩会把行撑出卡片、手机端触发视口扩展示缩（好友申请行实测 433px、论坛帖行 410px，布局视口分别被撑到 474px/451px） ===== */
+@media (max-width:900px){
+.chatlist .row{flex-wrap:wrap}
+.chatlist .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+#frReqs .row,#frOutReq .row{flex-wrap:wrap}
+#frReqs .row>span:nth-child(2),#frOutReq .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+#foPosts .row>span:nth-child(2){flex:1 1 88px;min-width:0}
+}
+/* ===== 个人资料（2.3.2：头像圆图＋品牌占位＋审核记录；定夺色：主色（深底）、警告 var(--warning)、圆角 14 / 无阴影无渐变） ===== */
+.qf-avatar{border-radius:50%;object-fit:cover;display:block;background:var(--navy)}
+.qf-avatar-ph{background:var(--navy)}
+[data-my-avatar]{display:inline-flex;flex:0 0 auto;align-items:center}
+.sideid{display:flex;align-items:center;gap:11px;width:100%;padding:11px 12px;border-radius:12px;background:var(--tint);border:0;color:var(--tx);text-align:left;font:inherit}
+.sideid:hover{background:var(--hover)}
+.sideidtx{display:flex;flex-direction:column;min-width:0}
+.sideidtx b{font-size:14px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sideidtx small{color:var(--sub);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.profile-head{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+.profile-head .pf-names b{font-size:17px;color:var(--navy);display:block}
+.profile-head .pf-names small{display:block;color:var(--sub);font-size:12.5px;margin-top:2px}
+.profile-login{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:11px 2px;margin-bottom:16px;font-size:13.5px;color:var(--sub);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.profile-login b{color:var(--tx)}
+.pf-ops{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.pf-count{font-weight:400;color:var(--sub);font-size:12.5px}
+.pfrec{display:flex;align-items:center;gap:11px;padding:11px 4px;border-bottom:1px solid var(--line)}
+.pfrec:last-child{border-bottom:none}
+.pfrec-main{flex:1;min-width:0}
+.pfrec-main b{font-size:14px}
+.pfrec-main small{display:block;color:var(--sub);font-size:12.5px}
+.pfrec-time{color:var(--sub);font-size:12.5px;white-space:nowrap}
+
+/* r13：桌面端顶栏＋内容框（2026-11-12 站长报桌面「框架不符」）：此前 .main 全局 max-width:1184px 居中，1919px 下顶栏缩成 1120px 悬空柱、与侧边栏脱节（左右死区各约 250px）；改 .main 不限宽、顶栏贴满侧边栏外全部宽度，内容区 #view/.foot 仍按 --col:1120px 居中（1024/1440 下与原来逐像素一致） */
+@media(min-width:761px){
+.main{max-width:none}
+#view{max-width:var(--col);margin:0 auto}
+.foot{max-width:var(--col);margin:0 auto}
+}
+@media(min-width:1440px){
+#view{max-width:var(--col-wide)}
+.foot{max-width:var(--col-wide)}
+}
+@media(min-width:900px){.grid2,.grid3,.plans,.paycards,.paygrid{gap:var(--sp-6)}}
+@media(max-width:899px){.card{padding:var(--sp-5)}}
+/* r13：两列键值表贴合卡片——.tblwrap>table 全局 min-width:560px 使「我的密钥」「设备信息」两列表在手机卡片内横滚夹断（密钥/到期/链接看不全，1024 下亦溢出 197px）；挂 .fit 的表取消最小宽、按卡片宽换行 */
+.tblwrap.fit>table{min-width:0}
+/* r13：文件选择器——原生 file 控件在中文界面露英文「Choose File / No file chosen」按钮且无样式；统改隐藏 input＋中文按钮＋已选文件名回显 */
+input[type=file].filepick{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}
+label.btn{display:inline-block;vertical-align:middle}
+.filepick-name{font-size:var(--fs-12);color:var(--sub);margin-left:var(--sp-2);overflow-wrap:anywhere;word-break:break-word;line-height:var(--lh-body)}
+
+/* ===== 排版深查批2（2026-11-13，站长报“设计乱、没条理、排版差”；大肥鱼三问审计＋我方逐项核查后落地；r13 四块修复原样保留在上） ===== */
+/* 行内操作区：此前只有 .dev .ops 有规则，.row 内的 .ops 靠内联补位（三处写法不一）。统一样式：行内靠右、不收缩、可换行。 */
+.row .ops{display:flex;align-items:center;gap:var(--sp-2);margin-left:auto;flex:0 0 auto;flex-wrap:wrap}
+/* 通告内按钮组：此前首页许可条用 <span style="float:right">，float 在 flex 子项上无效、按钮并未靠右。 */
+.note-ops{margin-left:auto;display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.note-ops .btn{margin-left:0}
+/* 设备行文本列：加 .devtx 类才可收缩（不用 :nth-child(2)，锁屏行等无 .devic 的 .dev 会误命中 ops）。 */
+.dev .devtx{flex:1;min-width:0;overflow-wrap:break-word}
+/* 设备行三级操作：详情由灰描边按钮降为文字按钮（主操作实心＞次操作描边＞详情文字）。 */
+.dev .ops .btn.grey{background:none;border-color:transparent;color:var(--sub);padding-inline:var(--sp-2)}
+.dev .ops .btn.grey:hover{background:var(--hover)}
+/* 聊天输入行：#chInput 补 min-width:0（与 #sup-in 同病）；按钮不收缩、不换行断字。 */
+.cht-comp textarea{min-width:0;flex:1 1 220px}
+.cht-comp .btn{flex:0 0 auto;white-space:nowrap}
+/* 订单说明段：此前全是内联 font-size:13.5px/margin-top:10px，层级不一；统进 .ordnote。颜色：中性内联保留；状态色内联已按 2026-11-15 Q1-2(a) 移除，文字继承中性墨色。 */
+.ordnote{font-size:var(--fs-13);line-height:var(--lh-body);margin:var(--sp-2) 0 0}
+/* 卡内副标题：此前「我的」页兑换 KEY 卡用第二个 h3＋内联 margin-top 硬撑层级，改 h4.subh（字号降档＋上边框分隔）。 */
+.card h4.subh{font-size:var(--fs-14);color:var(--navy);line-height:var(--lh-title);margin:var(--sp-5) 0 var(--sp-2);padding-top:var(--sp-4);border-top:1px solid var(--line)}
+/* 卡级文字入口：首页「查看全部设备」不再扮成描边按钮，改文字链、左对齐到行内容左沿。 */
+.txtlink.cardmore{text-align:left;padding:var(--sp-3) var(--sp-2) 0}
+@media(max-width:760px){
+/* 窄屏行内操作区：整行下移、对齐文字列左沿（图标 42＋间距 12＝54px；行内边距 8px，合计与文字列左沿 86px 一致）。 */
+.row{flex-wrap:wrap}
+.row .ops{flex:1 1 100%;margin-left:calc(42px + var(--sp-3));justify-content:flex-start}
+/* 窄屏通告按钮组：占满整行、左对齐，不再挤在文案后。 */
+.note-ops{margin-left:0;width:100%}
+/* 窄屏设备行：操作组整行下移、右对齐，状态 pill 留在首行文字后。 */
+.dev>.ops{flex:1 0 100%;margin-left:0;justify-content:flex-end}
+/* 窄屏聊天输入：输入框占满整行，两按钮各占一半并排。 */
+.cht-comp{flex-wrap:wrap}
+.cht-comp textarea{flex:1 1 100%}
+.cht-comp .btn{flex:1 1 calc(50% - var(--sp-1))}
+/* 窄屏订单头：改纵向，价格＋状态 pill 左对齐，不再与长订单号挤一行。 */
+.card[data-order]>.dev{flex-direction:column;align-items:stretch;gap:var(--sp-2)}
+.card[data-order]>.dev .ops{margin-left:0;justify-content:flex-start}
+}
+
+
+/* ===== Q3a 实施：utility／迁移组件 class（承接 app.js 167 处内联 style 迁移；禁 !important） ===== */
+/* 间距 utility（4/8 栅格；.ordnote 的颜色内联：中性保留，状态色已按 Q1-2(a) 移除） */
+.m-0{margin:0}.mt-4{margin-top:4px}.mt-6{margin-top:6px}.mt-8{margin-top:8px}.mt-10{margin-top:10px}.mt-12{margin-top:12px}.mt-14{margin-top:14px}.mt-16{margin-top:16px}.mt-18{margin-top:18px}.mt-22{margin-top:22px}
+.mb-4{margin-bottom:4px}.mb-6{margin-bottom:6px}.mb-8{margin-bottom:8px}.mb-10{margin-bottom:10px}.mb-12{margin-bottom:12px}.mb-14{margin-bottom:14px}
+.m-8-0-12{margin:8px 0 12px}.m-6-0-10{margin:6px 0 10px}.m-16-0-6{margin:16px 0 6px}.sp-h14{height:14px}.d-block{display:block}.fw-600{font-weight:600}.text-center{text-align:center}
+.my-10{margin:10px 0 0}.m-2-0-10{margin:2px 0 10px}.m-0-0-10{margin:0 0 10px}.m-4-4-0{margin:4px 4px 0 0}
+/* 文本 utility */
+.text-sub{color:var(--sub)}.text-err{color:var(--err)}.text-ok{color:var(--ok)}.text-navy{color:var(--navy)}.text-brand{color:var(--tx)}
+.authlinks a:hover,.txtlink:hover,.boot-link:hover,.cht-recall:hover{text-decoration-color:var(--link)}
+.fs-13{font-size:var(--fs-13)}.fs-12x5{font-size:12.5px}.fs-13x5{font-size:13.5px}.fs-17{font-size:17px}.fs-19{font-size:19px}
+.brand-name{font-size:19px}.brand-sub{color:var(--sub);letter-spacing:2.4px;font-size:8.5px}
+.cursor-pointer{cursor:pointer}
+/* 骨架高度 utility */
+.sk-h14{height:14px}.sk-h34{height:34px}.sk-h40{height:40px}.sk-h46{height:46px}.sk-h52{height:52px}.sk-h60{height:60px}.sk-w240{width:240px}
+/* 行内布局 */
+.flex-row{display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center}
+.flex-row-nw{display:flex;gap:var(--sp-2);align-items:center}
+.dev-flat{border:none;padding:0}.dev-flat2{border:none;padding:4px 0 0}
+.chatwrap-cols{grid-template-columns:1fr 1.6fr}
+.basis-full{flex-basis:100%}
+/* 表单行内控件（原内联 border/radius/padding 进 class；--btn-line/--fg 两个未定义变量收敛到 --line/--tx） */
+.mini-input{flex:1;min-width:130px;border:1px solid var(--line);border-radius:10px;padding:9px;font-size:var(--fs-16);background:var(--card);color:var(--tx)}
+.mini-input2{flex:1;min-width:200px;height:38px;border:1px solid var(--line);border-radius:10px;padding:0 12px;font-size:var(--fs-14);background:var(--card);color:var(--tx)}
+.mini-input2-sm{flex:1;min-width:0;height:38px;border:1px solid var(--line);border-radius:10px;padding:0 12px;font-size:var(--fs-13);background:var(--card);color:var(--tx)}
+.check-row{display:flex;gap:var(--sp-2);align-items:center;font-size:13.5px}
+.check-row input[type=checkbox]{accent-color:var(--brand);width:17px;height:17px;flex:0 0 auto}
+.check-row-m46{margin:4px 0 6px}.check-row-m014{margin:0 0 14px}.check-row-mb14{margin-bottom:14px}
+/* 密钥整串展示 */
+.keybox{user-select:all;word-break:break-all;font-size:var(--fs-16);letter-spacing:.5px}
+/* 动态尺寸头像：JS 只写 --av-size 变量，尺寸由 class 消费（P3） */
+.av-dyn{width:var(--av-size,38px);height:var(--av-size,38px)}
+/* 智能客服输入行（原内联） */
+.sup-input{flex:1;border:1px solid var(--line);border-radius:12px;padding:12px;font-size:var(--fs-16);background:var(--card);color:var(--tx);min-width:0}
+/* 首页智能客服入口按钮（原长内联，复用 .kfrow 形制） */
+.kf-btn{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:var(--radius-1);padding:12px 14px;background:var(--card);font-weight:600;font-size:14.5px;margin-top:14px;width:100%;text-align:left;color:var(--tx);line-height:var(--lh-btn)}
+.kf-btn .tile{width:36px;height:36px;flex-basis:36px}
+.kf-btn small{color:var(--sub);font-weight:400}
+.kf-btn .chev{margin-left:auto;color:var(--text-3)}
+/* 支付示例图 */
+.pay-example{display:block;max-width:250px;width:100%;margin:0 auto 12px;border:1px solid var(--line);border-radius:10px}
+/* 行链接（官方网站行） */
+.row-link{text-decoration:none;color:inherit}
+/* 启动兜底／noscript（原 index.html 内联，改 class 承接） */
+.bootfail{font-family:var(--font-sans);color:var(--sub);text-align:center;padding:48px 16px;font-size:var(--fs-14);line-height:1.7}
+.bootfail-noscript{font-family:var(--font-sans);color:var(--sub);text-align:center;padding:0 16px 32px;font-size:var(--fs-14)}
+.boot-link{color:var(--link);text-decoration:underline;text-decoration-color:var(--text-3);text-underline-offset:2px}
+/* 深色主题组件覆写（标题 navy 在深色下改亮字；白底组件走 --card） */
+[data-theme="dark"] h1.pt,[data-theme="dark"] .card h3,[data-theme="dark"] .card h4.subh,[data-theme="dark"] .plan b,[data-theme="dark"] .plan .price,[data-theme="dark"] .planhead b,[data-theme="dark"] .planhead .planprice,[data-theme="dark"] .profile-head .pf-names b,[data-theme="dark"] .auth h1,[data-theme="dark"] .statebox b,[data-theme="dark"] .stat div b,[data-theme="dark"] .qrzoom-meta,[data-theme="dark"] .note.blue,[data-theme="dark"] #modalRoot .modal h3,[data-theme="dark"] .pf-title,[data-theme="dark"] .text-navy{color:var(--dark-text-1)}
+[data-theme="dark"] .field input,[data-theme="dark"] .field select,[data-theme="dark"] .field textarea,[data-theme="dark"] .cht-comp textarea,[data-theme="dark"] .sup-input,[data-theme="dark"] .mini-input,[data-theme="dark"] .mini-input2,[data-theme="dark"] .mini-input2-sm{background:var(--dark-surface-0);color:var(--dark-text-1)}
+[data-theme="dark"] .btn.ghost,[data-theme="dark"] .btn.grey,[data-theme="dark"] .tabs button,[data-theme="dark"] .paytab,[data-theme="dark"] .plan,[data-theme="dark"] .planitem,[data-theme="dark"] .paycard,[data-theme="dark"] .kfrow,[data-theme="dark"] .kf-btn{background:transparent;color:var(--dark-text-2)}
+[data-theme="dark"] .btn.ghost{color:var(--brand-lt)}
+[data-theme="dark"] .btn:disabled{background:var(--dark-surface-3);opacity:.55}/* 六项②：禁用态不再单占一灰，与浅色一致用透明度表达禁用，文字色取自已计灰阶 */
+[data-theme="dark"] .note{background:var(--dark-surface-1);border-color:var(--dark-border-strong)}
+[data-theme="dark"] .note.warn{border-left-color:var(--warn)}
+[data-theme="dark"] .note.err{border-left-color:var(--err)}
+[data-theme="dark"] .note.ok{border-left-color:var(--ok)}
+[data-theme="dark"] .skel{background:var(--dark-surface-2)}
+[data-theme="dark"] .bar{background:var(--dark-surface-3)}
+[data-theme="dark"] .step b{background:var(--dark-surface-2)}
+[data-theme="dark"] .search input::placeholder,[data-theme="dark"] body.drawer-open .search input::placeholder{color:var(--text-2)}/* 深色 placeholder：对比度已核，改次级文字 token（6.91:1） */
+[data-theme="dark"] .row .chev,[data-theme="dark"] .planhead .chev,[data-theme="dark"] .kfrow .chev,[data-theme="dark"] .kf-btn .chev{color:var(--text-2)}/* 深色 chevron：对比度已核，改次级文字 token（6.91:1） */
+[data-theme="dark"] .acctmenu{background:var(--dark-surface-1)}
+/* P0/P1/P2 深色分支（2026-11-13 扫荡修复；浅色基规则在上，亮色字在深底上须另给值） */
+[data-theme="dark"] .auth .brand b,[data-theme="dark"] .auth .brand small{color:var(--dark-text-1)}/* W-02 深色分支：navy 字在深卡上 1.37:1，须改浅字 */
+[data-theme="dark"] .pill.off{background:var(--dark-surface-3)}/* W-06 */
+/* ===== 黑白化深色翻转（2026-11-14 大肥鱼定夺）：--brand 深色为白，底色类须黑字；顶栏/侧栏/抽屉深色主背景见 --chrome-bg（纯黑只用于 Hero/Logo/遮罩） ===== */
+
+/* ===== 排版优化批1（2026-10-31）：焦点环与减动效 ===== */
+button:focus-visible,a:focus-visible{outline:2px solid var(--brand);outline-offset:2px;box-shadow:none}
+@media (prefers-reduced-motion: reduce){
+*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
+.cht-msg{animation:none}
+}
+
+/* ===== REWORK 2026-11-14（A/B/C 三轮重做 · 网页端）=====
+   口径：A §3.0/§4（BG0–BG5＋文字 4 角色，单视图结构灰 ≤4，相邻面可分离）；
+   A §2.2/§2.3（字阶／字重／4pt 间距）；A §2.5＋C §1.1（交互状态矩阵）；
+   B §0/§3.1/§4/§6.1（动效 tokens／逐组件规格／弹簧／reduced motion）；
+   C §1.1/§2/§5.1（细节／专业内容／微文案）。本块为覆盖层，后出规则优先。 */
+
+/* --- 排版 A §2.2：字阶 11/16、12/18、13/20、14/22、16/24、20/28、24/32、28/36；字重只用 400/500/600 --- */
+body{font-size:14px;line-height:22px;font-variant-numeric:tabular-nums}
+h1.pt{font-size:24px;line-height:32px;font-weight:600;letter-spacing:-.01em}
+.card h3{font-size:16px;line-height:24px;font-weight:600;letter-spacing:-.01em}
+.psub{font-size:14px;line-height:22px;color:var(--text-2)}
+.row b{font-size:14px;line-height:20px;font-weight:500}
+.row small{font-size:12px;line-height:18px;color:var(--text-3)}
+th{font-size:12px;line-height:16px;font-weight:500;color:var(--text-3)}
+td,.stat div b,.msg .bub,.cht-bub{font-variant-numeric:tabular-nums}
+td.num,th.num,.num{ text-align:right;font-variant-numeric:tabular-nums}
+.gtitle{font-size:11px;line-height:16px;letter-spacing:.04em;font-weight:600;text-transform:uppercase}
+.brand b{font-size:17px;font-weight:600}
+.msg small,.cht-meta{font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+/* --- 间距 A §2.3：页面 padding 32；区块间距 32；组件内 8/12 --- */
+.main{padding:0 32px 48px}
+.card{padding:16px;margin-bottom:16px}
+@media(max-width:899px){.card{padding:16px}}
+/* --- 表面层级 A §2.1：浅卡白底＋1px hairline＋e1；浮层才加 e2；深卡内描边＋e2 --- */
+.card{border:1px solid var(--hairline);box-shadow:var(--card-shadow)}
+#modalRoot .modal,.acctmenu{box-shadow:var(--shadow-2)}
+/* --- 去卡片化 A §2.6：列表行与分隔线承重；卡片只承载独立对象 --- */
+.row,.dev{border-bottom:1px solid var(--hairline)}
+.row:last-child,.dev:last-child{border-bottom:none}
+/* --- 导航 A §3.1＋C §1.1：240px；行高 36；选中 BG3＋3px inset bar；顶栏选中 2px bottom bar --- */
+.side{width:240px;flex-basis:240px}
+.nav{position:relative;min-height:36px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:20px;font-weight:500;color:var(--text-2)}
+.nav .ic,.nav svg.ic{width:20px;height:20px}
+.nav:hover{background:var(--state-hover);color:var(--text-1)}
+.nav:active{background:var(--state-pressed)}
+.nav.on{background:var(--state-selected);color:var(--text-1);font-weight:600;box-shadow:inset 3px 0 0 var(--text-1);border-radius:0 8px 8px 0}
+.nav:focus-visible{outline:2px solid var(--brand-ring);outline-offset:2px;border-radius:4px}
+.acctmenu a.on{box-shadow:inset 3px 0 0 var(--text-1);border-radius:0 8px 8px 0}
+.bnav button.on{box-shadow:inset 0 2px 0 var(--text-1)}
+/* --- 交互状态矩阵 A §2.5＋C §1.1：focus 2px ring＋2px offset；disabled 文字色，不靠整件 opacity --- */
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--brand-ring);outline-offset:2px}
+.btn:disabled,.tabs button:disabled,.paytab:disabled,.planhead:disabled{opacity:1;color:var(--text-4);pointer-events:none}
+.btn:disabled{background:var(--bg2)}
+[data-theme="dark"] .btn:disabled{background:var(--bg3)}
+.btn{transition:background-color var(--d2) var(--e-c),color var(--d2) var(--e-c),border-color var(--d2) var(--e-c),transform var(--d0) var(--e-c),box-shadow var(--d2) var(--e-c)}
+.btn:hover{transform:none;filter:none}
+.btn:active{transform:scale(.985);filter:brightness(.94);transition-duration:var(--d0)}
+/* --- 列表行 C §1.1：默认 56／紧凑 44；hover 叠色；选中 inset 3px；名称末省略，路径中间省略；缺失 —；数值右对齐 --- */
+.row{min-height:44px}
+.row--set{min-height:56px}
+.row:hover{background:var(--state-hover)}
+.row.sel,.chatlist .row.act{background:var(--state-selected);box-shadow:inset 3px 0 0 var(--text-1)}
+.row b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row small.path,.path-mid{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.dev{min-height:56px}
+.dev b{font-size:14px;line-height:20px;font-weight:500}
+.dev small{font-size:12px;line-height:16px;color:var(--text-3)}
+/* --- 表头 C §1.1：sticky 高 40；底部 hairline；排序 chevron 8px 校正 2px；数值列右对齐 --- */
+thead th,table th{position:sticky;top:0;background:var(--card);z-index:1;height:40px}
+th .sort-chev{width:8px;height:8px;vertical-align:2px}
+/* --- 抽屉 A §3.1＋B §3.1＋C §1.1：宽 360；头 56／body 20／footer 64 sticky；左 hairline；进入 D4/E-L x+32，退出 D3/E-X x+24 --- */
+.drawer{width:min(360px,84vw);padding:20px;border-right:1px solid var(--hairline);box-shadow:-8px 0 24px var(--drawer-shadow-desk);transition:transform 160ms var(--e-x),visibility 0s linear 160ms}/* F-W2 返工：退出 160ms/E-X（B §3.1/§7：160ms±20），visibility 延迟同步 160ms 才隐藏，保留退出滑动 */
+.drawer.open{transition:transform var(--d4) var(--e-l)}
+.drawer:not(.open){transform:translateX(-24px)}/* F-W2 返工：关闭位移 32px→24px（B §3.1） */
+.dscrim{transition:opacity var(--d2) var(--e-c),visibility 0s linear var(--d2)}/* 返工补修：scrim 退出 D3=170ms→D2=140ms（B §7，复审唯一未过项） */
+/* --- 弹窗 B §3.1：进入 D3/E-S scale(.96)+y8；退出 D2/E-X scale(.98)+y4 --- */
+#modalRoot .mask{animation:mask-in var(--d2) var(--e-c)}
+#modalRoot .modal{animation:modal-in var(--d3) var(--e-s)}
+@keyframes mask-in{from{opacity:0}to{opacity:1}}
+@keyframes modal-in{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:scale(1) translateY(0)}}
+#modalRoot .modal.closing{animation:modal-out var(--d2) var(--e-x) forwards}
+@keyframes modal-out{from{opacity:1;transform:scale(1) translateY(0)}to{opacity:0;transform:scale(.98) translateY(4px)}}
+/* --- Toast B §3.1＋C §1.1：右下 24；最大宽 420；4s；最多 3 条；进入 D2/E-S y+12，退出 D1/E-Q y-8 --- */
+#toasts{top:auto;bottom:24px;right:24px;left:auto;transform:none;width:min(420px,92vw)}
+.toast{animation:toast-in var(--d2) var(--e-s);border-left-width:3px}
+.toast.leaving{animation:toast-out var(--d1) var(--e-q) forwards}
+@keyframes toast-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes toast-out{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-8px)}}
+/* --- 导航切换 B §3.1：内容 D3/E-S x+12→0；退出 D2/E-X x-8 --- */
+#view{animation:view-in var(--d3) var(--e-s)}
+@keyframes view-in{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:translateX(0)}}
+/* F-W3 返工：会话切换单独 crossfade D2/E-C（B §3.1），与导航切换 D3/E-S x+12 分离；由 render() 在会话路由挂 .view-session */
+#view.view-session{animation:view-crossfade var(--d2) var(--e-c)}
+@keyframes view-crossfade{from{opacity:0}to{opacity:1}}
+/* --- 列表 stagger B §3.1：22ms/项，最多 7 项；第 8 项起 0 延迟；只动 transform/opacity --- */
+.chatlist .row,.card>.row,.card>.dev{animation:row-in var(--d3) var(--e-s) both}
+.chatlist .row:nth-child(2),.card>.row:nth-child(2),.card>.dev:nth-child(2){animation-delay:22ms}
+.chatlist .row:nth-child(3),.card>.row:nth-child(3),.card>.dev:nth-child(3){animation-delay:44ms}
+.chatlist .row:nth-child(4),.card>.row:nth-child(4),.card>.dev:nth-child(4){animation-delay:66ms}
+.chatlist .row:nth-child(5),.card>.row:nth-child(5),.card>.dev:nth-child(5){animation-delay:88ms}
+.chatlist .row:nth-child(6),.card>.row:nth-child(6),.card>.dev:nth-child(6){animation-delay:110ms}
+.chatlist .row:nth-child(7),.card>.row:nth-child(7),.card>.dev:nth-child(7){animation-delay:132ms}
+@keyframes row-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+/* --- 聊天 B §3.1＋C §1.1：消息最大宽 640；头像 24；meta 12/16；正文 14/22；新消息 D3/E-S y+8 只对新消息 --- */
+.msg .bub,.cht-bub{max-width:min(640px,68%)}
+.cht-msg{animation:cht-in var(--d3) var(--e-s)}
+.cht-av{width:24px;height:24px;font-size:11px;line-height:16px}
+.cht-comp{border-top:1px solid var(--hairline);min-height:64px;padding-top:12px}
+.cht-comp .btn{min-height:32px}
+.cht-msg a:focus-visible{outline:2px solid var(--brand-ring);outline-offset:2px;text-decoration:underline}
+/* --- 输入框 C §1.1：高 36/40；标签 12；错误 12 带图标；focus ring 2px；数字右对齐 tabular --- */
+.field input,.field select{height:40px}
+.field input.sm,.mini-input2{height:36px}
+.field input[type=number],input.num{text-align:right;font-variant-numeric:tabular-nums}
+.field .ferr{display:flex;gap:6px;align-items:flex-start}
+.field .ferr::before{content:"!";flex:0 0 auto;width:14px;height:14px;border-radius:50%;background:var(--danger-solid);color:var(--on-danger);font-size:11px;line-height:14px;text-align:center;font-weight:600;margin-top:1px}
+/* --- 按钮 C §1.1：高 32/36/40 三档；图标 16 间距 6；loading 同宽图标位 --- */
+.btn.sm{min-height:32px}
+.btn .ic{width:16px;height:16px}
+.btn.is-loading{pointer-events:none}
+.btn.is-loading .ic{visibility:hidden}
+/* --- 空状态 C §2.1：证据模块（最近设备／最近会话／配对码／可复制命令／排障入口），不给大插画＋空话 --- */
+.statebox{padding:32px 16px;text-align:left}
+.statebox b{font-size:16px;line-height:24px;font-weight:600}
+.statebox p{font-size:14px;line-height:22px;color:var(--text-2)}
+.ev-empty{max-width:640px;margin:0 auto;text-align:left}
+.ev-empty .statebox{text-align:left}
+.ev-list{margin:16px 0;border-top:1px solid var(--hairline)}
+.ev-list .row{min-height:44px}
+.ev-meta{font-size:12px;line-height:18px;color:var(--text-3);font-variant-numeric:tabular-nums}
+.ev-meta b{color:var(--text-2);font-weight:500}
+.ev-code{font-family:var(--font-mono);font-size:13px;line-height:20px;letter-spacing:.04em}
+.ev-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
+/* --- 加载骨架 C §1.1：镜像最终布局；脉冲 1.6s 透明度 .6→.9；禁渐变 shimmer --- */
+.skel{animation:sk 1.6s ease-in-out infinite alternate}
+@keyframes sk{from{opacity:.6}to{opacity:.9}}
+.sv-stages{list-style:none;margin:12px 0 0;padding:0;text-align:left}
+.sv-stages li{display:flex;gap:8px;align-items:baseline;font-size:13px;line-height:20px;color:var(--text-3);padding:4px 0}
+.sv-stages li.done{color:var(--text-2)}
+.sv-stages li.now{color:var(--text-1);font-weight:500}
+.sv-stages li .st-t{margin-left:auto;font-variant-numeric:tabular-nums;font-size:12px;line-height:16px}
+.sv-stages li .st-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--text-4);transform:translateY(-1px)}
+.sv-stages li.done .st-dot{background:var(--ok)}
+.sv-stages li.now .st-dot{background:var(--text-1)}
+/* --- 会话详情／错误页 C §2.5/§2.6：6px 状态点＋文字；RTT 等缺数据显 — --- */
+.dot6{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);vertical-align:1px;margin-right:6px}
+.dot6.off{background:var(--err)}
+.dot6.warn{background:var(--warn)}
+.sv-mask-meta{font-size:12px;line-height:18px;color:var(--text-3);font-variant-numeric:tabular-nums;margin-top:12px;text-align:left;word-break:break-all}
+/* --- 顶栏 sticky 材质 A §5：78% 底＋blur 20＋1px 分割（纯色 fallback 为 --card） --- */
+.top{background:var(--chrome-bg)}
+@supports ((-webkit-backdrop-filter:blur(20px)) or (backdrop-filter:blur(20px))){
+  .top{background:color-mix(in srgb,var(--card) 78%,transparent);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+}
+/* --- 设置行 A §3.1：二级导航 200；设置行 56；label 14/22/500，desc 12/18；控件右对齐 32 高 --- */
+.setrow{min-height:56px}
+.setrow .lbl{font-size:14px;line-height:22px;font-weight:500}
+.setrow .desc{font-size:12px;line-height:18px;color:var(--text-3)}
+/* --- 图标 A：1.5px 描边（已在 svg.ic），光学对齐：图标盒 20×20 居中，视觉下移 0.5px 校正 --- */
+.nav .ic,.row .tile svg,.tile svg{transform:translateY(.5px)}
+/* --- reduced motion B §6.1：取消位移／缩放／弹簧／shake／stagger；只留 instant（B 允许“80ms 以内 opacity 或 instant”，
+   本实现取 instant＝0.01ms，与六项⑤既有运行时测试的 0.01ms 断言一致） --- */
+@media (prefers-reduced-motion: reduce){
+  #view,.chatlist .row,.card>.row,.card>.dev,.cht-msg,#modalRoot .modal,#modalRoot .mask,.toast,.drawer,.dscrim{animation-duration:.01ms !important;animation-delay:0ms !important;transition-duration:.01ms !important}
+  #view,.chatlist .row,.card>.row,.card>.dev,.cht-msg,#modalRoot .modal,.toast{animation-name:rm-fade !important;transform:none !important}
+  .drawer:not(.open){transform:none !important}
+  @keyframes rm-fade{from{opacity:0}to{opacity:1}}
+  .skel{animation:none;opacity:.75}
+}
+/* REWORK WCAG 补丁：三级文字在 BG2/BG3 上对比度不足；
+   选中/hover 行底色为 BG3 叠色时，三级文字改次级（BG3 上 7.05:1），不改 token。 */
+.row.sel small,.row:hover small,.chatlist .row.act small,.dev:hover small{color:var(--text-2)}
+/* REWORK 补丁：深色 disabled 仍被旧规则 [data-theme="dark"] .btn:disabled{opacity:.55} 以高特异度压住；此处同特异度后出规则改为 1，与浅色一致（只用文字色表达禁用）。 */
+[data-theme="dark"] .btn:disabled,[data-theme="dark"] .tabs button:disabled,[data-theme="dark"] .paytab:disabled,[data-theme="dark"] .planhead:disabled{opacity:1;color:var(--text-4);pointer-events:none}
+/* F-W1 返工：重做后补的无媒体查询 .nav{min-height:36px}（:550）会覆盖 (pointer:coarse) 里的 44px；文件末尾追加同特异度后出规则兜底，触控端恢复 44px（六项定夺③） */
+@media (pointer:coarse){.nav{min-height:44px}}
+/* F-W4 返工：许可页排障与硬件信息折叠区（C §2.4） */
+.lic-diag{margin-top:12px;border-top:1px solid var(--hairline);padding-top:4px}
+.lic-diag summary{cursor:pointer;font-size:14px;line-height:20px;font-weight:600;color:var(--text-1);padding:8px 0;list-style-position:inside}
+.lic-diag .tblwrap{margin-top:4px}
+.lic-diag .ev-meta{margin-top:8px}
+.lic-diag .btn{margin-top:8px}
+
+/* ===== MOBILE-FIX 2026-11-14（移动端深审 13 项修复 · 网页端 only）=====
+   口径：按 MOBILE-AUDIT-20261114.md 里大肥鱼逐项修复方向原文执行；
+   大厂参照：V-01/V-06 Airbnb mobile-1 与 Chrome 远程桌面 mobile-1（底部固定
+   导航始终可见、浮层停在导航之上，内容区与导航留间距）；V-02 Notion
+   mobile-1（副文案换行完整显示，不单行腰斩）；V-07c Notion mobile-1
+   （头像一处小尺寸主展示）。本块为覆盖层，后出规则优先；只改窄屏行为。 */
+/* V-01（P1）：移动端 toast 抬到 .bnav（实测高 59px）之上 12px；
+   容器 pointer-events:none，只留 toast 本身可点，不挡导航。 */
+@media(max-width:760px){
+  #toasts{bottom:calc(59px + var(--safe-b) + 12px);left:16px;right:16px;width:auto;pointer-events:none}
+  #toasts .toast{pointer-events:auto}
+}
+/* V-02（P1）：移动端取消 .row b/small 的 nowrap+ellipsis，允许换行；
+   文本列补 min-width:0 / overflow-wrap:anywhere。路径行 .row small.path
+   仍走中间省略（特异度更高，不受本规则影响）。 */
+@media(max-width:760px){
+  .row b,.row small{white-space:normal;overflow:visible;overflow-wrap:anywhere;text-overflow:clip}
+  .row>span{min-width:0;overflow-wrap:anywhere}
+}
+/* V-03（P2）：深色模式开关行不换行——开关与标题同行、靠行右；
+   只命中含 .qf-switch 的 .ops，其余行内操作区仍按窄屏规则整行下移。 */
+@media(max-width:760px){
+  .row .ops:has(>.qf-switch){flex:0 0 auto;margin-left:auto;justify-content:flex-end}
+}
+/* V-04（P1）：行换行规则覆盖到 820px，堵住 761–820px 空档；
+   .ops/按钮组可换行且 max-width:100%，不再顶出横向溢出。 */
+@media(max-width:820px){
+  .row{flex-wrap:wrap}
+  .row .ops{flex-wrap:wrap;max-width:100%}
+}
+/* V-06（P2）：移动端内容区底部留足 .bnav 高（59px）＋16px 间距，
+   滚到底时页脚容器不再被 fixed 导航盖住（REWORK 的 .main 48px 底垫曾盖掉窄屏 84px 规则）。 */
+@media(max-width:760px){
+  .main{padding-bottom:calc(75px + var(--safe-b))}
+}
+/* V-07a（P2）：无修饰 .pill 给中性“未知”样式，与在线/离线同体系；
+   颜色走 --info/--info-bg，浅深色主题自动适配。 */
+.pill.unknown{background:var(--info-bg);color:var(--info)}
+/* F-03（P2）：移动端补充说明（手机装不了桌面助手），桌面端隐藏。 */
+.lea-mob-note{display:none}
+@media(max-width:760px){.lea-mob-note{display:block}}
+
+/* ===== MOBILE-BUTTONS-FIX 2026-11-14（网页端手机按键审计 117 项修复）=====
+   依据：rework/mobile-buttons-20261114/BUTTONS-AUDIT-20261114.md（S1–S6，§4.1/§4.2/§4.3）。
+   只改 app.css（app.js 无需改动）；session.css 一个字不动——会话件全部用高特异度覆盖修。
+   口径：S2 选 (b) 视觉留 32px、命中区 ::before 扩到 44；O1–O8 不修；V-07b 短横不在本块。
+   【临时性说明 · REWORK 2026-11-14（大肥鱼 Q2 要求）】本块 S3 部分（body .viewer 变量重声明＋
+   会话件写死尺寸）是应急次优解，不是正式方案：session.css 的 --sp-* 与 --safe-* 自引用循环
+   只能由 session.css 本人修掉（去掉自引用、单一变量源）；本覆盖只是用更高特异度在外面
+   打破循环。变量契约：本块声明的 --sp-1..11／--iconbtn／--row-h／--tools-h／--safe-t／
+   --safe-b 必须与 :root 好值语义一致，session.css 一改变量名／新增变量／改派生公式，
+   本块必须同步更新并重跑回归。A2 移动端例外：--float-x／--float-y 绝不得误加进本块
+   （桌面走 session 底规则 var(--sp-4)=8px，手机走 session 尾部 A2 媒体查询 12px）。
+   session.css 修好自引用之日，删除本块 S3 覆盖（body .viewer 变量块＋会话件写死规则），
+   只留与 session.css 无关的通用修复。禁止再用 important 声明往本块堆叠——冲突一律用
+   特异度／顺序解决，堆 important 只会让下一次覆盖更难拆。 */
+/* S2 (b)：.btn.sm 视觉留 32px，粗指针下 ::before 上下各扩 8px。
+   只扩纵向：横向宽度本已 ≥44px，纵向扩可避免并排按钮命中区互叠。
+   【REWORK 2026-11-14 实测修正】v1 写 -6px、称命中 45.6px 是算错的：.btn 有边框，
+   ::before 以 padding box 为锚，每边真实扩展＝标称－计算边框宽（实测边框 1px，
+   逐像素扫描＋探针双重证实：标称 8px→真实 7px、命中高 33.6+14=47.6px，第 4 轮 51 实例全过）。 */
+@media (pointer:coarse){
+  .btn.sm{position:relative}
+  .btn.sm::before{content:"";position:absolute;left:0;right:0;top:-8px;bottom:-8px}
+}
+/* S6：文本链接／复选框行／弹窗输入框／折叠摘要，点按区抬到 44px（视觉尺寸不动） */
+.txtlink{min-height:44px;display:flex;align-items:center;justify-content:center;padding:12px 0}
+.txtlink.cardmore{justify-content:flex-start;padding:12px 8px}
+.authlinks{align-items:center}
+.authlinks a{display:inline-flex;align-items:center;min-height:44px}
+.psub a[data-back]{display:inline-flex;align-items:center;min-height:44px}
+#pf-reveal{display:inline-flex;align-items:center;min-height:44px}
+.check-row{min-height:44px}
+/* REWORK 2026-11-14（D6）：.field input 只抬非小号输入框——:623 的 .field input.sm{height:36px}
+   是 36px 小输入框，后出的 min-height:44px 会压掉它；:not(.sm) 把它排除在外，另补一行
+   min-height:36px 把 36px 钉死（app.js 里目前无 .field input.sm 实例，属防护性规则）。 */
+.field input:not(.sm){min-height:44px}
+.field input.sm{min-height:36px}
+.lic-diag summary{min-height:44px;padding:12px 0}
+/* S1 余项＋§4.1：逐项补 :active（只动反馈，不动尺寸；.nav.on／.acctmenu a.on 选中态不在内，见 O1） */
+.tabs button:active{background:var(--state-pressed);transform:scale(.98)}
+.bnav button:active{background:var(--state-pressed);transform:scale(.96)}
+.burger:active,.iconbtn:active,.uchip:active{background:var(--state-pressed);transform:scale(.95)}
+.planhead:active{background:var(--state-pressed)}
+.paytab:active{background:var(--state-pressed)}
+.kf-btn:active,.kfrow:active{background:var(--state-pressed)}
+.nav.nav-danger:active{filter:brightness(.88)}
+.lic-diag summary:active{background:var(--state-pressed)}
+tr[data-go]:active{background:var(--state-pressed)}
+.txtlink:active,.authlinks a:active,.psub a[data-back]:active,#pf-reveal:active{opacity:.6}
+/* S3 治本：index.html 里 app.css 在第 15 行、session.css 在第 16 行，同特异度拼不过；
+   body .viewer (0,1,1) 高于 session.css .viewer (0,1,0)，把失效的自引用变量逐项声明为 :root 好值。
+   session 内派生变量（--bar-h/--tools-h/--iconbtn/--row-h/--stage-t 等）引用这些值后自行恢复正确计算值：
+   --sp-1..11 = 2/4/6/8/10/12/16/20/24/32/40px；--iconbtn 22px；--row-h 28px；--tools-h 32px。
+   【临时覆盖，见块首说明】session.css 修好自引用后删除本规则块；--float-x/--float-y 不得加进来（A2 例外）。 */
+body .viewer{
+  --font-sans:"Inter Variable","Inter","SF Pro","Segoe UI Variable","PingFang SC","Microsoft YaHei UI","Noto Sans SC",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono","Geist Mono","SFMono-Regular","Cascadia Code","Roboto Mono",monospace;
+  --sp-1:2px;--sp-2:4px;--sp-3:6px;--sp-4:8px;--sp-5:10px;--sp-6:12px;--sp-7:16px;--sp-8:20px;--sp-9:24px;--sp-10:32px;--sp-11:40px;
+  /* --float-x/--float-y 不在此声明：桌面走 session 底规则 var(--sp-4)=8px，手机走 session A2 媒体查询 12px；写死 16px 会盖掉 A2 的 12px。 */
+  --iconbtn:22px;--row-h:28px;--tools-h:32px;
+  --safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px);
+  --ease-out:cubic-bezier(.16,1,.3,1);--ease-std:cubic-bezier(.22,1,.36,1);--ease-in:cubic-bezier(.4,0,1,1);
+}
+/* S3 余＋S4：sheet 关闭钮写死 44×44；设定／发送行写死 min-height:44px；能力开关写死 44×24（同 .qf-switch 画像，旋钮 20px＋位移 20px 恰好贴合） */
+body .viewer .sv-sheet__x{width:44px;height:44px}
+body .viewer .sv-opt{min-height:44px}
+body .viewer .sv-opt__k{width:44px;height:24px}
+/* REWORK 2026-11-14（D7）：.sv-opt__k 只写死 44×24 是视觉尺寸，不是命中区——
+   verdict-after.py 曾用 h>=24 即判过，与审计口径“开关按命中区 44×44”自相矛盾。
+   仿 .qf-switch::before（app.css:150/:256，粗指针下 top:-10px/bottom:-10px）补命中区：
+   ::before 上下各扩 10px，视觉 44×24 不变、命中区 44×44。宽度已是 44px，不扩横向。
+   .sv-opt__k 本身 position:relative（session.css:1502），::before 以它为锚。 */
+body .viewer .sv-opt__k::before{content:"";position:absolute;left:0;right:0;top:-10px;bottom:-10px}
+/* .sv-iconbtn 视觉 22px 保留，::before 命中区扩到 44×44（同开关做法；本身已是 position:relative）。
+   只扩非小号钮：.sv-iconbtn--sm（18px 行内小钮）不在审计 200 项内，不动。 */
+body .viewer .sv-iconbtn:not(.sv-iconbtn--sm)::before{content:"";position:absolute;left:-11px;right:-11px;top:-11px;bottom:-11px}
+/* REWORK 2026-11-14（D1/Q1 横向重叠实证）：.sv-iconbtn 横向各扩 11px 时，相邻钮间距须 ≥22px。
+   实测两处不足——顶栏全屏↔断开仅 10px、工具组设定↔发送仅 8px，扩展区互叠、落点串位。
+   修法（改布局，不减扩展量）：断开钮 margin-left:14px（间距 10→24px）；工具组 .sv-acts
+   gap 8→24px。设定／发送钮实测只有 22px 宽（非 128px），横向夹紧会丢 44 宽，故不用。 */
+body .viewer .sv-iconbtn[data-act="disconnect"]{margin-left:14px}
+body .viewer .sv-acts{gap:24px}
+/* S5 对比度（REWORK 2026-11-14，大肥鱼 Q3：原 4.83 只超线 0.33 太贴线，不可留）。
+   断开并返回：红底（浅深各值见 --disconnect-fg），白字双主题 6.47:1（余量 1.97）；hover/active 同值钉死。
+   断开图标：不再只加 --card 底（半透明／毛玻璃／hover 态会掉下去）——改深红字＋不透明实色底：
+   浅色 6.47:1，深色 6.76:1；hover/active 同值钉死。
+   分段器未选中／sheet × 沿用 --text-2（浅 7.05／深 9.12；浅 7.57／深 9.68）。
+   各态实测（默认／hover／active／focus-visible／选中／禁用）见 MOBILE-BUTTONS-REWORK-20261114.md §3。 */
+body .viewer .sv-seg__btn:not([aria-selected="true"]){color:var(--text-2)}
+body .viewer .sv-sheet__x{color:var(--text-2)}
+body .viewer .sv-iconbtn[data-act="disconnect"]{color:var(--disconnect-fg);background:var(--disconnect-bg)}
+body .viewer .sv-iconbtn[data-act="disconnect"]:hover,body .viewer .sv-iconbtn[data-act="disconnect"]:active{color:var(--disconnect-fg);background:var(--disconnect-bg)}
+/* 会话行／sheet 关闭钮补 :active（session.css 里只有 hover:hover，无触控反馈） */
+body .viewer .sv-opt:not(.sv-opt--set):active{background:var(--state-pressed);transform:scale(.98)}
+body .viewer .sv-sheet__x:active{background:var(--state-pressed);transform:scale(.94)}
+
+/* REWORK 2026-11-14：第 2 轮探针实测——许可页「复制诊断信息」钮（.btn.sm）与下方转赠密钥行
+   上下间距 0px，而其 ::before 真实上／下扩展 7px，need 7px。下垫 8px 使间距 0→8px。 */
+.lic-diag{padding-bottom:8px}
+
+/* REWORK 2026-11-14：第 2 轮探针实测——密钥页两吊销钮上下相邻间距 0px
+   （#ak-revoke-all 与 #ak-revoke-all-selfbind 同卡片内换行堆叠），下钮 ::before 真实上扩展 7px。
+   只在 ≤760px（移动端必换行）加 12px 上边距；桌面并排时不加，避免两钮错位。 */
+@media (max-width:760px){
+  #ak-revoke-all-selfbind{margin-top:12px}
+}
+
+/* REWORK 2026-11-14：第 2 轮探针实测——终端形态输入行两图标钮（键盘／发送，22×22、::before ±11px）
+   横向间距 8px（need 22）、与下方工具条按钮纵向间距 16px（need 22）。
+   输入行 gap 8→24px；输入行整体抬高 8px（行距 8→16px），按钮纵向间距 16→24px。
+   全屏态输入行 opacity:0 且 pointer-events:none，不受影响。 */
+body .viewer .sv-input{gap:24px;bottom:calc(var(--float-y) + var(--tools-h) + var(--sp-4) + var(--safe-b) + 8px)}
+
+/* ===== W-01 深色恢复规则（2026-11-15）：以下 5 条看似与基规则重复，实为承重特异度平局裁决——
+   删掉它们会改深色视觉（基线 diff 实证，见 EVIDENCE-L4.md W-01）：
+   · .tabs button.on/.paytab.on/.step b.on：419 行与 425 行的深色基规则与基规则同特异度且在后，
+     无此条则深色下选中态变透明/变底色；
+   · .msg.me .bub 边框：原 D1 深色规则以同特异度后置覆盖了基规则的浅边框；
+   · .top：584 行 color-mix 顶栏材质在深色下须由不透明主背景覆盖（原 D15 行为）；
+   · .bnav：基规则只在 ≤899px 媒体查询内，深色下桌面宽度须由本条补背景（原 426 行行为）；
+   · .bnav button.on：桌面宽度下无作者颜色，深色下靠本条压住 UA 深色按钮白字（原 D8 行为）。
+   值全部走 token，本文件仍零字面量。 */
+[data-theme="dark"] .tabs button.on,[data-theme="dark"] .paytab.on,[data-theme="dark"] .step b.on{background:var(--brand);color:var(--on-brand)}
+[data-theme="dark"] .msg.me .bub{border-color:var(--line)}
+[data-theme="dark"] .top{background:var(--chrome-bg)}
+[data-theme="dark"] .bnav{background:var(--bnav-bg)}
+[data-theme="dark"] .bnav button.on{color:var(--text-1)}

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'theme.dart';
+import 'reduced_motion.dart';
 
 /// 退出登录确认文案（站长 12:18 拟稿原文，逐字使用，不许改字）。
 const String kLogoutConfirmText = '退出后将清除本机保存的登录信息，下次使用需重新登录。是否继续？';
@@ -14,28 +15,28 @@ Future<void> confirmAndLogout(
   required VoidCallback onLogout,
 }) async {
   final p = palette;
-  final ok = await showDialog<bool>(
+  final ok = await showQfDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: p.cardColor,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusLg)),
       title: Text('退出账号',
-          style: TextStyle(color: p.onCard, fontSize: 16, fontWeight: FontWeight.w700)),
+          style: TextStyle(color: p.onCard, fontSize: QfScale.fs16, fontWeight: FontWeight.w600)),
       content: Text(kLogoutConfirmText,
-          style: TextStyle(color: p.onCard, fontSize: 14, height: 1.5)),
+          style: TextStyle(color: p.onCard, fontSize: QfScale.fs14, height: 1.5)),
       actions: [
-        TextButton(
+        QfButtonTapTarget(child: TextButton(
           onPressed: () => Navigator.of(ctx).pop(false),
-          child: Text('取消', style: TextStyle(color: p.onCardDim, fontSize: 14)),
-        ),
-        TextButton(
+          child: Text('取消', style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs14)),
+        )),
+        QfButtonTapTarget(child: TextButton(
           onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('退出',
+          child: Text('退出',
               style: TextStyle(
-                  color: QfPalette.probeBad,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700)),
-        ),
+                  color: p.danger,
+                  fontSize: QfScale.fs14,
+                  fontWeight: FontWeight.w600)),
+        )),
       ],
     ),
   );

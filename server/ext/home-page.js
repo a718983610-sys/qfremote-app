@@ -59,7 +59,12 @@ button[data-nav="admin"],button[data-quick="admin"]{display:none}
 button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
 .nav:hover{background:rgba(255,255,255,.08)}
 .nav.on{background:rgba(36,112,224,.35);color:#fff}
-.nav.red{color:#FFB3AE}
+/* 第 4 项（2026-11-13 大肥鱼定夺，7 项）：删除账户复用第 3 项同一危险态——红底白字，红图标放白底圆片；
+   hover 保持红底＋下划线，覆盖通用 .nav:hover；--danger-bg 作用域收在本规则内 */
+.nav.nav-danger{--danger-bg:#C62828;background-color:var(--danger-bg);color:#FFFFFF}
+.nav.nav-danger svg{color:#C62828;background:#FFFFFF;border-radius:50%}
+.nav.nav-danger:hover{background-color:var(--danger-bg);color:#FFFFFF;text-decoration:underline}
+.nav.nav-danger:focus-visible{outline:3px solid #FFFFFF;outline-offset:2px}
 .nav svg{width:20px;height:20px;flex:0 0 auto}
 .side-div{height:1px;background:rgba(255,255,255,.16);margin:14px 4px}
 .side-group{font-size:12px;color:#8FA9CC;padding:0 10px 6px}
@@ -225,7 +230,7 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
 <body>
 <div class="app">
   <aside class="side" id="qfSide" aria-label="主导航">
-    <div class="brand"><span class="mark"><svg viewBox="0 0 240 240"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="17" fill="#FF8A1E"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>
+    <div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><rect x="0" y="0" width="240" height="240" rx="56" fill="#FFFFFF"/><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#000000" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#000000"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>
     <nav class="navs" id="navMain"></nav>
     <div class="side-div"></div>
     <div class="side-group">账户功能</div>
@@ -304,7 +309,7 @@ button[data-nav="admin"].on,button[data-quick="admin"].on{display:flex}
       </section>
       <section class="brandcard" aria-label="品牌">
         <span class="hand dark">让远程连接更简单</span>
-        <span class="bc-brand"><span class="mark" style="width:34px;height:34px"><svg viewBox="0 0 240 240"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#0B2B5B" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="17" fill="#FF8A1E"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></span>
+        <span class="bc-brand"><span class="mark" style="width:34px;height:34px"><svg viewBox="0 0 240 240" aria-hidden="true"><rect x="0" y="0" width="240" height="240" rx="56" fill="#FFFFFF"/><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#000000" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#000000"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></span>
       </section>
     </div>
 
@@ -403,11 +408,11 @@ function bindGoto(scope){ (scope||document).querySelectorAll('[data-goto]').forE
 
 /* ----- 侧栏 ----- */
 var NAV_MAIN=[['首页',IC.home,'home'],['我的文件',IC.file,'console'],['我的设备',IC.dev,'console'],['好友',IC.friends,'friends'],['聊天',IC.chat,'chat'],['论坛',IC.forum,'forum'],['账号安全',IC.shield,'console'],['站长管理',IC.gear,'admin']];
-var NAV_ACCT=[['查看以前的登录',IC.history],['更改邮件地址',IC.mail],['更改密码',IC.lock],['删除账户',IC.trash,'red'],['设置深色模式',IC.moon],['个人笔记',IC.note]];
+var NAV_ACCT=[['查看以前的登录',IC.history],['更改邮件地址',IC.mail],['更改密码',IC.lock],['删除账户',IC.trash,'nav-danger'],['设置深色模式',IC.moon],['个人笔记',IC.note]];
 var NAV_SYS=[['检查更新',IC.refresh,'update'],['官方网站',IC.globe,'site'],['退出登录',IC.out,'logout']];
 function navHtml(list){ return list.map(function(n){ return '<button class="nav'+(n[3]==='red'?' red':'')+(n[2]==='home'?' on':'')+'" type="button" data-nav="'+esc(n[2]||'console')+'" data-search="'+esc(n[0])+'">'+n[1]+'<span>'+esc(n[0])+'</span></button>'; }).join(''); }
 $('navMain').innerHTML=navHtml(NAV_MAIN);
-$('navAcct').innerHTML=NAV_ACCT.map(function(n){ return '<button class="nav'+(n[2]==='red'?' red':'')+'" type="button" data-nav="console" data-search="'+esc(n[0])+'">'+n[1]+'<span>'+esc(n[0])+'</span></button>'; }).join('');
+$('navAcct').innerHTML=NAV_ACCT.map(function(n){ return '<button class="nav'+(n[2]==='nav-danger'?' nav-danger':'')+'" type="button" data-nav="console" data-search="'+esc(n[0])+'">'+n[1]+'<span>'+esc(n[0])+'</span></button>'; }).join('');
 $('navSys').innerHTML=NAV_SYS.map(function(n){ return '<button class="nav" type="button" data-nav="'+n[2]+'" data-search="'+esc(n[0])+'">'+n[1]+'<span>'+esc(n[0])+'</span></button>'; }).join('');
 document.querySelectorAll('[data-nav]').forEach(function(el){ el.addEventListener('click',function(){
   var k=el.getAttribute('data-nav');

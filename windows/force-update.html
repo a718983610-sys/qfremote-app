@@ -2,78 +2,70 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body {
-    background: #f4f7fb;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    background: var(--bg);
+    animation: win-in var(--d5) var(--e-l) both;
+    -webkit-user-select:none; user-select:none; color:var(--text-1); position:relative;
     display:flex; flex-direction:column;
   }
-  html[data-theme="dark"] body {
-    background: #17181c; color:#eceff3;
-  }
-  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:24px 26px 0; }
+  /* 重做 A §4：撤销六项②深色合并——卡片用 BG2，与页面 BG0 靠 hairline + e1 分离。 */
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:24px 24px 0; }
   .tile {
-    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    width:60px; height:60px; border-radius:14px; padding:4px; flex:none; background:var(--tile-bg);
     box-sizing:border-box;
   }
-  html[data-theme="dark"] .tile { background:#ffffff; }
-  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
-  .tt { margin-left:14px; padding-top:5px; }
-  .tt .nm { font-size:20px; font-weight:600; letter-spacing:.8px; line-height:1.1; }
-  .tt .ds { font-size:12px; color:#5d6e84; margin-top:5px; }
-  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .tile img { width:100%; height:100%; border-radius:10px; display:block; }
+  .tt { margin-left:16px; padding-top:4px; }
+  .tt .nm { font-size:24px; font-weight:600; letter-spacing:.8px; line-height:32px; }
+  .tt .ds { font-size:12px; color:var(--text-2); margin-top:5px; }
   .card {
-    margin:20px 26px 0; padding:16px 18px;
-    background: #ffffff;
-    border: 1px solid #dfe7f2; border-radius:14px;
+    margin:16px 24px 0; padding:20px;
+    background: var(--bg2);
+    border: 1px solid var(--line); border-radius:12px;
     /* 排版批1（P23）：卡片作滚动区——长更新说明在卡内滚，进度条/结果/按钮/页脚常驻窗内 */
     flex:0 1 auto; min-height:0; overflow-y:auto;
   }
   .head, .bar, .res, .act, .act2 { flex:none; }
-  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
-  .vrow { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:700; color:#1f2d47; }
-  html[data-theme="dark"] .vrow { color:#eceff3; }
-  .vrow .arr { color:#b45309; font-weight:700; }
-  .vrow .to { color:#b45309; }
-  .notes { margin-top:12px; font-size:14px; line-height:1.7; color:#1f2d47; white-space:pre-wrap; max-height:220px; overflow-y:auto; }
-  html[data-theme="dark"] .notes { color:#c9cdd4; }
-  .bar { display:none; height:9px; border-radius:99px; margin:18px 26px 0;
-    background: #dfe7f2; overflow:hidden; }
+  .vrow { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--text-1); }
+  .vrow .arr { color:var(--warning); font-weight:600; } /* Q1-2(a)：箭头是图形分隔符，保留警告色；版本号文字 .to 已改中性墨色 */
+  .vrow .to { color:var(--text-1); }
+  .notes { margin-top:12px; font-size:14px; line-height:22px; color:var(--text-1); white-space:pre-wrap; max-height:220px; overflow-y:auto; }
+  html[data-theme="dark"] .notes { color:var(--text-2); }
+  .bar { display:none; height:8px; border-radius:99px; margin:16px 24px 0;
+    background: var(--line); overflow:hidden; }
   .bar.show { display:block; }
   .bar i { display:block; height:100%; width:0%; border-radius:99px;
-    background: #2470e0; transition: width .2s ease; }
-  html[data-theme="dark"] .bar { background: rgba(255,255,255,.16); }
-  .res { margin:15px 26px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center;
-    color:#5d6e84; font-variant-numeric: tabular-nums; }
-  html[data-theme="dark"] .res { color:#a7adb8; }
-  .res .ok { color:#128a43; font-weight:600; }
-  .res .bad { color:#d3382c; font-weight:600; }
-  html[data-theme="dark"] .res .ok { color:#5eeaa0; }
-  html[data-theme="dark"] .res .bad { color:#ff9d8f; }
-  .act { padding:0 26px; margin-top:16px; }
+    background: var(--brand); transition: width var(--d2) linear; }
+  html[data-theme="dark"] .bar { background: var(--line); }
+  .res { margin:16px 24px 0; font-size:13px; line-height:1.6; min-height:22px; text-align:center;
+    color:var(--text-2); font-variant-numeric: tabular-nums; }
+  /* Q1-2(a)（2026-11-15）：小字状态文一律中性墨色，状态色只做 6px 点 */
+  .res .ok { color:var(--text-1); font-weight:600; }
+  .res .ok::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--success); margin-right:6px; vertical-align:middle; }
+  .res .bad { color:var(--text-1); font-weight:600; }
+  .res .bad::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .act { padding:0 24px; margin-top:16px; }
   .btn {
     width:100%; border:none; cursor:pointer; font-family:inherit;
-    font-size:15px; font-weight:600; color:#fff; letter-spacing:1px;
-    padding:13px 0; border-radius:12px;
-    background: #2470e0;
-    transition: filter .15s ease, transform .05s ease, opacity .15s;
+    font-size:14px; font-weight:600; color:var(--on-brand); letter-spacing:1px;
+    padding:12px 0; border-radius:var(--radius-1);
+    background: var(--brand);
+    transition: background var(--d1) var(--e-c), transform var(--d0) var(--e-s), opacity var(--d1) var(--e-c);
   }
-  .btn:hover { filter: brightness(1.07); }
-  .btn:active { transform: translateY(1px); }
-  .btn:disabled { opacity:.55; cursor:default; transform:none; filter:none; }
-  .act2 { display:flex; justify-content:center; padding:0 26px; margin-top:10px; }
-  .btn2 { background:none; border:none; color:#2470E0; font-size:13px; cursor:pointer; text-decoration:underline; padding:8px 12px; min-height:36px; }
-  .btn2:hover { filter:brightness(1.15); }
+  .btn:hover { filter:none; background:var(--brand-press); }
+  .btn:active { transform: scale(.985); }
+  .btn:disabled { background:var(--bg3); color:var(--text-disabled); cursor:default; transform:none; filter:none; }
+  .act2 { display:flex; justify-content:center; padding:0 24px; margin-top:8px; }
+  /* 先进入软件链接（定夺 §3.3）：主文字色＋始终下划线，hover 下划线变主文字色；蓝色已去掉 */
+  .btn2 { background:none; border:none; color:var(--link); font-size:13px; cursor:pointer; text-decoration:underline; text-decoration-color:var(--link-underline); padding:8px 12px; min-height:36px; }
+  .btn2:hover { text-decoration-color:var(--link); }
   .hidden { display:none !important; }
-  .foot { margin-top:auto; padding:0 26px 16px; text-align:center;
-    font-size:12px; line-height:1.6; color:#5d6e84; }
-  html[data-theme="dark"] .foot { color:#9aa1ab; }
+  .foot { margin-top:auto; padding:0 24px 16px; text-align:center;
+    font-size:12px; line-height:1.6; color:var(--text-2); }
 
-  /* 排版批1（P19）：焦点环与减动效 */
-  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
@@ -141,14 +133,19 @@
     } else if (s.phase === 'downloaded') {
       btn.disabled = false; btn.textContent = '安装更新并重启';
       fill.style.width = '100%';
-      res.innerHTML = '<span class="ok">下载完成，完整性核对通过</span>（SHA256 一致）。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹；安装完成后重新打开 QFRemote 即为新版本。';
+      // S-010：错误文／状态文不用 innerHTML 拼串，改 DOM 节点＋textContent。
+      res.textContent = '';
+      const okEl = document.createElement('span'); okEl.className = 'ok'; okEl.textContent = '下载完成，完整性核对通过';
+      res.append(okEl, document.createTextNode('（SHA256 一致）。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹；安装完成后重新打开 QFRemote 即为新版本。'));
     } else if (s.phase === 'installing') {
       btn.disabled = true; btn.textContent = '正在安装…';
       fill.style.width = '100%';
       res.textContent = '正在安装更新，软件即将重启；安装完成后重新打开 QFRemote 即为新版本。';
     } else if (s.phase === 'failed') {
       btn.disabled = false; btn.textContent = '重新下载';
-      res.innerHTML = '<span class="bad">下载失败</span>：' + (s.error || '未知原因') + '请点「重新下载」重试；也可以先进入软件，下次打开时再更新。';
+      res.textContent = '';
+      const badEl = document.createElement('span'); badEl.className = 'bad'; badEl.textContent = '下载失败';
+      res.append(badEl, document.createTextNode('：' + (s.error || '未知原因') + '请点「重新下载」重试；也可以先进入软件，下次打开时再更新。'));
       document.getElementById('releaseBtn').classList.remove('hidden');
     }
     if (s.phase === 'downloaded' || s.phase === 'installing') document.getElementById('releaseBtn').classList.add('hidden');

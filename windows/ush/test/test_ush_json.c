@@ -200,6 +200,45 @@ static void test_ush_token(void) {
     CHECK(!ush_token_matches(tok, NULL), "token: null provided rejects");
 }
 
+/* C1：自助绑定命令解析（deliver-ticket／clear／status／renew）。 */
+static void test_parse_selfbind(void) {
+    ush_request_t r;
+    const char *deliver =
+        "{\"command\":\"selfbind.deliver-ticket\",\"account_id\":\"alice\","
+        "\"device_id\":\"node//test-device-1\","
+        "\"params\":{\"ticket\":\"sbt_abc123\",\"challenge\":\"ch-1\","
+        "\"nonce\":\"test-nonce-001\",\"device_name\":\"TEST-PC\","
+        "\"platform\":\"windows\",\"expires_at\":1794568473}}";
+    CHECK(ush_parse_request(deliver, &r) == 1 && r.valid, "C1 parse: deliver-ticket valid");
+    CHECK(r.cmd == USH_CMD_SELFBIND, "C1 parse: deliver-ticket cmd enum");
+    CHECK(strcmp(r.account_id, "alice") == 0, "C1 parse: deliver account_id");
+    CHECK(strcmp(r.device_id, "node//test-device-1") == 0, "C1 parse: deliver device_id kept raw");
+    CHECK(strstr(r.params_json, "sbt_abc123") != NULL, "C1 parse: deliver params kept raw");
+    char tk[128];
+    CHECK(ush_json_get_string(r.params_json, "ticket", tk, sizeof(tk)) == 1
+        && strcmp(tk, "sbt_abc123") == 0, "C1 parse: deliver ticket value");
+    long exp = 0;
+    CHECK(ush_json_get_long(r.params_json, "expires_at", &exp) == 1
+        && exp == 1794568473, "C1 parse: deliver expires_at value");
+    CHECK(ush_parse_request("{\"command\":\"selfbind.clear-credential\"}", &r) == 1
+        && r.cmd == USH_CMD_SELFBIND_CLEAR, "C1 parse: clear-credential");
+    CHECK(ush_parse_request("{\"command\":\"selfbind.status\"}", &r) == 1
+        && r.cmd == USH_CMD_SELFBIND_STATUS, "C1 parse: status");
+    CHECK(ush_parse_request("{\"command\":\"selfbind.renew\",\"device_id\":\"node//x\"}", &r) == 1
+        && r.cmd == USH_CMD_SELFBIND_RENEW, "C1 parse: renew");
+    CHECK(ush_parse_request("{\"command\":\"selfbind.nope\"}", &r) == 0
+        && strcmp(r.error, "unknown-command") == 0, "C1 parse: unknown selfbind rejected");
+    /* C1：毫秒时间戳须走 llong（Windows long 只有 32 位，strtol 会截断）。 */
+    long long ms = 0;
+    CHECK(ush_json_get_llong("{\"expires_at\":1794568473000}", "expires_at", &ms) == 1
+        && ms == 1794568473000LL, "C1 llong: ms timestamp parses fully");
+    long long sec = 0;
+    CHECK(ush_json_get_llong("{\"expires_at\":1794568473}", "expires_at", &sec) == 1
+        && sec == 1794568473LL, "C1 llong: seconds timestamp parses");
+    CHECK(ush_json_get_llong("{\"expires_at\":\"x\"}", "expires_at", &ms) == 0,
+        "C1 llong: non-number rejects");
+}
+
 int main(void) {
     test_parse_click();
     test_parse_variants();
@@ -208,6 +247,7 @@ int main(void) {
     test_response_and_base64();
     test_retry_and_strategies();
     test_ush_token();
+    test_parse_selfbind();
     printf("----\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
