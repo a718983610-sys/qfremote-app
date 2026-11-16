@@ -395,6 +395,49 @@ function createFilesCore(deps) {
     return { ok: true, id: it.id, size: it.size, expiresAt: it.expiresAt };
   }
 
+  // L5 RC-08（QF-STREAM-1，加法）：由 Buffer 直接暂存（分片 commit
+  // 拼装后调用）。与 stage() 同一条索引/落盘/回滚语义，只是不走
+  // base64 解码；stage()/inbox()/ack()/sweep() 行为一字不改。
+  function stageBuffer(username, input, now) {
+    sweep(now);
+    const lim = limits();
+    const filename = String((input && input.filename) || '').slice(0, 200).replace(/[/\\]/g, '_') || 'file';
+    const toNode = String((input && input.toNode) || '').slice(0, 200);
+    const fromNode = String((input && input.fromNode) || '').slice(0, 200);
+    if (!toNode) return { ok: false, code: 'VALIDATION', msg: '请选择要发送到的设备。' };
+    if (fromNode && toNode === fromNode) return { ok: false, code: 'VALIDATION', msg: '目标设备与来源设备相同，请选择另一台设备。' };
+    const buf = (input && input.buf) || null;
+    if (!buf || !Buffer.isBuffer(buf) || !buf.length) return { ok: false, code: 'VALIDATION', msg: '文件内容为空。' };
+    if (buf.length > lim.maxBytes) return { ok: false, code: 'TOO_LARGE', msg: '文件超过单文件上限（' + Math.floor(lim.maxBytes / 1048576) + ' MB）。' };
+    const it = {
+      id: 'fs_' + crypto.randomBytes(8).toString('hex'),
+      username,
+      filename,
+      size: buf.length,
+      fromNode,
+      toNode,
+      status: 'staged',
+      createdAt: now,
+      expiresAt: now + lim.stageMs,
+      deliveredAt: null,
+      downloadedAt: null,
+      blob: null,
+    };
+    it.blob = it.id + '.bin';
+    try { fs.writeFileSync(path.join(blobDir, it.blob), buf, { mode: 0o600 }); } catch (e) { return { ok: false, code: 'IO', msg: '文件暂存失败，请稍后再试。' }; }
+    store.items[it.id] = it;
+    try {
+      save();
+    } catch (e) {
+      delete store.items[it.id];
+      unlinkBlobResult(it);
+      log({ ev: 'file-stage-save-error', id: it.id, target: username, err: String(e && e.stack || e) });
+      return { ok: false, code: 'IO', msg: '文件暂存失败，请稍后再试。' };
+    }
+    log({ ev: 'file-staged', id: it.id, target: username, size: it.size });
+    return { ok: true, id: it.id, size: it.size, expiresAt: it.expiresAt };
+  }
+
   function brief(it) {
     return {
       id: it.id,
@@ -511,7 +554,7 @@ function createFilesCore(deps) {
 
   if (sweepTimer && typeof sweepTimer.unref === 'function') sweepTimer.unref();
 
-  return { stage, inbox, sent, blobPathFor, ack, limits, sweep };
+  return { stage, stageBuffer, inbox, sent, blobPathFor, ack, limits, sweep };
 }
 
 module.exports = { createFilesCore };

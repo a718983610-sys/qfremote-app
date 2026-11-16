@@ -1,4 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
+// F-08 capability table：本桥只调下面这些 channel；主进程 ipc-trust.js 的
+// IPC_CAPABILITIES 逐条校验 sender（精确 devices.html＋主框架＋活窗口），
+// 表外一律拒绝。只作声明与审计对照，强制执行在主进程。
+const CAPABILITIES = Object.freeze(['qf-devices-list', 'qf-devices-open']);
 // 收编设备页桥（2.3.2 收编 Windows 线）：页面只经本桥取设备清单模型与
 // 发「打开会话」指令。清单由主进程在已登录的控制台视图同源上下文里经
 // 控制通道取得并归一（本地页直连 WS 带不上会话 cookie，会被服务端以

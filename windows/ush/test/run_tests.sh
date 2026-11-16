@@ -11,8 +11,8 @@ echo "== [2/2] mingw cross-compile (USH service, compile-only) =="
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     cd ..
     x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -std=c11 -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 \
-        -o /tmp/QFUserHelper.exe ush.c ush_json.c ush_log.c ush_uia.c ush_snapshot.c \
-        -lole32 -loleaut32 -luuid -lwtsapi32 -lgdi32 -luser32 -lbcrypt -lwindowscodecs
+        -o /tmp/QFUserHelper.exe ush.c ush_json.c ush_log.c ush_uia.c ush_snapshot.c ush_selfbind.c \
+        -lole32 -loleaut32 -luuid -lwtsapi32 -lgdi32 -luser32 -lbcrypt -lwindowscodecs -lwinhttp -lncrypt -lcrypt32
     file /tmp/QFUserHelper.exe
     echo "mingw cross-compile OK"
     cd test

@@ -1,0 +1,161 @@
+name: Windows 构建与测试
+
+# S-097：Windows pipeline（此前 .github/workflows/ 只有安卓文件）。
+# 跑在 windows-latest：固定 Node 24、npm ci、Node tests、Electron/NSIS 构建、
+# LEA/USH C 编译、白名单 --check、PE 版本/签名/哈希核查、安装升级卸载烟测。
+# 明确边界：真实 SYSTEM 服务、UAC、UIA 验收不在托管 runner 上做——按清单
+# 修法，用受控自托管 Windows runner 或人工签字设备验收（见 docs/release/
+# staged-rollout-checklist.md 与发版门）；本工作流只做到托管 runner 可及处。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, lea-local-agent]
+    paths:
+      - 'windows/**'
+      - 'version.json'
+      - 'tools/check-release-version.js'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    branches: [lea-local-agent, main]
+    paths:
+      - 'windows/**'
+      - 'version.json'
+      - 'tools/check-release-version.js'
+      - '.github/workflows/windows.yml'
+
+# S-101：最小权限。actions: write 是上传构建产物所必需的最小写权限。
+permissions:
+  contents: read
+  actions: write
+
+# S-097/S-098：Node 版本与产物版本均单一来源——Node 版只改这里；
+# 产物版只读 version.json（tools/check-release-version.js 全值校验）。
+env:
+  NODE_VERSION: '24'
+
+# 同一分支的 Windows 构建串行跑：update-test 之类曾有固定端口 flake，
+# 且安装烟测会动本机注册表/目录，并行跑互相干扰。
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # S-101：第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: 读取 version.json（唯一版本源）并全值校验
+        shell: pwsh
+        run: |
+          node tools/check-release-version.js
+          $ver = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SHORT_SHA=$($env:GITHUB_SHA.Substring(0,7))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 安装依赖
+        working-directory: windows
+        run: npm ci
+
+      - name: Node tests
+        working-directory: windows
+        run: npm test
+
+      - name: 生成 build-info（dev 产物标记）
+        working-directory: windows
+        env:
+          QF_CHANNEL: dev
+        run: node tools/gen_build_info.js
+
+      - name: Electron / NSIS 构建
+        working-directory: windows
+        run: npm run dist
+
+      - name: 装 MinGW（LEA/USH 交叉编译用）与 python3 垫片
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          $mingwBin = 'C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin'
+          "$mingwBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+            $py = (Get-Command python).Source
+            Copy-Item $py (Join-Path (Split-Path $py) 'python3.exe')
+          }
+          x86_64-w64-mingw32-gcc --version | Select-Object -First 1
+
+      - name: 编译 LEA（白名单 --check 在 build.sh 内跑）
+        shell: bash
+        run: bash windows/lea/build.sh
+
+      - name: 编译 USH（QFSysHelper）
+        shell: bash
+        run: bash windows/syshelper/build.sh
+
+      - name: 白名单 --check（LEA 与 USH 各自独立再核一次）
+        shell: bash
+        run: |
+          python3 windows/lea/gen_whitelist.py --check
+          python3 windows/syshelper/gen_whitelist.py --check
+
+      - name: PE 版本/签名/哈希核查
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem windows/dist/QFRemote-Setup-v*.exe | Select-Object -First 1
+          if (-not $exe) { throw 'dist 下没有 QFRemote-Setup-v*.exe' }
+          $vi = $exe.VersionInfo
+          $expect = "$env:APP_VERSION.0"
+          if ($vi.FileVersion -ne $expect) { throw "PE FileVersion 为 $($vi.FileVersion)，期望 $expect" }
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $sig = Get-AuthenticodeSignature $exe.FullName
+          # CI 无正式代码签名证书：未签名是预期状态，只记录不记失败；
+          # 正式发版签名在受保护的发版流程里做，见 release-check.yml。
+          if ($sig.Status -eq 'Valid') {
+            "PE OK: $($exe.Name) FileVersion=$($vi.FileVersion) sha256=$sha signer=$($sig.SignerCertificate.Subject)"
+          } else {
+            "PE OK: $($exe.Name) FileVersion=$($vi.FileVersion) sha256=$sha signature=$($sig.Status)（CI 未签名，预期内）"
+          }
+          $sha | Out-File -FilePath windows/dist/installer.sha256 -Encoding utf8
+
+      - name: 安装/升级/卸载烟测
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $exe = Get-ChildItem windows/dist/QFRemote-Setup-v*.exe | Select-Object -First 1
+          $installDir = Join-Path $env:LOCALAPPDATA 'Programs\QFRemote'
+          # 首装（静默）
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "首装退出码 $($p.ExitCode)" }
+          if (-not (Test-Path $installDir)) { throw "首装后安装目录不存在：$installDir" }
+          $un = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\QFRemote' -ErrorAction SilentlyContinue
+          if (-not $un -or $un.DisplayVersion -ne $env:APP_VERSION) { throw '首装后卸载注册表 DisplayVersion 与版本不一致' }
+          # 升级（同一安装器再跑一次，必须成功且版本不变）
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "升级退出码 $($p.ExitCode)" }
+          if (-not (Test-Path $installDir)) { throw '升级后安装目录不存在' }
+          # 卸载（静默）
+          $uninstaller = Join-Path $installDir 'Uninstall QFRemote.exe'
+          if (-not (Test-Path $uninstaller)) { $uninstaller = Get-ChildItem $installDir -Filter 'Uninstall*.exe' | Select-Object -First 1 -ExpandProperty FullName }
+          if (-not $uninstaller) { throw '找不到卸载程序' }
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "卸载退出码 $($p.ExitCode)" }
+          if (Test-Path $installDir) { throw '卸载后安装目录仍在' }
+          'SMOKE OK：安装/升级/卸载全过'
+
+      - name: 上传 dev 产物
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: QFRemote-windows-dev-${{ env.SHORT_SHA }}
+          path: |
+            windows/dist/QFRemote-Setup-v*.exe
+            windows/dist/installer.sha256
+            windows/build-info.json
+          if-no-files-found: error

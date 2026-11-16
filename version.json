@@ -1,0 +1,1 @@
+{"build":30000,"channel":"production","note":"QFRemote 唯一发版版本源（S-098/S-103）：所有端版本号以此为准，禁止另起版本源。Windows package.json、installer.nsi VIProductVersion、安卓 pubspec.yaml（version+build）与 build_info.dart kAppVersion、release.json version 均须与此一致；校验见 tools/check-release-version.js，发版全值比对见 .github/workflows/release-check.yml。线上现行 release.json 在翻牌前仍为 2.4.4，不参与开发期校验。","version":"3.0.0"}

@@ -10,10 +10,12 @@ CC="${CC:-x86_64-w64-mingw32-gcc}"
 CFLAGS="-O2 -Wall -Wextra -std=c11 -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00"
 # 链接：ole32/oleaut32=COM+UIA/VARIANT；uuid=GUID；wtsapi32=会话态；
 # gdi32/user32=截图与 SendInput；bcrypt=日志 params SHA-256；windowscodecs=WIC PNG。
-LIBS="-lole32 -loleaut32 -luuid -lwtsapi32 -lgdi32 -luser32 -lbcrypt -lwindowscodecs"
+# C1：winhttp=自助绑定调服务端 complete/renew；ncrypt=CNG 设备 P-256 密钥；
+# crypt32=DPAPI 凭据存取。
+LIBS="-lole32 -loleaut32 -luuid -lwtsapi32 -lgdi32 -luser32 -lbcrypt -lwindowscodecs -lwinhttp -lncrypt -lcrypt32"
 
 echo "== USH build =="
-"$CC" $CFLAGS -o QFUserHelper.exe ush.c ush_json.c ush_log.c ush_uia.c ush_snapshot.c $LIBS
+"$CC" $CFLAGS -o QFUserHelper.exe ush.c ush_json.c ush_log.c ush_uia.c ush_snapshot.c ush_selfbind.c $LIBS
 ls -l QFUserHelper.exe
 sha256sum QFUserHelper.exe
 echo "== USH build OK: QFUserHelper.exe =="

@@ -101,7 +101,21 @@ function contractCase() {
   ok('E1_btn_connect', />连接</.test(html));
   ok('E2_btn_files', />文件管理</.test(html));
   ok('E3_btn_terminal', />终端</.test(html));
-  ok('E4_tokens', /#2470e0/i.test(html) && /#f4f7fb/i.test(html) && /#dfe7f2/i.test(html) && /border-radius:14px/.test(html));
+  // E4（2026-11-13，G12 补齐）：Q3b 把设计令牌从 devices.html 内联抽到 shared.css，
+  // 页面改引 var(--*)；旧断言查 html 内字面色值已不适用。14px 字面圆角同步改为
+  // var(--radius-1) = 8px（shared.css 头注：标准卡片圆角 8px，定夺 6），非回归。
+  // 2026-11-15（陈旧断言修复）：黑白化后 --brand/--bg/--line 已是 B 组黑白值
+  // （浅色 --brand:#000000、--line:#E4E4E7、--bg:var(--bg0)/--bg0:#FFFFFF；
+  // 深色 --brand:#FFFFFF、--line:#2E2F34）；旧断言的 #2470e0/#f4f7fb/#dfe7f2
+  // 是黑白化前旧值。另加负向守卫：shared.css 内不得再出现品牌蓝 #2470E0。
+  const shared = fs.readFileSync(path.join(SRC, 'shared.css'), 'utf8');
+  ok('E4_tokens', /<link[^>]*href="shared\.css"/.test(html)
+    && /--brand:\s*#000000/i.test(shared) && /--brand:\s*#FFFFFF/i.test(shared)
+    && /--line:\s*#E4E4E7/i.test(shared) && /--line:\s*#2E2F34/i.test(shared)
+    && /--bg:\s*var\(--bg0\)/.test(shared) && /--bg0:\s*#FFFFFF/i.test(shared)
+    && !/#2470e0/i.test(shared)
+    && /--radius-1:\s*8px/.test(shared)
+    && /var\(--brand\)/.test(html) && /var\(--bg\)/.test(html) && /var\(--line\)/.test(html) && /var\(--radius-1\)/.test(html));
   ok('E5_no_gotonode_no_iframe', !/gotonode/.test(html) && !/<iframe/i.test(html));
   ok('E6_no_external', !/https?:\/\//.test(html.replace(/https?:\/\/54\.248\.9\.192/g, '')) || true); // 页面本身不写任何 http 地址（地址经桥下发）
   ok('E6b_no_hardcoded_host', !/54\.248\.9\.192/.test(html));
@@ -215,7 +229,14 @@ function jCase() {
   const nliBranch = (html.match(/if \(res && res\.reason === 'not-logged-in'\) \{[^}]*\}/) || [''])[0];
   ok('J5_not_logged_in_non_error', nliBranch.includes("selectedId = ''") && !/showState/.test(nliBranch) &&
     /没能读取到设备列表/.test(html));
-  ok('J6_render_clears_count', /if \(!model\) \{ els\.count\.textContent = ''; els\.detail\.classList\.remove\('show'\); return; \}/.test(html));
+  // J6（2026-11-15，陈旧断言修复）：render() !model 分支现为
+  // `if (!model) { els.count.textContent = ''; hideDetailWithExit(); return; }`，
+  // 不再同步 classList.remove('show')——hideDetailWithExit() 先上 .leaving 播
+  // 退出态，0ms（reduced-motion）或 140ms 后摘 show/leaving（F-Win2 退出动画，
+  // 行为等价，仅最长延迟 140ms）。断言改为行为等价：!model 分支调
+  // hideDetailWithExit()，且该函数最终摘掉 show。
+  ok('J6_render_clears_count', /if \(!model\) \{ els\.count\.textContent = ''; hideDetailWithExit\(\); return; \}/.test(html)
+    && /function hideDetailWithExit\(\) \{[\s\S]*?els\.detail\.classList\.remove\('show', 'leaving'\)/.test(html));
   ok('J7_onReset_still_loads', /onReset\(\(\) => \{ selectedId = ''; model = null; render\(\); load\(\); \}\)/.test(html));
   ok('J8_early_fail_logged', (main.match(/devicesModel\.early-fail/g) || []).length === 3,
     { hits: (main.match(/devicesModel\.early-fail/g) || []).length });

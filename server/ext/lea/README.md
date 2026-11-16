@@ -94,15 +94,18 @@
 
 `node server/ext/lea/test/test-lea.js`：**248/248 通过**（2026-11-10 干净基线 ad506e2＋本补丁实跑，与主树一致。含 H07 第二轮 rebind 票据九字段断言与第三轮同账号重登契约断言）。
 覆盖：Key 生成格式/只存哈希/列表脱敏、认证拒绝各码、换号失效、吊销/一键吊销、
-授权撤销、签名验签占位、**规范串 v1（信封 16 行／票据 9 行、定稿向量与 C 端字节一致、
+授权撤销、签名验签占位、**规范串 v1（信封 19 行／票据 9 行、定稿向量与 C 端字节一致、
 params 归一化（整数键数值序＋`__proto__` 保留）、篡改矩阵、票据签发与 rebind 路由返回票据、
 严格校验（timeout／seq／grant／scopes／lease）、固定密钥跨实例验签、批量 `-` 连接与
 幂等键 400、JSON 安全值（toJSON／函数／Date 拒签）、UTF-8 字节长度、scopes 256 上限、
 显式空 leaseId 拒签、批量后缀留长与非对象 params 400、安全整数、路由 timeout 显式非法 400）**、幂等去重、防重放、
 runcommands 下发构造（mock 通道）、路由层 execute/batches/jobs 全流程、审计不含 Key 明文、
-**H21 吊销推送（台账／下发前同步／失败不拦下发／已同步不重复写）、H22 绑定 epoch 不跳过 0
-（绑定前 Key 绑定后 409）、T07 授权代次（撤销后旧 Key 403／重授予后不复活／新 Key 可用／
-重复 grant 不递增）**。
+**H04 白名单（opts／whitelist.json／未配置 fail-closed）、H05 换绑归属／可见性
+（未知设备 404／已绑他人 403／站长换绑 200）、H06 Key 生成门与 dangerous 审批
+（无授权 403／自选 dangerous 403／站长授后可生成／撤销后失效）、H07 epoch 协调
+（client epoch 只许向前）、H21 吊销推送（台账／下发前同步／失败不拦下发／
+已同步不重复写）、H22 绑定 epoch 不跳过 0（绑定前 Key 绑定后 409）、T07 授权
+代次（撤销后旧 Key 403／重授予后不复活／新 Key 可用／重复 grant 不递增）**。
 另验：`node --check` 通过全部新文件与 `server/ext/server.js`；
 ext 服务带 LEA 加载正常（`QFEXT_NO_LISTEN=1` 启动，placeholder 警告符合设计）；
 既有 `server/ext/test-points.js` 11/11 通过；SEC_LEA 的 NSIS 语法经 makensis 3.09

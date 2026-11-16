@@ -7,8 +7,8 @@
 ///   出帧率——两者不等，诊断里必须写清是「WebView 渲染估算」。
 /// - RTT：Dart 侧一次会话探针求值（evaluateJavascript）的往返耗时，
 ///   即 Dart→页面求值一来一回的毫秒数，不是中继 RTT。
-/// - 输入→回显延迟：壳内没有任何输入打点钩子，**未度量**——HUD 与诊断
-///   一律写「未度量」，绝不编一个数字冒充。
+/// - 输入→回显延迟：壳内没有任何输入打点钩子，**未测量**——HUD 与诊断
+///   一律写「未测量」，绝不编一个数字冒充。
 /// - 档位：normal（探针 1 秒一拍）/ low（探针 2 秒一拍＋向会话透传
 ///   `quality=low`）。网页端 app.js 当前**没有** quality 参数处理
 ///   （全仓 grep `quality` 零命中），Dart 侧透传方式是会话建立时在
@@ -33,7 +33,7 @@ class SessionPerfTracker {
   /// 最近一拍 rAF 帧数（约等于该秒渲染帧率），未采到为 null。
   int? lastFps;
 
-  /// 输入→回显延迟：壳内无打点钩子，恒为 null＝未度量。
+  /// 输入→回显延迟：壳内无打点钩子，恒为 null＝未测量。
   int? get echoLatencyMs => null;
 
   /// 探针采样间隔（秒）：normal 1 秒，low 2 秒（降质降采样）。
@@ -50,13 +50,16 @@ class SessionPerfTracker {
     lastFps = null;
   }
 
-  /// HUD 一行文案（度量不到的项写「未度量」，不编数字）。
+  /// HUD 一行文案（测不到的项写「未测量」，不编数字；标签按审计 F-002
+  /// 第一阶段改名：FPS→WebView 渲染估算、RTT→页面探针耗时、回显延迟→未测量；
+  /// 档位标签按 A 线核查补改：low 档实际只降探针采样、不降远端画质，故 HUD
+  /// 与切换按钮一律写「采样」不写「画质」）。
   String hudText() {
-    final fps = lastFps == null ? '未度量' : '$lastFps fps';
-    final rtt = lastProbeRttMs == null ? '未度量' : '$lastProbeRttMs ms';
-    final q = quality == SessionQuality.low ? '低画质' : '标准画质';
-    return '帧率（WebView 渲染估算）：$fps · 探针往返：$rtt · '
-        '输入→回显：未度量 · 画质：$q';
+    final fps = lastFps == null ? '未测量' : '$lastFps fps';
+    final rtt = lastProbeRttMs == null ? '未测量' : '$lastProbeRttMs ms';
+    final q = quality == SessionQuality.low ? '降采样' : '标准采样';
+    return 'WebView 渲染估算：$fps · 页面探针耗时：$rtt · '
+        '输入→回显延迟：未测量 · 探针采样：$q';
   }
 
   /// 诊断追加行（与 hudText 同口径）。

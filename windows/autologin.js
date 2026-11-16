@@ -396,7 +396,7 @@ function pageInject(opts) {
   }
 
   // 2.5) 登录页许可入口（2.3.1 阶段 E，16:37 定版）：登录/注册区最后一行
-  // 「购买密钥」黑底白字、其下「查询密钥」蓝色无边框文字链。服务端登录页
+  // 「购买密钥」黑底白字、其下「查询密钥」白色下划线文字链（黑白化 v2：定夺 §3.3 下划线区分；深蓝渐变登录页上的白字，白 on #0D2F66 ≈ 13.0:1）。服务端登录页
   // 模板已有同 id 的两行（qfBuyKeyRow/qfQueryKeyRow）时不重复注入——其
   // 相对 href（/purchase、/license/status）落在直连控制台源上不可用，
   // 由主进程 will-navigate 拦截改走扩展源壳内打开（与安卓登录桥接管
@@ -409,21 +409,28 @@ function pageInject(opts) {
       var lbox = document.createElement('div');
       lbox.id = 'qfLicenseRows';
       lbox.style.cssText = 'box-sizing:border-box;width:280px;margin:14px auto 2px auto';
+      // 六项遗留②：购买密钥行视觉 36px，::after 透明区把触控补到 44px
+      if (!document.getElementById('qfLicenseRowsStyle')) {
+        var qfLicStyle = document.createElement('style');
+        qfLicStyle.id = 'qfLicenseRowsStyle';
+        qfLicStyle.textContent = '#qfBuyKeyRowShell::after{content:"";position:absolute;top:-4px;bottom:-4px;left:0;right:0;}';
+        document.head.appendChild(qfLicStyle);
+      }
       var buyA = document.createElement('a');
       buyA.id = 'qfBuyKeyRowShell';
       buyA.href = '/purchase';
       buyA.textContent = '购买密钥';
-      buyA.style.cssText = 'display:block;text-align:center;background:#111;color:#fff;border:0;border-radius:9px;padding:11px 0;font-size:15px;text-decoration:none;cursor:pointer';
+      buyA.style.cssText = 'display:block;text-align:center;background:#000000;color:#FFFFFF;border:0;border-radius:8px;padding:8px 0;font-size:14px;text-decoration:none;cursor:pointer;position:relative';
       var queryA = document.createElement('a');
       queryA.id = 'qfQueryKeyRowShell';
       queryA.href = '/license/status';
       queryA.textContent = '查询密钥';
-      queryA.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;text-decoration:none;background:none;border:0;cursor:pointer';
+      queryA.style.cssText = 'display:block;text-align:center;color:#fff;font-size:14px;padding:10px 0 2px 0;text-decoration:underline;text-decoration-color:#52525B;background:none;border:0;cursor:pointer';
       var rebindA = document.createElement('a');
       rebindA.id = 'qfRebindRowShell';
       rebindA.href = '/license/rebind';
       rebindA.textContent = '申诉换绑设备';
-      rebindA.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:4px 0 2px 0;text-decoration:none;background:none;border:0;cursor:pointer';
+      rebindA.style.cssText = 'display:block;text-align:center;color:#fff;font-size:14px;padding:4px 0 2px 0;text-decoration:underline;text-decoration-color:#52525B;background:none;border:0;cursor:pointer';
       lbox.appendChild(buyA);
       lbox.appendChild(queryA);
       lbox.appendChild(rebindA);

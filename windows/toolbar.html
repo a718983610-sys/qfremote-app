@@ -1,122 +1,149 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body {
-    /* 亮蓝主题（默认）：平涂品牌蓝，细底线收口 */
-    --fg:#eaf3ff;
-    --fg-dim: rgba(220,236,255,.72);
-    --zlabel:#dceaff;
-    --hover: rgba(255,255,255,.13);
-    --press: rgba(255,255,255,.22);
-    --sep: rgba(255,255,255,.22);
-    --status-bg: rgba(8,28,66,.42);
-    --status-border: rgba(255,180,84,.4);
-    --status-fg:#ffd9a0;
-    --pdetail-fg: rgba(233,243,255,.92);
-    --toast-ok-bg: #12703c;
-    --toast-bad-bg: #b3372f;
-    background: #2470e0;
-    border-bottom: 1px solid rgba(6,24,58,.30);
+    /* 浅色主题（默认，黑白化 v2 2026-11-14）：整页白底黑字；黑底整条已按
+       站长 2026-11-14 00:04 令（禁止区块级黑白交替）改掉，工具栏跟随主题 */
+    --fg: var(--text-1);
+    /* 六项定夺②灰阶合并：版本号文字三级 → 次级，工具栏不再单独占三级灰阶 */
+    --fg-dim: var(--text-2);
+    --zlabel: var(--text-2);
+    --hover: var(--hover-ov);
+    --press: var(--press-ov);
+    --sep: var(--line);
+    --status-bg: rgba(var(--warning-rgb),.12);
+    --status-border: rgba(var(--warning-rgb),.35);
+    --status-fg: var(--text-1);
+    --pdetail-fg: var(--text-1);
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
     box-sizing: border-box;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-    display:flex; align-items:center; gap:4px; padding:0 6px 0 12px;
+    height:52px; display:flex; align-items:center; gap:8px; padding:0 8px 0 12px;
+    animation: win-in var(--d5) var(--e-l) both;
     -webkit-user-select:none; user-select:none;
     -webkit-app-region: drag; color:var(--fg);
     position:relative;
   }
-  body.theme-dark {
-    /* 深灰深色主题（不用纯黑，对齐家族深色卡 #22262E） */
-    --fg:#eceff3;
-    --fg-dim: rgba(228,232,238,.60);
-    --zlabel:#c9ced6;
-    --hover: rgba(255,255,255,.09);
-    --press: rgba(255,255,255,.17);
-    --sep: rgba(255,255,255,.13);
-    --status-bg: rgba(0,0,0,.38);
-    --status-border: rgba(255,180,84,.35);
-    --status-fg:#ffd9a0;
-    --pdetail-fg: rgba(238,241,245,.92);
-    background: #22262e;
-    border-bottom: 1px solid rgba(255,255,255,.08);
+  html[data-theme="dark"] body {
+    /* 深色主题（Q1b 深色 token） */
+    --fg: var(--text-1);
+    --fg-dim: var(--text-2);
+    --zlabel: var(--text-2);
+    --hover: var(--hover-ov);
+    --press: var(--press-ov);
+    --sep: var(--line);
+    --status-bg: rgba(var(--warning-rgb),.12);
+    --status-border: rgba(var(--warning-rgb),.35);
+    --status-fg: var(--text-1);
+    --pdetail-fg: var(--text-1);
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--line);
   }
-  .brand { display:flex; align-items:center; gap:9px; margin-right:10px; }
-  .brand .tile { width:29px; height:29px; border-radius:8px; background:#fff; padding:2.5px;
+  .brand { display:flex; align-items:center; gap:9px; margin-right:10px; flex:none; }
+  /* W4 S 档：32／圆角 8／padding 4／内图 24（box-sizing 已是 border-box，内图仍 24） */
+  .brand .tile { width:32px; height:32px; border-radius:8px; background:var(--tile-bg); padding:4px;
     box-sizing:border-box; }
   .brand .tile img { width:100%; height:100%; border-radius:6px; display:block; }
-  .brand .nm { font-size:15px; font-weight:600; letter-spacing:.5px; line-height:1; }
-  .brand .ver { font-size:11px; color:var(--fg-dim); margin-top:3px; line-height:1; letter-spacing:.4px; }
-  .grp { display:flex; align-items:center; gap:3px; }
-  .sep { width:1px; height:22px; background:var(--sep); margin:0 7px; flex:none; }
+  .brand .nm { font-size:14px; font-weight:600; letter-spacing:.5px; line-height:1; }
+  /* W5：版本号 margin-top 3→4（4pt 网格）；品牌名字距 .5px 不动（字形光学参数） */
+  .brand .ver { font-size:12px; color:var(--fg-dim); margin-top:4px; line-height:1; letter-spacing:.4px; }
+  .grp { display:flex; align-items:center; gap:8px; flex:none; }
+  .sep { width:1px; height:20px; background:var(--sep); margin:0 8px; flex:none; }
   button {
     -webkit-app-region: no-drag; appearance:none; border:1px solid transparent;
     background: transparent; color:var(--fg); border-radius:8px; cursor:pointer;
     font-family:inherit; display:flex; align-items:center; justify-content:center; gap:5px;
-    height:32px; min-width:32px; padding:0 6px; font-size:13px;
-    transition: background .13s ease, border-color .13s ease;
+    height:32px; min-width:32px; padding:0 6px; font-size:13px; line-height:20px;
+    /* F-WIN-01（2026-11-15）：flex 子项默认可收缩，超宽时文字先竖排、
+       body scrollWidth 恒等于 clientWidth，溢出检测器误判“不溢出”。
+       按钮一律不收缩、不换行，超宽真实反映为几何溢出，由量测移进菜单。 */
+    flex:none; white-space:nowrap;
+    transition: background var(--d1) var(--e-c), border-color var(--d1) var(--e-c), transform var(--d0) var(--e-s), box-shadow var(--d2) var(--e-c);
   }
-  button:hover { background: var(--hover); }
-  button:active { background: var(--press); }
-  button:focus-visible { outline:2px solid rgba(255,255,255,.85); outline-offset:1px; }
-  button.on { background: rgba(255,159,46,.26); border-color: rgba(255,180,84,.6); color:#ffe1b0; }
-  button svg { width:18px; height:18px; flex:none; }
-  button:disabled { opacity:.4; cursor:default; }
+  button:hover { background: var(--hover-ov); }
+  button:active { background: var(--press-ov); transform: scale(.985); }
+  button:disabled { transform: none; }
+  button:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
+  /* 六项定夺②灰阶合并：选中态只留背景，不再另占强边框灰阶 */
+  button.on { background: var(--sel-ov); color: var(--text-1); box-shadow: inset 2px 0 0 var(--text-1); }
+  button svg { width:20px; height:20px; flex:none; }
+  button:disabled { color: var(--text-disabled); cursor: default; }
   .zlabel { -webkit-app-region: no-drag; min-width:42px; text-align:center;
-    font-size:12px; color:var(--zlabel); font-variant-numeric: tabular-nums; }
+    font-size:12px; color:var(--zlabel); font-variant-numeric: tabular-nums; flex:none; white-space:nowrap; }
   .spacer { flex:1; }
   .status {
     -webkit-app-region: no-drag; display:none; align-items:center; gap:7px;
     font-size:12px; color:var(--status-fg); background: var(--status-bg);
     border:1px solid var(--status-border); border-radius:999px; padding:4px 12px; margin-right:6px;
-    white-space:nowrap;
+    white-space:nowrap; flex:none;
   }
   .status.show { display:flex; }
-  .status .dot { width:8px; height:8px; border-radius:50%;
-    background: #ff8a1e;
+  .status .dot { width:6px; height:6px; border-radius:50%;
+    background: var(--warning);
     animation: pulse 1.5s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,150,40,.5);} 55% { box-shadow: 0 0 0 6px rgba(255,150,40,0);} }
   /* 服务器状态灯：平涂色点（绿/红/橙） */
   .probe { min-width:30px; padding:0 5px; }
-  .probe .pdot { width:11px; height:11px; border-radius:50%; flex:none;
-    background: #f5a623; }
-  .probe.ok .pdot { background: #1db954; }
-  .probe.bad .pdot { background: #e5484d; }
+  .probe .pdot { width:6px; height:6px; border-radius:50%; flex:none;
+    background: var(--warning); }
+  .probe.ok .pdot { background: var(--success); }
+  .probe.bad .pdot { background: var(--danger); }
   .pdetail {
     -webkit-app-region: no-drag; display:none; font-size:12px; color:var(--pdetail-fg);
-    white-space:nowrap; font-variant-numeric: tabular-nums;
+    white-space:nowrap; font-variant-numeric: tabular-nums; flex:none;
   }
   .pdetail.show { display:block; }
   .al { -webkit-app-region: no-drag; display:flex; align-items:center; gap:7px; cursor:pointer;
-    font-size:13px; color:var(--fg); padding:5px 9px; border-radius:8px; border:1px solid transparent; }
+    font-size:13px; color:var(--fg); padding:7px 9px; border-radius:8px; border:1px solid transparent; flex:none; white-space:nowrap; }
   .al:hover { background: var(--hover); }
-  .al input { accent-color:#ff9f2e; width:14px; height:14px; margin:0; cursor:pointer; }
-  .winbtn { min-width:40px; }
-  .winbtn.close:hover { background:#d3382c; color:#fff; }
-  /* 截图反馈：一行小字，居中浮现，几秒后自动消失 */
+  .al input { accent-color:var(--brand); width:14px; height:14px; margin:0; cursor:pointer; }
+  .winbtn { min-width:46px; height:32px; }
+  /* W7 定夺：关闭 × 默认 text-2 色；hover 只换 hover-ov 底＋danger 色图标，
+     不整块红底（危险语义由 hover 时红色图标承载）。 */
+  .winbtn.close { color: var(--text-2); }
+  .winbtn.close:hover { background:var(--hover-ov); color:var(--danger); }
+  /* 截图反馈（W7 定夺）：中性底＋文字＋6px 状态色点，不再整条绿／红实底白字 */
   #toast {
-    position:fixed; left:50%; top:7px; transform:translateX(-50%) translateY(-4px);
-    z-index:50; pointer-events:none; opacity:0; transition: opacity .18s ease, transform .18s ease;
-    font-size:13px; color:#fff; border-radius:999px; padding:6px 16px; white-space:nowrap;
-    background: var(--toast-ok-bg);
+    position:fixed; left:50%; top:7px; transform:translateX(-50%) translateY(12px);
+    z-index:50; pointer-events:none; opacity:0; transition: opacity var(--d2) var(--e-s), transform var(--d2) var(--e-s);
+    font-size:13px; color:var(--text-1); border-radius:999px; padding:6px 16px; white-space:nowrap;
+    background: var(--bg3); border:1px solid var(--line);
+    display:flex; align-items:center; gap:8px;
   }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-  #toast.bad { background: var(--toast-bad-bg); }
-  /* 有新版提示徽标：平涂家族橙 */
+  #toast .dot { width:6px; height:6px; border-radius:50%; background:var(--success); flex:none; }
+  #toast.bad .dot { background: var(--danger); }
+  /* 有新版提示徽标（W7 定夺）：中性底＋文字＋6px 警告色点＋中性描边；
+     不用警告色整底，也不用警告色整框常驻 */
   .updbadge {
-    display:none; align-items:center; gap:6px; height:30px; padding:0 12px; margin-right:6px;
-    border-radius:999px; border:1px solid rgba(255,213,141,.55); cursor:pointer;
-    background: #ff8a1e; color:#fff;
-    font-size:13px; font-weight:700; letter-spacing:.4px; white-space:nowrap;
-    transition: filter .13s ease;
+    display:none; align-items:center; gap:6px; height:32px; padding:0 12px; margin-right:6px;
+    border-radius:999px; border:1px solid var(--line); cursor:pointer;
+    background: var(--bg3); color:var(--text-1);
+    font-size:13px; font-weight:600; letter-spacing:.4px; white-space:nowrap; flex:none;
+    transition: filter var(--dur-fast) var(--ease-out);
   }
   .updbadge:hover { filter: brightness(1.07); }
   .updbadge.show { display:flex; }
-  .updbadge .udot { width:8px; height:8px; border-radius:50%; background:#fff;
+  .updbadge .udot { width:6px; height:6px; border-radius:50%; background:var(--warning);
     animation: pulse 1.5s ease-in-out infinite; }
+  /* F-WIN-01（2026-11-15）：紧凑档——站长＋有新版同时显示时，即使
+     7 个可溢出项全移进“更多”菜单，1280px 仍超宽约 32px（关闭按钮
+     右缘 1304px 被裁）。超宽时不靠档位假设，靠 JS 量测移菜单；但
+     固定项（品牌／导航／缩放／徽标／自启／窗口三键）本身也须收紧
+     间距，否则无项可移仍溢出。本档只收间距，不藏任何控件。 */
+  @media (max-width: 1400px) {
+    body { gap:4px; }
+    .grp { gap:4px; }
+    .sep { margin:0 4px; }
+    .brand { margin-right:6px; }
+  }
   /* 窄窗适配（排版批1 P22：原 8 档乱序逐个藏字重排为有序三档）：
-     >1240 全显——默认窗宽 1280 在此档，服务器详情、重连文字、新版徽标文字常态可见；
+     >1240 优先全显——但站长＋有新版同时显示时 1280px 也可能超宽，
+     此时不靠档位假设，靠 JS 逐项几何量测把溢出项移进“更多”菜单
+     （F-WIN-01，2026-11-15：档位假设在徽标＋管理同时出现时不成立）；
      ≤1240 收瞬时/次要文字（服务器详情行、徽标字、管理字；悬停 title 与点击详情仍在）；
      ≤1020 图标化（品牌名、首页/好友文字、缩放百分比、重连文字、自启文字收起，
      只留图标/状态点/勾选框）；收起一律用 display:none，不再用 font-size:0 藏字；
@@ -137,9 +164,9 @@
     .zlabel { display:none; }
     .status { gap:0; padding:4px 9px; }
     .status .status-tx { display:none; }
-    .al { gap:0; padding:5px 6px; }
+    .al { gap:0; padding:7px 6px; }
     .al .al-tx { display:none; }
-    button[onclick*="'reset'"] { display:none; }
+    /* W2：不再用 display:none 藏“还原”按钮——窄窗由 JS 量测移进“更多”原生菜单 */
   }
 </style>
 </head>
@@ -150,69 +177,98 @@
   </span>
 
   <span class="grp">
-    <button onclick="qfNav.go('back')" title="后退"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg></button>
-    <button onclick="qfNav.go('forward')" title="前进"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg></button>
-    <button onclick="qfNav.go('refresh')" title="刷新（F5）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3.5V8h-4.5"/></svg></button>
-    <button id="navHome" onclick="qfNav.go('home')" title="主页：返回设备列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.2 12 4l8 7.2"/><path d="M6.2 9.8V20h11.6V9.8"/></svg></button>
+    <button onclick="qfNav.go('back')" title="后退" aria-label="后退"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg></button>
+    <button onclick="qfNav.go('forward')" title="前进" aria-label="前进"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg></button>
+    <button onclick="qfNav.go('refresh')" title="刷新（F5）" aria-label="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
+    <button id="navHome" onclick="qfNav.go('home')" title="主页：返回设备列表" aria-label="主页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg></button>
   </span>
 
   <span class="sep"></span>
 
   <span class="grp">
-    <button onclick="qfNav.zoom('out')" title="缩小页面（Ctrl + -）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+    <button onclick="qfNav.zoom('out')" title="缩小页面（Ctrl + -）" aria-label="缩小页面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
     <span class="zlabel" id="zpct" title="当前页面缩放比例">100%</span>
-    <button onclick="qfNav.zoom('in')" title="放大页面（Ctrl + +）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
-    <button onclick="qfNav.zoom('reset')" title="还原为 100%（Ctrl + 0）" style="font-size:12px;">还原</button>
+    <button onclick="qfNav.zoom('in')" title="放大页面（Ctrl + +）" aria-label="放大页面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button id="zoomReset" onclick="qfNav.zoom('reset')" title="还原为 100%（Ctrl + 0）" style="font-size:12px;">还原</button>
   </span>
+
+  <!-- W2：“更多”按钮（量测驱动溢出菜单触发器；菜单非空时才显示）＋移入菜单的控件收纳处 -->
+  <button id="moreBtn" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false" style="display:none;"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+  <div id="overflowStore" aria-hidden="true" style="display:none;"></div>
 
   <span class="sep"></span>
 
-  <button class="probe" id="probe" title="服务器状态：检测中…"><span class="pdot"></span></button>
+  <button class="probe" id="probe" title="服务器状态：检测中…" aria-label="服务器状态"><span class="pdot"></span></button>
   <span class="pdetail" id="pdetail"></span>
 
   <span class="spacer"></span>
 
-  <span class="status" id="status"><span class="dot"></span><span class="status-tx">连接断开，正在重连…</span></span>
+  <span class="status" id="status"><span class="dot"></span><span class="status-tx" id="statusTx">连接断开，正在重连…</span><button id="statusCancel" title="取消重连" aria-label="取消重连" style="display:none;border:0;background:none;color:inherit;font:inherit;cursor:pointer;padding:0 2px;">取消</button></span>
 
-  <button id="navHomePage" onclick="qfNav.homePage()" title="首页：概览、付费与激活、快速入口"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></svg><span>首页</span></button>
-  <button id="navFriends" onclick="qfNav.friends()" title="好友：添加好友与共享电脑，与控制台共用登录状态，无需再次登录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="8" r="3.6"/><path d="M4.6 19.6c.8-3.3 3.4-5.1 6.4-5.1s5.6 1.8 6.4 5.1"/></svg><span>好友</span></button>
-  <button id="navForum" onclick="qfNav.forum()" title="论坛：使用求助、建议反馈、官方公告"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v8a1.5 1.5 0 0 1-1.5 1.5H9l-5 4z"/><path d="M7.5 8.5h9M7.5 11.5h5.5"/></svg></button>
-  <button onclick="qfNav.register()" title="注册新账号"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10.4" r="1.9"/><path d="M5.9 16.4c.5-1.6 1.7-2.5 3.1-2.5s2.6.9 3.1 2.5"/><path d="M14.6 9.6h3.9M14.6 12.9h3.9"/></svg></button>
-  <button onclick="qfNav.openLock()" title="隐私锁：锁定电脑本地屏幕，本机使用须输入密码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8 10.5V7.8a4 4 0 0 1 7.8-1.2"/><circle cx="12" cy="15.2" r="1.6" fill="currentColor" stroke="none"/></svg></button>
+  <button id="navHomePage" onclick="qfNav.homePage()" title="首页：概览、付费与激活、快速入口" aria-label="首页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg><span>首页</span></button>
+  <button id="navFriends" onclick="qfNav.friends()" title="好友：添加好友与共享电脑，与控制台共用登录状态，无需再次登录" aria-label="好友"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5"/></svg><span>好友</span></button>
+  <button id="navForum" onclick="qfNav.forum()" title="论坛：使用求助、建议反馈、官方公告" aria-label="论坛"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9.5h8M8 13h5"/></svg></button>
+  <button id="registerBtn" onclick="qfNav.register()" title="注册新账号" aria-label="注册新账号"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M5.5 16.5c.6-1.9 1.9-3 3.5-3s2.9 1.1 3.5 3"/><path d="M15 9.5h4M15 13h4"/></svg></button>
+  <button id="lockBtn" onclick="qfNav.openLock()" title="隐私锁：锁定电脑本地屏幕，本机使用须输入密码" aria-label="隐私锁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.4" fill="currentColor" stroke="none"/></svg></button>
 
-  <button class="updbadge" id="updBadge" onclick="qfNav.openAbout()" title="发现新版本，点此查看更新说明并下载"><span class="udot"></span><span id="updBadgeTx">有新版</span></button>
+  <button class="updbadge" id="updBadge" onclick="qfNav.openAbout()" title="发现新版本，点此查看更新说明并下载" aria-label="发现新版本，点此查看更新说明并下载"><span class="udot"></span><span id="updBadgeTx">有新版</span></button>
 
-  <button onclick="qfNav.screenshot()" title="截图（F9）：将当前控制台画面保存为图片至下载文件夹"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h1.6l1.5-2.2h6.8L16.9 7h1.6A1.5 1.5 0 0 1 20 8.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18z"/><circle cx="12" cy="13" r="3.4"/></svg></button>
-  <button id="themeBtn" onclick="qfNav.toggleTheme()" title="切换到深灰工具栏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2"/><path d="M12 3.8a8.2 8.2 0 0 1 0 16.4z" fill="currentColor" stroke="none"/></svg></button>
-  <button id="adminBtn" onclick="qfNav.openAdmin()" title="站长管理（账号管理、积分与申诉处理）" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.2c0 4.6 3 7.7 7 9.3 4-1.6 7-4.7 7-9.3V6z"/><path d="M9.3 11.8l2 2 3.6-3.8"/></svg><span>管理</span></button>
-  <button onclick="qfNav.openAbout()" title="关于 QFRemote（版本、服务器地址、检查服务器状态）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 11v5.2"/><path d="M12 7.6v.2"/></svg></button>
+  <button id="shotBtn" onclick="qfNav.screenshot()" title="截图（F9）：将当前控制台画面保存为图片至下载文件夹" aria-label="截图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.2"/></svg></button>
+  <button id="themeBtn" onclick="qfNav.toggleTheme()" title="切换到深色工具栏" aria-label="切换到深色工具栏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg></button>
+  <button id="adminBtn" onclick="qfNav.openAdmin()" title="站长管理（账号管理、积分与申诉处理）" aria-label="站长管理" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.2c0 4.6 3 7.7 7 9.3 4-1.6 7-4.7 7-9.3V6z"/><path d="m9 12 2 2 4-4"/></svg><span>管理</span></button>
+  <button id="aboutBtn" onclick="qfNav.openAbout()" title="关于 QFRemote（版本、服务器地址、检查服务器状态）" aria-label="关于 QFRemote"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><path d="M12 7.8v.2"/></svg></button>
 
-  <label class="al" title="Windows 登录后自动启动 QFRemote"><input type="checkbox" id="al"><span class="al-tx">开机自启</span></label>
-  <button id="pin" onclick="qfNav.toggleTop()" title="窗口置顶（F10）：开启后 QFRemote 窗口始终位于最前"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 4h5l-.8 6.2 2.8 2.8H7.5l2.8-2.8z"/><path d="M12 13v7.2"/></svg></button>
-  <button id="fs" onclick="qfNav.toggleFullscreen()" title="全屏（F11）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  <label class="al" title="Windows 登录后自动启动 QFRemote"><input type="checkbox" id="al" aria-label="开机自启"><span class="al-tx">开机自启</span></label>
+  <button id="pin" onclick="qfNav.toggleTop()" title="窗口置顶（F10）：开启后 QFRemote 窗口始终位于最前" aria-label="窗口置顶"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5h6l-.7 6.5 2.7 2.7v1.3H7v-1.3l2.7-2.7z"/><path d="M12 14v7"/></svg></button>
+  <button id="fs" onclick="qfNav.toggleFullscreen()" title="全屏（F11）" aria-label="全屏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
 
   <span class="sep"></span>
 
-  <button class="winbtn" onclick="qfNav.win('min')" title="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
-  <button class="winbtn" onclick="qfNav.win('max')" title="最大化 / 还原"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><rect x="5.5" y="5.5" width="13" height="13" rx="2"/></svg></button>
-  <button class="winbtn close" onclick="qfNav.win('close')" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  <button class="winbtn" onclick="qfNav.win('min')" title="最小化" aria-label="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+  <button class="winbtn" onclick="qfNav.win('max')" title="最大化 / 还原" aria-label="最大化 / 还原"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5.5" y="5.5" width="13" height="13" rx="2"/></svg></button>
+  <button class="winbtn close" onclick="qfNav.win('close')" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
 
-  <div id="toast"></div>
+  <div id="toast" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="toastTx"></span></div>
 
 <script>
   const box = document.getElementById('al');
   qfNav.getAutoLaunch().then(v => { box.checked = !!v; }).catch(() => {});
   box.addEventListener('change', () => qfNav.setAutoLaunch(box.checked));
 
-  qfNav.getVersion().then(v => { document.getElementById('ver').textContent = 'v' + v; }).catch(() => {});
+  qfNav.getVersion().then(v => { document.getElementById('ver').textContent = 'v' + String(v).replace(/\.0$/, ''); }).catch(() => {});
 
-  // ---------- 主题 ----------
+  // ---------- 主题（三态：跟随系统 → 浅色 → 深色；W1 定夺，2026-11-14） ----------
+  // 内容页只认识解析后的 'dark'/'blue'（qf-theme-state 不动）；工具栏按钮要
+  // 区分 mode 与 resolved（qf-theme-mode {mode, resolved}）。三态图标：
+  // system＝半圆（现成）、blue＝太阳、dark＝月亮。
   const themeBtn = document.getElementById('themeBtn');
-  function applyTheme(t) {
-    document.body.classList.toggle('theme-dark', t === 'dark');
-    themeBtn.title = t === 'dark' ? '切换到亮蓝工具栏' : '切换到深灰工具栏';
+  const THEME_ICONS = {
+    system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>',
+    blue: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"/></svg>',
+    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5z"/></svg>'
+  };
+  let themeModeCur = 'system'; // 当前档（由 qf-theme-mode / getUiState 回填；未知时默认 system）
+  function renderThemeBtn(mode, resolved) {
+    const m = (mode === 'system' || mode === 'blue' || mode === 'dark') ? mode : 'system';
+    const r = resolved === 'dark' ? 'dark' : 'blue';
+    themeModeCur = m;
+    if (r === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+    themeBtn.innerHTML = THEME_ICONS[m];
+    // 文案实时明确当前档＋下一档动作（定夺原文口径）：
+    const next = m === 'system' ? '浅色' : m === 'blue' ? '深色' : '跟随系统';
+    const cur = m === 'system' ? '跟随系统（当前' + (r === 'dark' ? '深色' : '浅色') + '）' : m === 'blue' ? '浅色' : '深色';
+    const label = '主题：' + cur + '，点击切换到' + next;
+    themeBtn.title = label;
+    themeBtn.setAttribute('aria-label', label);
   }
+  function applyThemeMode(mode, resolved) { renderThemeBtn(mode, resolved); }
+  // qf-theme-state 只含 resolved：只改解析色，不动档位（否则每次广播都会把图标打回 system）。
+  function applyTheme(t) { renderThemeBtn(themeModeCur, t); }
   qfNav.onThemeState(applyTheme);
+  if (window.qfNav && qfNav.onThemeMode) qfNav.onThemeMode((m) => applyThemeMode(m && m.mode, m && m.resolved));
+  /* F7：冷启动先按 ?t= 落主题（与其他页同口径），不等异步 getUiState 回填 */
+  try { const _themeQ = new URLSearchParams(location.search).get('t'); if (_themeQ) applyTheme(_themeQ); } catch (e) {}
 
   // ---------- 服务器状态灯 ----------
   const probeBtn = document.getElementById('probe');
@@ -251,9 +307,10 @@
 
   // ---------- 截图反馈 ----------
   const toast = document.getElementById('toast');
+  const toastTx = document.getElementById('toastTx');
   let toastTimer = null;
   qfNav.onShotFeedback((f) => {
-    toast.textContent = f.text;
+    toastTx.textContent = f.text;
     toast.classList.toggle('bad', !f.ok);
     toast.classList.add('show');
     clearTimeout(toastTimer);
@@ -266,14 +323,58 @@
     document.getElementById('zpct').textContent = s.zoomPercent + '%';
     document.getElementById('fs').classList.toggle('on', !!s.fullScreen);
     document.getElementById('pin').classList.toggle('on', !!s.alwaysOnTop);
-    if (s.theme) applyTheme(s.theme);
+    // 冷启动用 qf-ui-state 回填 themeMode＋themeResolved，不能只靠 ?t=（只含 resolved）。
+    if (s.themeMode || s.themeResolved) applyThemeMode(s.themeMode, s.themeResolved);
+    else if (s.theme) applyTheme(s.theme);
     if (s.probe) renderProbe(s.probe);
   }).catch(() => {});
-  qfNav.onZoomState(p => { document.getElementById('zpct').textContent = p + '%'; });
+  qfNav.onZoomState(p => { document.getElementById('zpct').textContent = p + '%'; scheduleOverflow(); });
   qfNav.onFsState(on => { document.getElementById('fs').classList.toggle('on', !!on); });
   qfNav.onTopState(on => { document.getElementById('pin').classList.toggle('on', !!on); });
+  // RC-04：重连状态行——主进程发 { state, attempt, maxAttempts } 对象
+  // （旧字符串 'reconnecting' 仍兼容）；重连中显示“第 N 次 / 共 5 次”
+  // 与取消按钮，到顶/凭据类停手时显示原因、不再自动点。
+  // RC-04 票据层：凭据类停手原因码 → 中文短原因（规范 §4/§5.2 八码）。
+  function ticketStopReasonText(reason) {
+    switch (reason) {
+      case 'QFR_API_KEY_REVOKED': return '密钥已吊销';
+      case 'QFR_TICKET_REUSED': return '票据已使用';
+      case 'QFR_TICKET_EXPIRED': return '票据已过期';
+      case 'QFR_TICKET_INVALID': return '票据无效';
+      case 'QFR_BINDING_CHANGED': return '设备已换绑';
+      case 'QFR_GRANT_REVOKED': return '授权已撤销';
+      case 'QFR_SCOPE_DENIED': return '权限不足';
+      case 'QFR_LEA_NOT_BOUND': return '设备未绑定';
+      default: return '登录失效';
+    }
+  }
   qfNav.onStatus(s => {
-    document.getElementById('status').classList.toggle('show', s === 'reconnecting');
+    const st = (s && typeof s === 'object') ? s : { state: s };
+    const el = document.getElementById('status');
+    const tx = document.getElementById('statusTx');
+    const cancel = document.getElementById('statusCancel');
+    const show = st.state === 'reconnecting' || st.state === 'reconnect-failed' || st.state === 'reconnect-stopped';
+    el.classList.toggle('show', show);
+    if (st.state === 'reconnecting') {
+      const a = (typeof st.attempt === 'number') ? st.attempt : 0;
+      const m = (typeof st.maxAttempts === 'number') ? st.maxAttempts : 5;
+      tx.textContent = '正在重连（第 ' + Math.max(1, a) + ' 次 / 共 ' + m + ' 次）';
+      cancel.style.display = '';
+    } else if (st.state === 'reconnect-failed') {
+      tx.textContent = '重连失败（已试 5 次），请点“连接”手动重试';
+      cancel.style.display = 'none';
+    } else if (st.state === 'reconnect-stopped') {
+      // RC-04 票据层：凭据类停手时主进程附 reason=错误码（规范 §5.2），
+      // 显示具体原因与“重新登录”入口；无 reason 时沿用旧文案。
+      tx.textContent = '重连已停（' + ticketStopReasonText(st.reason) + '），请重新登录';
+      cancel.style.display = 'none';
+    } else {
+      cancel.style.display = 'none';
+    }
+    scheduleOverflow();
+  });
+  document.getElementById('statusCancel').addEventListener('click', () => {
+    if (window.qfNav && qfNav.cancelReconnect) qfNav.cancelReconnect();
   });
 
   // ---------- 有新版提示徽标（v1.0.3） ----------
@@ -283,6 +384,7 @@
     const show = !!(s && s.manifest && (s.phase === 'available' || s.phase === 'downloaded' || s.phase === 'download-failed'));
     updBadge.classList.toggle('show', show);
     if (show) updBadgeTx.textContent = s.phase === 'downloaded' ? '新版已下载 v' + s.manifest.version : '有新版 v' + s.manifest.version;
+    scheduleOverflow();
   }
   qfNav.onUpdateState(renderUpdate);
   qfNav.getUpdateState().then(renderUpdate).catch(() => {});
@@ -300,8 +402,102 @@
   // ---------- 站长管理入口（v2.2.0，仅站长可见） ----------
   const adminBtn = document.getElementById('adminBtn');
   if (window.qfNav && qfNav.onAdminState) {
-    qfNav.onAdminState((on) => { adminBtn.style.display = on ? '' : 'none'; });
+    qfNav.onAdminState((on) => { adminBtn.style.display = on ? '' : 'none'; scheduleOverflow(); });
   }
+
+  // ---------- 工具栏溢出菜单（W2＋死区定夺 A，量测驱动，全宽段） ----------
+  // 52px 视图里放不下 DOM 下拉菜单（会被视图裁掉），菜单走原生 Menu：
+  // 本段只决定“哪些控件进菜单”（量测驱动），点“更多”时把清单发主进程。
+  // 移入优先级按定夺不改：关于→论坛→注册→还原→截图→隐私锁→主题。
+  const OVERFLOW_ORDER = ['aboutBtn', 'navForum', 'registerBtn', 'zoomReset', 'shotBtn', 'lockBtn', 'themeBtn'];
+  const moreBtn = document.getElementById('moreBtn');
+  const overflowStore = document.getElementById('overflowStore');
+  const overflowPlaceholders = new Map(); // id -> 占位注释节点（移回原位用）
+  const overflowInMenu = new Set(); // 当前在菜单里的 id
+  function overflowBtn(id) { return document.getElementById(id); }
+  function moveToMenu(id) {
+    const btn = overflowBtn(id);
+    if (!btn || overflowInMenu.has(id)) return;
+    let ph = overflowPlaceholders.get(id);
+    if (!ph) { ph = document.createComment('overflow:' + id); overflowPlaceholders.set(id, ph); }
+    btn.before(ph);
+    overflowStore.appendChild(btn);
+    overflowInMenu.add(id);
+  }
+  function moveToToolbar(id) {
+    const btn = overflowBtn(id);
+    const ph = overflowPlaceholders.get(id);
+    if (!btn || !overflowInMenu.has(id) || !ph || !ph.parentNode) return;
+    ph.after(btn);
+    ph.remove();
+    overflowInMenu.delete(id);
+  }
+  function toolbarRightEdge() {
+    // 可见子项右缘最大值（#toast 是 fixed 定位的浮层、#overflowStore 是
+    // 收纳处，不参与量测）。
+    let max = 0;
+    const kids = document.body.children;
+    for (let i = 0; i < kids.length; i++) {
+      const el = kids[i];
+      if (el.id === 'overflowStore' || el.id === 'toast') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0) max = Math.max(max, r.right);
+    }
+    return max;
+  }
+  function toolbarOverflows() {
+    // F-WIN-01（2026-11-15）：旧检测只看 body scrollWidth > clientWidth，
+    // 但 flex 子项默认 flex-shrink:1 时超宽先收缩、文字先竖排，
+    // scrollWidth 恒等于 clientWidth，检测器误判“不溢出”而停止移菜单。
+    // 改为逐项几何检测：任一可见子项右缘超出视口即溢出；子项内部
+    // 文字竖排／溢出（scrollWidth > clientWidth）同样算溢出。
+    const vw = document.body.clientWidth;
+    if (toolbarRightEdge() > vw + 1) return true;
+    const kids = document.body.children;
+    for (let i = 0; i < kids.length; i++) {
+      const el = kids[i];
+      if (el.id === 'overflowStore' || el.id === 'toast') continue;
+      if (el.scrollWidth > el.clientWidth + 1) return true;
+    }
+    return document.body.scrollWidth > vw + 1;
+  }
+  function applyOverflow() {
+    // 一次算出目标集合，不逐项 toggle：先把 More 显示出来参与量测
+    // （把 More 的约 42px 计入，避免显示／隐藏 More 造成量测抖动）。
+    moreBtn.style.display = '';
+    let guard = 0;
+    while (toolbarOverflows() && guard++ < OVERFLOW_ORDER.length) {
+      const next = OVERFLOW_ORDER.find((id) => !overflowInMenu.has(id) && overflowBtn(id));
+      if (!next) break;
+      moveToMenu(next);
+    }
+    // 移回：按同一优先级逐项试放回；放回后余量须 ≥12px，否则放回菜单并停止（滞回防抖）。
+    // 余量按可见子项右缘算（flex 收缩时 body scrollWidth 不可信，见 toolbarOverflows）。
+    for (const id of OVERFLOW_ORDER) {
+      if (!overflowInMenu.has(id)) continue;
+      moveToToolbar(id);
+      const slack = document.body.clientWidth - toolbarRightEdge();
+      if (toolbarOverflows() || slack < 12) { moveToMenu(id); break; }
+    }
+    // 菜单空 → 藏 More（只释放空间，不会引发新的溢出）；非空 → 显示 More。
+    moreBtn.style.display = overflowInMenu.size ? '' : 'none';
+    moreBtn.setAttribute('aria-expanded', 'false');
+  }
+  let overflowRaf = 0;
+  function scheduleOverflow() {
+    if (overflowRaf) return;
+    overflowRaf = requestAnimationFrame(() => { overflowRaf = 0; applyOverflow(); });
+  }
+  // body 尺寸只随窗口变（内容移动不改 body 宽），ResizeObserver 不会自触发；再加 window resize 兜底。
+  try { new ResizeObserver(scheduleOverflow).observe(document.body); } catch (e) {}
+  window.addEventListener('resize', scheduleOverflow);
+  moreBtn.addEventListener('click', () => {
+    if (!overflowInMenu.size) return;
+    const r = moreBtn.getBoundingClientRect();
+    qfNav.showOverflowMenu(OVERFLOW_ORDER.filter((id) => overflowInMenu.has(id)), Math.round(r.left), Math.round(r.bottom));
+  });
+  // 初始量测（updBadge／adminBtn 尚未显隐时先按当前状态算一次，显隐时由各自钩子重跑）。
+  applyOverflow();
 </script>
 </body>
 </html>

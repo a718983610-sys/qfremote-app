@@ -10,8 +10,10 @@
  *   D. 静态：buildSessionFrame 调用点（W-01 后、t0 前、世代守卫、W-04 门含
  *      identityMismatch）、Sess.identityCheck 字段。
  *   E. 无回归：checkPresence / probeFrame / fetchControlNodes / driveConnect /
- *      frameNodeMatches / applyControlNodes / ensureNodeMap / startSlowProbe /
- *      fetchNodeMap 与 HEAD（0d7df83）逐字一致（防御 (a) 之外的既有缓解未动）。
+ *      frameNodeMatches / applyControlNodes / ensureNodeMap 与 HEAD（b943853）逐字一致（防御 (a) 之外的既有缓解未动）；
+ *      startSlowProbe / fetchNodeMap 与 2026-11-13 基线快照逐字一致——网页深查修复「高-1」
+ *      代次守卫（nodeMapGen：invalidate 自增，在飞旧代次回包一律丢弃）的直接后果，
+ *      报告明言须由归属线更新基线；快照见文件内 BASELINE_20261113，今后改动须同步更新快照并写明原因。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  */
 const fs = require('fs');
@@ -22,7 +24,10 @@ const { execSync } = require('child_process');
 const OUT = process.env.QFTEST_OUT || '/tmp/qfr-defense-a/session-defense-a-result.json';
 const result = { cases: {}, pass: false };
 const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !!cond }, extra || {}); };
-const SRC = path.join(__dirname, '..', '..', 'server', 'webapp', 'app.js');
+// W-08：app.js 已改名内容 hash 文件，经 ASSETS.json 解析当前文件名（只改读路径）
+const WEBAPP_DIR = path.join(__dirname, '..', '..', 'server', 'webapp');
+const ASSETS = JSON.parse(fs.readFileSync(path.join(WEBAPP_DIR, 'ASSETS.json'), 'utf8')).files;
+const SRC = path.join(WEBAPP_DIR, (ASSETS && ASSETS['app.js']) || 'app.js');
 const src = fs.readFileSync(SRC, 'utf8');
 
 // ---------- 抽取函数源码（brace 配对；目标函数内花括号均成对） ----------
@@ -263,7 +268,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     ok('D7_no_new_mask_on_mismatch', bsf.indexOf('identityMismatch') > 0 && !/identityMismatch[\s\S]{0,200}showSessionMask/.test(bsf));
   }
 
-  // ---------- E. 无回归：既有函数与 HEAD 逐字一致 ----------
+  // ---------- E. 无回归：7 个既有函数与 HEAD 逐字一致；2 个函数与 2026-11-13 基线快照逐字一致 ----------
+  // 基线快照（2026-11-13，G11 补齐）：网页深查修复「高-1」代次守卫后的 startSlowProbe / fetchNodeMap
+  // 全文，由本文件从当时 server/webapp/app.js 抽取、逐字存入；与快照不符即 fail，改动须同步更新快照。
+  const BASELINE_20261113 = {
+    startSlowProbe: "function startSlowProbe() {\n  if (nodeMapSlowInflight) return;\n  const gen0 = nodeMapGen; // 高-1：慢源回填前比代次，换账号后旧探测结果不写缓存、不刷设备行\n  nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)\n    .then((grouped) => { if (gen0 === nodeMapGen) { applyControlNodes(grouped); refreshDevRowIds(document); } })\n    .catch(() => {})\n    .then(() => { nodeMapSlowInflight = null; });\n}",
+    fetchNodeMap: "async function fetchNodeMap(opts) {\n  const force = !!(opts && opts.force);\n  const deferSlow = !!(opts && opts.deferSlow);\n  const gen0 = nodeMapGen; // 高-1：本次取数代次，快源回包与 .then 清位都先比代次\n  // X-05：首屏 defer 过的慢源，在下一次非首屏取数时补起（哪怕本次命中页内缓存\n  // 直接返回，也要把 WS 建起来，否则共享设备 id 会一直缺到 TTL 过期）。\n  if (!deferSlow && nodeMapSlowDeferred && !nodeMapSlowInflight) { nodeMapSlowDeferred = false; startSlowProbe(); }\n  if (nodeMapInflight) return nodeMapInflight;                 // single-flight\n  const nm0 = ensureNodeMap();\n  if (!force && nm0.at && (Date.now() - nm0.at) < NODE_MAP_TTL_MS) return nm0;\n  nodeMapInflight = (async () => {\n    let lockStatus = 'ok', lockError = '';\n    try {\n      // X-14：force 时 /lock/devices 带 ?force=1，跳过服务端非机主缓存与失败抑制实读一次。\n      const lr = await lockApi('GET', force ? '/devices?force=1' : '/devices');\n      // 高-1：快源在飞期间已 invalidate（登出/换账号/强制下线）：旧账号结果\n      // 一个字节都不写缓存——校验必须在 applyLockDevices 之前，否则旧设备\n      // 已落缓存。返回当前缓存（新账号已取到的即新数据，尚未取到的为空壳\n      // 且 at=0，下次调用必重取），旧调用方凭原有守卫丢弃。\n      if (gen0 !== nodeMapGen) return ensureNodeMap();\n      if (lr.status === 200 && lr.json && Array.isArray(lr.json.devices)) {\n        applyLockDevices(lr.json.devices);\n        // X-13：服务端回 partial/pending（读路径预算用尽、部分设备未实读）时\n        // 记在节点图上，锁面板据此明示并补拉，不得静默漏设备。\n        const nm2 = ensureNodeMap();\n        nm2.lockPartial = !!lr.json.partial; nm2.lockPending = lr.json.pending || 0;\n      } else if (lr.status === 401) { lockStatus = 'needlogin'; lockError = apiErrText(lr, '登录状态已失效，请重新登录后再管理屏幕锁。'); }\n      else if (lr.networkError) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }\n      else { lockStatus = 'unavailable'; lockError = apiErrText(lr, '屏幕锁服务暂未开通网页通道，暂时无法在此管理。请通过软件端管理该设备的屏幕锁。'); }\n    } catch (e) { lockStatus = 'unreachable'; lockError = '暂时连不上屏幕锁服务，请检查网络后重试。'; }\n    const nm = ensureNodeMap();\n    nm.lockStatus = lockStatus; nm.lockError = lockError; nm.at = Date.now();\n    // 慢源不阻塞：后台拉控制通道全量 nodes，回来只回填缓存（供后续导航/共享设备用）。\n    // X-05：首屏 deferSlow 时只记待补、不建 WS（见文件头注释）。\n    if (deferSlow) nodeMapSlowDeferred = true;\n    else startSlowProbe();\n    return nm;\n  })().then((v) => { if (gen0 === nodeMapGen) nodeMapInflight = null; return v; },\n            (e) => { if (gen0 === nodeMapGen) nodeMapInflight = null; throw e; });\n  return nodeMapInflight;\n}",
+  };
   {
     let head = null;
     try {
@@ -273,13 +284,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       ok('E0_head_available', false, { note: 'git show HEAD 失败，跳过 E 组比对' });
     } else {
       ok('E0_head_available', true);
-      ['checkPresence', 'probeFrame', 'fetchControlNodes', 'driveConnect', 'frameNodeMatches', 'applyControlNodes', 'ensureNodeMap', 'startSlowProbe', 'fetchNodeMap'].forEach((n) => {
+      ['checkPresence', 'probeFrame', 'fetchControlNodes', 'driveConnect', 'frameNodeMatches', 'applyControlNodes', 'ensureNodeMap'].forEach((n) => {
         let a = null, b = null;
         try { a = extractFn(src, n); } catch (e) { a = null; }
         try { b = extractFn(head, n); } catch (e) { b = null; }
         ok('E_' + n + '_unchanged_vs_head', a !== null && b !== null && a === b);
       });
     }
+    // 高-1 基线：逐字比对快照＋语义守卫双重断言（快照被删/改短仍能由守卫断言兜底）。
+    ['startSlowProbe', 'fetchNodeMap'].forEach((n) => {
+      let a = null;
+      try { a = extractFn(src, n); } catch (e) { a = null; }
+      ok('E_' + n + '_baseline_20261113', a !== null && a === BASELINE_20261113[n]);
+    });
+    const ssp = extractFn(src, 'startSlowProbe');
+    const fnm = extractFn(src, 'fetchNodeMap');
+    ok('E_startSlowProbe_gen_guard', ssp.includes('const gen0 = nodeMapGen') && ssp.includes('if (gen0 === nodeMapGen) { applyControlNodes(grouped)'));
+    ok('E_fetchNodeMap_gen_guard', fnm.includes('const gen0 = nodeMapGen') && fnm.indexOf('if (gen0 !== nodeMapGen) return ensureNodeMap();') > 0 && fnm.indexOf('if (gen0 !== nodeMapGen) return ensureNodeMap();') < fnm.indexOf('applyLockDevices(lr.json.devices)') && (fnm.split('if (gen0 === nodeMapGen) nodeMapInflight = null').length - 1) === 2);
   }
 
   const allPass = Object.values(result.cases).every((c) => c.pass);

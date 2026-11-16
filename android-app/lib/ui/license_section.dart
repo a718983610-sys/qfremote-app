@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/license.dart';
 import 'license_gate.dart';
@@ -10,7 +11,7 @@ import 'theme.dart';
 /// 概览卡（套餐/状态/密钥掩码/剩余时长/设备名额/网页版权益）、本机绑定框
 /// （契约 §3 bind）、转赠领取框（契约 §7.5.3 已登录入口）、兑换KEY卡
 /// （决策 #24 统一兑换入口：粘贴兑换＋待兑换列表一键兑换）、购买/查询
-/// 入口（16:37 定版样式：购买黑底白字、查询蓝色无边框文字链，壳内打开）。
+/// 入口（16:37 定版样式：购买黑底白字、查询主文字色加下划线文字链，壳内打开）。
 class LicenseSection extends StatefulWidget {
   final QfPalette palette;
   final Future<LicenseMe?> Function() fetchLicense;
@@ -70,6 +71,8 @@ class _LicenseSectionState extends State<LicenseSection> {
       widget.fetchMyKeys != null &&
       widget.onRedeem != null &&
       widget.onRedeemId != null;
+
+  bool _purchaseFocused = false;
 
   @override
   void initState() {
@@ -201,6 +204,41 @@ class _LicenseSectionState extends State<LicenseSection> {
     }
   }
 
+  Future<void> _copyDiagnostics() async {
+    final me = _me;
+    final text = [
+      '许可状态：${me?.displayStatus ?? '—'}',
+      '当前套餐：${me?.planName ?? '—'}',
+      '密钥：${me?.maskedKey ?? '—'}',
+      '剩余时长：${me != null ? licenseRemainText(me, DateTime.now().millisecondsSinceEpoch) : '—'}',
+      '设备名额：电脑 ${me?.slotsPc ?? 0} / ${me?.slotsPcMax ?? 2} · 手机 ${me?.slotsMobile ?? 0} / ${me?.slotsMobileMax ?? 1}',
+    ].join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('诊断信息已复制，包含许可状态与密钥掩码。')),
+    );
+  }
+
+  /// 有效期绝对时间（C §2.4：YYYY-MM-DD HH:mm，本地时区；无则 —）。
+  /// 密钥到期优先，试用到期其次；两者皆无为 —，不编造日期。
+  String _expiryText(LicenseMe? me) {
+    final ms = me?.keyExpiresMs ?? me?.trialExpiresMs;
+    if (ms == null) return '—';
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+
+  Color _statusDot(String? status) {
+    final s = status ?? '';
+    if (s.contains('过期') || s.contains('失效') || s.contains('封禁') || s.contains('冻结')) {
+      return widget.palette.danger;
+    }
+    if (s.contains('试用')) return widget.palette.warning;
+    return widget.palette.success;
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = widget.palette;
@@ -221,23 +259,23 @@ class _LicenseSectionState extends State<LicenseSection> {
                 Text('登录已过期，请重新登录',
                     style: TextStyle(
                         color: p.onCard,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700)),
+                        fontSize: QfScale.fs15,
+                        fontWeight: FontWeight.w600)),
                 const SizedBox(height: 4),
                 Text('当前登录已过期，许可信息无法读取，请重新登录后查看。',
-                    style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+                    style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13)),
                 const SizedBox(height: 10),
-                FilledButton(
+                QfButtonTapTarget(child: FilledButton(
                   onPressed: widget.onRelogin,
                   style: FilledButton.styleFrom(
-                    backgroundColor: QfPalette.brand,
-                    minimumSize: const Size(0, 48),
+                    backgroundColor: p.brand,
+                    minimumSize: const Size(0, QfScale.buttonVisualHeight),
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
+                        borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                   ),
                   child: const Text('重新登录',
-                      style: TextStyle(fontWeight: FontWeight.w700)),
-                ),
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                )),
               ],
             ),
           ),
@@ -251,8 +289,16 @@ class _LicenseSectionState extends State<LicenseSection> {
         if (!widget.authDead)
         _card(
           child: _loading && me == null
-              ? Text('正在读取许可信息…',
-                  style: TextStyle(color: p.onCardDim, fontSize: 13.5))
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('正在读取许可信息…',
+                        style: QfType.meta12(p.textSecondary)),
+                    const SizedBox(height: 12),
+                    QfSkeletonRow(palette: p, withAvatar: false),
+                    QfSkeletonRow(palette: p, withAvatar: false),
+                  ],
+                )
               : _failed && me == null
                   ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -260,25 +306,38 @@ class _LicenseSectionState extends State<LicenseSection> {
                         // B21 返修：常驻重试入口——许可读取失败时一直显示
                         // 「许可信息读取失败，点重试」＋重试按钮（点即立即
                         // 重新拉取，不依赖 5 分钟后台重试）；成功后入口消失。
-                        Text('许可信息读取失败，点重试。',
-                            style:
-                                TextStyle(color: p.onCard, fontSize: 13.5)),
+                        // 文案逐字保留（既有测试精确匹配）；错误码另起一行。
+                        QfErrorLine(
+                            palette: p, text: '许可信息读取失败，点重试。'),
+                        Text('错误码：—。',
+                            style: QfType.meta12(p.textSecondary)),
                         const SizedBox(height: 8),
-                        OutlinedButton(
+                        QfButtonTapTarget(child: OutlinedButton(
                           onPressed: _load,
                           child: const Text('重试'),
-                        ),
+                        )),
                       ],
                     )
                   : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // C §2.4：状态 chip（6px 点＋文字，不做大绿块）。
+                        QfStatusChip(
+                          palette: p,
+                          label: me?.displayStatus ?? '—',
+                          dotColor: _statusDot(me?.displayStatus),
+                        ),
+                        const SizedBox(height: 12),
                         _kv('当前套餐', me?.planName ?? '—'),
                         _kv('账户状态', me?.displayStatus ?? '—'),
                         _kv('密钥', me?.maskedKey ?? '—'),
+                        _kv('有效期', _expiryText(me)),
                         _kv('剩余时长',
                             me != null ? licenseRemainText(me, nowMs) : '—'),
                         _kv('设备名额',
                             '电脑 ${me?.slotsPc ?? 0} / ${me?.slotsPcMax ?? 2} · 手机 ${me?.slotsMobile ?? 0} / ${me?.slotsMobileMax ?? 1}'),
+                        _kv('设备名额（合计）',
+                            '${(me?.slotsPc ?? 0) + (me?.slotsMobile ?? 0)} / ${(me?.slotsPcMax ?? 2) + (me?.slotsMobileMax ?? 1)}'),
                         _kv('网页版权益',
                             (me?.webEnabled ?? false)
                                 ? '已开通'
@@ -287,6 +346,49 @@ class _LicenseSectionState extends State<LicenseSection> {
                       ],
                     ),
         ),
+        // C §2.4：排障日志入口＋硬件指纹折叠。机器码／许可 ID／最后校验
+        // 时间／硬件指纹四项在 LicenseMe／本 widget 入参里均无数据源，
+        // 按 C 规则显示 — 并在报告列入缺数据 plumbing，不编假值。
+        // ExpansionTile（ListTile）须包在自己的 Material 里，否则
+        // Flutter 会断言 ink 被上层 DecoratedBox 底色遮住。
+        if (!widget.authDead && !_loading)
+          Material(
+            color: p.cardColor,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(QfScale.radiusMd),
+              side: BorderSide(color: p.cardBorder),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Theme(
+              data: Theme.of(context).copyWith(
+                dividerColor: Colors.transparent,
+              ),
+              child: ExpansionTile(
+                tilePadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                childrenPadding:
+                    const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                title: Text('排障与硬件信息',
+                    style: QfType.title16(p.onCard)),
+                subtitle: Text('机器码、许可 ID、最后校验、硬件指纹',
+                    style: QfType.meta12(p.textSecondary)),
+                children: [
+                  _kv('机器码', '—'),
+                  _kv('许可 ID', '—'),
+                  _kv('最后校验时间', '—'),
+                  _kv('硬件指纹', '—（默认折叠，未提供）'),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: QfButtonTapTarget(child: TextButton(
+                      onPressed: _copyDiagnostics,
+                      child: const Text('复制诊断信息'),
+                    )),
+                  ),
+                ],
+              ),
+            ),
+          ),
         // #49 分流：已激活（永久/按天）不再显示「输入密钥激活」卡。
         if (entryMode == LicenseEntryMode.inactive) ...[
         const SizedBox(height: 12),
@@ -296,10 +398,10 @@ class _LicenseSectionState extends State<LicenseSection> {
             children: [
               Text('输入密钥激活',
                   style: TextStyle(
-                      color: p.onCard, fontSize: 15, fontWeight: FontWeight.w700)),
+                      color: p.onCard, fontSize: QfScale.fs15, fontWeight: FontWeight.w600)),
               const SizedBox(height: 4),
               Text('把密钥粘贴到这里，绑定到本机（两台电脑与一部手机）。',
-                  style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+                  style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13)),
               const SizedBox(height: 10),
               _keyRow(
                 ctrl: _bindCtrl,
@@ -310,7 +412,7 @@ class _LicenseSectionState extends State<LicenseSection> {
               if (_bindOut != null) ...[
                 const SizedBox(height: 8),
                 Text(_bindOut!,
-                    style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+                    style: TextStyle(color: p.onCard, fontSize: QfScale.fs13, height: 1.5)),
               ],
             ],
           ),
@@ -323,10 +425,10 @@ class _LicenseSectionState extends State<LicenseSection> {
             children: [
               Text('领取转赠密钥',
                   style: TextStyle(
-                      color: p.onCard, fontSize: 15, fontWeight: FontWeight.w700)),
+                      color: p.onCard, fontSize: QfScale.fs15, fontWeight: FontWeight.w600)),
               const SizedBox(height: 4),
               Text('如有人向您转赠密钥：先在登录页点「查询密钥」，凭账号和密码核验后复制完整密钥串，再粘贴到这里领取。领取成功后密钥即转入您的账号，原主人一侧同时失效。',
-                  style: TextStyle(color: p.onCardDim, fontSize: 12.5, height: 1.5)),
+                  style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13, height: 1.5)),
               const SizedBox(height: 10),
               _keyRow(
                 ctrl: _claimCtrl,
@@ -337,7 +439,7 @@ class _LicenseSectionState extends State<LicenseSection> {
               if (_claimOut != null) ...[
                 const SizedBox(height: 8),
                 Text(_claimOut!,
-                    style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+                    style: TextStyle(color: p.onCard, fontSize: QfScale.fs13, height: 1.5)),
               ],
             ],
           ),
@@ -352,10 +454,10 @@ class _LicenseSectionState extends State<LicenseSection> {
             children: [
               Text('兑换KEY',
                   style: TextStyle(
-                      color: p.onCard, fontSize: 15, fontWeight: FontWeight.w700)),
+                      color: p.onCard, fontSize: QfScale.fs15, fontWeight: FontWeight.w600)),
               const SizedBox(height: 4),
               Text('在别处获得的密钥（购买转售、积分兑换等）粘贴到这里即可兑换激活；积分福利兑换的密钥会出现在下方待兑换列表中，点「一键兑换」即可激活。',
-                  style: TextStyle(color: p.onCardDim, fontSize: 12.5, height: 1.5)),
+                  style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13, height: 1.5)),
               const SizedBox(height: 10),
               _keyRow(
                 ctrl: _redeemCtrl,
@@ -366,7 +468,7 @@ class _LicenseSectionState extends State<LicenseSection> {
               if (_redeemOut != null) ...[
                 const SizedBox(height: 8),
                 Text(_redeemOut!,
-                    style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+                    style: TextStyle(color: p.onCard, fontSize: QfScale.fs13, height: 1.5)),
               ],
               ..._pendingRedeemRows(p),
             ],
@@ -374,36 +476,82 @@ class _LicenseSectionState extends State<LicenseSection> {
         ),
         ],
         const SizedBox(height: 12),
-        // 16:37 定版样式：购买密钥黑底白字；其下查询密钥蓝色无边框文字链
+        // 16:37 定版样式：购买密钥黑底白字；其下查询密钥主文字色加下划线文字链
         // #49 分流：永久已激活隐藏购买按钮；按天已激活文案改「购买叠加」
         //（onPurchase 行为不变）；查询密钥入口不受分流影响、恒显示。
         if (entryMode != LicenseEntryMode.permanent)
-        SizedBox(
-          width: double.infinity,
-          child: FilledButton(
-            onPressed: widget.onPurchase,
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF111111),
-              foregroundColor: Colors.white,
-              minimumSize: const Size(0, 48),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11)),
+        Focus(
+          // A4 剩余-3 定夺（:focus-visible 等效实现）：焦点白框平时透明
+          // 常驻 2px 间隙，聚焦才显色，布局不跳变。
+          // 第 6 项（7 项定夺）：浅色焦点描边改 #111111（白描边对浅页底
+          // 仅 1.07:1）；深色保留白描边。2px 描边＋2px 间隙不变。黑白化后
+          // 焦点环与按钮白边框同为白色系，环在按钮外沿、边框在按钮内沿，
+          // 两者不重叠（环 vs 页底：浅色 18.88:1／深色 17.00:1）。
+          onFocusChange: (v) => setState(() => _purchaseFocused = v),
+          child: Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              borderRadius:
+                  BorderRadius.circular(QfScale.radiusMd + 2),
+              border: Border.all(
+                color: _purchaseFocused
+                    ? (p.isDark
+                        ? Colors.white
+                        : const Color(0xFF000000))
+                    : Colors.transparent,
+                width: 2,
+              ),
             ),
-            child: Text(
-                entryMode == LicenseEntryMode.timed ? '购买叠加' : '购买密钥',
-                style: const TextStyle(
-                    fontSize: 15.5, fontWeight: FontWeight.w700)),
+            child: SizedBox(
+              width: double.infinity,
+              child: QfButtonTapTarget(child: FilledButton(
+                onPressed: widget.onPurchase,
+                style: FilledButton.styleFrom(
+                  // A4 剩余-3 定夺（黑白化修订）：黑底白字不变（浅色 #000000／
+                  // 深色卡片色 #111113；6 项定夺②灰阶审计合并：深色 surface3
+                  // #18181B 并入卡片色），两端统一加白色 2px 边框（黑白主色，
+                  // 旧品牌蓝边框已退役；边框绘于按钮内沿，不挤占内容）。
+                  // 白字对比度：浅色 21.00／深色 18.86。边界承载：浅色由黑底
+                  // 对卡片 #FFFFFF 21.00 承载（白边框对卡片 1.0，不示界）；
+                  // 深色按钮底与卡片同色（1.0），边界改由白边框对卡片 18.86
+                  // 承载，视觉上仍为清晰黑 pill＋白环。
+                  backgroundColor:
+                      p.isDark ? p.cardColor : const Color(0xFF000000),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(0, QfScale.buttonVisualHeight),
+                  side: const BorderSide(
+                      color: Colors.white, width: 2),
+                  shape: RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.circular(QfScale.radiusMd)),
+                ),
+                child: Text(
+                    entryMode == LicenseEntryMode.timed ? '购买叠加' : '购买密钥',
+                    style: const TextStyle(
+                        fontSize: QfScale.fs16, fontWeight: FontWeight.w600)),
+              )),
+            ),
           ),
         ),
         Center(
-          child: TextButton(
+          child: QfButtonTapTarget(child: TextButton(
             onPressed: widget.onStatusQuery,
             style: TextButton.styleFrom(
-              foregroundColor: QfPalette.brand,
-              minimumSize: const Size(0, 48),
+              foregroundColor: p.link,
+              minimumSize: const Size(0, QfScale.buttonVisualHeight),
             ),
-            child: const Text('查询密钥', style: TextStyle(fontSize: 14.5)),
-          ),
+            // S-040：下划线色与登录桥注入行取同一 token p.linkUnderline
+            // （浅 #A1A1AA／深 #52525B）。旧口径并入 onCardDim 与登录桥
+            // 正好相反（onCardDim 浅 #52525B／深 #A1A1AA），同一条
+            // “查询密钥”文字链两处下划线色对调；S-040 以 linkUnderline
+            // 为准统一，旧注释口径随之作废。
+            child: Text('查询密钥',
+                style: TextStyle(
+                    fontSize: QfScale.fs15,
+                    decoration: TextDecoration.underline,
+                    decorationColor: p.linkUnderline,
+                    decorationThickness: 1)),
+          )),
         ),
       ],
     );
@@ -418,7 +566,7 @@ class _LicenseSectionState extends State<LicenseSection> {
       const SizedBox(height: 12),
       Text('待兑换密钥',
           style: TextStyle(
-              color: p.onCard, fontSize: 13.5, fontWeight: FontWeight.w700)),
+              color: p.onCard, fontSize: QfScale.fs14, fontWeight: FontWeight.w600)),
       const SizedBox(height: 6),
       ...pend.map((k) => Padding(
             padding: const EdgeInsets.only(top: 6),
@@ -427,24 +575,24 @@ class _LicenseSectionState extends State<LicenseSection> {
                 Expanded(
                   child: Text(
                       '${k.planName} · ${k.masked}${k.sourceLabel.isNotEmpty ? '（${k.sourceLabel}）' : ''}',
-                      style: TextStyle(color: p.onCard, fontSize: 13)),
+                      style: TextStyle(color: p.onCard, fontSize: QfScale.fs13)),
                 ),
                 const SizedBox(width: 8),
-                FilledButton(
+                QfButtonTapTarget(child: FilledButton(
                   onPressed:
                       _redeemingId == null ? () => _redeemById(k) : null,
                   style: FilledButton.styleFrom(
-                    backgroundColor: QfPalette.brand,
-                    minimumSize: const Size(0, 48),
+                    backgroundColor: p.brand,
+                    minimumSize: const Size(0, QfScale.buttonVisualHeight),
                     padding: const EdgeInsets.symmetric(horizontal: 13),
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(9)),
+                        borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                   ),
                   child: Text(
                       _redeemingId == k.keyId ? '处理中…' : '一键兑换',
                       style: const TextStyle(
-                          fontSize: 13, fontWeight: FontWeight.w700)),
-                ),
+                          fontSize: QfScale.fs13, fontWeight: FontWeight.w600)),
+                )),
               ],
             ),
           )),
@@ -460,7 +608,8 @@ class _LicenseSectionState extends State<LicenseSection> {
     return Row(
       children: [
         Expanded(
-          child: TextField(
+          child: QfTextFieldTapTarget(builder: (node) => TextField(
+            focusNode: node,
             controller: ctrl,
             maxLength: 40,
             autocorrect: false,
@@ -470,24 +619,24 @@ class _LicenseSectionState extends State<LicenseSection> {
               hintText: kClaimInputLabel,
               counterText: '',
               border:
-                  OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  OutlineInputBorder(borderRadius: BorderRadius.circular(QfScale.radiusMd)),
               contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             ),
-          ),
+          )),
         ),
         const SizedBox(width: 10),
-        FilledButton(
+        QfButtonTapTarget(child: FilledButton(
           onPressed: busy ? null : onSubmit,
           style: FilledButton.styleFrom(
-            backgroundColor: QfPalette.brand,
-            minimumSize: const Size(0, 48),
+            backgroundColor: widget.palette.brand,
+            minimumSize: const Size(0, QfScale.buttonVisualHeight),
             shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusMd)),
           ),
           child: Text(busy ? '处理中…' : btnLabel,
-              style: const TextStyle(fontWeight: FontWeight.w700)),
-        ),
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+        )),
       ],
     );
   }
@@ -501,12 +650,12 @@ class _LicenseSectionState extends State<LicenseSection> {
         children: [
           SizedBox(
             width: 76,
-            child: Text(k, style: TextStyle(color: p.onCardDim, fontSize: 13)),
+            child: Text(k, style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13)),
           ),
           Expanded(
             child: Text(v,
-                style: TextStyle(
-                    color: p.onCard, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                style: QfType.tabular(
+                    TextStyle(color: p.onCard, fontSize: QfScale.fs14, fontWeight: FontWeight.w600))),
           ),
         ],
       ),
@@ -518,7 +667,7 @@ class _LicenseSectionState extends State<LicenseSection> {
     return Container(
       decoration: BoxDecoration(
         color: p.cardColor,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(QfScale.radiusMd),
         border: Border.all(color: p.cardBorder),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),

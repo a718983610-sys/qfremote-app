@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- QF 家族深蓝启动底 + 居中自家标（Flutter 首屏接上后由应用内启动画面接管） -->
+<!-- QF 纯白启动底 + 居中自家标（Flutter 首屏接上后由应用内启动画面接管） -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#0E2A52" />
+            <solid android:color="#FFFFFF" />
         </shape>
     </item>
     <item>

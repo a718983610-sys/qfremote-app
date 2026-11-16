@@ -98,7 +98,11 @@ int ush_json_get_string(const char *json, const char *key, char *out, size_t out
                 } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
                     return 0; /* 孤立低代理 */
                 }
-                char tmp[4];
+                /* fanalyzer 曾报 tmp 未初始化使用，实为误报：utf8_encode
+                 * 对任何合法码点（cp ≤ 0x10FFFF，已在上行由代理对逻辑
+                 * 保证）都会写满 w 字节；此处仍显式零初始化以消除警告，
+                 * 行为不变。 */
+                char tmp[4] = { 0 };
                 int w = utf8_encode(cp, tmp);
                 if (n + (size_t)w >= out_size) return 0;
                 memcpy(out + n, tmp, (size_t)w);
@@ -120,6 +124,17 @@ int ush_json_get_long(const char *json, const char *key, long *out) {
     if (!((*p >= '0' && *p <= '9') || *p == '-')) return 0;
     char *end = NULL;
     long v = strtol(p, &end, 10);
+    if (end == p) return 0;
+    *out = v;
+    return 1;
+}
+
+int ush_json_get_llong(const char *json, const char *key, long long *out) {
+    const char *p = find_key_value(json, key);
+    if (!p) return 0;
+    if (!((*p >= '0' && *p <= '9') || *p == '-')) return 0;
+    char *end = NULL;
+    long long v = strtoll(p, &end, 10);
     if (end == p) return 0;
     *out = v;
     return 1;
@@ -262,6 +277,10 @@ int ush_parse_request(const char *text, ush_request_t *out) {
     else if (strcmp(cmd, "ui.input") == 0) out->cmd = USH_CMD_INPUT;
     else if (strcmp(cmd, "ui.snapshot") == 0) out->cmd = USH_CMD_SNAPSHOT;
     else if (strcmp(cmd, "ui.tree") == 0) out->cmd = USH_CMD_TREE;
+    else if (strcmp(cmd, "selfbind.deliver-ticket") == 0) out->cmd = USH_CMD_SELFBIND;
+    else if (strcmp(cmd, "selfbind.clear-credential") == 0) out->cmd = USH_CMD_SELFBIND_CLEAR;
+    else if (strcmp(cmd, "selfbind.status") == 0) out->cmd = USH_CMD_SELFBIND_STATUS;
+    else if (strcmp(cmd, "selfbind.renew") == 0) out->cmd = USH_CMD_SELFBIND_RENEW;
     else { strcpy(out->error, USH_ERR_UNKNOWN_COMMAND); return 0; }
 
     /* params 缺失时视为空对象；params 不是对象时拒绝 */

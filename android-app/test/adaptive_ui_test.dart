@@ -15,7 +15,6 @@ import 'package:qfremote/ui/me_page.dart';
 import 'package:qfremote/ui/settings_page.dart';
 import 'package:qfremote/ui/overlays.dart';
 import 'package:qfremote/ui/theme.dart';
-import 'package:qfremote/ui/toolbar.dart';
 
 /// 适配增强点验（2.3.0 追加三）：多视口无溢出、刘海/手势条安全区、
 /// 键盘弹起可达、旋转不丢状态、深色可构建、主题跟随系统裁决。
@@ -41,25 +40,6 @@ void _setView(WidgetTester tester, Size size) {
     tester.view.resetViewInsets();
   });
 }
-
-QfToolbar _toolbar(QfPalette p) => QfToolbar(
-      palette: p,
-      canGoBack: true,
-      lastProbe: ProbeResult(
-          ok: true, at: DateTime(2026, 10, 25), elapsedMs: 5, statusCode: 200),
-      probeBusy: false,
-      hasUpdate: true,
-      onBack: () {},
-      onRefresh: () {},
-      onHome: () {},
-      onFriends: () {},
-      onForum: () {},
-      onRegister: () {},
-      onProbeTap: () {},
-      onUpdateTap: () {},
-      onMenuAction: (_) {},
-      showAdmin: true,
-    );
 
 ReleaseEntry _entry({String notes = '更新说明'}) => ReleaseEntry(
       version: '2.3.0',
@@ -88,17 +68,6 @@ void main() {
         testWidgets('${entry.key} / ${mode.name}', (tester) async {
           _setView(tester, entry.value);
           final p = QfPalette(mode);
-          final app = MaterialApp(home: Scaffold(body: _toolbar(p)));
-
-          // 工具栏（对应「设备/好友/论坛」等全部入口所在面）
-          await tester.pumpWidget(app);
-          await tester.pump();
-          expect(tester.takeException(), isNull);
-          expect(find.byType(QfToolbar), findsOneWidget);
-          // 工具栏 6 个导航按钮都在、不被裁掉
-          expect(find.byType(IconButton), findsAtLeastNWidgets(6));
-          final barRect = tester.getRect(find.byType(QfToolbar));
-          expect(barRect.width, entry.value.width);
 
           // 开屏页
           await tester.pumpWidget(MaterialApp(

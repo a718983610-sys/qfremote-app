@@ -1,0 +1,95 @@
+name: 发版全值比对
+
+# S-098/S-103：发布 job 全值比对——任一值对不上即失败关闭，不许发版。
+# 触发：手动（workflow_dispatch，输 tag）或 GitHub Release 发布时自动跑。
+# 比对链：
+#   1. tools/check-release-version.js：version.json 与各端版本源全值一致；
+#   2. tag 名须为 v<version.json version>；
+#   3. 从 GitHub Release 下载正式 exe/apk 产物；
+#   4. make-release-json.js --check --require-signature --expect-key-id：
+#      逐项比对 release.json 与实际产物的 version/size/sha256/url 文件名/
+#      minUsable/android.minUsable/interop.minVersion，并验 Ed25519 签名；
+#   5. ops/drift-check.sh manifest：生成本次发版 artifact manifest 存档。
+# 注意：本 job 只比对、不签名、不部署、不翻牌。签名与翻牌由发版执行线
+# 在发版窗口另行操作（make-release-json.js --sign-key，私钥永不入库）。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要比对的 GitHub Release tag（形如 v3.0.0）'
+        required: true
+      allow_min_usable_below_version:
+        description: 'minUsable 低于 version 时是否放行（默认否；须发版时显式勾选）'
+        type: boolean
+        default: false
+  release:
+    types: [published]
+
+# S-101：最小权限。actions: write 是上传比对 manifest 存档所必需的最小写权限。
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # S-102：正式发布走独立 protected environment，审批规则由 GitHub 管理员配。
+    environment: production
+    steps:
+      # S-101：第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: 版本单一来源全值校验
+        run: |
+          node tools/check-release-version.js
+          echo "APP_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")" >> "$GITHUB_ENV"
+
+      - name: 解析并核对 tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="${INPUT_TAG:-$EVENT_TAG}"
+          [ -n "$TAG" ] || { echo "未给 tag（手动触发须输 tag）" >&2; exit 1; }
+          [ "$TAG" = "v$APP_VERSION" ] || { echo "tag 为 $TAG，期望 v$APP_VERSION" >&2; exit 1; }
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "比对 tag: $TAG（期望版本 $APP_VERSION）"
+
+      - name: 下载 Release 正式产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-assets
+          gh release download "$TAG" --repo ${{ github.repository }} \
+            -p "QFRemote-Setup-v$APP_VERSION.exe" \
+            -p "QFRemote-v$APP_VERSION.apk" \
+            -D release-assets
+          ls -la release-assets/
+
+      - name: 全值比对 release.json 与实际产物（含签名验签）
+        run: |
+          ARGS="--check server/meshcentral/public/release.json --require-signature --expect-key-id release-1"
+          if [ "${{ inputs.allow_min_usable_below_version }}" = "true" ]; then
+            ARGS="$ARGS --allow-min-usable"
+          fi
+          # shellcheck disable=SC2086
+          node server/ext/make-release-json.js $ARGS \
+            "release-assets/QFRemote-Setup-v$APP_VERSION.exe" \
+            "release-assets/QFRemote-v$APP_VERSION.apk"
+
+      - name: 生成本次发版 artifact manifest
+        run: |
+          bash ops/drift-check.sh manifest \
+            --version "$APP_VERSION" \
+            --exe "release-assets/QFRemote-Setup-v$APP_VERSION.exe" \
+            --apk "release-assets/QFRemote-v$APP_VERSION.apk" \
+            --out release-manifest.json
+          cat release-manifest.json
+
+      - name: 上传比对 manifest 存档
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-manifest-${{ env.TAG }}
+          path: release-manifest.json
+          if-no-files-found: error

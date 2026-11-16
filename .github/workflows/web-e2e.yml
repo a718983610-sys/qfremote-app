@@ -1,0 +1,59 @@
+name: Web E2E
+
+# QFRemote 网页端：门禁（lint＋单测）＋ Playwright 全套 E2E。
+# S-071：push / PR 改动 server/webapp/** 时自动跑；手动亦可触发。
+# 覆盖映射（tests/*.spec.mjs，2026-11-15）：
+#  登录/退出/恢复 split-smoke、boot-data、w02-w10（W-04 boot）
+#  设备列表 split-smoke（路由到设备页渲染）
+#  连接/断线重连 l5-clients（RC-07 降级/选址）、w02-w10（RC-04 接线存在性）
+#  会话工具条 deep-check（DC-04 交互态）、components（画廊）
+#  好友/聊天 压力脚本 server/friends/chat/stress-inbox-test.js（服务端＋假 MC）
+#  上传下载 l5-clients（RC-08 上传、RC-10 回放）
+#  权限拒绝 error-states（登录失败错误面；REJECT 遮罩待真机 MeshCentral 窗口）
+#  错误 toast error-states（err toast 渲染/点击关闭/4 秒自动消失）
+#  无障碍 axe（登录页＋壳首页浅色）、a11y（键盘验收，S-076）
+#  动效 reduced-motion（prefers-reduced-motion）
+# 注意：本工作流不启动真实 MeshCentral、不连生产；服务端端点一律 page.route 桩。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, lea-local-agent]
+    paths:
+      - 'server/webapp/**'
+      - '.github/workflows/web-e2e.yml'
+  pull_request:
+    branches: [lea-local-agent, main]
+    paths:
+      - 'server/webapp/**'
+      - '.github/workflows/web-e2e.yml'
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  web-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/webapp/tests/package-lock.json
+      - name: 网页门禁（lint ×4＋单测）
+        run: cd server/webapp/tests && npm ci && node run.mjs
+      - name: 安装 Playwright Chromium
+        run: cd server/webapp/tests && npx playwright install --with-deps chromium
+      - name: Playwright 全套（desktop Chromium＋mobile viewport）
+        run: cd server/webapp/tests && npx playwright test
+      - name: 上传失败截图与报告
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: web-e2e-report
+          path: server/webapp/tests/test-results/
+          retention-days: 7

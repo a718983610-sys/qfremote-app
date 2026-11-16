@@ -14,8 +14,9 @@
 *   reason "test-only-unsigned-accepted"。生产构建绝不启用该宏。
 * * 签名编码接受标准 base64 与 base64url（服务端签发用标准 base64；
 *   格式合理但验签失败时 reason 为 "bad-signature"）。
-* * 规范串见 ~/workspace/qfremote/local-agent/ds-review-stage2/
-*   CANONICAL-SIGNING-V1.md（v1 定稿）；信封与票据用同一服务端密钥。
+* * 规范串：信封见 windows/lea/CANONICAL-SIGNING-V2.md（v2 定稿），
+*   票据见 ds-review-stage2/CANONICAL-SIGNING-V1.md §3（v1）；
+*   信封与票据用同一服务端密钥。
 *
 * 红线：本层不存、不记、不输出任何密钥明文；日志只记 key_id 与前缀片段。
 */
@@ -64,6 +65,11 @@ int lea_sig_format_ok(const char *signature);
 * 32 字节；未定义该宏时返回 NULL = 未配置 = fail-closed）。
 * 公钥本身公开，不涉密。 */
 const char *lea_server_pubkey_hex(void);
+
+/* RC-01 服务端公钥指纹（与 JS signingPublicKeyFingerprint 同定义）：
+ * 32 字节公钥 → 标准 base64（44 字符，含 '=' padding）→ SHA-256 →
+ * 前 16 位小写 hex。out[17]（16 hex＋\0）。无编译期公钥即返回 0（out 置空）。 */
+int lea_server_pubkey_fingerprint(char out[17]);
 
 /* 验签信封签名。canonical 为待签名的规范串（调用方按服务端约定构造）。
 * 返回 1=验签通过（reason 置 "ok"）；0=拒绝，reason 写明原因：

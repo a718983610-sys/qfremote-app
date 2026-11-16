@@ -17,16 +17,38 @@
  *      避开页面切换瞬间的残影。
  *   4. 点击前用同一套严格条件在页面里重新找一遍按钮，找不到就不点。
  *
- * 重试策略（不设次数上限、永不放弃、但不疯狂刷屏）：
+ * 重试策略（RC-04 客户端层，3.0.0；FreeRDP 照抄）：
  *   - 轮询间隔 pollMs（默认 4 秒）；
  *   - 每次点击后进入冷却，冷却时长从 backoffStartMs（默认 5 秒）起
  *     每次翻倍，封顶 backoffMaxMs（默认 30 秒）：5s -> 10s -> 20s -> 30s -> 30s ...
+ *   - 最多重试 maxAttempts 次（默认 5 次，见 reconnect-policy.js）：
+ *     到顶即停手并报 'reconnect-failed'（带已试次数），等用户手动点
+ *     连接；看护继续轮询，页面恢复 'ok' 后计数清零，下一轮断开重计；
+ *   - 凭据类失败立即停：重连中一旦落到登录页（state==='login'），
+ *     视为凭据/授权类失败，立即停手并报 'reconnect-stopped'，不刷屏；
+ *   - 用户取消立即停：cancel() 后本轮断开不再自动点，报
+ *     'reconnect-cancelled'；工具栏状态行显示“第 N 次 / 共 5 次”与
+ *     取消按钮（见 main.js qf-conn-status 扩展 payload）。
  *   - 一旦检测恢复正常（'ok'），退避与确认计数全部清零；
  *   - 全程不弹任何对话框，状态只通过 onStatus 回调交给工具栏显示一行小字。
+ *
+ * 票据恢复层（RC-04 票据层，3.0.0；规范 RC-04-RECONNECT-TICKET-SPEC.md §5）：
+ *   - 可选 onBeforeReconnect({ attempt, maxAttempts })：每次点击“连接”
+ *     前调用（await），由调用方凭票据先试一次 resume；返回
+ *     { stop: true, code } 时本轮立即停手、报 'reconnect-stopped'
+ *    （附 reason=code，不再点按钮、不刷屏）；返回其它值或抛错时
+ *     照常点击（票据层是加法：无票据／网络失败／服务端未实现端点
+ *     时不阻塞原有点按钮重连）。钩子未传时行为与旧版完全一致。
+ *   - 可选 onRecovered()：页面恢复 'ok' 且本轮曾进入重连时调用一次，
+ *     调用方据此 Toast“已恢复连接”并为同一会话续领新票据。
+ *   - 重试次数／退避／到顶仍由本模块 + reconnect-policy.js 管，票据层
+ *     不自己数次数、不自己退避。
  *
  * 与整页加载失败的关系：整页都加载不出来时走 main.js 的断线友好页
  * （did-fail-load），不归本模块管；本模块只处理「页面在、会话断」。
  */
+
+const reconnectPolicy = require('./reconnect-policy');
 
 // 页面内状态检测脚本：返回 'login' | 'disconnected' | 'partial' | 'ok'
 const DETECT_JS = `(function () {
@@ -85,6 +107,8 @@ function createWatchdog(getWebContents, options) {
     confirmScans: 2,
     backoffStartMs: 5000,
     backoffMaxMs: 30000,
+    maxAttempts: reconnectPolicy.DEFAULT_MAX_ATTEMPTS,
+    onAttempt: () => {},
     enabled: () => true,
     onStatus: () => {},
     log: () => {}
@@ -96,6 +120,13 @@ function createWatchdog(getWebContents, options) {
   let backoffMs = opts.backoffStartMs;
   let nextAttemptAt = 0;
   let reconnecting = false;
+  let attemptCount = 0; // 本轮断开已试次数（RC-04：到顶即停）
+  let episodeStopped = false; // 本轮已停手（到顶/凭据类/用户取消）
+  let userCancelled = false;
+
+  function reportAttempt() {
+    try { opts.onAttempt({ attempt: attemptCount, maxAttempts: opts.maxAttempts, reconnecting }); } catch (e) { /* ignore */ }
+  }
 
   function schedule(ms) {
     if (stopped) return;
@@ -127,15 +158,51 @@ function createWatchdog(getWebContents, options) {
     if (state === 'disconnected') {
       confirmCount++;
       const now = Date.now();
-      if (confirmCount >= opts.confirmScans && now >= nextAttemptAt) {
+      if (confirmCount >= opts.confirmScans && now >= nextAttemptAt && !episodeStopped) {
+        // RC-04：先问策略能不能再试（凭据类/到顶/取消一律停）。
+        const decision = reconnectPolicy.decide(attemptCount, 'network', {
+          maxAttempts: opts.maxAttempts,
+          minIntervalMs: opts.backoffStartMs,
+          backoffMaxMs: opts.backoffMaxMs
+        });
+        if (!decision.retry) {
+          episodeStopped = true;
+          setReconnecting(false);
+          try { opts.onStatus('reconnect-failed'); } catch (e) { /* ignore */ }
+          opts.log('reconnect max-attempts reached (' + attemptCount + '/' + opts.maxAttempts + ')');
+          confirmCount = 0;
+          schedule(opts.pollMs);
+          return;
+        }
         setReconnecting(true);
+        // RC-04 票据层：点击前先凭票据试一次 resume。钩子回报 stop
+        // （凭据类：吊销/过期/重放/换绑/授权撤销）即本轮立即停手、
+        // 报 reconnect-stopped（附 reason=错误码），不再点按钮；
+        // 其余回报（成功／无票据／网络失败／端点未实现）或钩子抛错
+        // 时照常点击——票据层不阻塞原有点按钮重连。
+        if (typeof opts.onBeforeReconnect === 'function') {
+          let verdict = null;
+          try { verdict = await opts.onBeforeReconnect({ attempt: attemptCount + 1, maxAttempts: opts.maxAttempts }); } catch (e) { verdict = null; }
+          if (stopped) return;
+          if (verdict && verdict.stop) {
+            episodeStopped = true;
+            setReconnecting(false);
+            try { opts.onStatus('reconnect-stopped', { reason: verdict.code || verdict.reason || 'credential' }); } catch (e) { /* ignore */ }
+            opts.log('reconnect stopped: ticket ' + (verdict.code || verdict.reason || 'credential'));
+            confirmCount = 0;
+            schedule(opts.pollMs);
+            return;
+          }
+        }
         let clicked = false;
         try { clicked = await wc.executeJavaScript(CLICK_JS, true); } catch (e) { clicked = false; }
         opts.log('reconnect click -> ' + clicked);
         if (clicked && typeof opts.onReconnect === 'function') {
           try { opts.onReconnect(); } catch (e) { /* ignore */ }
         }
-        nextAttemptAt = Date.now() + backoffMs;
+        attemptCount++;
+        reportAttempt();
+        nextAttemptAt = Date.now() + decision.delayMs;
         backoffMs = Math.min(backoffMs * 2, opts.backoffMaxMs);
         confirmCount = 0;
       }
@@ -144,22 +211,47 @@ function createWatchdog(getWebContents, options) {
     }
 
     if (state === 'ok') {
-      // 恢复正常：退避清零，工具栏状态行消失
+      // 恢复正常：退避、确认计数、重试计数全部清零
+      const wasReconnecting = reconnecting || attemptCount > 0;
       confirmCount = 0;
       backoffMs = opts.backoffStartMs;
       nextAttemptAt = 0;
+      attemptCount = 0;
+      episodeStopped = false;
+      userCancelled = false;
       setReconnecting(false);
+      // RC-04 票据层：本轮曾进入重连才报恢复（调用方 Toast＋续领新票据）。
+      if (wasReconnecting && typeof opts.onRecovered === 'function') {
+        try { opts.onRecovered(); } catch (e) { /* ignore */ }
+      }
     } else {
       // login / partial / unknown：不动作，只把断开确认计数清掉，避免跨状态攒确认数
       confirmCount = 0;
+      // RC-04：重连中落到登录页 = 凭据/授权类失败，立即停手，不刷屏。
+      if (state === 'login' && (reconnecting || attemptCount > 0) && !episodeStopped) {
+        episodeStopped = true;
+        setReconnecting(false);
+        try { opts.onStatus('reconnect-stopped'); } catch (e) { /* ignore */ }
+        opts.log('reconnect stopped: landed on login page (credential)');
+      }
     }
     schedule(opts.pollMs);
+  }
+
+  function cancel() {
+    // 用户取消：本轮断开不再自动点。下一轮新断开（ok 后再断）重计。
+    userCancelled = true;
+    episodeStopped = true;
+    setReconnecting(false);
+    try { opts.onStatus('reconnect-cancelled'); } catch (e) { /* ignore */ }
   }
 
   return {
     start() { if (!stopped && !timer) schedule(800); },
     stop() { stopped = true; clearTimeout(timer); timer = null; },
-    isReconnecting() { return reconnecting; }
+    isReconnecting() { return reconnecting; },
+    cancel,
+    getAttemptInfo() { return { attempt: attemptCount, maxAttempts: opts.maxAttempts, stopped: episodeStopped, cancelled: userCancelled }; }
   };
 }
 

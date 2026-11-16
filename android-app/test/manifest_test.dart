@@ -1,8 +1,51 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfremote/core/manifest.dart';
+import 'package:qfremote/core/release_signature.dart';
 
 const _sha = 'ffce5da483d2bd7ab99f32f7d69903c16e5d899275eed07e845a7833a5fbf351';
 const _origin = 'https://app.qfremote.top';
+
+/// F-05 夹具签名（TEST ONLY 测试密钥对，与
+/// test/release_signature_test.dart 同一对，永不用于生产）：
+/// 2026-11-16 r11③ 垫片已删后，ReleaseManifest.parse 要求清单带有效
+/// 签名才返回；本文件测的是“结构解析”（版本/minUsable/相对 url），
+/// 不是签名本身，故 4 个成功路径用例的夹具改走测试密钥签名，
+/// 原断言一字未动；拒绝路径用例仍用无签名体（结构错先于签名门触发）。
+const String _testSeedHex =
+    '0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210';
+const String _testPubSpkiB64 =
+    'MCowBQYDK2VwAyEAxQyzrpVpR6jeGRNbW+JoX/NIr8Y/w0qDesoSvFwfViU=';
+
+List<int> _hex(String s) {
+  final out = <int>[];
+  for (var i = 0; i < s.length; i += 2) {
+    out.add(int.parse(s.substring(i, i + 2), radix: 16));
+  }
+  return out;
+}
+
+/// 给无签名清单体补上测试密钥签名（签规范串，与服务端流程同款）。
+String _signedBody(String body) {
+  final doc = jsonDecode(body) as Map<String, dynamic>;
+  final sig = ed25519Sign(
+    seed: _hex(_testSeedHex),
+    message: utf8.encode(canonicalReleaseJson(doc)),
+  );
+  doc['signature'] = <String, dynamic>{
+    'alg': 'ed25519',
+    'key_id': 'release-1',
+    'sig': base64Url.encode(sig).replaceAll('=', ''),
+  };
+  return jsonEncode(doc);
+}
+
+ReleaseManifest _parseSigned(String body) => ReleaseManifest.parse(
+      _signedBody(body),
+      trustedOrigin: _origin,
+      verifyPublicKeyB64: _testPubSpkiB64,
+    );
 
 void main() {
   group('ReleaseManifest.parse', () {
@@ -22,7 +65,7 @@ void main() {
     "size": 12345678
   }
 }''';
-      final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
+      final m = _parseSigned(body);
       expect(m.windows?.version, '1.0.3');
       expect(m.android?.version, '1.0.4');
       expect(m.android?.size, 12345678);
@@ -47,7 +90,7 @@ void main() {
     "minUsable": "bogus"
   }
 }''';
-      final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
+      final m = _parseSigned(body);
       expect(m.windows?.minUsable, '2.4.2');
       expect(m.android?.minUsable, isNull);
     });
@@ -85,7 +128,7 @@ void main() {
 
     test('没有 android 段时 android 为 null', () {
       const body = '{"version":"1.0.3","notes":"","url":"$_origin/x.exe","sha256":"$_sha","size":1}';
-      final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
+      final m = _parseSigned(body);
       expect(m.android, isNull);
       expect(m.windows?.version, '1.0.3');
     });
@@ -107,7 +150,7 @@ void main() {
 
     test('相对 url 按清单地址解析且仍受可信校验', () {
       const body = '{"version":"1.0.3","notes":"","url":"/x.exe","sha256":"$_sha","size":1}';
-      final m = ReleaseManifest.parse(body, trustedOrigin: _origin);
+      final m = _parseSigned(body);
       expect(m.windows?.url, '$_origin/x.exe');
     });
   });

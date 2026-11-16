@@ -20,7 +20,7 @@ const SVC_HANDSHAKE_MS = 5000;
 const SVC_BACKOFF_MIN_MS = 1000;
 const SVC_BACKOFF_MAX_MS = 30000;
 const SVC_BACKOFF_AUTH_MAX_MS = 60000;
-const DEFAULT_RUN_TIMEOUT_MS = 5000; // 下发 5s（DESIGN §3）
+const DEFAULT_RUN_TIMEOUT_MS = 5000; // 未传 timeout 时的回退默认值；B1 下发实际传 8000（见 lea-core DISPATCH_TIMEOUT_MS），此处不封顶。
 const BRIDGE_CFG_PATH = '/opt/qfremote-lock/bridge-config.json';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -233,11 +233,26 @@ function createLeaChannel(opts) {
       return null;
     } catch (e) { return null; } // 通道不可达 → 未知（调用方 fail-closed）
   }
+  // 删 MeshCentral 节点记录（卸载注销用）。
+  // 上游依据：MeshCentral master meshuser.js `case 'removedevices'`——
+  // control.ashx 消息 { action:'removedevices', nodeids:[...] }，回包
+  // { action:'removedevices', responseid, result:'ok'|错误串 }；服务端
+  // 删节点本体＋ if/nt/lc/si/al 附属记录、全部事件与用户链接，并断开
+  // agent 连接；调用账号须对该节点有 MESHRIGHT_UNINSTALL（0x8000）权限。
+  // nodeids 传裸 id：服务端按 `node/<domain>/<bare>` 补全（默认域 id 为
+  // 空串，即 node//<bare>，与本产品全形一致）。节点已不在／通道不可达
+  // 时 svcCall 抛错或回错误串，由调用方按 best-effort 处理（注销不因此
+  // 失败，见 lea-routes handleDeregister）。
+  async function deleteNode(nodeId, timeoutMs) {
+    const r = await svcCall({ action: 'removedevices', nodeids: [bareNodeId(nodeId)] }, timeoutMs || 5000);
+    const result = (r && typeof r.result === 'string') ? r.result : '';
+    return { ok: result === 'ok', result };
+  }
   function status() {
     return { configured: !!loadCfg(), ready: !!(svc.ready && svc.ws), failStreak: svc.failStreak };
   }
 
-  return { runCommand, listNodes, nodeOnline, status, svcCall, bareNodeId, nodeMatchesId, _test: { svc, loadCfg, mcUrlIsLoopback } };
+  return { runCommand, listNodes, nodeOnline, deleteNode, status, svcCall, bareNodeId, nodeMatchesId, _test: { svc, loadCfg, mcUrlIsLoopback } };
 }
 
 module.exports = { createLeaChannel, bareNodeId, nodeMatchesId };

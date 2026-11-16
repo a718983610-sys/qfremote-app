@@ -17,6 +17,19 @@
  */
 const C = window.QFChatCrypto;
 const $ = (id) => document.getElementById(id);
+/* S-081（2026-11-15）：提示收敛为 toast——本页 4 处原生 alert 全改于此；
+ * 与控制台 qf-ui.js toast 同口径（最多 3 条、4 秒、点按关闭、role=status）。
+ * 文本走 textContent，不拼 HTML。confirm（撤回／删对话的二次确认）保留。 */
+function toast(msg, type) {
+  const box = $('toasts'); if (!box) return;
+  while (box.children.length >= 3) box.removeChild(box.firstChild);
+  const t = document.createElement('div');
+  t.className = 'toast ' + (type || 'info'); t.textContent = msg;
+  t.setAttribute('role', 'status');
+  t.onclick = () => { t.classList.add('leaving'); setTimeout(() => t.remove(), 120); };
+  box.appendChild(t);
+  setTimeout(() => { t.classList.add('leaving'); setTimeout(() => t.remove(), 120); }, 4000);
+}
 const state = {
   token: '', user: '', password: '',
   priv: '', vaultKey: '', pubCache: {}, convKeyCache: {},
@@ -437,10 +450,12 @@ async function loadSupportFaq() {
   // 仅为兼容既有调用点，不再请求、不再渲染任何静态问答。
 }
 // 品牌占位头像（2.3.2 统一档案，DESIGN §三 A9／§四 C3 定版）：深蓝圆盘
-// #0B2B5B＋白色断环＋橙点 #FF8A1E，几何照 assets/avatar-placeholder.svg
+// #4B4B55＋白色断环＋橙点 #FF8A1E，几何照 assets/avatar-placeholder.svg
+// 2026-11-15 P0-2 遗留：占位圆盘由深蓝改为中性灰，与 --deep 新值一致；
+// 控制台共用文件 server/webapp/assets/avatar-placeholder.svg 仍是旧蓝，本轮不动（另议）。
 //（与安卓 QfAvatarPlaceholder 同参）。无真头像、或真头像加载失败时一律
 // 用它，不再用哈希色＋账号名首字。身份键仍是账号名，displayName 只作显示。
-const AV_PLACEHOLDER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="#0B2B5B"/><path d="M 68.65 73.50 A 30 30 0 1 1 78.81 41.62" fill="none" stroke="#FFFFFF" stroke-width="7.5" stroke-linecap="round"/><circle cx="73.4" cy="26.6" r="8.5" fill="#FF8A1E"/></svg>';
+const AV_PLACEHOLDER_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="#4B4B55"/><path d="M 68.65 73.50 A 30 30 0 1 1 78.81 41.62" fill="none" stroke="#FFFFFF" stroke-width="7.5" stroke-linecap="round"/><circle cx="73.4" cy="26.6" r="8.5" fill="#FF8A1E"/></svg>';
 const AV_PLACEHOLDER_URI = 'data:image/svg+xml;utf8,' + encodeURIComponent(AV_PLACEHOLDER_SVG);
 function qfAvatarImgError(img) { img.onerror = null; img.src = AV_PLACEHOLDER_URI; }
 function peerViewOf(name) { return (state._peers || []).find(x => x.name === name) || null; }
@@ -540,10 +555,22 @@ async function convKey(withUser) {
 
 // ---------- 历史（保险库） ----------
 async function loadHistory() {
-  const r = await api('GET', '/chat/api/vault');
+  /* S-051：保险库分页拉取（每页 100 条，cursor 循环直至 hasMore=false）；
+   * 不传 limit 的全量拉取在记录多时会超限，traces 取首页即可。 */
+  const entries = [];
+  let traces = null;
+  let cursor = '';
+  let guard = 0;
+  while (guard++ < 50) {
+    const r = await api('GET', '/chat/api/vault?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    (r.entries || []).forEach(e => entries.push(e));
+    if (traces === null) traces = r.traces || {};
+    if (!r.hasMore || !r.nextCursor) break;
+    cursor = r.nextCursor;
+  }
   state.history = {};
-  state.traces = r.traces || {};
-  r.entries.forEach(e => {
+  state.traces = traces || {};
+  entries.forEach(e => {
     const text = C.openVault(state.vaultKey, e.nonce, e.cipher);
     if (text !== null) state.history[e.msgId] = { id: e.msgId, with: e.with, dir: e.dir, at: e.at, text };
   });
@@ -609,6 +636,8 @@ function appendTraceDom(t) {
 
 function renderMessages() {
   const box = $('msgs');
+  /* S-050：重绘前记是否贴底，仅贴底时重绘后滚底（打开会话时框为空即贴底，照常见底）。 */
+  const atBottom = isAtBottom(box);
   box.innerHTML = '';
   state.rendered = new Set();
   const msgs = Object.values(state.history).filter(m => m.with === state.currentWith)
@@ -617,7 +646,12 @@ function renderMessages() {
   msgs.concat(trs).sort((a, b) => a.at - b.at).forEach(item => {
     if (item.msg) appendMessageDom(item.msg); else appendTraceDom(item.trace);
   });
-  box.scrollTop = box.scrollHeight;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+/* S-050：贴底判定（24px 容差，抵渲染取整与字体差异）。 */
+function isAtBottom(box) {
+  if (!box) return true;
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
 }
 function appendMessageDom(m) {
   if (state.rendered.has(m.id)) return;
@@ -631,8 +665,22 @@ function appendMessageDom(m) {
   div.innerHTML = '<div>' + esc(m.text) + '</div><div class="meta"><span>' + fmtTime(m.at) + '</span>' + act + '</div>';
   const actEl = div.querySelector('[data-recall]');
   if (actEl) actEl.onclick = () => recallMessage(m.id);
+  /* S-050：追加前记是否贴底，仅贴底时滚底；上翻看历史不抢滚动。 */
+  const atBottom = isAtBottom(box);
   box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+/* S-054：客户端消息 ID（cm-＋32 位小写 hex，每次发送生成一个，永不复用；
+ * 本页不加载 qf-runtime.js，与 qf-schema.js 的 qfNewClientMessageId 同格式；
+ * 服务端存索引＋按 id 查询由 C-4 的 S-086 落地，契约字段名 clientMessageId）。 */
+function newClientMessageId() {
+  let hex = '';
+  try {
+    const b = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) { crypto.getRandomValues(b); hex = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''); }
+  } catch (e) {}
+  if (!hex) { for (let i = 0; i < 32; i++) hex += Math.floor(Math.random() * 16).toString(16); }
+  return 'cm-' + hex;
 }
 async function sendMessage() {
   if (state.currentWith === 'qf-support') return; // 只读会话：不发送（服务端亦拒发）
@@ -643,14 +691,15 @@ async function sendMessage() {
   try {
     const key = await convKey(state.currentWith);
     const sealed = C.sealMessage(key, text);
-    const r = await api('POST', '/chat/api/send', { to: state.currentWith, nonce: sealed.nonce, cipher: sealed.cipher });
-    const m = { id: r.id, with: state.currentWith, dir: 'out', at: r.at, text };
+    const clientMessageId = newClientMessageId(); // S-054：随消息提交
+    const r = await api('POST', '/chat/api/send', { to: state.currentWith, nonce: sealed.nonce, cipher: sealed.cipher, clientMessageId });
+    const m = { id: r.id, with: state.currentWith, dir: 'out', at: r.at, text, clientMessageId };
     await vaultAppend(r.id, state.currentWith, 'out', r.at, text);
     state.lastEventSeq = Math.max(state.lastEventSeq, r.seq);
     if (state.currentWith) appendMessageDom(m);
     markRead();
     renderFriends().catch(() => {}); // 双栏列表常驻：同步刷新该会话的预览与时间
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message, 'error'); }
 }
 async function recallMessage(msgId) {
   if (!confirm('撤回后，您和对方都将看不到这条消息，只会留下一条撤回提示。\n软件之外的副本（如截图）无法撤回。确定撤回吗？')) return;
@@ -661,7 +710,7 @@ async function recallMessage(msgId) {
     if (m) addTrace(convKeyOf(m.with), { msgId, by: state.user, at: r.at, msgAt: r.msgAt });
     if (state.currentWith && (!m || m.with === state.currentWith)) renderMessages();
     renderFriends().catch(() => {}); // 撤回的若是末条，列表预览同步回落
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message, 'error'); }
 }
 async function deleteConversation() {
   if (!state.currentWith) return;
@@ -672,8 +721,8 @@ async function deleteConversation() {
     delete state.traces[convKeyOf(state.currentWith)];
     renderMessages();
     renderFriends().catch(() => {}); // 整删后列表预览/时间同步清空
-    alert('已删除，共清除 ' + r.count + ' 条。');
-  } catch (e) { alert(e.message); }
+    toast('已删除，共清除 ' + r.count + ' 条。');
+  } catch (e) { toast(e.message, 'error'); }
 }
 function removeMessageEverywhere(msgId) {
   delete state.history[msgId];
@@ -692,12 +741,52 @@ function startPolling() {
   state.pollTimer = setInterval(pollOnce, 3000);
   pollOnce();
 }
+/* S-048/S-053：gap 补齐——按 seq 从 /chat/api/catchup 拉回错过的消息密文，
+ * 解密后写入保险库与历史（已删 id 直接清历史），最多 10 页，单条失败不卡整批。 */
+async function catchUp() {
+  let since = state.lastEventSeq;
+  let guard = 0;
+  while (guard++ < 10) {
+    let r;
+    try { r = await api('GET', '/chat/api/catchup?since=' + since + '&limit=100'); } catch (e) { return; }
+    if (!r || !r.ok) return;
+    (r.deletedIds || []).forEach(id => removeMessageEverywhere(id));
+    for (const m of (r.messages || [])) {
+      if (!m || !m.id || state.history[m.id]) continue;
+      const other = m.from === state.user ? m.to : m.from;
+      try {
+        const key = await convKey(other);
+        const text = C.openMessage(key, m.nonce, m.cipher);
+        if (text === null) continue;
+        const dir = m.from === state.user ? 'out' : 'in';
+        await vaultAppend(m.id, other, dir, m.at, text);
+        if (state.currentWith === other) appendMessageDom(state.history[m.id]);
+      } catch (e) { /* 单条失败不卡整批补齐 */ }
+    }
+    if (typeof r.nextSince === 'number') since = Math.max(since, r.nextSince);
+    if (!r.hasMore) break;
+  }
+}
 async function pollOnce() {
   if (!state.token) return;
   let r;
   try { r = await api('GET', '/chat/api/poll?since=' + state.lastEventSeq); } catch (e) { return; }
   let sawNewMessage = false;
-  for (const ev of r.events) {
+  /* S-048/S-053：gap=true 说明本轮事件不完整（长离线期间 inbox 已剪枝）——
+     先走 catchup 按 seq 补回错过的消息密文，再把游标推到 maxSeq，不得静默跳号。 */
+  if (r.gap && typeof r.maxSeq === 'number') {
+    try { await catchUp(); } catch (e) { /* 下轮再试 */ }
+    if (r.maxSeq > state.lastEventSeq) state.lastEventSeq = r.maxSeq;
+    sawNewMessage = true;
+  }
+  /* S-048/S-053：hasMore 时翻页取完本轮事件，再统一处理。 */
+  const events = (r.events || []).slice();
+  let pageGuard = 0;
+  while (r.hasMore && pageGuard++ < 10) {
+    try { r = await api('GET', '/chat/api/poll?since=' + (typeof r.nextSince === 'number' ? r.nextSince : state.lastEventSeq)); } catch (e) { break; }
+    events.push(...(r.events || []));
+  }
+  for (const ev of events) {
     state.lastEventSeq = Math.max(state.lastEventSeq, ev.seq);
     if (ev.type === 'msg') {
       const m = ev.msg;
@@ -817,13 +906,44 @@ window.qfShellUnlock = async function (password) {
   } catch (e) { return false; }
 };
 
+// ---------- 主题（P0-2：与控制台统一来源；聊天页不再私自存 qfchat-theme） ----------
+// 有效主题 = 壳手动选择 ＞ 控制台共用偏好（localStorage['qf-theme']）＞ 系统主题。
+// 壳推送经窗口事件 'qf-theme-state'（Electron 由 console-preload.js 转发主进程推送，
+// Android 由壳注入 JS 派发）；detail 为 {resolved: 'dark'|'blue', mode: 'system'|'blue'|'dark'}，
+// 其中 'blue' 是浅色历史键名，不对应蓝色。纯浏览器下该事件永不触发，走偏好/系统两层。
+// 壳推送只作运行时生效，不写 localStorage。
+let chatShellMode = null; // 'system' | 'blue' | 'dark' | null（null = 未收到壳推送）
+let chatShellResolved = null; // 'dark' | 'blue' | null
+function chatSystemTheme() { try { return (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'; } catch (e) { return 'light'; } }
+function chatStoredTheme() { try { const v = localStorage.getItem('qf-theme'); return (v === 'dark' || v === 'light') ? v : null; } catch (e) { return null; } }
+function chatApplyEffectiveTheme() {
+  let t;
+  if (chatShellMode === 'dark' || chatShellMode === 'blue') t = chatShellResolved === 'dark' ? 'dark' : 'light';
+  else t = chatStoredTheme() || chatSystemTheme();
+  document.body.classList.toggle('dark', t === 'dark');
+  return t;
+}
+function chatOnShellTheme(resolved, mode) {
+  if (resolved === 'dark' || resolved === 'blue') chatShellResolved = resolved;
+  if (mode === 'dark' || mode === 'blue' || mode === 'system') chatShellMode = mode;
+  return chatApplyEffectiveTheme();
+}
+try { window.addEventListener('qf-theme-state', (e) => { const d = (e && e.detail) || {}; chatOnShellTheme(d.resolved, d.mode); }); } catch (e) {}
+try {
+  const _mq = window.matchMedia && matchMedia('(prefers-color-scheme: dark)');
+  if (_mq) {
+    const _h = () => { try { chatApplyEffectiveTheme(); } catch (e) {} };
+    if (_mq.addEventListener) _mq.addEventListener('change', _h);
+    else if (_mq.addListener) _mq.addListener(_h);
+  }
+} catch (e) {}
+
 // ---------- 入口 ----------
 window.addEventListener('DOMContentLoaded', async () => {
-  if (localStorage.getItem('qfchat-theme') === 'dark') document.body.classList.add('dark');
-  $('themeBtn').onclick = () => {
-    document.body.classList.toggle('dark');
-    localStorage.setItem('qfchat-theme', document.body.classList.contains('dark') ? 'dark' : 'light');
-  };
+  chatApplyEffectiveTheme();
+  try { localStorage.removeItem('qfchat-theme'); } catch (e) {} // P0-2：旧私自键一次清掉，之后只用控制台共用键 qf-theme
+  try { if (window.qfLea && typeof window.qfLea.onTheme === 'function') { window.qfLea.onTheme((resolved, mode) => chatOnShellTheme(resolved, mode)); } } catch (e) {}
+  try { if (window.qfLea && typeof window.qfLea.getThemeState === 'function') { window.qfLea.getThemeState().then((s) => { if (s) chatOnShellTheme(s.resolved, s.mode); }).catch(() => {}); } } catch (e) {}
   $('logoutBtn').onclick = async () => {
     try { await api('POST', '/chat/api/logout'); } catch (e) {}
     localStorage.removeItem('qfchat-remember');
@@ -844,7 +964,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     rzTimer = setTimeout(() => { if (!$('splitRoot').classList.contains('hidden')) syncSplit(); }, 80);
   });
   $('sendBtn').onclick = sendMessage;
-  $('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+  $('msgInput').addEventListener('keydown', (e) => { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') sendMessage(); }); // S-052：组合输入（IME）中不发送
   $('delConvBtn').onclick = deleteConversation;
   await C.ready();
   await tryRestore();

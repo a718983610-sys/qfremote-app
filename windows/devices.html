@@ -2,78 +2,106 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; }
   body {
-    --bg:#f4f7fb; --card:#ffffff; --line:#dfe7f2; --fg:#1f2d47; --sub:#5d6e84;
-    --brand:#2470e0; --brand-press:#1b5dc4; --sel-bg:#eaf2fd; --btn-line:#c9d6ea;
-    background:var(--bg); color:var(--fg); box-sizing:border-box;
-    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
-    padding:20px max(24px, calc((100vw - 1100px) / 2)) 28px;
+    background:var(--bg); color:var(--text-1); box-sizing:border-box;
+    padding:24px;
     -webkit-user-select:none; user-select:none;
   }
-  html[data-theme="dark"] body {
-    --bg:#22242a; --card:#22262e; --line:rgba(255,255,255,.10); --fg:#eceff3;
-    --sub:rgba(228,232,238,.60); --sel-bg:#2b3648; --btn-line:rgba(255,255,255,.18);
-  }
-  .head { display:flex; align-items:center; gap:12px; margin-bottom:4px; }
-  h1 { font-size:20px; font-weight:600; margin:0; letter-spacing:.3px; }
-  .count { font-size:13px; color:var(--sub); }
+  /* 重做 A §3.2 / §2.6：去卡片化分栏——左列表 360px + 右详情 flex；行和分隔线承载列表 */
+  .head { display:flex; align-items:center; gap:12px; margin-bottom:24px; }
+  h1 { font-size:24px; font-weight:600; line-height:32px; margin:0; letter-spacing:-.01em; }
+  .count { font-size:13px; line-height:20px; color:var(--text-2); font-variant-numeric: tabular-nums; }
   .spacer { flex:1; }
   button {
-    appearance:none; border-radius:10px; cursor:pointer; font-family:inherit;
+    appearance:none; border-radius:var(--radius-1); cursor:pointer; font-family:inherit;
     display:inline-flex; align-items:center; justify-content:center; gap:6px;
-    transition: background .13s ease, border-color .13s ease;
+    transition: background var(--d1) var(--e-c), border-color var(--d1) var(--e-c), transform var(--d0) var(--e-s);
   }
-  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
-  button:disabled { opacity:.45; cursor:default; }
+  button:hover { background: var(--hover-ov); }
+  button:active { background: var(--press-ov); transform: scale(.985); }
+  button:disabled { color: var(--text-disabled); cursor: default; transform: none; }
   .btn-refresh {
-    height:34px; padding:0 14px; font-size:14px;
-    background:var(--card); color:var(--brand); border:1px solid var(--btn-line);
+    height:36px; padding:0 14px; font-size:14px; line-height:22px;
+    background:var(--bg2); color:var(--text-1); border:1px solid var(--line);
   }
-  .btn-refresh:hover { background:var(--sel-bg); }
-  .group-title { font-size:13px; color:var(--sub); margin:18px 0 10px; letter-spacing:.4px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; }
-  .card {
-    background:var(--card); border:1px solid var(--line); border-radius:14px;
-    padding:14px 16px; cursor:pointer; box-sizing:border-box;
+  .btn-refresh:hover { background:var(--sel-ov); }
+  .btn-refresh:active { background:var(--press-ov); }
+  .layout { display:flex; gap:24px; align-items:flex-start; }
+  .list { width:360px; flex:none; min-width:0; }
+  .group-title { font-size:12px; font-weight:500; line-height:18px; color:var(--text-2); margin:0 0 12px; letter-spacing:.04em; }
+  .group-title + .group-title { margin-top:24px; }
+  /* 列表行 56px（C §1.2 行高 44/48 档之上取标准 56；A §2.3 标准列表 48/56） */
+  /* W8 已定（2026-11-14 晚站长亲定，不改，按大肥鱼 P3）：保留行圆角＋分隔线＋hover 三重叠加；
+     选中态 inset bar 保留，容器外层圆角负责裁剪首尾行 */
+  .row {
+    display:flex; align-items:center; gap:12px; min-height:56px; padding:8px 12px;
+    box-sizing:border-box; cursor:pointer;
+    border-radius:var(--radius-1);
+    border-bottom:1px solid var(--line);
+    animation: row-in var(--d3) var(--e-s) both;
+    transition: background var(--d1) var(--e-c);
   }
-  .card:hover { border-color:var(--brand); }
-  .card.sel { border-color:var(--brand); background:var(--sel-bg); }
-  .card .row1 { display:flex; align-items:center; gap:8px; }
-  .dot { width:10px; height:10px; border-radius:50%; background:#b9c2cf; flex:none; }
-  .dot.on { background:#1db954; }
-  .card .nm { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .card .meta { font-size:13px; color:var(--sub); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .card .st { font-size:13px; color:var(--sub); margin-top:2px; }
+  .row:last-child { border-bottom:none; }
+  .list.done .row { animation: none; }
+  .row:hover { background: var(--hover-ov); }
+  .row:active { transform: scale(.985); }
+  .row.sel { background: var(--sel-ov); box-shadow: inset 2px 0 0 var(--text-1); }
+  .row:focus-visible { outline:2px solid var(--text-1); outline-offset:2px; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--text-3); flex:none; }
+  .dot.on { background:var(--success); }
+  .dot.connecting { background:var(--warning); }
+  .row .nm { font-size:14px; font-weight:500; line-height:20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+  .row .st { font-size:12px; line-height:18px; color:var(--text-2); white-space:nowrap; flex:none; }
+  .row .meta { font-size:12px; line-height:16px; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .txt { min-width:0; flex:1; display:flex; flex-direction:column; gap:2px; }
+  /* 右详情：唯一承载独立对象的面板（A §2.6），BG2 + hairline + e1 */
   .detail {
-    margin-top:18px; background:var(--card); border:1px solid var(--line);
-    border-radius:14px; padding:16px 18px; display:none;
+    flex:1; min-width:0; background:var(--bg2);
+    border-radius:12px; padding:24px; display:none;
   }
-  .detail.show { display:block; }
-  .detail .dnm { font-size:16px; font-weight:600; }
-  .detail .dmeta { font-size:13px; color:var(--sub); margin-top:5px; }
-  .actions { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .detail.show { display:block; animation: route-in var(--d3) var(--e-s) both; }
+  /* F-Win2 路由退出态（B §3.2）：D2/E-X x-8；播完由 JS 摘 show/leaving 再 display:none */
+  .detail.leaving { display:block; animation: route-out var(--d2) var(--e-x) both; }
+  .detail .dnm { font-size:20px; font-weight:600; line-height:28px; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .detail .dmeta { font-size:13px; line-height:20px; color:var(--text-2); margin-top:8px; }
+  .metrics { display:grid; grid-template-columns:1fr 1fr; gap:16px 24px; margin-top:24px; }
+  .metrics .k { font-size:12px; line-height:16px; color:var(--text-2); } /* WCAG：三级 on BG2 浅色仅 4.43:1，改次级 7.57:1 */
+  .metrics .v { font-size:20px; line-height:28px; font-weight:500; margin-top:4px; font-variant-numeric: tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } /* F-Win3：按 A §3.2 恢复 20/28；长值靠末省略截断 */
+  .metrics .v.mono { font-family:var(--font-mono); font-size:20px; line-height:28px; white-space:normal; overflow:visible; text-overflow:clip; word-break:break-all; } /* F-Win3：设备 ID 长串 20px 下不断行会溢出，改换行全显 */
+  .metrics .v .dot { display:inline-block; vertical-align:middle; margin-right:6px; }
+  .actions { display:flex; gap:12px; margin-top:24px; flex-wrap:wrap; }
   .btn-primary {
-    height:38px; padding:0 22px; font-size:15px; font-weight:600;
-    background:var(--brand); color:#fff; border:1px solid var(--brand);
+    height:36px; padding:0 22px; font-size:14px; line-height:22px; font-weight:600;
+    background:var(--brand); color:var(--on-brand); border:1px solid var(--brand);
   }
   .btn-primary:hover { background:var(--brand-press); border-color:var(--brand-press); }
+  .btn-primary:disabled { background:var(--bg3); border-color:var(--bg3); color:var(--text-disabled); }
   .btn-secondary {
-    height:38px; padding:0 18px; font-size:15px;
-    background:var(--card); color:var(--fg); border:1px solid var(--btn-line);
+    height:36px; padding:0 18px; font-size:14px; line-height:22px;
+    background:var(--bg2); color:var(--text-1); border:1px solid var(--line);
   }
-  .btn-secondary:hover { background:var(--sel-bg); }
-  .offnote { font-size:13px; color:var(--sub); margin-top:10px; display:none; }
+  .btn-secondary:hover { background:var(--sel-ov); }
+  .btn-secondary:disabled { background:var(--bg2); color:var(--text-disabled); }
+  .offnote { font-size:13px; line-height:20px; color:var(--text-2); margin-top:16px; display:none; }
   .offnote.show { display:block; }
+  .missing { font-size:12px; line-height:18px; color:var(--text-2); margin-top:24px; } /* 同上：BG2 面板内不用三级 */
+  /* 空状态（C §2.1）：证据 + 下一步，不用大插画；标题 16/24，说明 14/22 */
   .statebox {
-    margin-top:26px; background:var(--card); border:1px solid var(--line);
-    border-radius:14px; padding:26px 20px; text-align:center; display:none;
+    margin-top:24px; background:var(--bg2); border:1px solid var(--line);
+    border-radius:12px; padding:24px; text-align:center; display:none;
   }
-  .statebox.show { display:block; }
-  .statebox .t { font-size:15px; font-weight:600; }
-  .statebox .d { font-size:14px; color:var(--sub); margin-top:8px; line-height:1.6; }
-  .statebox button { margin-top:14px; }
+  .statebox.show { display:block; animation: row-in var(--d4) var(--e-s) both; }
+  .statebox .t { font-size:16px; font-weight:600; line-height:24px; }
+  .statebox .d { font-size:14px; line-height:22px; color:var(--text-2); margin-top:8px; }
+  .statebox button { margin-top:16px; }
+  /* 骨架（C §1.1）：镜像列表行 56px，透明度脉冲 1200ms，无 shimmer */
+  .skel { display:none; }
+  .skel.show { display:block; }
+  .skel .sk { height:56px; border-radius:6px; background:var(--bg2); margin-bottom:8px; animation: skel-pulse 1200ms ease-in-out infinite alternate; }
+  /* F-Win4（B §7 离屏停播）：页面不可见时骨架停播（JS 加 html.paused） */
+  html.paused .skel .sk { animation-play-state: paused; }
 </style>
 </head>
 <body>
@@ -84,20 +112,30 @@
     <button class="btn-refresh" id="refreshBtn">刷新</button>
   </div>
 
-  <div id="groups"></div>
-
-  <div class="detail" id="detail">
-    <div class="dnm" id="dName"></div>
-    <div class="dmeta" id="dMeta"></div>
-    <div class="actions">
-      <button class="btn-primary" id="actConnect">连接</button>
-      <button class="btn-secondary" id="actFiles">文件管理</button>
-      <button class="btn-secondary" id="actTerminal">终端</button>
+  <div class="layout">
+    <div class="list">
+      <div class="skel" id="skel" aria-hidden="true"><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
+      <div id="groups"></div>
     </div>
-    <div class="offnote" id="offNote">这台设备当前不在线，上线后即可连接。</div>
+
+    <div class="detail elev-1" id="detail">
+      <div class="dnm" id="dName"></div>
+      <div class="dmeta" id="dMeta"></div>
+      <div class="metrics" id="metrics"></div>
+      <div class="actions">
+        <button class="btn-primary" id="actConnect">连接</button>
+        <button class="btn-secondary" id="actFiles">文件管理</button>
+        <button class="btn-secondary" id="actTerminal">终端</button>
+      </div>
+      <div class="offnote" id="offNote">这台设备当前不在线，上线后即可连接。</div>
+      <!-- 缺数据说明（C §4：无数据源的字段显示 —，不编假数字）：页面探针耗时 / 码率 / 编码 /
+           分辨率 / WebView 渲染估算 / 最后在线 / 系统版本均不在设备清单接口字段里，见重做报告缺数据清单。 -->
+      <div class="missing">页面探针耗时、码率、编码、分辨率、WebView 渲染估算、最后在线未接入本页数据源，显示为 —。</div>
+    </div>
   </div>
 
   <div class="statebox" id="stateBox">
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin:0 auto 12px; display:block; stroke:var(--text-2);" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
     <div class="t" id="stateTitle">正在读取设备列表…</div>
     <div class="d" id="stateDesc"></div>
     <button class="btn-refresh" id="retryBtn" style="display:none;">重新读取</button>
@@ -109,10 +147,12 @@
 
   const els = {
     groups: document.getElementById('groups'),
+    skel: document.getElementById('skel'),
     count: document.getElementById('count'),
     detail: document.getElementById('detail'),
     dName: document.getElementById('dName'),
     dMeta: document.getElementById('dMeta'),
+    metrics: document.getElementById('metrics'),
     offNote: document.getElementById('offNote'),
     stateBox: document.getElementById('stateBox'),
     stateTitle: document.getElementById('stateTitle'),
@@ -124,6 +164,29 @@
   };
   let model = null;
   let selectedId = '';
+  let renderedOnce = false; // 首刷后 stagger 不再重播（B：重复切换 instant）
+  let detailHideTimer = null; // F-Win2：路由退出定时器（播完再 display:none）
+  // F-Win4（B §7 离屏停播）：骨架在页面不可见时停播（IntersectionObserver +
+  // visibilitychange 双信号；WebContentsView 切走无 DOM 信号，见修复报告）。
+  (function () {
+    const pauseReasons = {};
+    function refreshPaused() {
+      document.documentElement.classList.toggle('paused', Object.keys(pauseReasons).length > 0);
+    }
+    function setPauseReason(name, on) {
+      if (on) pauseReasons[name] = true; else delete pauseReasons[name];
+      refreshPaused();
+    }
+    if ('IntersectionObserver' in window) {
+      const pauseIO = new IntersectionObserver(function (entries) {
+        setPauseReason('offscreen', !entries.some(function (e) { return e.isIntersecting; }));
+      }, { threshold: 0 });
+      pauseIO.observe(document.getElementById('skel'));
+    }
+    document.addEventListener('visibilitychange', function () {
+      setPauseReason('hidden', document.hidden);
+    });
+  })();
   // r12②：load 请求版本号——新 load()/clear 启动即废止旧的在途请求，
   // 旧响应不得覆盖新态（登出前刷新在途、登出、重登的三段竞态）。
   let loadSeq = 0;
@@ -131,6 +194,11 @@
   function findDevice(id) {
     if (!model) return null;
     for (const g of model.groups) for (const d of g.devices) if (d.id === id) return d;
+    return null;
+  }
+  function findGroup(id) {
+    if (!model) return null;
+    for (const g of model.groups) for (const d of g.devices) if (d.id === id) return g;
     return null;
   }
   function showState(title, desc, retry) {
@@ -141,48 +209,100 @@
   }
   function hideState() { els.stateBox.classList.remove('show'); }
 
+  // F-Win2（B §3.2 路由退出 D2/E-X x-8）：详情面板先上 .leaving 播退出态，
+  // 140ms 后再摘 show/leaving（display:none）；reduced-motion 下立即隐藏。
+  // 未显示时直接返回；已在退出中时不重复排队。
+  function hideDetailWithExit() {
+    if (!els.detail.classList.contains('show')) return;
+    if (detailHideTimer !== null) return;
+    els.detail.classList.add('leaving');
+    const reduced = document.documentElement.classList.contains('reduced-motion')
+      || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    detailHideTimer = setTimeout(function () {
+      els.detail.classList.remove('show', 'leaving');
+      detailHideTimer = null;
+    }, reduced ? 0 : 140);
+  }
+  // 详情面板显示：取消未完成的退出定时器；同一面板内换设备也要重播进入动画
+  // （先下 show 强制重排再上 show，同帧内浏览器不绘制中间态）。
+  function showDetail() {
+    if (detailHideTimer !== null) { clearTimeout(detailHideTimer); detailHideTimer = null; }
+    els.detail.classList.remove('leaving');
+    els.detail.classList.remove('show');
+    void els.detail.offsetWidth;
+    els.detail.classList.add('show');
+  }
+
+  function metric(label, value, mono) {
+    const wrap = document.createElement('div');
+    const k = document.createElement('div'); k.className = 'k'; k.textContent = label;
+    const v = document.createElement('div'); v.className = 'v' + (mono ? ' mono' : ''); v.textContent = value;
+    wrap.appendChild(k); wrap.appendChild(v);
+    return wrap;
+  }
+  function statusText(d) {
+    return d.status === 'connecting' ? '连接中' : (d.online ? '在线' : '离线');
+  }
+
   function render() {
     els.groups.innerHTML = '';
+    if (renderedOnce) els.groups.parentElement.classList.add('done'); // .list.done 才命中 CSS 停播规则
+    renderedOnce = true;
+    els.skel.classList.remove('show');
     // r12②：无模型时清空计数、藏详情——失败态不得顶着上一会话的旧计数
     // 与旧设备详情误导（r11 首刷失败帧标题仍挂“共 1 台 · 在线 1 台”即此残留；
     // render() 旧代码在 !model 时直接 return，详情面板会被漏掉）。
-    if (!model) { els.count.textContent = ''; els.detail.classList.remove('show'); return; }
+    if (!model) { els.count.textContent = ''; hideDetailWithExit(); return; }
     els.count.textContent = model.total ? ('共 ' + model.total + ' 台 · 在线 ' + model.onlineCount + ' 台') : '';
+    let rowIndex = 0;
     for (const g of model.groups) {
       if (!g.devices.length) continue;
       const gt = document.createElement('div');
       gt.className = 'group-title';
       gt.textContent = g.name || '我的设备';
       els.groups.appendChild(gt);
-      const grid = document.createElement('div');
-      grid.className = 'grid';
       for (const d of g.devices) {
-        const card = document.createElement('div');
-        card.className = 'card' + (d.id === selectedId ? ' sel' : '');
-        card.dataset.nodeId = d.id;
-        const row1 = document.createElement('div'); row1.className = 'row1';
-        const dot = document.createElement('span'); dot.className = 'dot' + (d.online ? ' on' : '');
-        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = d.name || d.id;
-        row1.appendChild(dot); row1.appendChild(nm);
+        const row = document.createElement('div');
+        row.className = 'row' + (d.id === selectedId ? ' sel' : '');
+        row.dataset.nodeId = d.id;
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        // B §0.3：stagger 22ms/项，最多前 7 项；第 8 项起 0 延迟
+        if (rowIndex < 7) row.style.animationDelay = (rowIndex * 22) + 'ms';
+        rowIndex++;
+        const dot = document.createElement('span');
+        dot.className = 'dot' + (d.online ? ' on' : (d.status === 'connecting' ? ' connecting' : ''));
+        const txt = document.createElement('div'); txt.className = 'txt';
+        const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.name || d.id;
         const meta = document.createElement('div'); meta.className = 'meta';
-        meta.textContent = d.host || d.desc || '';
-        const st = document.createElement('div'); st.className = 'st';
-        st.textContent = d.status === 'connecting' ? '连接中' : (d.online ? '在线' : '离线');
-        card.appendChild(row1); card.appendChild(meta); card.appendChild(st);
-        card.addEventListener('click', () => { selectedId = d.id; render(); });
-        grid.appendChild(card);
+        meta.textContent = d.host || d.desc || '—';
+        txt.appendChild(nm); txt.appendChild(meta);
+        const st = document.createElement('span'); st.className = 'st'; st.textContent = statusText(d);
+        row.appendChild(dot); row.appendChild(txt); row.appendChild(st);
+        const select = () => { selectedId = d.id; render(); };
+        row.addEventListener('click', select);
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); } });
+        els.groups.appendChild(row);
       }
-      els.groups.appendChild(grid);
     }
     const sel = findDevice(selectedId);
-    els.detail.classList.toggle('show', !!sel);
+    const grp = sel ? findGroup(selectedId) : null;
+    if (sel) showDetail(); else hideDetailWithExit();
     if (sel) {
       els.dName.textContent = sel.name || sel.id;
       const bits = [];
       if (sel.host) bits.push('主机 ' + sel.host);
       if (sel.desc) bits.push(sel.desc);
-      bits.push(sel.status === 'connecting' ? '连接中' : (sel.online ? '在线' : '离线'));
+      bits.push(statusText(sel));
       els.dMeta.textContent = bits.join(' · ');
+      // 详情指标（C §2.6 Windows 列）：只用清单接口真实字段；缺失值显示 —（C §4）。
+      els.metrics.innerHTML = '';
+      els.metrics.appendChild(metric('设备 ID', sel.id || '—', true));
+      els.metrics.appendChild(metric('主机名', sel.host || '—'));
+      els.metrics.appendChild(metric('状态', statusText(sel)));
+      els.metrics.appendChild(metric('电源', (sel.power == null) ? '—' : String(sel.power)));
+      els.metrics.appendChild(metric('分组', (grp && grp.name) ? grp.name : '—'));
+      els.metrics.appendChild(metric('页面探针耗时', '—'));
       els.actConnect.disabled = !sel.online;
       els.actFiles.disabled = !sel.online;
       els.actTerminal.disabled = !sel.online;
@@ -193,10 +313,13 @@
   async function load() {
     const seq = ++loadSeq;
     hideState();
+    els.groups.innerHTML = '';
+    els.skel.classList.add('show');
     showState('正在读取设备列表…', '', false);
     let res = null;
     try { res = await qfDevices.list(); } catch (e) { res = null; }
     if (seq !== loadSeq) return; // 已被更新的 load()/clear 废止，不覆盖新态
+    els.skel.classList.remove('show');
     if (!res || !res.ok || !res.model) {
       // r12②：未登录不是读取失败——登录交接时任何误触发的 load() 都只
       // 清模型藏状态、不画报错；登录落点重刷时再正常读。
@@ -208,7 +331,7 @@
     model = res.model;
     if (selectedId && !findDevice(selectedId)) selectedId = '';
     hideState();
-    if (!model.total) showState('还没有可显示的设备', '被控电脑装好 QFRemote 并上线后，会出现在这台列表里。', true);
+    if (!model.total) showState('未发现设备', '被控电脑装好 QFRemote 并上线后，会出现在这台列表里。', true);
     render();
   }
 

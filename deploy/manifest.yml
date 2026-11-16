@@ -1,0 +1,120 @@
+# QFRemote 部署清单（S-090，2026-11-15，C-4）
+# ================================================================
+# 用途：一次部署要登记的服务／unit／环境变量名／端口／数据目录／
+# 公钥指纹与回滚版本，一处可查。密钥值绝不进本文件——只由 secret
+# store 注入（见末节“密钥”）。
+# 填写规则：每项标“已核实（仓库有源）”或“待部署窗口核对”；
+# 未核实的项部署时必须在服务器上实查后补填，不可凭推测填。
+# 工作树基线：HEAD b943853（lea-local-agent，rc9 已冻结）。
+# 部署 commit：部署时填实际部署的 commit（当前基线仅为工作树状态，
+# 不是已部署版本）；线上当前运行版本：2.4.4（回滚目标）。
+
+meta:
+  generated: "2026-11-15"
+  worktree_baseline: b943853
+  branch: lea-local-agent
+  deployed_commit: "" # 待部署时填
+  rollback_version: "2.4.4"
+
+services:
+  - name: meshcentral
+    port: 8443
+    proto: https
+    unit: meshcentral.service # 待部署窗口核对（仓库无此 unit 文件）
+    working_dir: "" # 待部署窗口核对
+    data_dir: "" # 待部署窗口核对
+    notes: 控制台引擎；其余服务 After 它
+  - name: register
+    port: 8444
+    proto: https
+    unit: qfremote-register.service # 待部署窗口核对（仓库无此 unit 文件；chat 草稿提及同款式）
+    working_dir: "" # 待部署窗口核对
+    data_dir: "" # 待部署窗口核对
+  - name: friends-chat
+    port: 8445
+    proto: https
+    unit: "" # 待部署窗口核对：聊天已合入一期好友服务同一进程（chat-server.js 头注释）；
+      # 独立聊天 unit 只有 server/friends/chat/qfremote-chat.service.draft（草稿，未定稿）
+    working_dir: /opt/qfremote-social/chat # 草稿值，待部署窗口核对
+    data_dir: /opt/qfremote-social/data # 已核实：server/friends/chat/config.sample.json 的 dataFile/friendsFile/logFile 同级目录
+    notes: 好友＋聊天＋智能客服＋锁桥同进程；聊天数据文件 chat-data.json；inbox 分片在同级 inbox/by-user/（S-079）
+  - name: forum
+    port: 8446
+    proto: http
+    unit: "" # 待部署窗口核对（仓库无此 unit 文件）
+    working_dir: "" # 待部署窗口核对
+    data_dir: "" # 待部署窗口核对
+  - name: ext
+    port: 8448
+    proto: http
+    unit: qfremote-ext.service # 已核实：server/ext/qfremote-ext.service
+    working_dir: /opt/qfremote-ext # 已核实：同上
+    exec: /usr/bin/node /opt/qfremote-ext/server.js # 已核实：同上
+    data_dir: /opt/qfremote-ext/data # 待部署窗口核对（LEA 数据目录见 server/ext/lea 配置）
+    notes: 站长管理／积分／购买／license／LEA／崩溃上报（/api/lea/v1/crash-report）
+  - name: loginshim
+    port: 8450
+    proto: http
+    unit: "" # 待部署窗口核对（仓库无此 unit 文件）
+    working_dir: "" # 待部署窗口核对
+    data_dir: /opt/qfremote-loginshim/data # 待部署窗口核对（appeals.json 在此，见 server/loginshim/appeal-admin.js 的 QF_APPEALS_FILE 默认值推导）
+  - name: nginx
+    port: 8080
+    bind: 127.0.0.1
+    proto: http
+    unit: nginx.service # 系统自带
+    working_dir: /etc/nginx
+    notes: 只听回环；公网唯一入口是 Cloudflare 快速隧道
+
+env_vars: # 只登记变量名与用途，不记值
+  - name: QFCHAT_CONFIG
+    used_by: friends-chat
+    purpose: 聊天服务配置文件路径（默认 ./config.json）
+  - name: QFEXT_PORT
+    used_by: ext, friends-chat
+    purpose: ext 服务端口（默认 8448）；friends-chat 用它回源统一档案
+  - name: QFLIC_SECRET_FILE
+    used_by: friends-chat
+    purpose: ext 内部 secret 文件路径（默认 /opt/qfremote-license/internal.secret）
+  - name: QF_APPEALS_FILE
+    used_by: loginshim
+    purpose: 申诉数据文件路径（默认 /opt/qfremote-loginshim/data/appeals.json）
+
+lea:
+  # LEA 服务端公钥：只记 SHA-256 指纹，不记密钥本身（公钥 hex 本身公开，
+  # 但本清单只存指纹，核对时用指纹比对）。
+  server_pubkey_sha256: 2a34c826a0fafe43ded31ab99251b8be69d29cf64e3b277e8ca86cf9cc3afb08
+  notes: 发版包必须编入该公钥；无 LEA_SERVER_PUBKEY_HEX 时验签一律拒绝
+
+nginx_includes: # S-078：全部非秘密 include 纳入仓库；部署后以 nginx -T 做指纹比对
+  files:
+    - file: server/nginx/qfremote-proxy
+      deployed_as: /etc/nginx/qfremote-proxy
+      sha256: 22eaff848f659bcd9ac6813997a130d6b1b303403ff32a959b904aab4913c609
+    - file: server/nginx/qfremote-proxy-headers.conf
+      deployed_as: /etc/nginx/qfremote-proxy-headers.conf
+      sha256: 82433a787d4fbae7520e5246aed0bdac9f61b01a8500d1b2eae32d9281d872dd
+    - file: server/nginx/qf-front-proxy-common.inc
+      deployed_as: /etc/nginx/qf-front-proxy-common.inc
+      sha256: fa4c29f3428979a34d3e4bdb18069edf85185e61cbfe291462cb2a6806d1a32b
+  notes: |
+    hash 为 2026-11-15 工作树状态实算；部署前若文件有改动须重算填入。
+    部署前 diff 线上 /etc/nginx 同名文件，线上手工改动先合进仓库正本。
+    另：$qf_login_upstream／$qf_root_final／$qf_engine_upstream／
+    $qf_spa_upstream／$qf_frame_ua／$qf_ce_ua 六个 map 的定义在服务器
+    主 conf（不在仓库），部署窗口须把定义抄回仓库或确认其所在文件
+    已纳入本清单（见 server/nginx/PROXY-CONTRACTS.md §0）。
+
+secrets: # 密钥只由 secret store 注入，本文件不记任何密钥值
+  - LEA 服务端签名密钥（生产）：sudo 读密钥文件现铸信封，密钥值绝不打印、不外带
+  - 聊天 sessionCopy 主密钥：服务数据目录内 session-master.key（0600）
+  - ext 内部 secret：/opt/qfremote-license/internal.secret（QFLIC_SECRET_FILE）
+  - QFRemote 站长级助手令牌：存保险箱，走 custom.qfremote-assistant 连接器，绝不入本文件
+
+deploy_checklist:
+  - 部署前 diff 线上 /etc/nginx 三个文件，合入手工改动
+  - 部署后 nginx -T，展开配置与仓库正本逐项比对（见 server/nginx/PROXY-CONTRACTS.md §3）
+  - 部署后 node server/nginx/check-nginx-contract.mjs（有 nginx 的环境）
+  - 线上实际上传核验：200MB 文件发送、12MB 付款截图提交（S-077，待部署窗口）
+  - 崩溃上报端到端：POST /api/lea/v1/crash-report 经 nginx 可达（N-01，待部署窗口）
+  - 健康探活：GET /health 经 nginx 回 {ok:true}，控制台灯变绿（S-080，待部署窗口）

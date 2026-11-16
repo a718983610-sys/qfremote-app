@@ -145,13 +145,44 @@ void main() {
       await store.clearAll();
       expect(await store.loadCredentials(), isNull);
       expect(await store.loadSession(), isNull);
-      expect(kv.map, isEmpty); // 手动退出的验证口径：底层一位不剩
+      // R-A8：手动退出闸持久化在位（直到下次登录成功落盘新凭据时才清），
+      // 其余一位不剩。
+      expect(kv.map.keys, ['qf_manual_logout']);
     });
 
     test('只剩半截凭据（只有账号）按没存处理', () async {
       final kv = MemorySecureKvStore();
       final store = CredentialStore(kv);
       await kv.write('qf_saved_username', 'alice');
+      expect(await store.loadCredentials(), isNull);
+    });
+
+    test('F2：新 key 损坏（JSON 解析失败）时落到旧 key 兼容读', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      await kv.write('qf_saved_creds', '{"username":"alice",'); // 截断损坏
+      await kv.write('qf_saved_username', 'bob');
+      await kv.write('qf_saved_password', 'old-pass');
+      final creds = await store.loadCredentials();
+      expect(creds?.username, 'bob');
+      expect(creds?.password, 'old-pass');
+    });
+
+    test('F2：新 key 有效 JSON 但缺字段时落到旧 key 兼容读', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      await kv.write('qf_saved_creds', '{"username":"alice"}'); // 缺 password
+      await kv.write('qf_saved_username', 'bob');
+      await kv.write('qf_saved_password', 'old-pass');
+      final creds = await store.loadCredentials();
+      expect(creds?.username, 'bob');
+      expect(creds?.password, 'old-pass');
+    });
+
+    test('F2：新 key 损坏且无旧 key 时按没存处理', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      await kv.write('qf_saved_creds', 'not-json');
       expect(await store.loadCredentials(), isNull);
     });
 
@@ -198,8 +229,10 @@ void main() {
     });
 
     test('DC-C：clearAll 单步删除失败不中断后续清除（退出不留快照）', () async {
-      // 旧版 clearAll：第一删抛错即中断，后面的 key 全残留——退出登录时
-      // 若会话快照残留，下次冷启恢复链会拿它自动恢复。修后各删尽力而为。
+      // R-A8 修后：删 qf_saved_creds 抛错被重试后仍失败、由 _quietDelete
+      // 吞掉，该 key 合法残留；但 clearAll 另持久化“已手动退出”闸，
+      // 下次冷启读凭据／会话先查闸——闸在即按无存处理，残留凭据再也
+      // 不会被拿去自动登录（旧行为“残留凭据仍回 alice”已废止）。
       final kv = _DeleteFirstKeyFailingKv();
       final store = CredentialStore(kv);
       await store.saveCredentials('alice', 'secret-1');
@@ -207,13 +240,35 @@ void main() {
           cookies: {'xid': 'x1', 'xid.sig': 's1'},
           savedAt: DateTime(2026, 11, 10)));
       await store.clearAll();
-      // 删 qf_saved_creds 抛错被 _quietDelete 吞掉，该 key 合法残留
-      // （设计如此：清不掉的下次读/写时再扫尾）；此处只钉“后续清除
-      // 未被中断”——会话快照必须已清（否则下次冷启会拿它自动恢复），
-      // 且除失败 key 外无残留。
-      expect((await store.loadCredentials())?.username, 'alice');
+      expect(await store.loadCredentials(), isNull);
       expect(await store.loadSession(), isNull);
-      expect(kv.map.keys, ['qf_saved_creds']);
+      // 底层只剩删失败的凭据残留＋手动退出闸。
+      expect(kv.map.keys.toSet(),
+          {'qf_saved_creds', 'qf_manual_logout'});
+    });
+
+    test('R-A8：手动退出闸在下次登录成功落盘新凭据时清除', () async {
+      final kv = MemorySecureKvStore();
+      final store = CredentialStore(kv);
+      await store.saveCredentials('alice', 'secret-1');
+      await store.clearAll();
+      expect(await store.loadCredentials(), isNull);
+      expect(kv.map.containsKey('qf_manual_logout'), isTrue);
+      await store.saveCredentials('alice', 'secret-2');
+      expect(kv.map.containsKey('qf_manual_logout'), isFalse);
+      expect((await store.loadCredentials())?.password, 'secret-2');
+    });
+
+    test('R-A8：删失败重试——前两次抛错、第三次成功则无残留', () async {
+      final kv = _DeleteFailsTwiceKv();
+      final store = CredentialStore(kv);
+      await store.saveCredentials('alice', 'secret-1');
+      await store.saveSession(SessionSnapshot(
+          cookies: {'xid': 'x1'}, savedAt: DateTime(2026, 11, 10)));
+      await store.clearAll();
+      expect(await store.loadCredentials(), isNull);
+      expect(await store.loadSession(), isNull);
+      expect(kv.map.keys, ['qf_manual_logout']);
     });
   });
 
@@ -295,6 +350,30 @@ class _DeleteFirstKeyFailingKv implements SecureKvStore {
   @override
   Future<void> delete(String key) async {
     if (key == 'qf_saved_creds') {
+      throw StateError('delete failed (test double)');
+    }
+    await _inner.delete(key);
+  }
+}
+
+/// R-A8 重试测试替身：删 qf_saved_creds 前两次抛错、第三次成功——
+/// 模拟 Keystore 瞬时失败后恢复，验证有界重试能清干净。
+class _DeleteFailsTwiceKv implements SecureKvStore {
+  final MemorySecureKvStore _inner = MemorySecureKvStore();
+  var _failuresLeft = 2;
+
+  Map<String, String> get map => _inner.map;
+
+  @override
+  Future<String?> read(String key) => _inner.read(key);
+
+  @override
+  Future<void> write(String key, String value) => _inner.write(key, value);
+
+  @override
+  Future<void> delete(String key) async {
+    if (key == 'qf_saved_creds' && _failuresLeft > 0) {
+      _failuresLeft--;
       throw StateError('delete failed (test double)');
     }
     await _inner.delete(key);
