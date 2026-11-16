@@ -4889,8 +4889,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             onUpdateVisitedHistory:
                                 (controller, url, isReload) async {
                                   final can = await controller.canGoBack();
-                                  if (mounted)
+                                  if (mounted) {
                                     setState(() => _homeCanGoBack = can);
+                                  }
                                 },
                             onReceivedServerTrustAuthRequest: _onTrustChallenge,
                             onDownloadStartRequest: (controller, request) {
@@ -4929,8 +4930,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             onUpdateVisitedHistory:
                                 (controller, url, isReload) async {
                                   final can = await controller.canGoBack();
-                                  if (mounted)
+                                  if (mounted) {
                                     setState(() => _filesCanGoBack = can);
+                                  }
                                 },
                             onReceivedServerTrustAuthRequest: _onTrustChallenge,
                             onDownloadStartRequest: (controller, request) {
@@ -5007,9 +5009,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     shouldOverrideUrlLoading:
                                         (controller, action) async {
                                           final url = action.request.url;
-                                          if (url == null)
+                                          if (url == null) {
                                             return NavigationActionPolicy
                                                 .CANCEL;
+                                          }
                                           // 跳登出地址 = 本人手动退出：先记下，别被自动恢复拉回来
                                           // （只认自有服务源，外站同名路径不许误触发）
                                           if (url.path == '/logout' &&
@@ -5075,8 +5078,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         (controller, request, response) {
                                           _bootLoadWatchdog?.cancel();
                                           _bootLoadWatchdog = null;
-                                          if (request.isForMainFrame != true)
+                                          if (request.isForMainFrame != true) {
                                             return;
+                                          }
                                           final code = response.statusCode;
                                           if (code == 404) {
                                             _mainFrameFailed = true;
@@ -5120,14 +5124,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                           }
                                           final can = await controller
                                               .canGoBack();
-                                          if (mounted)
+                                          if (mounted) {
                                             setState(() => _canGoBack = can);
+                                          }
                                         },
                                     onConsoleMessage: (controller, msg) {
-                                      if (kHasTestUrl)
+                                      if (kHasTestUrl) {
                                         debugPrint(
                                           '[webconsole] ${msg.message}',
                                         );
+                                      }
                                     },
                                     onDownloadStartRequest:
                                         (controller, request) {
@@ -5262,8 +5268,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             onWebViewCreated: (controller) {
                               _friendsWeb = controller;
                               _rendererRecovery.noteRecreated(AppSlot.friends);
-                              if (_chromeVisible)
+                              if (_chromeVisible) {
                                 _maybeLoadSlot(AppSlot.friends);
+                              }
                             },
                             onRenderProcessGone: (controller, detail) =>
                                 _onRendererGone(AppSlot.friends, detail),
@@ -5279,11 +5286,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             },
                             onUpdateVisitedHistory:
                                 (controller, url, isReload) async {
-                                  if (url != null)
+                                  if (url != null) {
                                     _friendsCurrentUrl = url.toString();
+                                  }
                                   final can = await controller.canGoBack();
-                                  if (mounted)
+                                  if (mounted) {
                                     setState(() => _friendsCanGoBack = can);
+                                  }
                                 },
                             onReceivedServerTrustAuthRequest: _onTrustChallenge,
                             onDownloadStartRequest: (controller, request) {
@@ -5322,8 +5331,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             onUpdateVisitedHistory:
                                 (controller, url, isReload) async {
                                   final can = await controller.canGoBack();
-                                  if (mounted)
+                                  if (mounted) {
                                     setState(() => _forumCanGoBack = can);
+                                  }
                                 },
                             onReceivedServerTrustAuthRequest: _onTrustChallenge,
                             onDownloadStartRequest: (controller, request) {

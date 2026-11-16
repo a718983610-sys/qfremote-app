@@ -37,8 +37,8 @@ void main() {
 
   group('A2/A3/A6 token：scrim／label12／间距 token', () {
     test('scrim 两端均为 .32', () {
-      expect(light.scrim.alpha, closeTo(0.32 * 255, 1));
-      expect(dark.scrim.alpha, closeTo(0.32 * 255, 1));
+      expect((light.scrim.a * 255.0).round().clamp(0, 255), closeTo(0.32 * 255, 1));
+      expect((dark.scrim.a * 255.0).round().clamp(0, 255), closeTo(0.32 * 255, 1));
     });
 
     test('label12：12sp／行高 16／字距 +0.44／默认 w500', () {
