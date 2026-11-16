@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfremote/core/constants.dart';
 import 'package:qfremote/core/manifest.dart';
+import 'package:qfremote/core/release_signature.dart';
 import 'package:qfremote/services/apk_verify.dart';
 import 'package:qfremote/services/updater.dart';
 
@@ -42,6 +43,37 @@ class _StubApkVerifier implements ApkIdentityVerifier {
 const int _port = 18791;
 const String _origin = 'http://127.0.0.1:$_port';
 
+/// F-05：假清单也要带 Ed25519 签名（测试密钥对，与
+/// test/release_signature_test.dart 同一对，TEST ONLY）。
+/// 发版清单签名覆盖整份文档，篡改腿（mode=tampered）是“先改 sha 再签”，
+/// 这样 fetchManifest 验签通过、下载完整性腿仍能测到 SHA 不一致；
+/// 若只签正常文档再改 sha，清单签名腿会先拦，下载腿就测不到了。
+const String _testSeedHex =
+    '0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210';
+const String _testPubSpkiB64 =
+    'MCowBQYDK2VwAyEAxQyzrpVpR6jeGRNbW+JoX/NIr8Y/w0qDesoSvFwfViU=';
+
+List<int> _hex(String s) {
+  final out = <int>[];
+  for (var i = 0; i < s.length; i += 2) {
+    out.add(int.parse(s.substring(i, i + 2), radix: 16));
+  }
+  return out;
+}
+
+Map<String, dynamic> _signManifest(Map<String, dynamic> doc) {
+  final sig = ed25519Sign(
+    seed: _hex(_testSeedHex),
+    message: utf8.encode(canonicalReleaseJson(doc)),
+  );
+  doc['signature'] = <String, dynamic>{
+    'alg': 'ed25519',
+    'key_id': 'release-1',
+    'sig': base64Url.encode(sig).replaceAll('=', ''),
+  };
+  return doc;
+}
+
 void main() {
   test('更新全流程＋失败注入', () async {
     final apkBytes = List<int>.generate(200000, (i) => (i * 7 + 13) % 251);
@@ -65,7 +97,7 @@ void main() {
           await req.response.close();
           return;
         }
-        final manifest = {
+        final manifest = _signManifest({
           'version': '9.9.9',
           'notes': '测试清单（Windows 段占位）',
           'url': '$_origin/QFRemote-Setup-v9.9.9.exe',
@@ -78,7 +110,7 @@ void main() {
             'sha256': mode == 'tampered' ? 'b' * 64 : apkSha,
             'size': apkBytes.length,
           },
-        };
+        });
         req.response
           ..headers.contentType = ContentType.json
           ..write(jsonEncode(manifest));
@@ -144,6 +176,7 @@ void main() {
       apkIdentityVerifier: _StubApkVerifier(),
       releaseUrl: '$_origin/release.json',
       trustedOrigin: _origin,
+      verifyPublicKeyB64: _testPubSpkiB64,
     );
     final dir = await Directory.systemTemp.createTemp('qf_upd_test');
     addTearDown(() async {
@@ -221,7 +254,7 @@ void main() {
 
     // 5) 服务器不回响应头：等响应头超时（注入 600ms）判失败，不无声挂死
     mode = 'hang';
-    final hangManifest = ReleaseManifest.parse(jsonEncode({
+    final hangManifest = ReleaseManifest.parse(jsonEncode(_signManifest({
       'version': '9.9.9',
       'notes': '',
       'url': '$_origin/QFRemote-Setup-v9.9.9.exe',
@@ -234,13 +267,14 @@ void main() {
         'sha256': apkSha,
         'size': apkBytes.length,
       },
-    }), trustedOrigin: _origin);
+    })), trustedOrigin: _origin, verifyPublicKeyB64: _testPubSpkiB64);
     final impatient = UpdateService(
       responseTimeout: const Duration(milliseconds: 600),
       stallTimeout: const Duration(milliseconds: 600),
       apkIdentityVerifier: _StubApkVerifier(),
       releaseUrl: '$_origin/release.json',
       trustedOrigin: _origin,
+      verifyPublicKeyB64: _testPubSpkiB64,
     );
     final sw = Stopwatch()..start();
     // VM-03 起下载层异常统一映射为中文 FormatException 展示给用户，

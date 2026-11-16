@@ -10,9 +10,9 @@
  *  E. main.js 接线静态断言：require 了共享模块、软更新与强更两个入口
  *     都走 launchDownloadedInstaller、全文件再无 openPath、软更新拉起后
  *     置 'installing' 态并退出交接；
- *  F. 网页下载路径零改动守卫：installer.nsi 仍含 MUI_PAGE_DIRECTORY 与
- *     InstallDirRegKey；关于页/强更页文案已是「安装更新并重启」、
- *     再无「打开安装包」。
+ *  F. 网页下载路径零改动守卫：A1 两段式后目录页在外层安装器
+ *     installer-outer.nsi、InstallDirRegKey 内外层各一；关于页/强更页
+ *     文案已是「安装更新并重启」、再无「打开安装包」。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  */
 const fs = require('fs');
@@ -76,27 +76,36 @@ function segment(src, startMarker, endMarker) {
     // E
     const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
     ok('E1_require_shared', mainSrc.includes("require('./installer-launch')"));
-    ok('E2_wrapper_uses_silent', segment(mainSrc, 'function launchDownloadedInstaller', "ipcMain.on('qf-update-open'")
-      .includes('launchInstallerSilent') && segment(mainSrc, 'function launchDownloadedInstaller', "ipcMain.on('qf-update-open'")
+    // F-08（2026-11-14）：main.js 的 IPC 注册已改走 trustedOn 包装器，定位符同步改名；断言本身（下载入口走共享安装器、先置 installing 再退出交接）不变。
+    ok('E2_wrapper_uses_silent', segment(mainSrc, 'function launchDownloadedInstaller', "trustedOn('qf-update-open'")
+      .includes('launchInstallerSilent') && segment(mainSrc, 'function launchDownloadedInstaller', "trustedOn('qf-update-open'")
       .includes('process.execPath'));
-    const softSeg = segment(mainSrc, "ipcMain.on('qf-update-open'", '// ---------- v1.0.4');
+    const softSeg = segment(mainSrc, "trustedOn('qf-update-open'", '// ---------- v1.0.4');
     ok('E3_soft_uses_shared', softSeg.includes('launchDownloadedInstaller(updateState.download.file)'), {});
     ok('E4_soft_installing_then_quit', softSeg.includes("phase: 'installing'") && softSeg.includes('broadcastUpdate()') && (softSeg.includes('quitForInstaller()') || softSeg.includes('app.exit(0)')), {});
-    const forceSeg = segment(mainSrc, "ipcMain.on('qf-force-open'", '// 启动门');
+    const forceSeg = segment(mainSrc, "trustedOn('qf-force-open'", '// 启动门');
     ok('E5_force_uses_shared', forceSeg.includes('launchDownloadedInstaller(forceState.download.file)'), {});
     ok('E6_force_installing_then_quit', forceSeg.includes("phase: 'installing'") && forceSeg.includes('sendForceState()') && (forceSeg.includes('quitForInstaller()') || forceSeg.includes('app.exit(0)')), {});
-    ok('E7_no_openpath_anywhere', !mainSrc.includes('openPath'));
+    // D-07
+    ok('E7_openpath_only_bootlog', (mainSrc.match(/openPath/g) || []).length === 1 && mainSrc.includes('shell.openPath(bootLogPath())'));
     ok('E8_both_entries_only', (mainSrc.match(/launchDownloadedInstaller\(/g) || []).length === 3,
       { count: (mainSrc.match(/launchDownloadedInstaller\(/g) || []).length });
 
-    // F
+    // F（A1 两段式：目录页在外层，InstallDirRegKey 内外层各一）
     const nsi = fs.readFileSync(path.join(__dirname, '..', 'installer.nsi'), 'utf8');
-    ok('F1_nsi_directory_page_kept', nsi.includes('MUI_PAGE_DIRECTORY'));
+    const nsiOuter = fs.readFileSync(path.join(__dirname, '..', 'installer-outer.nsi'), 'utf8');
+    ok('F1_nsi_directory_page_kept', nsiOuter.includes('MUI_PAGE_DIRECTORY'));
     ok('F2_nsi_regkey_kept', nsi.includes('InstallDirRegKey'));
     const about = fs.readFileSync(path.join(__dirname, '..', 'about.html'), 'utf8');
     const force = fs.readFileSync(path.join(__dirname, '..', 'force-update.html'), 'utf8');
     ok('F3_about_wording', about.includes('安装更新并重启') && about.includes("s.phase === 'installing'") && !about.includes('打开安装包'));
     ok('F4_force_wording', force.includes('安装更新并重启') && force.includes("s.phase === 'installing'") && !force.includes('打开安装包'));
+    // R-W6：about 浅色 .btn.danger 文字须为中性墨色（F1 口径），不得用
+    // var(--danger) 红字（#DC2626 于 --surface-3 #F0F0F2 仅 4.24:1，
+    // 低于正文 4.5:1；墨色 #111113 为 16.57:1）。深色 #F87171 于
+    // #1C1C1E 为 6.15:1 已过线，保留。
+    const dangerRule = (about.match(/\.btn\.danger\s*\{[^}]*\}/) || [''])[0];
+    ok('F6_about_danger_ink', dangerRule.includes('color:var(--text-1)') && !dangerRule.includes('color:var(--danger)'));
     const pkg = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8');
     ok('F5_packaged_files_include_module', pkg.includes('"installer-launch.js"'));
 

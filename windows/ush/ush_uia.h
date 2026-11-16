@@ -45,7 +45,14 @@ void ush_uia_shutdown(void);
  * err_code 填 QFR_USH_SESSION_LOCKED 或 QFR_USH_NO_INTERACTIVE_SESSION。 */
 int ush_session_interactive(char *err_code, size_t err_size);
 
-/* 执行命令。成功返回 1，data_json 填好结果对象原文（含花括号）；
+/* S-024（2026-11-15）：执行前目标信息＋NOT_CONFIRMED 状态。
+ * ui.click／ui.input 的成功结果带 "status":"CONFIRMED" 与 "target"
+ * 对象（见 ush_uia_target_json：hwnd 哈希／标题摘要／PID／session／
+ * 完整性级别／DPI／坐标／前置状态）；无法确认时只报
+ * "status":"NOT_CONFIRMED"，不把“发送了输入事件”说成“业务操作成功”。
+ * target 字段取不到填 null／"unknown"，绝不暴露原始窗口句柄。
+ *
+ * 执行命令。成功返回 1，data_json 填好结果对象原文（含花括号）；
  * 失败返回 0，err_code 填错误码，err_text 填人类可读说明（不含敏感明文）。
  * retry_count 回填实际重试次数；window_title 回填目标窗口标题（可空）。 */
 int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,

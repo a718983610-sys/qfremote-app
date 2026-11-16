@@ -2,30 +2,28 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body {
-    background:#ffffff; color:#1f2d47; box-sizing:border-box;
-    border-bottom:1px solid #dfe7f2;
-    font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    background:var(--surface-3); color:var(--text-1); box-sizing:border-box;
+    border-bottom:1px solid var(--line);
     display:flex; align-items:center; gap:10px; padding:0 12px;
     -webkit-user-select:none; user-select:none;
   }
-  html[data-theme="dark"] body { background:#22262e; color:#eceff3; border-bottom-color:rgba(255,255,255,.08); }
-  .dot { width:9px; height:9px; border-radius:50%; background:#1db954; flex:none; }
-  .title { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
-  .mode { font-size:13px; color:#5d6e84; white-space:nowrap; }
-  html[data-theme="dark"] .mode { color:rgba(228,232,238,.60); }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--success); flex:none; }
+  .title { font-size:14px; font-weight:600; line-height:20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  .mode { font-size:12px; line-height:18px; color:var(--text-2); white-space:nowrap; }
   .spacer { flex:1; }
   button {
-    appearance:none; border:1px solid #c9d6ea; background:#ffffff; color:#2470e0;
-    border-radius:8px; cursor:pointer; font-family:inherit; font-size:13px;
-    height:30px; padding:0 12px; display:flex; align-items:center; gap:5px; flex:none;
+    appearance:none; border:1px solid var(--btn-line); background:var(--bg2); color:var(--text-1);
+    border-radius:8px; cursor:pointer; font-family:inherit; font-size:13px; line-height:20px;
+    height:32px; padding:0 12px; display:flex; align-items:center; gap:6px; flex:none;
+    transition: background var(--d1) var(--e-c), transform var(--d0) var(--e-s);
   }
-  html[data-theme="dark"] button { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16); }
-  button:hover { background:#eef3fb; }
-  html[data-theme="dark"] button:hover { background:#32363f; }
-  button:focus-visible { outline:2px solid #2470e0; outline-offset:1px; }
+  button:active { transform: scale(.985); }
+  button:disabled { color: var(--text-disabled); }
+  button:hover { background:var(--hover-ov); }
 </style>
 </head>
 <body>

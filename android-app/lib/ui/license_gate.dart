@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/license.dart';
+import 'qf_icons.dart';
 import 'theme.dart';
 
 /// 许可拦截面（2.3.1 阶段 D；设计稿 §四 + 契约 §7.5.5）：
@@ -19,6 +20,10 @@ class LicenseGatePage extends StatefulWidget {
   final VoidCallback onLogout;
   final VoidCallback onRecheck;
 
+  /// 拦截码（F-A8 返工，C §1.3）：LicenseDecision.code，由 main 传入；
+  /// 为空时不显示 chip（旧调用点／测试不传时不破版）。
+  final String? decisionCode;
+
   /// G3 时的「申诉换绑设备」入口（§11.9）；为 null 时不显示。
   final VoidCallback? onRebind;
 
@@ -27,6 +32,7 @@ class LicenseGatePage extends StatefulWidget {
     required this.palette,
     required this.username,
     required this.copy,
+    this.decisionCode,
     required this.onClaim,
     required this.onPurchase,
     required this.onAppeal,
@@ -90,9 +96,10 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
             const Center(child: QfAvatarPlaceholder(size: 54)),
             const SizedBox(height: 14),
             Center(
+              // 定夺 §2.1：页面标题 24/32、600+；24/14=1.71，满足与正文 ≥1.6。
               child: Text(copy.title,
                   style: TextStyle(
-                      color: p.onCard, fontSize: 20, fontWeight: FontWeight.w800)),
+                      color: p.onCard, fontSize: QfScale.fs24, fontWeight: FontWeight.w600)),
             ),
             const SizedBox(height: 6),
             Center(
@@ -103,30 +110,43 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                   widget.username.trim().isEmpty
                       ? '当前账号：暂未读取到（请以控制台登录账号为准）'
                       : '当前账号：${widget.username}',
-                  style: TextStyle(color: p.onCardDim, fontSize: 13)),
+                  style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13)),
             ),
             const SizedBox(height: 16),
+            // F-A8：拦截码 chip（decision.code 原样显示，不编新码）；
+            // 为空时整行不出现。
+            if (widget.decisionCode != null)
+              Center(
+                child: QfStatusChip(
+                  palette: p,
+                  label: widget.decisionCode!,
+                  dotColor: p.danger,
+                ),
+              ),
+            if (widget.decisionCode != null) const SizedBox(height: 16),
             Container(
               decoration: BoxDecoration(
                 color: p.cardColor,
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(QfScale.radiusMd),
                 border: Border.all(color: p.cardBorder),
               ),
               padding: const EdgeInsets.fromLTRB(16, 15, 16, 15),
               child: Text(copy.body,
-                  style: TextStyle(color: p.onCard, fontSize: 14.5, height: 1.65)),
+                  // A §2.2：正文 14/22/400；拦截码 decision.code 未传入
+                  // 本页（见缺数据清单），不编 G-code chip。
+                  style: QfType.body14(p.onCard)),
             ),
             if (copy.hasTransferGuide) ...[
               const SizedBox(height: 12),
               Text(kTransferGuideText,
-                  style: TextStyle(color: p.onCardDim, fontSize: 13, height: 1.6)),
+                  style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13, height: 1.6)),
             ],
             if (copy.hasClaimBox && widget.onClaim != null) ...[
               const SizedBox(height: 16),
               Container(
                 decoration: BoxDecoration(
                   color: p.cardColor,
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(QfScale.radiusMd),
                   border: Border.all(color: p.cardBorder),
                 ),
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
@@ -135,9 +155,10 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                   children: [
                     Text(kClaimInputLabel,
                         style: TextStyle(
-                            color: p.onCard, fontSize: 14, fontWeight: FontWeight.w700)),
+                            color: p.onCard, fontSize: QfScale.fs14, fontWeight: FontWeight.w600)),
                     const SizedBox(height: 10),
-                    TextField(
+                    QfTextFieldTapTarget(builder: (node) => TextField(
+                      focusNode: node,
                       controller: _claimCtrl,
                       maxLength: 40,
                       autocorrect: false,
@@ -147,32 +168,32 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                         hintText: '粘贴完整密钥串',
                         counterText: '',
                         border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10)),
+                            borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 11),
+                            horizontal: 12, vertical: 8),
                       ),
-                    ),
+                    )),
                     const SizedBox(height: 10),
                     SizedBox(
                       width: double.infinity,
-                      child: FilledButton(
+                      child: QfButtonTapTarget(child: FilledButton(
                         onPressed: _claimBusy ? null : _submitClaim,
                         style: FilledButton.styleFrom(
-                          backgroundColor: QfPalette.brand,
-                          minimumSize: const Size(0, 46),
+                          backgroundColor: p.brand,
+                          minimumSize: const Size(0, QfScale.buttonVisualHeight),
                           shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
+                              borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                         ),
                         child: Text(_claimBusy ? '正在领取…' : '领取密钥',
                             style: const TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w700)),
-                      ),
+                                fontSize: QfScale.fs15, fontWeight: FontWeight.w600)),
+                      )),
                     ),
                     if (_claimOut != null) ...[
                       const SizedBox(height: 10),
                       Text(_claimOut!,
                           style: TextStyle(
-                              color: p.onCard, fontSize: 13.5, height: 1.55)),
+                              color: p.onCard, fontSize: QfScale.fs14, height: 1.55)),
                     ],
                   ],
                 ),
@@ -180,51 +201,51 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
             ],
             const SizedBox(height: 18),
             if (copy.primary == GatePrimary.purchase)
-              FilledButton(
+              QfButtonTapTarget(child: FilledButton(
                 onPressed: widget.onPurchase,
                 style: FilledButton.styleFrom(
-                  backgroundColor: QfPalette.brand,
-                  minimumSize: const Size(0, 48),
+                  backgroundColor: p.brand,
+                  minimumSize: const Size(0, QfScale.buttonVisualHeight),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11)),
+                      borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                 ),
                 child: const Text('前往购买',
-                    style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700)),
-              ),
+                    style: TextStyle(fontSize: QfScale.fs16, fontWeight: FontWeight.w600)),
+              )),
             if (copy.primary == GatePrimary.appeal)
-              FilledButton(
+              QfButtonTapTarget(child: FilledButton(
                 onPressed: widget.onAppeal,
                 style: FilledButton.styleFrom(
-                  backgroundColor: QfPalette.brand,
-                  minimumSize: const Size(0, 48),
+                  backgroundColor: p.brand,
+                  minimumSize: const Size(0, QfScale.buttonVisualHeight),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11)),
+                      borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                 ),
                 child: const Text('提交申诉',
-                    style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700)),
-              ),
+                    style: TextStyle(fontSize: QfScale.fs16, fontWeight: FontWeight.w600)),
+              )),
             if (copy.hasRebind && widget.onRebind != null)
-              TextButton(
+              QfButtonTapTarget(child: TextButton(
                 onPressed: widget.onRebind,
                 child: const Text('申诉换绑设备'),
-              ),
+              )),
             const SizedBox(height: 6),
-            TextButton(
+            QfButtonTapTarget(child: TextButton(
               onPressed: widget.onRecheck,
               child: const Text('重新检查状态'),
-            ),
+            )),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                TextButton(
+                QfButtonTapTarget(child: TextButton(
                   onPressed: widget.onSupport,
                   child: const Text('咨询智能客服'),
-                ),
-                TextButton(
+                )),
+                QfButtonTapTarget(child: TextButton(
                   onPressed: widget.onLogout,
                   child: Text('退出账号',
-                      style: TextStyle(color: QfPalette.probeBad)),
-                ),
+                      style: TextStyle(color: p.danger)),
+                )),
               ],
             ),
           ],
@@ -253,13 +274,13 @@ class TrialBar extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: p.cardColor,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(QfScale.radiusMd),
         border: Border.all(color: p.cardBorder),
       ),
       padding: const EdgeInsets.fromLTRB(16, 13, 16, 13),
       child: Row(
         children: [
-          Icon(Icons.schedule, size: 20, color: QfPalette.brand),
+          QfIcon(QfIconKind.clock, size: 20, color: p.brand),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -267,25 +288,25 @@ class TrialBar extends StatelessWidget {
               children: [
                 Text(text,
                     style: TextStyle(
-                        color: p.onCard, fontSize: 14.5, fontWeight: FontWeight.w700)),
+                        color: p.onCard, fontSize: QfScale.fs15, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 3),
                 Text('试用结束后，电脑与手机需使用激活密钥继续使用；购买密钥后，网页版免费开通，可在任意设备登录使用。',
-                    style: TextStyle(color: p.onCardDim, fontSize: 12.5, height: 1.45)),
+                    style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13, height: 1.45)),
               ],
             ),
           ),
           const SizedBox(width: 10),
-          FilledButton(
+          QfButtonTapTarget(child: FilledButton(
             onPressed: onPurchase,
             style: FilledButton.styleFrom(
-              backgroundColor: QfPalette.brand,
-              minimumSize: const Size(0, 40),
+              backgroundColor: p.brand,
+              minimumSize: const Size(0, QfScale.buttonVisualHeight),
               padding: const EdgeInsets.symmetric(horizontal: 14),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(999)),
+                  borderRadius: BorderRadius.circular(QfScale.rPill)),
             ),
-            child: const Text('购买密钥', style: TextStyle(fontWeight: FontWeight.w700)),
-          ),
+            child: const Text('购买密钥', style: TextStyle(fontWeight: FontWeight.w600)),
+          )),
         ],
       ),
     );

@@ -103,7 +103,10 @@ function makeCtx(elById, opts) {
 }
 
 const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-const appJs = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'webapp', 'app.js'), 'utf8');
+// W-08：app.js 已改名内容 hash 文件，经 ASSETS.json 解析当前文件名（只改读路径）
+const _waDir = path.join(__dirname, '..', '..', 'server', 'webapp');
+const _assets = JSON.parse(fs.readFileSync(path.join(_waDir, 'ASSETS.json'), 'utf8')).files;
+const appJs = fs.readFileSync(path.join(_waDir, (_assets && _assets['app.js']) || 'app.js'), 'utf8');
 
 // P4：handleManualLogout 登出即清 cookie。
 {
@@ -176,7 +179,8 @@ const appJs = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'webapp
 // P13：主进程两处登出入口先等 cookie 清净再回登录页（P1-4a 第三轮）。
 {
   const check = (name) => {
-    const at = mainJs.indexOf("ipcMain.handle('" + name + "'");
+    // F-08（2026-11-14）：main.js 的 IPC 注册已改走 trustedHandle 包装器，定位符同步改名；断言本身（先清 cookie 再回登录页）不变。
+    const at = mainJs.indexOf("trustedHandle('" + name + "'");
     const body = at >= 0 ? mainJs.slice(at, at + 5000) : '';
     const awaitAt = body.indexOf('await autologinMod.clearConsoleSession(authSession(), CONSOLE_URL)');
     const loadAt = body.indexOf("loadURL(CONSOLE_URL + 'logout')");

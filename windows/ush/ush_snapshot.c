@@ -13,6 +13,10 @@
 /* H24：截图落盘上限——目录内最多保留 50 个文件、超过 7 天的删。 */
 #define USH_SNAPSHOT_MAX_FILES 50
 #define USH_SNAPSHOT_MAX_AGE_DAYS 7
+/* S-025：截图最长边上限（像素）。超限即按比例降采样（HALFTONE）。 */
+#define USH_SNAPSHOT_MAX_EDGE 1920
+/* S-025：一次截图最多遮罩的密码框数（枚举上限，防失控）。 */
+#define USH_SNAPSHOT_MAX_MASK_RECTS 64
 
 /* ---------- 窗口查找（标题子串 + 类名精确） ---------- */
 
@@ -102,6 +106,214 @@ static void capture_free(capture_t *c) {
     if (c->hbmp) DeleteObject(c->hbmp);
     c->hbmp = NULL;
     c->bits = NULL;
+}
+
+/* ---------- S-025：密码遮罩＋降采样＋设备端提示条 ---------- */
+/* 密码遮罩：只遮经典 Win32 Edit 密码框（类名 Edit＋ES_PASSWORD 样式）。
+ * 已知局限：现代 UIA 密码框（如 Chromium 密码字段、WPF PasswordBox）
+ * 不是 Win32 Edit，不在此列——遮不到不谎称已遮，真机验收见
+ * WINDOWS-TESTS.md。遮罩在降采样之前做（先遮原图再缩放，遮罩边缘
+ * 不会因缩放漏出半个像素）。 */
+typedef struct {
+    RECT rects[USH_SNAPSHOT_MAX_MASK_RECTS];
+    int count;
+    RECT cap_rc; /* 抓屏矩形（屏幕坐标），用于求交集 */
+} mask_ctx_t;
+
+static BOOL CALLBACK enum_password_child_proc(HWND hwnd, LPARAM lp) {
+    mask_ctx_t *c = (mask_ctx_t *)lp;
+    if (c->count >= USH_SNAPSHOT_MAX_MASK_RECTS) return FALSE;
+    WCHAR cls[32] = { 0 };
+    if (GetClassNameW(hwnd, cls, 32) == 0) return TRUE;
+    if (wcscmp(cls, L"Edit") != 0) return TRUE;
+    if ((GetWindowLongW(hwnd, GWL_STYLE) & ES_PASSWORD) == 0) return TRUE;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    RECT wr;
+    if (!GetWindowRect(hwnd, &wr)) return TRUE;
+    RECT inter;
+    if (!IntersectRect(&inter, &wr, &c->cap_rc)) return TRUE;
+    c->rects[c->count++] = inter;
+    return TRUE;
+}
+
+static BOOL CALLBACK enum_password_top_proc(HWND hwnd, LPARAM lp) {
+    EnumChildWindows(hwnd, enum_password_child_proc, lp);
+    mask_ctx_t *c = (mask_ctx_t *)lp;
+    return c->count < USH_SNAPSHOT_MAX_MASK_RECTS; /* 集满即停 */
+}
+
+/* 抓屏后遮密码框：DIB 对应区域涂不透明黑。返回遮住的字段数。 */
+static int mask_password_fields(capture_t *cap, RECT cap_rc) {
+    mask_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.cap_rc = cap_rc;
+    EnumWindows(enum_password_top_proc, (LPARAM)&ctx);
+    /* DIB 为 32bpp top-down：像素 (x,y) 在 bits + y*stride + x*4。 */
+    for (int i = 0; i < ctx.count; i++) {
+        RECT r = ctx.rects[i];
+        int x0 = r.left - cap_rc.left, y0 = r.top - cap_rc.top;
+        int x1 = r.right - cap_rc.left, y1 = r.bottom - cap_rc.top;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > cap->width) x1 = cap->width;
+        if (y1 > cap->height) y1 = cap->height;
+        unsigned char *bits = (unsigned char *)cap->bits;
+        for (int y = y0; y < y1; y++) {
+            unsigned char *row = bits + (size_t)y * (size_t)cap->stride + (size_t)x0 * 4;
+            for (int x = x0; x < x1; x++) {
+                row[0] = 0; row[1] = 0; row[2] = 0; row[3] = 255;
+                row += 4;
+            }
+        }
+    }
+    return ctx.count;
+}
+
+/* 降采样：最长边超 USH_SNAPSHOT_MAX_EDGE 即按比例缩小（HALFTONE），
+ * 成功返回 1（cap 已换成新 DIB，旧 DIB 已释放）；未超限返回 0
+ * （cap 不动）；失败返回 0 且 cap 不动（宁可回原图也不让截图失败）。 */
+static int downscale_capture(capture_t *cap) {
+    int longest = cap->width > cap->height ? cap->width : cap->height;
+    if (longest <= USH_SNAPSHOT_MAX_EDGE) return 0;
+    double scale = (double)USH_SNAPSHOT_MAX_EDGE / (double)longest;
+    int nw = (int)(cap->width * scale);
+    int nh = (int)(cap->height * scale);
+    if (nw < 1) nw = 1;
+    if (nh < 1) nh = 1;
+    HDC screen = GetDC(NULL);
+    if (!screen) return 0;
+    HDC dst = CreateCompatibleDC(screen);
+    HDC src = CreateCompatibleDC(screen);
+    if (!dst || !src) {
+        if (dst) DeleteDC(dst);
+        if (src) DeleteDC(src);
+        ReleaseDC(NULL, screen);
+        return 0;
+    }
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = nw;
+    bi.bmiHeader.biHeight = -nh; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void *nbits = NULL;
+    HBITMAP nbmp = CreateDIBSection(dst, &bi, DIB_RGB_COLORS, &nbits, NULL, 0);
+    if (!nbmp || !nbits) {
+        if (nbmp) DeleteObject(nbmp);
+        DeleteDC(dst);
+        DeleteDC(src);
+        ReleaseDC(NULL, screen);
+        return 0;
+    }
+    HGDIOBJ old_dst = SelectObject(dst, nbmp);
+    HGDIOBJ old_src = SelectObject(src, cap->hbmp);
+    SetStretchBltMode(dst, HALFTONE);
+    SetBrushOrgEx(dst, 0, 0, NULL);
+    BOOL ok = StretchBlt(dst, 0, 0, nw, nh, src, 0, 0, cap->width, cap->height, SRCCOPY);
+    SelectObject(dst, old_dst);
+    SelectObject(src, old_src);
+    DeleteDC(dst);
+    DeleteDC(src);
+    ReleaseDC(NULL, screen);
+    if (!ok) {
+        DeleteObject(nbmp);
+        return 0;
+    }
+    DeleteObject(cap->hbmp);
+    cap->hbmp = nbmp;
+    cap->bits = nbits;
+    cap->width = nw;
+    cap->height = nh;
+    cap->stride = nw * 4;
+    return 1;
+}
+
+/* 设备端提示条：独立线程＋自带消息泵，不阻塞管道线程。提示条本身会
+ * 出现在截图里（有意为之：远端看到的画面与本机用户看到的提示一致）。
+ * 单飞行：USH 管道线程串行处理请求，同一时刻最多一个提示条。 */
+static HANDLE g_notice_stop = NULL;
+static HANDLE g_notice_thread = NULL;
+static volatile LONG g_notice_shown = 0;
+
+static LRESULT CALLBACK snapshot_notice_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT r;
+        GetClientRect(hwnd, &r);
+        SetBkMode(hdc, TRANSPARENT);
+        DrawTextW(hdc, L"QFRemote 正在截图…", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static DWORD WINAPI snapshot_notice_thread(LPVOID unused) {
+    (void)unused;
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = snapshot_notice_wndproc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"QFRSnapshotNotice";
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int x = (sw - 340) / 2;
+    if (x < 0) x = 0;
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"QFRSnapshotNotice",
+                                L"QFRemote 正在截图", WS_POPUP | WS_VISIBLE,
+                                x, 0, 340, 40, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    if (!hwnd) return 1;
+    InterlockedExchange(&g_notice_shown, 1);
+    for (;;) {
+        DWORD w = MsgWaitForMultipleObjects(1, &g_notice_stop, FALSE, INFINITE, QS_ALLINPUT);
+        if (w == WAIT_OBJECT_0) break;
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) goto done;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+done:
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+/* 弹提示条：成功显示返回 1；建窗失败即无提示继续，返回 0（best-effort）。 */
+static int snapshot_notice_show(void) {
+    g_notice_shown = 0;
+    g_notice_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_notice_stop) return 0;
+    g_notice_thread = CreateThread(NULL, 0, snapshot_notice_thread, NULL, 0, NULL);
+    if (!g_notice_thread) {
+        CloseHandle(g_notice_stop);
+        g_notice_stop = NULL;
+        return 0;
+    }
+    for (int i = 0; i < 20 && !g_notice_shown; i++) Sleep(10);
+    return g_notice_shown ? 1 : 0;
+}
+
+static void snapshot_notice_hide(void) {
+    if (g_notice_stop) SetEvent(g_notice_stop);
+    if (g_notice_thread) {
+        WaitForSingleObject(g_notice_thread, 500);
+        CloseHandle(g_notice_thread);
+        g_notice_thread = NULL;
+    }
+    if (g_notice_stop) {
+        CloseHandle(g_notice_stop);
+        g_notice_stop = NULL;
+    }
+    g_notice_shown = 0;
 }
 
 /* ---------- WIC 编 PNG ---------- */
@@ -388,6 +600,83 @@ static void snapshot_dir(char *out, size_t out_size) {
     ush_snapshot_prune_dir(out, USH_SNAPSHOT_MAX_FILES, USH_SNAPSHOT_MAX_AGE_DAYS);
 }
 
+/* ---------- file 模式：WIC 工厂＋文件流 ---------- */
+/* N-09（2026-11-15）：file 模式在 USH 管道线程上跑，管道线程从未初始
+ * 化 COM——旧代码在 ush_ui_snapshot 内直接 CoCreateInstance 建 WIC
+ * 工厂，恒返 CO_E_NOTINITIALIZED（0x800401F0），默认 mode=file 截图
+ * 恒败（encode 内的 CoInitializeEx 根本没机会跑到）。修法：本函数入
+ * 口即按需 CoInitializeEx（MTA，与 encode 内同款）；只有本次调用真
+ * 由我们初始化时才置 *com_init_out=1，调用方在 encode 完成后凭此配
+ * 对 CoUninitialize（本函数自身绝不反初始化——流与编码器须在初始化
+ * 的线程上用完再反初始化）。不做 pipe_loop 入口常驻初始化（UIA 对
+ * 象建在主线程 STA，常驻初始化会走跨套间封送、主线程不泵消息会挂死
+ * click/tree/input，见 encode 注释）。RPC_E_CHANGED_MODE 等失败时
+ * 不置位，照常往下尝试创建（线程已被别处以另一模式初始化时工厂
+ * 创建仍可成功）。
+ * 成功返回 1（factory／wstream／istream 均已建出，调用方释放）；
+ * 失败返回 0 并带回步骤＋HRESULT（步骤口径与旧内联代码一致）；
+ * 失败时已建出的对象由本函数自行释放，调用方无需再释放。
+ * 供单测直验：无 COM 初始化的线程上调本函数须成功建出工厂＋流。 */
+static int snapshot_open_file_stream(const char *path_utf8,
+                                     IWICImagingFactory **factory_out,
+                                     IWICStream **wstream_out,
+                                     IStream **istream_out,
+                                     int *com_init_out,
+                                     HRESULT *hr_out, const char **step_out,
+                                     HRESULT *hr_init_out) {
+    if (factory_out) *factory_out = NULL;
+    if (wstream_out) *wstream_out = NULL;
+    if (istream_out) *istream_out = NULL;
+    if (com_init_out) *com_init_out = 0;
+    if (hr_out) *hr_out = E_FAIL;
+    if (step_out) *step_out = "handler/stream-setup";
+    HRESULT hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (hr_init_out) *hr_init_out = hr_init;
+    int com_init_here = SUCCEEDED(hr_init);
+    if (com_init_out) *com_init_out = com_init_here;
+    IWICImagingFactory *factory = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICImagingFactory, (void **)&factory);
+    if (FAILED(hr) || !factory) {
+        if (hr_out) *hr_out = FAILED(hr) ? hr : E_POINTER;
+        if (step_out) *step_out = "handler/CoCreateInstance";
+        return 0;
+    }
+    IWICStream *wstream = NULL;
+    HRESULT hr2 = factory->lpVtbl->CreateStream(factory, &wstream);
+    if (FAILED(hr2) || !wstream) {
+        if (hr_out) *hr_out = FAILED(hr2) ? hr2 : E_POINTER;
+        if (step_out) *step_out = "handler/CreateStream";
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    WCHAR wpath[MAX_PATH + 64];
+    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, wpath, MAX_PATH + 64);
+    hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
+    if (FAILED(hr2)) {
+        if (hr_out) *hr_out = hr2;
+        if (step_out) *step_out = "handler/InitializeFromFilename";
+        wstream->lpVtbl->Release(wstream);
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    IStream *istream = NULL;
+    hr2 = wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream);
+    if (FAILED(hr2) || !istream) {
+        if (hr_out) *hr_out = FAILED(hr2) ? hr2 : E_POINTER;
+        if (step_out) *step_out = "handler/QueryInterface";
+        wstream->lpVtbl->Release(wstream);
+        factory->lpVtbl->Release(factory);
+        return 0;
+    }
+    if (factory_out) *factory_out = factory;
+    if (wstream_out) *wstream_out = wstream;
+    if (istream_out) *istream_out = istream;
+    if (hr_out) *hr_out = S_OK;
+    if (step_out) *step_out = "ok";
+    return 1;
+}
+
 int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                     char *err_code, size_t err_code_size,
                     char *err_text, size_t err_text_size) {
@@ -420,13 +709,20 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
         rc.bottom = rc.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
     }
 
+    /* S-025：抓屏前弹设备端提示条（best-effort；建窗失败即无提示继续）。 */
+    int notice_shown = snapshot_notice_show();
+
     capture_t cap;
     if (!capture_rect(rc, &cap)) {
+        snapshot_notice_hide();
         strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
         snprintf(err_text, err_text_size,
             "screen capture failed (BitBlt); session may be locked or RDP disconnected");
         return 0;
     }
+    /* S-025：先遮密码框、再降采样（遮罩在原图上做，缩放不漏边）。 */
+    int masked_password_fields = mask_password_fields(&cap, rc);
+    int downscaled = downscale_capture(&cap);
 
     int ok = 0;
     if (!inline_mode) {
@@ -440,36 +736,26 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
             st.wMilliseconds, (unsigned long)GetCurrentProcessId());
         /* WIC 直接写文件：用 IWICStream::InitializeFromFilename。
          * r9-diag：handler 自身的工厂创建与流搭建失败时同样带回步骤＋HRESULT；
-         * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。 */
+         * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。
+         * N-09：工厂＋流搭建抽到 snapshot_open_file_stream（入口即按需
+         * CoInitializeEx，见该函数注释）。 */
         HRESULT diag_hr = E_FAIL;
         const char *diag_step = "handler/stream-setup";
-        /* 0xFFFFFFFF＝哨兵：CoInitializeEx 尚未在本路径调用（encode 未被调
-         * 到时沿用此值）；切勿默认为 S_OK，那会谎称“初始化已成功”。 */
+        /* 0xFFFFFFFF＝哨兵：CoInitializeEx 尚未在本路径调用（open 失败且
+         * encode 未被调到时沿用此值）；切勿默认为 S_OK，那会谎称“初始化
+         * 已成功”。open 成功时 diag_init 为 open 的初始化结果，encode 被
+         * 调到后由其覆写为真实步骤。 */
         HRESULT diag_init = (HRESULT)0xFFFFFFFF;
+        int com_init_here = 0;
         IWICImagingFactory *factory = NULL;
-        HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-                                      &IID_IWICImagingFactory, (void **)&factory);
-        if (SUCCEEDED(hr) && factory) {
-            IWICStream *wstream = NULL;
-            HRESULT hr2 = factory->lpVtbl->CreateStream(factory, &wstream);
-            if (SUCCEEDED(hr2) && wstream) {
-                WCHAR wpath[MAX_PATH + 64];
-                MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH + 64);
-                hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
-                if (SUCCEEDED(hr2)) {
-                    IStream *istream = NULL;
-                    hr2 = wstream->lpVtbl->QueryInterface(wstream, &IID_IStream, (void **)&istream);
-                    if (SUCCEEDED(hr2) && istream) {
-                        ok = encode_png_to_stream(&cap, istream, &diag_hr, &diag_step, &diag_init);
-                        istream->lpVtbl->Release(istream);
-                    } else { diag_step = "handler/QueryInterface"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
-                } else { diag_step = "handler/InitializeFromFilename"; diag_hr = hr2; }
-                wstream->lpVtbl->Release(wstream);
-            } else { diag_step = "handler/CreateStream"; diag_hr = FAILED(hr2) ? hr2 : E_POINTER; }
+        IWICStream *wstream = NULL;
+        IStream *istream = NULL;
+        if (snapshot_open_file_stream(path, &factory, &wstream, &istream,
+                                      &com_init_here, &diag_hr, &diag_step, &diag_init)) {
+            ok = encode_png_to_stream(&cap, istream, &diag_hr, &diag_step, &diag_init);
+            istream->lpVtbl->Release(istream);
+            wstream->lpVtbl->Release(wstream);
             factory->lpVtbl->Release(factory);
-        } else {
-            diag_step = "handler/CoCreateInstance";
-            diag_hr = FAILED(hr) ? hr : E_POINTER;
         }
         if (ok) {
             /* 文件大小 */
@@ -483,14 +769,21 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
             char pesc[4096];
             ush_json_escape(path, pesc, sizeof(pesc));
             snprintf(data_json, data_size,
-                "{\"mode\":\"file\",\"path\":\"%s\",\"width\":%d,\"height\":%d,\"bytes\":%lu}",
-                pesc, cap.width, cap.height, (unsigned long)fsize);
+                "{\"mode\":\"file\",\"path\":\"%s\",\"width\":%d,\"height\":%d,\"bytes\":%lu,"
+                "\"downscaled\":%s,\"masked_password_fields\":%d,\"notice_shown\":%s}",
+                pesc, cap.width, cap.height, (unsigned long)fsize,
+                downscaled ? "true" : "false", masked_password_fields,
+                notice_shown ? "true" : "false");
         } else {
             strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
             snprintf(err_text, err_text_size, "PNG encode failed at %s hr=0x%08lX init=0x%08lX cap=%dx%d stride=%d",
                      diag_step, (unsigned long)diag_hr, (unsigned long)diag_init,
                      cap.width, cap.height, cap.stride);
         }
+        /* N-09：与 snapshot_open_file_stream 内的 CoInitializeEx 配对
+         * （仅本次调用真由我们初始化时反初始化；RPC_E_CHANGED_MODE 等
+         * 失败时不反初始化）。 */
+        if (com_init_here) CoUninitialize();
     } else {
         /* 内联：编到内存流 → 读 HGLOBAL → Base64 */
         HGLOBAL hg = NULL;
@@ -509,12 +802,18 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
                         size_t b64_size = ((sz + 2) / 3) * 4 + 1;
                         char *b64 = (char *)malloc(b64_size);
                         if (b64 && ush_base64_encode((const unsigned char *)bytes, sz, b64, b64_size)) {
-                            if (strlen(b64) + 256 < data_size) {
+                            /* S-025：固定字段部分已含 downscaled／masked_password_fields／
+                             * notice_shown 三字段，预留从 256 放到 512。 */
+                            if (strlen(b64) + 512 < data_size) {
                                 snprintf(data_json, data_size,
                                     "{\"mode\":\"inline\",\"format\":\"png\",\"width\":%d,"
-                                    "\"height\":%d,\"bytes\":%llu,\"data_base64\":\"%s\"}",
+                                    "\"height\":%d,\"bytes\":%llu,\"data_base64\":\"%s\","
+                                    "\"downscaled\":%s,\"masked_password_fields\":%d,"
+                                    "\"notice_shown\":%s}",
                                     cap.width, cap.height,
-                                    (unsigned long long)sz, b64);
+                                    (unsigned long long)sz, b64,
+                                    downscaled ? "true" : "false", masked_password_fields,
+                                    notice_shown ? "true" : "false");
                                 ok = 1;
                             } else {
                                 strncpy(err_code, USH_ERR_TOO_LARGE, err_code_size - 1);
@@ -554,6 +853,8 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
         }
         (void)hg;
     }
+    /* S-025：编码完成后再撤提示条（提示条须出现在截图里）。 */
+    snapshot_notice_hide();
     capture_free(&cap);
     return ok;
 }

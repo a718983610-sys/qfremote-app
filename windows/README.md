@@ -134,13 +134,13 @@ Electron 外壳，双击打开就是控制台，免开浏览器、免点证书�
 ## 构建（本机实际出包路线，Linux 沙箱）
 0. `node tools/gen_build_info.js` 生成 build-info.json（版本号＋构建日期，关于面板用）。
 1. `npx electron-builder --win --dir` 出 `dist/win-unpacked`（主程序 PE32+ x64，版本串由此步写入）。
-2. 把 win-unpacked 内容用 7z 打成 `app.7z`，连同 Nsis7z 插件（x86-unicode）暂存到内存盘 /dev/shm/qfr/
+2. 把 win-unpacked 内容用 7z 打成 `app.7z`，连同 Nsis7z 插件（x86-unicode）放到仓库内 staging `windows/build/installer-work/`（S-017：不再用 /dev/shm）
    （本沙箱对磁盘大文件 mmap 会 SIGBUS，必须走内存盘中转；另注意 /tmp 是 512M tmpfs，
    大文件别往 /tmp 堆，会把更新自测的下载挤爆——v1.0.3 实测踩过）。
    —— 7z 与 makensis 的系统版会被沙箱环境重置弄丢，优先用电缓存里的：
    7zz 在 `~/.cache/electron-builder/7zip@1.0.0/*/bin/7zz`，
    makensis 在 `~/.cache/electron-builder/nsis-3.0.4.1/*/linux/makensis`（配 NSISDIR=该缓存根）。
-3. 用 makensis 编译 `installer.nsi`（脚本里的 OutFile、版本串均为 1.0.4，脚本与 icon.ico 一起拷到 /dev/shm/qfr/ 再编），产物即 `QFRemote-Setup-v1.0.4.exe`。
+3. 用 `windows/tools/build-installer.sh --plugins-dir <插件目录> --app-7z <app.7z>` 编译内外两层（版本由 BUILD_VERSION 注入，默认 3.0.0；产物进 `windows/dist/`），不要直接拿 makensis 编裸脚本。
    —— electron-builder 自带的 NSIS 收尾在本沙箱跑不了（wine 段错误），故用原生 makensis 与它同款的解压机制手工组装。
 4. 图标重绘：`python3 tools/make_icon.py`；v1.0.1 预览拼版：`python3 tools/make_previews.py`；
    v1.0.2 预览拼版：`python3 tools/make_previews_v102.py`；v1.0.3 预览拼版：`python3 tools/make_previews_v103.py`；

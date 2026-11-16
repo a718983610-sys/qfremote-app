@@ -2,55 +2,154 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body {
-    background: #f4f7fb;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg);
     display:flex; align-items:center; justify-content:center;
-    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    -webkit-user-select:none; user-select:none; color:var(--text-1); position:relative;
   }
-  .card {
-    background: #ffffff;
-    border:1px solid #dfe7f2; border-radius:14px;
-    padding:46px 60px 40px; display:flex; flex-direction:column; align-items:center;
-    animation: rise .5s ease both;
+  /* 重做 C §2.2 / A §3.2：不用大转圈、不用卡片——居中列：小 Logo + 2px 进度线 + 百分比/已用时间
+     + 阶段列表 + 骨架；8s 无进展提示、15s 超时给重试/复制日志。 */
+  .col {
+    display:flex; flex-direction:column; align-items:center; width:320px;
+    animation: win-in var(--d5) var(--e-l) both;
   }
-  @keyframes rise { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
+  /* W4 M 档：60／圆角 14／padding 4／内图圆角 10（原 48／12／3／9） */
   .tile {
-    width:88px; height:88px; border-radius:14px; padding:4px; box-sizing:border-box;
-    background: #0b2b5b;
+    width:60px; height:60px; border-radius:14px; padding:4px; box-sizing:border-box;
+    background: var(--tile-bg);
   }
   .tile img { width:100%; height:100%; border-radius:10px; display:block; }
-  .name { font-size:20px; font-weight:600; letter-spacing:1.2px; margin-top:17px; color:#1f2d47; }
-  .bar { width:192px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:25px; overflow:hidden; }
-  .bar i { display:block; height:100%; width:38%; border-radius:3px;
-    background: #2470e0;
-    animation: slide 1.15s ease-in-out infinite alternate; }
-  @keyframes slide { from { transform: translateX(-55%);} to { transform: translateX(315%);} }
-  .hint { font-size:14px; color:#5d6e84; margin-top:12px; }
-  /* 深灰深色主题（与工具栏联动，不用纯黑） */
-  html[data-theme="dark"] body { background: #17181c; }
-  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
-  html[data-theme="dark"] .tile { background: #ffffff; }
-  html[data-theme="dark"] .name { color:#eceff3; }
-  html[data-theme="dark"] .bar { background: rgba(255,255,255,.14); }
-  html[data-theme="dark"] .hint { color:#9aa1ab; }
-
-  /* 排版批1（P19）：焦点环与减动效 */
-  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+  .name { font-size:20px; font-weight:600; line-height:28px; letter-spacing:-.01em; margin-top:16px; color:var(--text-1); }
+  .bar { width:160px; height:2px; border-radius:999px; background:var(--line); margin-top:24px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:40px; border-radius:999px;
+    background: var(--brand);
+    animation: load-indet 900ms linear infinite; }
+  .pct { font-size:12px; line-height:16px; color:var(--text-2); margin-top:12px; font-variant-numeric: tabular-nums; }
+  .hint { font-size:14px; line-height:22px; color:var(--text-2); margin-top:8px; }
+  /* 阶段列表：进行中只显示已用时间；阶段进度未接入主进程事件，状态一律 —（不编假进度） */
+  .stages { width:100%; margin-top:24px; border-top:1px solid var(--line); }
+  .stage { display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; line-height:20px; }
+  .stage:last-child { border-bottom:none; }
+  .stage .nm { flex:1; }
+  .stage .st { color:var(--text-3); font-variant-numeric: tabular-nums; }
+  .stage .dot { width:6px; height:6px; border-radius:50%; background:var(--text-3); flex:none; }
+  .stage.on .dot { background:var(--text-1); }
+  .note { width:100%; font-size:12px; line-height:18px; color:var(--text-3); margin-top:12px; }
+  /* 骨架：8 行，镜像主界面列表，透明度脉冲 1200ms，无 shimmer */
+  .skel { width:100%; margin-top:16px; }
+  .skel .sk { height:12px; border-radius:6px; background:var(--bg2); margin-bottom:8px; animation: skel-pulse 1200ms ease-in-out infinite alternate; }
+  /* F-Win4（B §7 离屏停播）：页面不可见时骨架与不确定进度停播（JS 加 html.paused） */
+  html.paused .bar i, html.paused .skel .sk { animation-play-state: paused; }
+  .slow { display:none; width:100%; margin-top:16px; font-size:13px; line-height:20px; color:var(--text-2); text-align:center; }
+  .slow.show { display:block; }
+  .timeout { display:none; width:100%; margin-top:16px; padding:16px; box-sizing:border-box; border:1px solid var(--line); border-radius:12px; background:var(--bg2); text-align:center; }
+  .timeout.show { display:block; }
+  .timeout .t { font-size:14px; font-weight:600; line-height:22px; }
+  .timeout .t::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .timeout .d { font-size:13px; line-height:20px; color:var(--text-2); margin-top:8px; }
+  .timeout .d code { font-family:var(--font-mono); font-size:12px; }
+  .timeout .acts { display:flex; gap:12px; justify-content:center; margin-top:16px; }
+  button {
+    appearance:none; cursor:pointer; font-family:inherit; font-size:14px; line-height:22px;
+    height:36px; padding:0 18px; border-radius:8px; border:1px solid var(--line);
+    background:var(--bg2); color:var(--text-1);
+    transition: background var(--d1) var(--e-c), transform var(--d0) var(--e-s);
+  }
+  button:hover { background:var(--sel-ov); }
+  button:active { background:var(--press-ov); transform: scale(.985); }
+  button.primary { background:var(--brand); color:var(--on-brand); border-color:var(--brand); }
+  button.primary:hover { background:var(--brand-press); }
 </style>
 </head>
 <body>
-  <div class="card">
+  <div class="col">
     <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
     <div class="name">QFRemote</div>
-    <div class="bar"><i></i></div>
-    <div class="hint">正在连接 QFRemote 服务器…</div>
+    <div class="bar" role="progressbar" aria-label="正在启动"><i></i></div>
+    <div class="pct" id="pct">已用 0.0 s</div>
+    <div class="hint" id="hint">正在连接 QFRemote 服务器…</div>
+
+    <div class="stages" id="stages" aria-label="启动阶段">
+      <div class="stage on"><span class="dot"></span><span class="nm">初始化网络</span><span class="st">—</span></div>
+      <div class="stage"><span class="dot"></span><span class="nm">解析设备</span><span class="st">—</span></div>
+      <div class="stage"><span class="dot"></span><span class="nm">鉴权</span><span class="st">—</span></div>
+      <div class="stage"><span class="dot"></span><span class="nm">建立通道</span><span class="st">—</span></div>
+      <div class="stage"><span class="dot"></span><span class="nm">协商编码</span><span class="st">—</span></div>
+      <div class="stage"><span class="dot"></span><span class="nm">首帧</span><span class="st">—</span></div>
+    </div>
+    <div class="note">阶段状态未接入主进程事件，显示为 —；进度百分比无数据源，不编数字。</div>
+
+    <div class="skel" aria-hidden="true">
+      <div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>
+      <div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>
+      <div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>
+      <div class="sk" style="width:60%"></div><div class="sk" style="width:40%"></div>
+    </div>
+
+    <div class="slow" id="slow">仍在等待…可复制日志后联系支持。</div>
+
+    <div class="timeout" id="timeout">
+      <div class="t">启动超时</div>
+      <div class="d">错误码 <code>—</code>（启动超时未返回错误码）。已等待 15 s，可重试或复制日志。</div>
+      <div class="acts">
+        <button class="primary" id="retryBtn">重试</button>
+        <button id="copyBtn">复制日志</button>
+      </div>
+    </div>
   </div>
 <script>
   if (new URLSearchParams(location.search).get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
+  var startedAt = Date.now();
+  var pctEl = document.getElementById('pct');
+  function fmtElapsed() { return '已用 ' + ((Date.now() - startedAt) / 1000).toFixed(1) + ' s'; }
+  // F-Win4（B §7 离屏停播）：骨架与不确定进度在页面不可见时停播
+  // （IntersectionObserver + visibilitychange 双信号，任一成立即停）；
+  // 已用时间计时器同停同启，恢复后按 startedAt 续算，不丢时间。
+  var tickTimer = null;
+  function startTick() { if (tickTimer === null) tickTimer = setInterval(function () { pctEl.textContent = fmtElapsed(); }, 100); }
+  function stopTick() { if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; } }
+  var pauseReasons = {};
+  function refreshPaused() {
+    var paused = Object.keys(pauseReasons).length > 0;
+    document.documentElement.classList.toggle('paused', paused);
+    if (paused) stopTick(); else startTick();
+  }
+  function setPauseReason(name, on) {
+    if (on) pauseReasons[name] = true; else delete pauseReasons[name];
+    refreshPaused();
+  }
+  if ('IntersectionObserver' in window) {
+    var pauseIO = new IntersectionObserver(function (entries) {
+      var anyVisible = entries.some(function (e) { return e.isIntersecting; });
+      setPauseReason('offscreen', !anyVisible);
+    }, { threshold: 0 });
+    pauseIO.observe(document.querySelector('.bar'));
+    pauseIO.observe(document.querySelector('.skel'));
+  }
+  document.addEventListener('visibilitychange', function () {
+    setPauseReason('hidden', document.hidden);
+  });
+  startTick();
+  setTimeout(function () {
+    document.getElementById('slow').classList.add('show');
+    document.getElementById('hint').textContent = '正在连接设备…';
+  }, 8000);
+  setTimeout(function () {
+    document.getElementById('timeout').classList.add('show');
+  }, 15000);
+  document.getElementById('retryBtn').addEventListener('click', function () { location.reload(); });
+  document.getElementById('copyBtn').addEventListener('click', function () {
+    var text = 'QFRemote 启动日志\n时间：' + new Date().toLocaleString() + '\n已用：' + fmtElapsed()
+      + '\n阶段：初始化网络 / 解析设备 / 鉴权 / 建立通道 / 协商编码 / 首帧（状态 —，未接入主进程事件）'
+      + '\n错误码：—';
+    var btn = document.getElementById('copyBtn');
+    function done(ok) { btn.textContent = ok ? '已复制' : '复制失败'; setTimeout(function () { btn.textContent = '复制日志'; }, 2000); }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+    else done(false);
+  });
 </script>
 </body>
 </html>

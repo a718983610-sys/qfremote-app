@@ -125,6 +125,14 @@ void main() {
       expect(c.hasClaimBox, isTrue);
     });
 
+    test('G2 日期缺失时不留空（F3：不写“已于  到期”）', () {
+      final c = gateCopyFor(const LicenseDecision(allow: false, code: 'G2'))!;
+      expect(c.title, '试用已到期');
+      expect(c.body, contains('3 天免费试用已到期'));
+      expect(c.body, isNot(contains('已于  到期')));
+      expect(c.body, isNot(contains('已于 到期')));
+    });
+
     test('G5 与 G2 严格区分：出现「密钥已过期」、不出现「试用」', () {
       final c = gateCopyFor(const LicenseDecision(allow: false, code: 'G5'))!;
       expect(c.title, '密钥已过期');
@@ -182,6 +190,23 @@ void main() {
       expect(c.title, '账号已被冻结');
       expect(c.body, contains('密钥绑定异常操作'));
       expect(c.body, contains('2026 年 11 月 1 日'));
+    });
+
+    test('BAN_UNTIL 的 B10 日期缺失时不留空（R-A1：不写“（至 ）”）', () {
+      final c = gateCopyFor(const LicenseDecision(
+          allow: false, code: 'BAN_UNTIL', banCode: 'B10'))!;
+      expect(c.title, '账号已被冻结');
+      expect(c.body, contains('该账户已被冻结。原因'));
+      expect(c.body, isNot(contains('（至 ）')));
+      expect(c.body, isNot(contains('至 。')));
+    });
+
+    test('BAN_UNTIL 非 B10 日期缺失时不留空（R-A1）', () {
+      final c = gateCopyFor(
+          const LicenseDecision(allow: false, code: 'BAN_UNTIL'))!;
+      expect(c.title, '账号已被冻结');
+      expect(c.body, contains('该账号已被冻结，暂时无法登录。'));
+      expect(c.body, isNot(contains('（至')));
     });
 
     test('DEVICE_REVIEW 显示「设备异常登录」，无申诉按钮、无封禁措辞', () {
@@ -460,7 +485,7 @@ void main() {
   });
 
   group('登录页许可入口（16:37 定版注入脚本）', () {
-    test('桥脚本含购买黑底/查询蓝字与回传处理器', () {
+    test('桥脚本含购买黑底/查询主文字色＋下划线与回传处理器', () {
       final js = buildLoginBridgeJs(
         savedUsername: null,
         savedPassword: null,
@@ -471,9 +496,37 @@ void main() {
       expect(js, contains(kHandlerLicenseNav));
       expect(js, contains('购买密钥'));
       expect(js, contains('查询密钥'));
-      expect(js, contains('#111')); // 购买钮黑底
-      expect(js, contains('#2470E0')); // 查询链蓝字
+      expect(js, contains('#000000')); // 购买钮黑底（定夺：浅色纯黑）
+      expect(js, contains('#09090B')); // 查询链主文字色（定夺：不用蓝）
+      expect(js, contains('text-decoration:underline')); // 查询链始终下划线
+      expect(js, contains('2px solid #000000')); // A4 剩余-3：购买钮主色 2px 边框
+      expect(js, contains('#qfBuyKeyRowShell:focus-visible')); // A4 剩余-3：焦点白描边
+      expect(js, contains('outline:2px solid #FFFFFF;outline-offset:2px'));
       expect(js, contains('qfBuyKeyRow')); // 服务端已有行时接管点击
+      // 第 5 项（7 项定夺）：壳按钮外包 4px 白垫，边框仍品牌蓝
+      expect(js, contains('qfBuyKeyRowPad'));
+      expect(js,
+          contains('padding:4px;background:#FFFFFF;border-radius:12px'));
+    });
+
+    test('A4 剩余-3 深色：购买钮底 #111113＋主色白 2px 边框不变', () {
+      final js = buildLoginBridgeJs(
+        savedUsername: null,
+        savedPassword: null,
+        rememberPasswordChecked: false,
+        rememberDeviceChecked: false,
+        fillSaved: false,
+        isDark: true,
+      );
+      // 6 项定夺②灰阶审计合并：深色购买钮底由 surface3 #18181B 并入卡片色
+      // #111113（与原生 license_section 购买钮同值；对白垫 18.86:1）。
+      expect(js, contains('#111113')); // 深色购买钮底（定夺：卡片色）
+      expect(js, contains('2px solid #FFFFFF')); // 深色同款主色白边框
+      expect(js, contains('#FFFFFF')); // 深色查询链主文字色（定夺：不用蓝）
+      // 第 5/6 项（7 项定夺）：深色壳按钮同样有白垫；桥焦点描边在登录页深蓝渐变宿主上
+      // 白色清晰可见（6.00–12.61），深色保留白描边、浅色改色只动原生 license_section，不动此处
+      expect(js, contains('qfBuyKeyRowPad'));
+      expect(js, contains('outline:2px solid #FFFFFF;outline-offset:2px'));
     });
 
     test('A-009 桥脚本逐行接管＋逐行补缺：三行各自守卫齐备', () {

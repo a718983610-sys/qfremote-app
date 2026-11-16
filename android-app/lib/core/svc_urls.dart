@@ -37,11 +37,14 @@ class SvcUrls {
   /// 好友页：地址恒定口径（见类注释）。
   String get friendsUrl => kFriendsUrl;
 
-  /// 服务地址白名单（2.4.5 B15，与 Windows 端 W-20 同口径）：
-  /// 只接受 app.qfremote.top 及其子域的 https 地址。product.json 被
-  /// 劫持/投毒也只能指向自家源，指向任意 https 源的地址一律丢弃并
-  /// 回落写死兜底；会话 cookie 只向白名单内地址移植（见
-  /// main.dart _transplantSessionToExt）。
+  /// 服务地址白名单（F-06，3.0.0，取代 2.4.5 B15 的子域通配）：
+  /// 只接受 [kTrustedSvcOrigins] 写死表里的精确 origin（scheme＋host＋
+  /// 端口三者全对，见 constants.dart 的表注）。product.json 被劫持／
+  /// 投毒也只能指向这一个 origin：任意子域（如 sub.app.qfremote.top、
+  /// tun.qfremote.top）、任意非默认端口（如 :8443）、裸域
+  /// qfremote.top、userinfo 嵌套一律丢弃并回落写死兜底；会话 cookie
+  /// 只向精确的生产 ext origin 移植（见 main.dart
+  /// _transplantSessionToExt）。
   static bool isTrustedSvcUrl(String? url) {
     if (url == null) return false;
     if (!url.startsWith('https://') || url.length <= 10 || url.contains(' ')) {
@@ -49,8 +52,24 @@ class SvcUrls {
     }
     final uri = Uri.tryParse(url);
     if (uri == null) return false;
-    final host = uri.host.toLowerCase();
-    return host == kServerHost || host.endsWith('.$kServerHost');
+    if (uri.userInfo.isNotEmpty) return false;
+    return kTrustedSvcOrigins.contains(uri.origin);
+  }
+
+  /// 这个 origin 字符串是不是精确白名单内的服务 origin（供 Cookie
+  /// 移植等只认 origin 的调用方；比较前先归一化，显式 :443 与默认
+  /// 端口视为同一 origin，非默认端口不在表内）。
+  static bool isTrustedSvcOrigin(String? origin) {
+    if (origin == null) return false;
+    final uri = Uri.tryParse(origin);
+    if (uri == null || uri.scheme != 'https') return false;
+    if (uri.userInfo.isNotEmpty) return false;
+    try {
+      return kTrustedSvcOrigins.contains(uri.origin);
+    } catch (_) {
+      // 无 authority 等取不到源的地址一律不认。
+      return false;
+    }
   }
 
   /// 已退役源过滤：旧版本写入本地缓存（或旧清单下发）的临时隧道地址
@@ -81,17 +100,19 @@ class SvcUrls {
   /// 令牌换发地址：拿控制台会话换一次性登录令牌，再打开管理页。
   String get ssoTokenUrl => '$adminUrl/api/sso-token';
 
-  /// 自有服务源集合：自家域名源（控制台/好友/聊天/锁同源）与当前解析
-  /// 到的各服务源。导航策略据此识别「自家页面的 /logout」——外站同名
-  /// 路径不许触发本机手动退出（深查修复：防外链 /logout 误清凭据）。
+  /// 自有服务源集合：F-06 起只含精确白名单内的 origin。五族地址经
+  /// getter 校验后现行值全是 [kServerOrigin]，本集合同步只收可信
+  /// origin——外站同名路径（如 /logout）不许触发本机手动退出。
   Set<String> ownOrigins() {
-    final out = <String>{
-      kServerOrigin,
-      Uri.parse(kFriendsUrl).origin,
-    };
+    final out = <String>{};
+    if (isTrustedSvcOrigin(kServerOrigin)) out.add(kServerOrigin);
+    if (isTrustedSvcOrigin(Uri.parse(kFriendsUrl).origin)) {
+      out.add(Uri.parse(kFriendsUrl).origin);
+    }
     for (final u in [forumUrl, registerUrl, pointsUrl, adminUrl, termsUrl]) {
       try {
-        out.add(Uri.parse(u).origin);
+        final o = Uri.parse(u).origin;
+        if (isTrustedSvcOrigin(o)) out.add(o);
       } catch (_) {
         // 解析不了的地址不进集合
       }
@@ -116,7 +137,13 @@ class SvcUrls {
   /// 扩展服务同源根（2.3.1 许可/新首页落点）：许可接口、新首页、购买页、
   /// 状态查询页都挂在扩展服务同一源下（经 nginx 同源 /license/*、/purchase、
   /// /home），与积分同源——取 pointsUrl 的 origin，不另设地址来源。
-  String get extOrigin => Uri.parse(pointsUrl).origin;
+  /// F-06：pointsUrl 既经精确白名单校验，此处再守一道——origin 不在
+  /// 白名单内时回落 [kServerOrigin]，绝不把会话 Cookie 的移植目标
+  /// 交给解析值单方面决定。
+  String get extOrigin {
+    final o = Uri.parse(pointsUrl).origin;
+    return isTrustedSvcOrigin(o) ? o : kServerOrigin;
+  }
 
   /// 新版首页（阶段 C-3 网页正本，壳内同框呈现）。
   String get homeUrl => '$extOrigin/home';

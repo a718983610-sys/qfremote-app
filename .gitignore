@@ -4,6 +4,11 @@ node_modules/
 **/node_modules/
 dist/
 **/data/
+# 例外（2026-11-15 L6 实证）：android-app 的 lib/data 与 test/data 是源码目录（Drift 层/测试），不是运行数据；不加否定项则 git add 收不到、git clean 会丢。
+!android-app/lib/data/
+!android-app/lib/data/**
+!android-app/test/data/
+!android-app/test/data/**
 *.log
 *.db
 *.sqlite*
@@ -16,3 +21,4 @@ dist/
 *.key
 **/cert/
 config.json
+windows/build/installer-work/

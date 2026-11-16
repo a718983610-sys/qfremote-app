@@ -18,16 +18,25 @@
  *   qf-lea-client.exe --internal "<一行内部命令 JSON>"
  *     （内部命令：{"cmd":"session.login_changed",...} 等，供主程序／安装
  *      脚本以 SYSTEM 身份通知 LEA；同样走管道，不走信封验签）
+ *   qf-lea-client.exe --internal-b64 "<base64 内部命令 JSON>"
+ *     （RC-02：内部命令的 base64 形态，供服务端 kick（lea.key_revoked）
+ *      用；base64 字母表对 cmd.exe 安全，解码后走与 --internal 同一条
+ *      管道路径）
  *
  * 动词缺参或 dispatch Base64 解码失败时退出码 2 且绝不把动词原文发往
  * 管道（S3 原 bug：旧 main 把 "dispatch" 当信封原文发出，还收到了
  * 服务端的假成功响应）。
  *
- * 超时：连管道 2s（WaitNamedPipeW，DESIGN §3）；执行等待按信封 timeout_ms
- * 另加 5s（默认 30s）。响应原样打印到 stdout。
- * 退出码：0=服务回 ok:true；1=服务回 ok:false；2=本机错误（连不上管道、
- * 读写失败、参数错误等，此时同样向 stdout 打印一行 JSON 错误，便于
- * runcommands 回传时可读）。
+ * 超时（B1，2026-11-13）：连管道 2s（WaitNamedPipeW，DESIGN §3）；提交后
+ * 等 ACK 最多 2 秒、等同步结果最多 6 秒（绝对 deadline，以提交完成起算），
+ * 任一超时即输出 timeout JSON 并 exit 0，释放 runcommands 队列。
+ * 服务对入队命令先回 ACK 行（QFR_LEA_ACCEPTED），同步命令再回结果行；
+ * 异步命令（信封 mode=async 且命令为长分级 tier 2，见 envelope_mode_is_async
+ * 下方的 tier 判定）收到 ACK 即退出。老版本服务不发 ACK，
+ * 其唯一响应行即终态，客户端同样处理（兼容）。
+ * 退出码：0=服务回 ok:true，或客户端超时（timeout JSON）；1=服务回
+ * ok:false；2=本机错误（连不上管道、读写失败、参数错误等，此时同样向
+ * stdout 打印一行 JSON 错误，便于 runcommands 回传时可读）。
  *
  * 安全：本程序不执行业务命令、不存密钥、不做准入判断（准入在服务端＋
  * QFRLEA 服务两层做）；只做管道搬运。
@@ -41,6 +50,12 @@
 
 #define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
 #define CONNECT_TIMEOUT_MS 2000
+/* B1（2026-11-13，PLAN §2 B1）：客户端硬时限——ACK 2 秒、结果 6 秒。
+ * 连接 2 秒＋结果 6 秒＝最迟 8 秒退出（验收“8 秒内退出”）；任一时限到
+ * 即输出 timeout JSON 并 exit 0，释放 runcommands 队列。旧实现按信封
+ * timeout_ms＋5 秒等（最长 305 秒），卡死命令会把队列堵死。 */
+#define ACK_TIMEOUT_MS 2000
+#define RESULT_TIMEOUT_MS 6000
 #define MAX_ENVELOPE 65536
 #define MAX_RESPONSE 65536
 #define LEA_INBOX_DIR "C:\\ProgramData\\QFR\\LEA\\inbox"
@@ -169,21 +184,8 @@ static const char *json_top_level_value(const char *text, const char *key) {
     }
 }
 
-static int json_long_field(const char *text, const char *key, long long *out) {
-    const char *p = json_top_level_value(text, key);
-    if (!p) return 0;
-    if (*p == '"') return 0;
-    char *end = NULL;
-    long long v = strtoll(p, &end, 10);
-    if (end == p) return 0;
-    *out = v;
-    return 1;
-}
-
-/* 顶层是否存在 key（任意值类型）。 */
-static int json_top_level_has_key(const char *text, const char *key) {
-    return json_top_level_value(text, key) != NULL;
-}
+/* B1：json_long_field 与 json_top_level_has_key 已随旧“信封超时＋5 秒”
+ * 等待逻辑一并删除（硬时限不再读信封 timeout_ms）。 */
 
 static int read_all_stdin(char *buf, size_t size) {
     size_t total = 0;
@@ -221,6 +223,133 @@ static int resolve_apply_path(const char *arg, char *out, size_t out_size) {
     }
     if (strlen(LEA_INBOX_DIR) + 1 + strlen(arg) >= out_size) return 0;
     snprintf(out, out_size, "%s\\%s", LEA_INBOX_DIR, arg);
+    return 1;
+}
+
+/* B1：从信封顶层取 request_id（token 字符集，无转义，直接拷引号内
+ * 容；取不到即空串，超时 JSON 仍可发）。 */
+static void extract_request_id(const char *envelope, char *out, size_t out_size) {
+    const char *p = json_top_level_value(envelope, "request_id");
+    out[0] = '\0';
+    if (!p || *p != '"') return;
+    const char *end = json_skip_string(p);
+    if (!end) return;
+    size_t n = (size_t)(end - 1 - (p + 1));
+    if (n >= out_size) n = out_size - 1;
+    memcpy(out, p + 1, n);
+    out[n] = '\0';
+}
+
+/* B1：信封 mode 是否为 async（缺失／其它值一律按同步）。 */
+static int envelope_mode_is_async(const char *envelope) {
+    const char *p = json_top_level_value(envelope, "mode");
+    if (!p || *p != '"') return 0;
+    /* "async\"" 共 6 字节（async＋右引号）；比 7 字节会把第 7 位的 '}' 与
+     * 字面量结尾 '\0' 对上而误判为非 async。 */
+    return strncmp(p + 1, "async\"", 6) == 0;
+}
+
+/* 低项 2（2026-11-15）：信封命令是否为长分级（tier 2）。服务端只对
+ * tier==L2 认 async（QFRLEA.c handle_envelope：“L0／L1 信封纵写 async
+ * 也强制同步”）；旧客户端只看 mode==async，L0／L1 信封被服务端改写
+ * mode=async 后（服务端 lea-core.js:2464 认调用方自报 input.mode，
+ * 故 L0／L1 完全可能带 async 到达本机），客户端收到 ACK 即退出、
+ * 服务端随后发的结果行永远丢失。修法：客户端与服务端同规则——
+ * 只有 tier 2 命令的 async 才见 ACK 即退，其余一律等结果行。
+ * tier 2 命令表以 lea_protocol.c k_commands 为准（当前仅 script.run、
+ * file.write 两项，末字段为 2；新增 tier 2 命令时须同步改这里——
+ * 客户端不链接 lea_protocol.c，见下）。不链接 lea_protocol.c 的原因：
+ * 客户端是唯一能被 runcommands 远程调到的 LEA 二进制，A1 隔离要求
+ * 它不得带服务安装等子命令能力；只在信封原文里读 command 名，
+ * 不引入服务端命令表实现。 */
+static int envelope_command_is_long_tier(const char *envelope) {
+    const char *p = json_top_level_value(envelope, "command");
+    if (!p || *p != '"') return 0;
+    const char *end = json_skip_string(p);
+    if (!end) return 0;
+    size_t n = (size_t)(end - 1 - (p + 1));
+    if ((n == 10 && strncmp(p + 1, "script.run", 10) == 0) ||
+        (n == 10 && strncmp(p + 1, "file.write", 10) == 0))
+        return 1;
+    return 0;
+}
+
+/* B1：服务发来的行是否为接单 ACK（code 为 QFR_LEA_ACCEPTED）。 */
+static int is_ack_line(const char *line) {
+    return strstr(line, "\"code\":\"QFR_LEA_ACCEPTED\"") != NULL;
+}
+
+/* R-C4：按顶层 ok 字段判响应成败——不用 strstr 子串匹配，避免嵌套
+ * result／detail 文本内含 "ok":true 被误判为成功。值须为字面量 true，
+ * 且后跟结构分隔符（, } 空白或行尾）；缺失／非 true／字符串 "true"
+ * 一律按失败处理（fail-closed）。 */
+static int response_ok_true(const char *line) {
+    const char *p = json_top_level_value(line, "ok");
+    if (!p) return 0;
+    if (strncmp(p, "true", 4) != 0) return 0;
+    char c = p[4];
+    return c == ',' || c == '}' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\0';
+}
+
+/* B1：客户端超时 JSON（带 request_id 便于服务端按 job_id 幂等关联）。 */
+static void print_timeout_json(const char *request_id, const char *detail) {
+    printf("{\"ok\":false,\"code\":\"QFR_LEA_TIMEOUT\",\"request_id\":\"%s\",\"retryable\":true,"
+           "\"detail\":\"%s\",\"result\":null}\n",
+           request_id ? request_id : "", detail);
+    fflush(stdout);
+}
+
+/* B1：读一行响应，带绝对 deadline（GetTickCount64 单调时钟）。
+ * 返回 1=读到完整行（含 \n 或对端关闭且已有数据），0=超时／无数据／
+ * 出错。out 内不含末尾换行。 */
+static int read_one_line(HANDLE pipe, ULONGLONG deadline_tick, char *out, size_t out_size) {
+    size_t total = 0;
+    char chunk[4096];
+    int got_any = 0;
+    while (total + 1 < out_size) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline_tick) return 0;
+        DWORD wait_ms = (DWORD)(deadline_tick - now);
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!ov.hEvent) return 0;
+        DWORD got = 0;
+        BOOL r = ReadFile(pipe, chunk, sizeof(chunk), &got, &ov);
+        if (!r && GetLastError() == ERROR_IO_PENDING) {
+            DWORD w = WaitForSingleObject(ov.hEvent, wait_ms);
+            if (w != WAIT_OBJECT_0) {
+                CancelIo(pipe);
+                CloseHandle(ov.hEvent);
+                return 0;
+            }
+            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) {
+                CloseHandle(ov.hEvent);
+                return got_any ? 1 : 0;
+            }
+        } else if (!r) {
+            CloseHandle(ov.hEvent);
+            return got_any ? 1 : 0;
+        }
+        CloseHandle(ov.hEvent);
+        /* T24 同款：got==0（对端关闭）时，有数据即本次响应结束。 */
+        if (got == 0) {
+            out[total] = '\0';
+            return got_any ? 1 : 0;
+        }
+        got_any = 1;
+        size_t take = got;
+        if (total + take >= out_size) take = out_size - total - 1;
+        memcpy(out + total, chunk, take);
+        total += take;
+        out[total] = '\0';
+        if (memchr(chunk, '\n', got)) {
+            char *nl = strchr(out, '\n');
+            if (nl) *nl = '\0';
+            return 1;
+        }
+    }
+    out[total] = '\0';
     return 1;
 }
 
@@ -264,6 +393,17 @@ int main(int argc, char **argv) {
             return 2;
         }
         snprintf(envelope, sizeof(envelope), "%s", argv[2]);
+    } else if (argc >= 3 && strcmp(argv[1], "--internal-b64") == 0) {
+        /* RC-02：内部命令的 base64 形态（服务端 kick 用）。base64 字母表
+         * 对 cmd.exe 安全；解码失败／解出空串／超长时退出 2，绝不把乱码
+         * 发往管道（与 dispatch 同款 fail-closed）。 */
+        long n = lea_b64_decode(argv[2], (unsigned char *)envelope,
+                                sizeof(envelope) - 1);
+        if (n <= 0) {
+            print_error_json("QFR_LEA_CLIENT_BAD_DISPATCH", "internal-b64-decode-failed");
+            return 2;
+        }
+        envelope[n] = '\0';
     } else if (argc >= 2) {
         if (strlen(argv[1]) >= sizeof(envelope)) {
             print_error_json("QFR_LEA_CLIENT_ENVELOPE_OVERSIZE", "envelope-too-large");
@@ -282,13 +422,15 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* 执行等待超时：信封 timeout_ms + 5s；内部命令默认 10s；上限 305s。 */
-    long long tmo = 0;
-    long wait_ms = 30000;
-    if (json_long_field(envelope, "timeout_ms", &tmo) && tmo >= 1 && tmo <= 300000)
-        wait_ms = (long)(tmo + 5000);
-    else if (json_top_level_has_key(envelope, "cmd"))
-        wait_ms = 10000;
+    /* B1：硬时限与信封 timeout_ms 脱钩——提交后 ACK 2 秒、结果 6 秒
+     *（绝对 deadline，以写完提交时刻起算；request_id 供超时 JSON 关联）。
+     * 内部命令（--internal）同样走硬时限，不再另给 10 秒。 */
+    char req_id[64] = { 0 };
+    extract_request_id(envelope, req_id, sizeof(req_id));
+    /* 低项 2：async 只对 tier 2 命令生效（与服务端 QFRLEA.c 同规则）；
+     * L0／L1 信封纵写 async 也被服务端强制同步，客户端须等结果行。 */
+    int is_async = envelope_mode_is_async(envelope) &&
+                   envelope_command_is_long_tier(envelope);
 
     if (!WaitNamedPipeW(PIPE_NAME_W, CONNECT_TIMEOUT_MS)) {
         DWORD e = GetLastError();
@@ -352,56 +494,45 @@ int main(int argc, char **argv) {
         print_error_json("QFR_LEA_CLIENT_WRITE_FAILED", "pipe-write-short");
         return 2;
     }
+    CloseHandle(ov.hEvent); /* 写侧事件已用完；读侧 read_one_line 自建事件。 */
 
-    /* 读一行响应（带 deadline）。 */
-    static char resp[MAX_RESPONSE + 1];
-    size_t total = 0;
-    int ok_read = 0;
-    char chunk[4096];
-    DWORD deadline = (DWORD)wait_ms;
-    while (total + 1 < sizeof(resp)) {
-        DWORD got = 0;
-        memset(&ov, 0, sizeof(ov));
-        ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-        if (!ov.hEvent) break;
-        BOOL r = ReadFile(pipe, chunk, sizeof(chunk), &got, &ov);
-        if (!r && GetLastError() == ERROR_IO_PENDING) {
-            DWORD w = WaitForSingleObject(ov.hEvent, deadline);
-            if (w != WAIT_OBJECT_0) {
-                CancelIo(pipe);
-                CloseHandle(ov.hEvent);
-                break;
-            }
-            if (!GetOverlappedResult(pipe, &ov, &got, FALSE)) {
-                CloseHandle(ov.hEvent);
-                break;
-            }
-        } else if (!r) {
-            CloseHandle(ov.hEvent);
-            break;
+    /* B1：ACK＋结果两行协议（硬时限）。
+     * 第 1 行 2 秒内到：是 ACK（QFR_LEA_ACCEPTED）则接单成功；同步命令
+     * 再等第 2 行（结果），异步命令（tier 2）收到 ACK 即退出；L0／L1
+     * 的 async 信封被服务端强制同步，同样等第 2 行（低项 2）。不是 ACK
+     * 即为终态响应（内联命令／准入拒绝／幂等缓存），直接打印退出。
+     * 任一时限到即输出 timeout JSON 并 exit 0（释放 runcommands 队列）。
+     * 老版本服务不发 ACK：其唯一响应行即终态，走“不是 ACK”分支，兼容。 */
+    ULONGLONG t_submit = GetTickCount64();
+    static char line1[MAX_RESPONSE + 1];
+    if (!read_one_line(pipe, t_submit + ACK_TIMEOUT_MS, line1, sizeof(line1))) {
+        CloseHandle(pipe);
+        print_timeout_json(req_id, "ack-timeout-no-response-in-2s");
+        return 0;
+    }
+    if (is_ack_line(line1)) {
+        if (is_async) {
+            /* 异步 job：ACK 即结果（job 已接单，后台跑），直接退出。 */
+            CloseHandle(pipe);
+            printf("%s\n", line1);
+            fflush(stdout);
+            return 0;
         }
-        CloseHandle(ov.hEvent);
-        /* T24：got==0（对端关闭）时，若已收到部分数据即视为本次响应结束
-         * （无换行也以已收内容为准）；尚未收到任何数据则仍判无响应。
-         * 管道短读是常态，不得把 got < sizeof(chunk) 当作完成。 */
-        if (got == 0) { if (total > 0) ok_read = 1; break; }
-        size_t take = got;
-        if (total + take >= sizeof(resp)) take = sizeof(resp) - total - 1;
-        memcpy(resp + total, chunk, take);
-        total += take;
-        resp[total] = '\0';
-        if (memchr(chunk, '\n', got)) { ok_read = 1; break; }
-        /* 短读继续读：只有读到换行、对端关闭或超时才算完成。 */
+        static char line2[MAX_RESPONSE + 1];
+        if (!read_one_line(pipe, t_submit + RESULT_TIMEOUT_MS, line2, sizeof(line2))) {
+            CloseHandle(pipe);
+            print_timeout_json(req_id, "result-timeout-no-result-in-6s");
+            return 0;
+        }
+        CloseHandle(pipe);
+        printf("%s\n", line2);
+        fflush(stdout);
+        /* 退出码：响应 ok:true → 0，否则 1。 */
+        return response_ok_true(line2) ? 0 : 1;
     }
     CloseHandle(pipe);
-    if (!ok_read || total == 0) {
-        print_error_json("QFR_LEA_TIMEOUT", "no-response-from-service-in-time");
-        return 1;
-    }
-    char *nl = strchr(resp, '\n');
-    if (nl) *nl = '\0';
-    printf("%s\n", resp);
+    printf("%s\n", line1);
     fflush(stdout);
     /* 退出码：响应 ok:true → 0，否则 1。 */
-    return strstr(resp, "\"ok\":true") ? 0 : 1;
+    return response_ok_true(line1) ? 0 : 1;
 }

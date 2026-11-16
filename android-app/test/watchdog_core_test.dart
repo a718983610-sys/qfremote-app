@@ -189,6 +189,89 @@ void main() {
     });
   });
 
+  group('S-042/R-06：看护画布门——Connected 无画布不再报 ok', () {
+    test('kDetectJs：裸 Connected 分支已删，终端按“文本＋画布”二元判定', () {
+      expect(
+        kDetectJs,
+        isNot(contains("if (fDeskText === 'Connected') return 'ok';")),
+      );
+      expect(
+        kDetectJs,
+        contains("if (fDeskText === 'Connected' && fHasCanvas) return 'ok';"),
+      );
+      expect(kDetectJs, contains('connected-wait-render'));
+      expect(kDetectJs, contains('fDeskTextTop'));
+      expect(
+        kDetectJs,
+        contains(
+          "if (fDeskTextTop === 'Connected') return hasCanvas ? 'ok' : 'connected-wait-render';",
+        ),
+      );
+    });
+
+    test('connected-wait-render：报 waitRender 不报 ok；宽限期到报一次 render-not-ready', () async {
+      final ev = FakeEvaluator('connected-wait-render');
+      final events = <WatchdogStatus>[];
+      var notReady = 0;
+      final core = WatchdogCore(
+        evaluator: ev,
+        pollInterval: const Duration(milliseconds: 30),
+        renderGrace: const Duration(milliseconds: 100),
+        onStatus: events.add,
+        onRenderNotReady: () => notReady++,
+      );
+      core.start();
+      await waitFor(
+        () => events.contains(WatchdogStatus.connectedWaitRender),
+      );
+      expect(events, isNot(contains(WatchdogStatus.ok)));
+      await waitFor(() => notReady == 1);
+      // 只报一次：再等 300ms 也不重复报。
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      core.stop();
+      expect(notReady, 1);
+      expect(ev.clicks, 0);
+    });
+
+    test('connected-wait-render 后出画布（ok）：回 video-ready，不报 not-ready', () async {
+      final ev = FakeEvaluator('connected-wait-render');
+      final events = <WatchdogStatus>[];
+      var notReady = 0;
+      final core = WatchdogCore(
+        evaluator: ev,
+        pollInterval: const Duration(milliseconds: 30),
+        renderGrace: const Duration(milliseconds: 200),
+        onStatus: events.add,
+        onRenderNotReady: () => notReady++,
+      );
+      core.start();
+      await waitFor(
+        () => events.contains(WatchdogStatus.connectedWaitRender),
+      );
+      ev.state = 'ok';
+      await waitFor(() => events.isNotEmpty && events.last == WatchdogStatus.ok);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      core.stop();
+      expect(notReady, 0);
+      expect(ev.clicks, 0);
+    });
+
+    test('渲染进程死后 detect() 抛错：看护报 unknown、不动作、不乱点', () async {
+      final ev = _ThrowingEvaluator();
+      final events = <WatchdogStatus>[];
+      final core = WatchdogCore(
+        evaluator: ev,
+        pollInterval: const Duration(milliseconds: 30),
+        onStatus: events.add,
+      );
+      core.start();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      core.stop();
+      expect(ev.clicks, 0);
+      expect(events, isEmpty);
+    });
+  });
+
   group('kClickJs（B10 返修：点掩码「重试」）', () {
     test('优先按 data-act="retry" 定位掩码重试按钮', () {
       expect(kClickJs, contains('data-act="retry"'));
@@ -209,4 +292,18 @@ void main() {
       expect(kClickJs, contains("qfFrame"));
     });
   });
+}
+
+/// 模拟渲染进程已死：每次求值都抛错（看护按 'unknown' 处理）。
+class _ThrowingEvaluator implements WatchdogEvaluator {
+  int clicks = 0;
+
+  @override
+  Future<String> detect() async => throw StateError('页面尚未就绪');
+
+  @override
+  Future<bool> clickReconnect() async {
+    clicks++;
+    return true;
+  }
 }

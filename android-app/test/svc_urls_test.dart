@@ -21,10 +21,47 @@ void main() {
       expect(SvcUrls.isTrustedSvcUrl('https://evil.example/points'), isFalse);
       expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top.evil.example/x'),
           isFalse);
+      // F-06：子域通配已收回——子域不再信任，须回落写死兜底。
       expect(SvcUrls.isTrustedSvcUrl('https://sub.app.qfremote.top/points'),
-          isTrue);
+          isFalse);
       expect(SvcUrls.isTrustedSvcUrl('http://app.qfremote.top/points'), isFalse);
       expect(SvcUrls.isTrustedSvcUrl('https://trycloudflare.com/x'), isFalse);
+    });
+
+    test('F-06：精确 origin 白名单——只认写死表，不许子域／任意端口', () {
+      // 显式 :443 与默认端口同一 origin，认。
+      expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top:443/points'),
+          isTrue);
+      expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top/points'),
+          isTrue);
+      // 非默认端口、子域、裸域、userinfo 一律拒。
+      expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top:8443/points'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://app.qfremote.top:80/points'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://tun.qfremote.top/points'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://qfremote.top/points'), isFalse);
+      expect(
+          SvcUrls.isTrustedSvcUrl('https://user@app.qfremote.top/points'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcUrl('https://APP.QFREMOTE.TOP/points'),
+          isTrue);
+      // 投毒 product.json：子域 points 地址被丢弃、回落兜底。
+      final m = SvcUrls.parseProductWeb(
+          '{"web":{"pointsUrl":"https://evil-sub.app.qfremote.top/points","forumUrl":"https://app.qfremote.top:8443/forum"}}');
+      expect(m, isEmpty);
+      // origin 校验口径与 URL 校验一致。
+      expect(SvcUrls.isTrustedSvcOrigin('https://app.qfremote.top'), isTrue);
+      expect(SvcUrls.isTrustedSvcOrigin('https://app.qfremote.top:443'),
+          isTrue);
+      expect(SvcUrls.isTrustedSvcOrigin('https://app.qfremote.top:8443'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcOrigin('https://sub.app.qfremote.top'),
+          isFalse);
+      expect(SvcUrls.isTrustedSvcOrigin(null), isFalse);
+      // extOrigin 恒为精确生产源。
+      expect(SvcUrls.instance.extOrigin, 'https://app.qfremote.top');
     });
 
     test('缺字段/非 https 值被丢弃', () {

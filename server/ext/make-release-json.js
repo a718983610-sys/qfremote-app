@@ -15,14 +15,18 @@
  *           --apk  QFRemote-v2.4.5.apk \
  *           --version 2.4.5 --min-usable 2.4.5 \
  *           [--notes "……"] [--notes-android "……"] \
+ *           [--zip QFRemote-v2.4.5-portable.zip] \
  *           [--sign-key 发版私钥.pem] [--key-id release-1] \
  *           [--out server/meshcentral/public/release.json]
  *         不传 --out 时只打印到 stdout，不写文件（默认安全）。
  *         生产发布必须传 --sign-key（H26；不签名 Windows 客户端拒绝更新）。
+ *         --zip 可选：给便携 ZIP 时文档加 portable 段
+ *         {url, sha256, size}（D-04；便携版只凭此段下载，不走安装包）。
  *   校验：node server/ext/make-release-json.js \
  *           --check server/meshcentral/public/release.json \
  *           [--require-signature] [--verify-key <base64 SPKI>] \
- *           QFRemote-Setup-v2.4.5.exe QFRemote-v2.4.5.apk
+ *           [--expect-key-id release-1] \
+ *           QFRemote-Setup-v2.4.5.exe QFRemote-v2.4.5.apk [便携.zip]
  *         逐项比对 size/sha256/url 文件名/version/minUsable/
  *         android.minUsable（QF-14）/interop.minVersion（QF-15），
  *         全部一致 exit 0，任一不一致 exit 1 并逐项报错。
@@ -30,6 +34,10 @@
  *         的旧清单会因缺 interop 段失败，那不是误伤——旧清单须先重生成。）
  *         带签名时验签（验签不过即失败）；无签名时警告，
  *         传 --require-signature 时无签名也失败（发版门禁应传）。
+ *         D-02：--expect-key-id（默认 release-1）核对签名 key_id 是否
+ *         为当前轮换代次，不对即失败（与客户端 update.js 同口径）。
+ *         D-04：文档含 portable 段时 --check 须再给 zip 文件逐项比对
+ *         size/sha256/url 文件名；缺 zip 即失败。
  *         minUsable 有意不抬（§5.3 条件不满足、发版时 minUsable 仍为旧版）
  *         时，须显式传 --allow-min-usable，否则 --check 把
  *         minUsable≠version 记为失败；传了该标志时该项不记失败（其余
@@ -119,12 +127,13 @@ function sha256File(p) {
 }
 
 function parseArgs(argv) {
-  const a = { exe: null, apk: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [], signKey: null, keyId: RELEASE_SIGN_KEY_ID, verifyKey: null, requireSignature: false };
+  const a = { exe: null, apk: null, zip: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [], signKey: null, keyId: RELEASE_SIGN_KEY_ID, verifyKey: null, requireSignature: false, expectKeyId: RELEASE_SIGN_KEY_ID };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     const next = () => { if (i + 1 >= argv.length) fail('参数 ' + t + ' 缺少值'); return argv[++i]; };
     if (t === '--exe') a.exe = next();
     else if (t === '--apk') a.apk = next();
+    else if (t === '--zip') a.zip = next();
     else if (t === '--version') a.version = next();
     else if (t === '--min-usable') a.minUsable = next();
     else if (t === '--allow-min-usable') a.allowMinUsable = true;
@@ -140,6 +149,7 @@ function parseArgs(argv) {
     else if (t === '--sign-key') a.signKey = next();
     else if (t === '--key-id') a.keyId = next();
     else if (t === '--verify-key') a.verifyKey = next();
+    else if (t === '--expect-key-id') a.expectKeyId = next();
     else if (t === '--require-signature') a.requireSignature = true;
     else if (t === '--help' || t === '-h') { console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(1, 31).join('\n')); process.exit(0); }
     else if (t.startsWith('-')) fail('未知参数：' + t);
@@ -162,7 +172,7 @@ function buildDoc(a) {
   const apkStat = fs.statSync(a.apk);
   if (!exeStat.isFile()) fail('--exe 不是文件：' + a.exe);
   if (!apkStat.isFile()) fail('--apk 不是文件：' + a.apk);
-  return {
+  const doc = {
     version: a.version,
     notes: a.notes || (a.version + ' 正式版。'),
     url: 'https://app.qfremote.top/dl/' + exeName,
@@ -179,6 +189,18 @@ function buildDoc(a) {
     },
     interop: { window: 2, minVersion: a.version }
   };
+  // D-04：--zip 给便携 ZIP 时加 portable 段（url/sha256/size），供便携版
+  // 客户端下载 ZIP；不给则无此段（老版本无便携版）。
+  if (a.zip) {
+    const zipStat = fs.statSync(a.zip);
+    if (!zipStat.isFile()) fail('--zip 不是文件：' + a.zip);
+    doc.portable = {
+      url: 'https://app.qfremote.top/dl/' + path.basename(a.zip),
+      sha256: sha256File(a.zip),
+      size: zipStat.size
+    };
+  }
+  return doc;
 }
 
 function verifySelf(doc, a) {
@@ -191,6 +213,15 @@ function verifySelf(doc, a) {
   if (doc.android.sha256 !== sha256File(a.apk)) problems.push('apk sha256 不一致');
   if (!doc.url.endsWith('/' + path.basename(a.exe))) problems.push('exe url 文件名与 --exe 不符：' + doc.url);
   if (!doc.android.url.endsWith('/' + path.basename(a.apk))) problems.push('apk url 文件名与 --apk 不符：' + doc.android.url);
+  // D-04：生成后自校验 portable 段（给了 --zip 才有该段）。
+  if (doc.portable) {
+    if (!a.zip) problems.push('文档含 portable 段但未传 --zip');
+    else {
+      if (doc.portable.size !== fs.statSync(a.zip).size) problems.push('zip size 不一致：文档 ' + doc.portable.size + ' vs 实测 ' + fs.statSync(a.zip).size);
+      if (doc.portable.sha256 !== sha256File(a.zip)) problems.push('zip sha256 不一致');
+      if (!doc.portable.url.endsWith('/' + path.basename(a.zip))) problems.push('zip url 文件名与 --zip 不符：' + doc.portable.url);
+    }
+  }
   return problems;
 }
 
@@ -210,12 +241,12 @@ function checkMode(a) {
   if (!a.check) fail('--check 须给 release.json 路径');
   if (typeof a.check !== 'string') {
     // --check 未直接带值：位置参数首位即 release.json 路径。
-    if (a.files.length !== 3) fail('--check 模式须给 release.json 路径＋exe 与 apk 两个文件路径（顺序：release.json exe apk）');
+    if (a.files.length !== 3 && a.files.length !== 4) fail('--check 模式须给 release.json 路径＋exe 与 apk 两个文件路径（顺序：release.json exe apk，便携版校验时再加 zip：release.json exe apk zip）');
     a.check = a.files.shift();
   }
-  if (a.files.length !== 2) fail('--check 模式须再给 exe 与 apk 两个文件路径（顺序：exe apk）');
+  if (a.files.length !== 2 && a.files.length !== 3) fail('--check 模式须再给 exe 与 apk 两个文件路径（顺序：exe apk，便携版校验时再加 zip：exe apk zip）');
   const doc = JSON.parse(fs.readFileSync(a.check, 'utf8'));
-  const [exeP, apkP] = a.files;
+  const [exeP, apkP, zipP] = a.files;
   const problems = [];
   const expect = (label, got, want) => { if (got !== want) problems.push(label + '：文档 ' + JSON.stringify(got) + ' vs 实测 ' + JSON.stringify(want)); };
   expect('exe size', doc.size, fs.statSync(exeP).size);
@@ -269,6 +300,20 @@ function checkMode(a) {
     if (a.allowMinUsable) console.log('提示：minUsable(' + doc.minUsable + ')与 version(' + doc.version + ')不一致，已按 --allow-min-usable 视为有意不抬，不记失败。');
     else problems.push('minUsable(' + doc.minUsable + ')与 version(' + doc.version + ')不一致——翻牌前请确认是有意为之（有意不抬时传 --allow-min-usable）');
   }
+  // D-04：--check 补 portable 段比较。文档有 portable 段时须给 zip 文件
+  // 逐项比对 size/sha256/url 文件名；文档无 portable 段却给了 zip 即报错
+  // （防拿错包）；文档无 portable 段且未给 zip 时不报错（老版本无便携版）。
+  if (doc.portable && typeof doc.portable === 'object') {
+    if (!zipP) {
+      problems.push('文档含 portable 段，但 --check 未给 zip 文件路径（顺序：exe apk zip）');
+    } else {
+      expect('zip size', doc.portable.size, fs.statSync(zipP).size);
+      expect('zip sha256', doc.portable.sha256, sha256File(zipP));
+      expect('zip url 文件名', doc.portable.url && path.basename(doc.portable.url), path.basename(zipP));
+    }
+  } else if (zipP) {
+    problems.push('--check 给了 zip 文件路径，但文档无 portable 段（防拿错包）');
+  }
   if (problems.length) {
     console.error('校验失败（' + problems.length + ' 项）：');
     problems.forEach(p => console.error('  - ' + p));
@@ -279,6 +324,10 @@ function checkMode(a) {
   const vr = verifyReleaseSignature(doc, a.verifyKey);
   if (doc.signature) {
     if (!vr.ok) { console.error('校验失败：release.json 签名无效（' + vr.reason + '）。'); process.exit(1); }
+    // D-02：签名本身有效、但 key_id 不是当前轮换代次即失败（与客户端
+    // update.js 同口径；轮换时 --expect-key-id 与客户端同改）。
+    const expectKeyId = a.expectKeyId || RELEASE_SIGN_KEY_ID;
+    if (vr.key_id !== expectKeyId) { console.error('校验失败：release.json 签名 key_id 不符（' + (vr.key_id || '未标') + '，期望 ' + expectKeyId + '）。'); process.exit(1); }
     console.log('签名有效（key_id=' + (vr.key_id || '未标') + '）。');
   } else if (a.requireSignature) {
     console.error('校验失败：release.json 无签名（已传 --require-signature）。');
@@ -286,7 +335,7 @@ function checkMode(a) {
   } else {
     console.log('警告：release.json 无签名——生产发布须用 --sign-key 签名，否则 Windows 客户端拒绝更新。');
   }
-  console.log('校验通过：' + a.check + ' 与两个包的 size/sha256/url/version 全部一致（version ' + doc.version + '，minUsable ' + doc.minUsable + '，android.minUsable ' + (doc.android && doc.android.minUsable) + '，interop.minVersion ' + (doc.interop && doc.interop.minVersion) + '）。');
+  console.log('校验通过：' + a.check + ' 与两个包的 size/sha256/url/version 全部一致（version ' + doc.version + '，minUsable ' + doc.minUsable + '，android.minUsable ' + (doc.android && doc.android.minUsable) + '，interop.minVersion ' + (doc.interop && doc.interop.minVersion) + (doc.portable ? '，portable ' + doc.portable.size + ' B 已核对' : '，无 portable 段') + '）。');
 }
 
 function main() {
@@ -298,7 +347,7 @@ function main() {
   const text = JSON.stringify(doc, null, 2) + '\n';
   if (a.out) {
     fs.writeFileSync(a.out, text);
-    console.log('已写入 ' + a.out + '（version ' + doc.version + '，minUsable ' + doc.minUsable + '，exe ' + doc.size + ' B，apk ' + doc.android.size + ' B，自校验通过' + (doc.signature ? '，已签名 key_id=' + doc.signature.key_id : '，未签名') + '）。');
+    console.log('已写入 ' + a.out + '（version ' + doc.version + '，minUsable ' + doc.minUsable + '，exe ' + doc.size + ' B，apk ' + doc.android.size + ' B' + (doc.portable ? '，便携 zip ' + doc.portable.size + ' B' : '') + '，自校验通过' + (doc.signature ? '，已签名 key_id=' + doc.signature.key_id : '，未签名') + '）。');
   } else {
     process.stdout.write(text);
     console.error('（未写文件：未传 --out。发版时显式传 --out 指向 server/meshcentral/public/release.json。）');

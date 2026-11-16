@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../core/constants.dart';
+import 'qf_bridge.dart';
 
 /// APK 身份信息：包名 + 全部当前签名者证书 SHA-256 指纹。
 @immutable
@@ -25,18 +26,16 @@ abstract class ApkIdentityVerifier {
   Future<ApkIdentity> inspect(File apk);
 }
 
-/// MethodChannel 封装。
+/// MethodChannel 封装（A-06：走单一桥接 `qfremote/bridge` 的 `apk.` 域）。
 ///
 /// 平台通道不可用、返回格式异常、取不到包名/签名者时均抛异常，
 /// 由上层 downloadApk 统一转为中文 fail-closed 文案。
 class PlatformApkIdentityVerifier implements ApkIdentityVerifier {
-  static const MethodChannel _channel = MethodChannel('qfremote/apk_verify');
-
   @override
   Future<ApkIdentity> inspect(File apk) async {
     final Object? raw;
     try {
-      raw = await _channel.invokeMethod<Object?>('inspectApk', {
+      raw = await QfBridge.channel.invokeMethod<Object?>('apk.inspectApk', {
         'path': apk.path,
       });
     } on PlatformException catch (e) {

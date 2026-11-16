@@ -29,12 +29,28 @@
  *   验签公钥内嵌（release-1）；仅测试用环境变量
  *   QFREMOTE_RELEASE_SIGN_PUBLIC_KEY（base64 SPKI）可覆盖，与
  *   QFREMOTE_RELEASE_URL 测试覆盖同款口径，生产环境不要设置。
+ * D-02（3.0.0）：只验签名不够——签名 key_id 必须等于当前轮换代次
+ *   （RELEASE_SIGN_KEY_ID，现行 release-1），不对即拒绝更新。
+ *   key_id 由发版流程（make-release-json.js --check --expect-key-id）
+ *   同步核对；轮换时两处同改。仅测试用环境变量
+ *   QFREMOTE_RELEASE_SIGN_KEY_ID 可覆盖（与公钥覆盖同款口径）。
+ * D-03（3.0.0，照抄 RustDesk updater.rs）：有活跃远程会话时不更新
+ *   （自动检查跳过、下载拒绝、安装不拉起）；失败退避重试——会话中
+ *   10 分钟、失败 30 分钟、计费连接 30 分钟（见 nextRetryDelayMs）。
+ * D-05（3.0.0，照抄 draw.io＋VS Code）：更新策略跟着安装方式走——
+ *   安装版（install-mode.txt=installed 或无标记的老版本）走安装包
+ *   更新；便携版（install-mode.txt=portable）只提示＋下 ZIP，不静
+ *   默装、不转安装版。设置总开关 settings.update.enabled（默认开，
+ *   只关自动检查；手动检查仍可用）；集中管理环境变量
+ *   QFREMOTE_DISABLE_UPDATE=1 关全部检查（含手动）。计费连接上自动
+ *   检查暂停（VS Code PR #331701 同款口径），恢复不限流量后继续。
  */
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const clientVersion = require('./client-version');
 
 const PROD_ORIGIN = 'https://app.qfremote.top';
@@ -61,10 +77,77 @@ const TRUSTED_ORIGIN = OVERRIDE_OK ? new URL(OVERRIDE_URL).origin : PROD_ORIGIN;
 // server/ext/make-release-json.js 的 RELEASE_SIGN_PUBLIC_KEY_B64 同值；
 // 轮换时两处同改。仅测试用环境变量可覆盖（见文件头）。
 const RELEASE_SIGN_PUBLIC_KEY_B64 = 'MCowBQYDK2VwAyEAmGZlcEEV5U0J9ciAaA69WYkIfG/Og7arHBEuR+PTtnA=';
+// D-02：当前签名密钥轮换代次。key_id 不对即拒绝更新（见 fetchManifest）。
+// 轮换时与 make-release-json.js 的 RELEASE_SIGN_KEY_ID 同改。
+const RELEASE_SIGN_KEY_ID = 'release-1';
 
 function releaseVerifyKeyB64() {
   const ov = process.env.QFREMOTE_RELEASE_SIGN_PUBLIC_KEY || '';
   return ov || RELEASE_SIGN_PUBLIC_KEY_B64;
+}
+
+// D-02：期望的 key_id。仅测试用环境变量可覆盖（与公钥覆盖同款口径）。
+function releaseExpectedKeyId() {
+  const ov = process.env.QFREMOTE_RELEASE_SIGN_KEY_ID || '';
+  return ov || RELEASE_SIGN_KEY_ID;
+}
+
+// D-05：安装方式判定。安装器写 install-mode.txt=installed，便携 ZIP 里
+// 带 install-mode.txt=portable；无标记即老版本安装版（默认 installed）。
+function detectInstallMode(appDir) {
+  try {
+    const v = fs.readFileSync(path.join(appDir, 'install-mode.txt'), 'utf8').trim().toLowerCase();
+    if (v === 'portable' || v === 'installed') return v;
+  } catch (e) { /* 无标记：老版本安装版 */ }
+  return 'installed';
+}
+
+// D-05：按安装方式＋设置给出的更新策略（纯函数，可单测）。
+//   installed：自动检查（总开关可关）＋点按下载安装包＋重启安装；
+//   portable：自动检查只为提示，下载只给 ZIP、永不静默装、不转安装版。
+//   askBeforeDownload=true 时下载须经一次显式确认（主进程握手）。
+function getUpdatePolicy(installMode, updateSettings) {
+  const s = (updateSettings && typeof updateSettings === 'object') ? updateSettings : {};
+  const enabled = s.enabled !== false;
+  const askBeforeDownload = s.askBeforeDownload === true;
+  if (installMode === 'portable') {
+    return { installMode: 'portable', enabled, askBeforeDownload, autoCheck: enabled, autoDownload: false, downloadKind: 'portable-zip', installAction: 'manual' };
+  }
+  return { installMode: 'installed', enabled, askBeforeDownload, autoCheck: enabled, autoDownload: false, downloadKind: 'installer', installAction: 'restart' };
+}
+
+// D-03：失败退避间隔（照抄 RustDesk：有会话 10 分钟／失败 30 分钟）。
+// 纯函数：{activeSession, metered, consecutiveFailures} -> 毫秒（0=不约）。
+const UPDATE_RETRY_MS = { ACTIVE_SESSION: 10 * 60 * 1000, FAILURE: 30 * 60 * 1000, METERED: 30 * 60 * 1000 };
+function nextRetryDelayMs(state) {
+  const s = state || {};
+  if (s.activeSession) return UPDATE_RETRY_MS.ACTIVE_SESSION;
+  if (s.metered) return UPDATE_RETRY_MS.METERED;
+  if ((s.consecutiveFailures || 0) > 0) return UPDATE_RETRY_MS.FAILURE;
+  return 0;
+}
+
+// D-05：是否在按流量计费的连接上。Windows 用 WinRT NetworkInformation
+// 查当前连接的 NetworkCostType（Fixed/Variable 即计费）；非 Windows 一
+// 律 false。查不到（离线/无 WinRT）按不限流量处理——更新检查本身会失败，
+// 不由这里多拦一道。结果缓存 5 分钟。仅测试用环境变量
+// QFREMOTE_METERED_TEST=1/0 可强制（与公钥覆盖同款口径）。
+let meteredCache = { at: 0, value: false };
+function isMeteredConnection() {
+  const ov = process.env.QFREMOTE_METERED_TEST || '';
+  if (ov === '1') return Promise.resolve(true);
+  if (ov === '0') return Promise.resolve(false);
+  if (process.platform !== 'win32') return Promise.resolve(false);
+  if (Date.now() - meteredCache.at < 5 * 60 * 1000) return Promise.resolve(meteredCache.value);
+  return new Promise((resolve) => {
+    const ps = 'try { $p = [Windows.Networking.Connectivity.NetworkInformation, Windows.Networking.Connectivity, ContentType=WindowsRuntime]::GetInternetConnectionProfile(); if ($null -eq $p) { exit 2 }; $c = $p.GetConnectionCost(); if ($c.NetworkCostType -eq "Fixed" -or $c.NetworkCostType -eq "Variable") { exit 1 } else { exit 0 } } catch { exit 2 }';
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 10000 }, (err) => {
+      // exit 1=计费，0=不限流量，2=查不到（按不限流量处理）。
+      const metered = !!(err && typeof err.code === 'number' && err.code === 1);
+      meteredCache = { at: Date.now(), value: metered };
+      resolve(metered);
+    });
+  });
 }
 
 function canonicalReleaseJson(doc) {
@@ -86,8 +169,9 @@ function canonicalReleaseJson(doc) {
 // H26：验 release.json 签名。返回 { ok, reason }；ok=false 时调用方拒绝更新。
 function verifyReleaseSignature(doc) {
   const sig = doc && doc.signature;
-  // r11③：缺签名单独给机器码 missing-signature——fetchManifest 的兼容
-  // 垫片按码识别，不依赖 reason 文案（文案一改垫片就失效）。
+  // 缺签名单独给机器码 missing-signature（仅作文案／日志区分；调用方
+  // 对任何 !ok 一律拒绝，不再按码放行——r11③ 垫片已于 2026-11-16
+  // 按站长终局删除）。
   if (!sig || typeof sig !== 'object') return { ok: false, reason: '缺少 signature 字段', code: 'missing-signature' };
   if (sig.alg !== 'ed25519') return { ok: false, reason: '未知签名算法：' + String(sig.alg) };
   if (typeof sig.sig !== 'string' || !/^[A-Za-z0-9_-]+$/.test(sig.sig)) return { ok: false, reason: 'sig 不是 base64url' };
@@ -168,21 +252,31 @@ async function fetchManifest(timeoutMs) {
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error('更新清单缺少完整的 SHA256 校验码');
   // H26：清单签名必验——无签名／验签不过即拒绝更新（fail-closed）。
   // 2.4.5 起发版流程用 --sign-key 签名；签发方漏签时客户端宁可不更新。
-  // r11③ 例外（有界兼容垫片）：线上现行清单是 H26 之前发布的 2.4.4，
-  // 本来就没有 signature 字段——它不是被篡改，是发版时签名机制还不
-  // 存在。仅当“缺签名、且版本号 ≤2.4.4（最后一个发版前版本）”时放
-  // 行，并记 signatureVerified:false；版本号更新、或签名在场但验不
-  // 过，仍一律拒绝。放行的唯一后果是“不提供比 2.4.4 更新的版本”，
-  // 与清单未签名时能做的事相同；下载仍须 SHA256＋size＋可信 origin
-  // 三重核对。服务端正确修复是重发已签名的 release.json（见 REPORT），
-  // 该垫片在服务端清单带签名后即可删除（日落条件：线上清单含有效签名）。
+  // 2026-11-16 站长终局：r11③ 有界兼容垫片已删——缺签名＋版本 ≤2.4.4
+  // 也不再放行。预签名时代根本没有签名机制，不存在旧版合法签名格式
+  // 可保留；垫片接受的是“完全没有签名”，且放行条件（版本号）写在未
+  // 签名的清单正文里、可由递假清单者自填，不构成信任边界。故验签失败
+  // 一律整单拒绝，不回退到不安全模式。服务端须先签发带签名的
+  // release.json，否则新版客户端取不到清单、更新走不下去。
   const vr = verifyReleaseSignature(m);
-  let signatureVerified = true;
+  const signatureVerified = true;
   if (!vr.ok) {
-    const missingSig = vr.code === 'missing-signature';
-    const preSigning = compareVersions(m.version, '2.4.4') <= 0;
-    if (!(missingSig && preSigning)) throw new Error('更新清单签名无效（' + vr.reason + '），拒绝更新');
-    signatureVerified = false;
+    throw new Error('更新清单签名无效（' + vr.reason + '），拒绝更新');
+  } else if (vr.key_id !== releaseExpectedKeyId()) {
+    // D-02：签名本身有效、但 key_id 不是当前轮换代次——拒绝更新。
+    // （如旧密钥签发的新清单、或轮换后发版方漏换 key_id。）
+    throw new Error('更新清单签名 key_id 不符（' + String(vr.key_id) + '，期望 ' + releaseExpectedKeyId() + '），拒绝更新');
+  }
+  // D-04：便携版下载信息（可选段；发版时 make-release-json.js --zip 写入）。
+  // 有该段时逐项校验（可信 origin＋SHA256＋size），缺一即拒绝整份清单。
+  let portable = null;
+  if (m.portable && typeof m.portable === 'object') {
+    const pUrl = typeof m.portable.url === 'string' ? new URL(m.portable.url, RELEASE_URL).toString() : '';
+    if (!isTrustedUrl(pUrl)) throw new Error('清单里便携版下载地址不在信任范围内');
+    const pSha = typeof m.portable.sha256 === 'string' ? m.portable.sha256.toLowerCase() : '';
+    if (!/^[0-9a-f]{64}$/.test(pSha)) throw new Error('清单里便携版缺少完整的 SHA256 校验码');
+    if (typeof m.portable.size !== 'number' || !Number.isFinite(m.portable.size) || m.portable.size <= 0) throw new Error('清单里便携版缺少有效的文件大小');
+    portable = { url: pUrl, sha256: pSha, size: m.portable.size };
   }
   // 强更线 minUsable（2026-11-07 站长令）：清单可选字段，本机版本低于它即触发
   // 启动强制更新（见 main.js startupUpdateGate）；缺失/格式不合规按无强更线处理。
@@ -194,13 +288,29 @@ async function fetchManifest(timeoutMs) {
     sha256: sha,
     size: typeof m.size === 'number' ? m.size : null,
     minUsable,
-    signatureVerified
+    signatureVerified,
+    portable
   };
 }
 
-// 检查更新：{available, manifest|null, error|null}
+// 检查更新：{available, manifest|null, error|null, skipped?}
+// D-03/D-05：opts={manual, hasActiveSession(bool|fn), updateEnabled, metered}。
+//   自动检查（manual=false）：总开关关／会话中／计费连接时跳过，返 skipped
+//   （'disabled'/'active-session'/'metered'），不记错误；手动检查跳过会话与
+//   计费两道门（用户当面点的，只查清单、不下载）；集中管理环境变量
+//   QFREMOTE_DISABLE_UPDATE=1 关全部检查（含手动）。
 // W-26：timeoutMs 可透传（启动后自动检查用 5s、关于面板手动检查用 8s）。
-async function checkForUpdate(currentVersion, timeoutMs) {
+async function checkForUpdate(currentVersion, timeoutMs, opts) {
+  const o = opts || {};
+  if (process.env.QFREMOTE_DISABLE_UPDATE === '1') return { available: false, manifest: null, error: null, skipped: 'disabled' };
+  if (o.updateEnabled === false && !o.manual) return { available: false, manifest: null, error: null, skipped: 'disabled' };
+  const manual = !!o.manual;
+  const hasActiveSession = typeof o.hasActiveSession === 'function' ? !!o.hasActiveSession() : !!o.hasActiveSession;
+  if (hasActiveSession && !manual) return { available: false, manifest: null, error: null, skipped: 'active-session' };
+  let metered = null;
+  if (typeof o.metered === 'boolean') metered = o.metered;
+  else if (!manual) metered = await isMeteredConnection();
+  if (metered && !manual) return { available: false, manifest: null, error: null, skipped: 'metered' };
   try {
     const manifest = await fetchManifest(timeoutMs);
     return { available: compareVersions(manifest.version, currentVersion) > 0, manifest, error: null };
@@ -283,14 +393,31 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   if (!manifest || typeof manifest !== 'object') throw new Error('更新清单为空，无法下载');
   if (typeof manifest.url !== 'string' || !manifest.url) throw new Error('更新清单缺少下载地址，无法下载');
   if (typeof manifest.sha256 !== 'string' || !manifest.sha256) throw new Error('更新清单缺少 SHA256 校验码，无法下载');
-  if (!isTrustedUrl(manifest.url)) throw new Error('下载地址不在信任范围内');
-  const u = new URL(manifest.url);
+  // 纵深防御（2026-11-16 站长终局）：清单须经签名验证。fetchManifest
+  // 已在取清单时 fail-closed（验签失败直接抛错、不会返回带病清单），
+  // 这里再拦一道——显式 signatureVerified:false 的清单（手工拼装／旧
+  // 垫片口径残留）一律拒绝下载，不静默放行。字段缺失的手工清单不在此
+  // 限（测试夹具沿用旧口径），以 fetchManifest 的验签为准。
+  if (manifest.signatureVerified === false) throw new Error('更新清单未通过签名验证，拒绝下载');
+  // D-03：会话中不下载（主进程下载入口另有同一道门，这里是纵深防御）。
+  // D-04：kind='portable' 时下清单 portable 段的 ZIP（便携版只提示＋下 ZIP）。
+  const o = opts || {};
+  if (o.hasActiveSession) throw new Error('有进行中的远程会话，暂不下载更新');
+  let src = manifest;
+  if (o.kind === 'portable') {
+    if (!manifest.portable || typeof manifest.portable !== 'object') throw new Error('更新清单无便携版下载地址');
+    src = manifest.portable;
+  }
+  if (typeof src.url !== 'string' || !src.url) throw new Error('下载地址缺失，无法下载');
+  if (typeof src.sha256 !== 'string' || !src.sha256) throw new Error('下载缺少 SHA256 校验码，无法下载');
+  if (!isTrustedUrl(src.url)) throw new Error('下载地址不在信任范围内');
+  const u = new URL(src.url);
   const name = path.basename(u.pathname).replace(/[^\w.\- ]/g, '_') || 'QFRemote-Setup.exe';
   fs.mkdirSync(destDir, { recursive: true });
   const dest = path.join(destDir, name);
   const part = dest + '.part';
   try {
-    await downloadToFile(u, part, manifest, onProgress, opts || {});
+    await downloadToFile(u, part, src, onProgress, opts || {});
   } catch (e) {
     try { fs.unlinkSync(part); } catch (err) { /* ignore */ }
     throw e;
@@ -302,10 +429,10 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
     // size 时“文件多大才算下完”无锚点，且与安卓口径（清单 size 必填，
     // 见 manifest.dart H-3）不一致；发版口径 release.json 必带 size，
     // 缺失即清单不完整。核对失败一律删文件（见下 catch）。
-    if (typeof manifest.size !== 'number' || !Number.isFinite(manifest.size) || manifest.size <= 0) throw new Error('更新清单缺少有效的文件大小（size 必填）');
-    if (st.size !== manifest.size) throw new Error('文件大小与清单不一致');
+    if (typeof src.size !== 'number' || !Number.isFinite(src.size) || src.size <= 0) throw new Error('更新清单缺少有效的文件大小（size 必填）');
+    if (st.size !== src.size) throw new Error('文件大小与清单不一致');
     const digest = await sha256File(part);
-    if (digest.toLowerCase() !== manifest.sha256.toLowerCase()) throw new Error('SHA256 校验码不一致');
+    if (digest.toLowerCase() !== src.sha256.toLowerCase()) throw new Error('SHA256 校验码不一致');
     fs.renameSync(part, dest);
     return { file: dest, sha256: digest, size: st.size };
   } catch (e) {
@@ -318,4 +445,4 @@ async function downloadUpdate(manifest, destDir, onProgress, opts) {
   }
 }
 
-module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File, setHealReport, canonicalReleaseJson, verifyReleaseSignature, RELEASE_SIGN_PUBLIC_KEY_B64 };
+module.exports = { RELEASE_URL, TRUSTED_ORIGIN, PROD_RELEASE_URL, compareVersions, fetchManifest, checkForUpdate, downloadUpdate, sha256File, setHealReport, canonicalReleaseJson, verifyReleaseSignature, RELEASE_SIGN_PUBLIC_KEY_B64, RELEASE_SIGN_KEY_ID, releaseExpectedKeyId, detectInstallMode, getUpdatePolicy, isMeteredConnection, nextRetryDelayMs, UPDATE_RETRY_MS };

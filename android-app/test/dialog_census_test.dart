@@ -116,10 +116,10 @@ void main() {
       await tester.tap(find.text('深色模式'));
       await tester.pumpAndSettle(const Duration(milliseconds: 100), EnginePhase.sendSemanticsUpdate, const Duration(seconds: 30));
       expect(tester.takeException(), isNull);
-      expect(find.text('深灰（不用纯黑）'), findsOneWidget);
-      // 弹窗里的选项：不能点已选项（不触发变更、弹窗不关），点「深灰」
+      expect(find.text('深色'), findsOneWidget);
+      // 弹窗里的选项：不能点已选项（不触发变更、弹窗不关），点「深色」
       await tester.tap(find.descendant(
-          of: find.byType(AlertDialog), matching: find.text('深灰（不用纯黑）')));
+          of: find.byType(AlertDialog), matching: find.text('深色')));
       await tester.pumpAndSettle(const Duration(milliseconds: 100), EnginePhase.sendSemanticsUpdate, const Duration(seconds: 30));
       await tester.scrollUntilVisible(find.text('退出账号'), 200);
       await tester.pumpAndSettle(const Duration(milliseconds: 100), EnginePhase.sendSemanticsUpdate, const Duration(seconds: 30));

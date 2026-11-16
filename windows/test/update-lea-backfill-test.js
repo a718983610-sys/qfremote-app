@@ -1,10 +1,17 @@
 'use strict';
 /*
  * 更新路径 LEA 升级补装（B-LEA，3.0.0，windows/main.js）本地自检：
+ * A1（2026-11-13）改写：登录时 LEA 不再 UAC 补装——首装由安装器
+ * （QFRLEA.exe --install-service）完成；登录只做健康检查，不健康走
+ * repairLeaService（helper→一次 UAC --repair）。本文件 B／C／K2／K3／
+ * K5／K6b／K7／K8／L3／B7／H5／M3／N1／N2／J5／I1／E1 组已按 A1 语义改写：
+ * LEA 缺失／降级／哈希不符时 maybeInstallSystemServices 返回
+ * already-installed 且零拉起（修复由 maybeCheckLeaHealth 另行覆盖，
+ * 见 lea-firstinstall-a1-test.js）；leaServiceInstalled 判据本身不变。
  *  A. leaServiceInstalled 判据：exe＋version.json 齐全且无 LEA_DEGRADED 才算已装；
- *  B. 锁已装＋LEA 缺失（升级场景）→ 不返 already-installed，落到白名单校验＋
- *     一次 UAC 拉起 install-system-services.ps1（-LeaScriptHash 随行）；
- *  C. 锁已装＋LEA 降级（LEA_DEGRADED 在）→ 同样补装；
+ *  B. 锁已装＋LEA 缺失（升级场景）→ A1：返回 already-installed，零拉起
+ *     （修复由 maybeCheckLeaHealth／repairLeaService 另行负责）；
+ *  C. 锁已装＋LEA 降级（LEA_DEGRADED 在）→ A1：同样不再补装拉起；
  *  D. 锁已装＋LEA 齐全 → 原路 already-installed／owner-updated，不拉起；
  *  E. 补装路径哈希篡改 → fail-closed（hash-mismatch，零拉起）；
  *  F. 锁未装（全新安装）→ 原行为 launched 不变；同版本二次调用 already-tried；
@@ -29,28 +36,49 @@
  * 探针 P1（非门禁）：拉起成功／失败行由 M-C DS-6 拉起块记既有日志
  * （launched／install-failed 等），本线为保 hunk 可分未在该块加 backfill
  * 打标，排障按序对上 lea-missing 行；是否须逐行打标待 DS R2 裁决。
- *  K. r12 哈希比对（leaServiceInstalled 同版号不同哈希 → 未装 → backfill）：
+ *  K. r12 哈希比对（leaServiceInstalled 同版号不同哈希 → 未装；A1：
+ *     maybeInstallSystemServices 返回 already-installed，零拉起）：
  *     K1 载荷在、三件哈希一致 → 已装／already-installed，不拉起；
- *     K2 载荷在、live USH 哈希不同 → 未装 → launched 补装，记
+ *     K2 载荷在、live USH 哈希不同 → 未装 → A1：already-installed，记
  *        system-services.lea-hash-mismatch:QFUserHelper.exe；
- *     K3 载荷在、live QFRLEA 哈希不同 → 未装 → launched 补装；
+ *     K3 载荷在、live QFRLEA 哈希不同 → 未装 → A1：already-installed；
  *     K4 载荷缺失（开发态未编／旧包无 LEA）→ 无法比对，按旧判据放行；
  *     K5 live 比随包新（用户降级应用）→ 同样判未装、与运行中应用对齐；
- *     K6 打包态（execPath 旁 LEA/）：一致 → 已装；USH 不同 → launched。
- *     K7 载荷在、live qf-lea-client.exe 哈希不同 → 未装 → launched 补装。
- *     K8 载荷在、live QFUserHelper.exe 文件缺失 → 未装 → launched 补装
+ *     K6 打包态（execPath 旁 LEA/）：一致 → 已装；USH 不同 → A1：already-installed。
+ *     K7 载荷在、live qf-lea-client.exe 哈希不同 → 未装 → A1：already-installed。
+ *     K8 载荷在、live QFUserHelper.exe 文件缺失 → 未装 → A1：already-installed
  *        （DS diff 复核覆盖缺口：旧夹具让 live USH 永不缺失）。
  *     K9 载荷在、随包 USH 存在但读失败 → 单记 lea-pkg-hash-read-error
  *        并跳过该件，其余件一致 → 已装（DS diff 复核问题 A）。
- *     沙箱内补装是桩 spawn，不真换文件，故补装后复核仍记 lea-degraded，
- *     属夹具局限（真机上 backfill 换件后哈希即一致，记 lea-installed），
- *     K 组只断言拉起与否与 mismatch 日志，不对复核行断言。
+ *     沙箱内拉起是桩 spawn，不真换文件；r13 起 launched 后复核改为延迟重评
+ *     （pending＋轮询），轮询首 tick 在 10 秒后、测试退出前不触发；K 组仍只断言
+ *     拉起与否与 mismatch 日志，复核行由 M 组覆盖。A1 起 scheduleLeaBackfillRecheck
+ *     由修复路径（repairLeaService）驱动，不再由 maybeInstallSystemServices 触发。
+ *  M. r13 minor ①（verdict 时序）：修复派发后不立即复核——
+ *     M1 轮询中 live 翻转为一致 → lea-installed，无 degraded、无 mismatch 行
+ *        （quiet 轮询）；M2 永不一致 → 耗尽后记一次 lea-degraded；
+ *     M3 集成（A1）：run() 返回 already-installed、无 pending、无 degraded、
+ *        mismatch 仅首检一条；M4 同启内二次调度返回 false（只调度一次）。
+ *  N. r13 minor ②（全新路径拉起传 -MainVersion）：
+ *     N1 开发态／N2 打包态：拉起参数含 '-MainVersion' '3.0.0'；
+ *     N3 静态：wrapper 声明 MainVersion 参数并转传给 install-lea.ps1；
+ *     N4／N5（门禁）：whitelist.json 内 install-system-services.ps1 条目
+ *        == 磁盘实算 SHA-256 且 verify 通过（改脚本不刷新白名单即
+ *        fail-closed，见 N4 断言）。
+ *  O. r13 查因 ①（register-ush-task UserId，install-lea.ps1 静态断言；
+ *     沙箱无 PowerShell 运行时，行为由 ECS 真机 backfill 验证）：
+ *     O1 服务账号判据含 SID S-1-5-18/19/20 与三名；O2 步骤 ⑤ 先判服务
+ *        账号、后重试；O3 服务账号时取枚举首用户沿用旧主任务名；
+ *     O4 枚举只跑一次、循环复用；O5 诊断行 install user context；
+ *     O6 失实措辞 main app will retry on login 已删；O7 卸载段清后缀任务；
+ *     O8（门禁）whitelist.json 内 install-lea.ps1 条目 == 磁盘实算；
+ *     O9 无交互用户时跳过主任务注册（不以空名重试）。
  *  L. r12 守门键（版本 OR 载荷签名，DS 方案复核阻断点 1）：
  *     L1 同版本＋同载荷签名 → tried-this-version，不拉起；
  *     L2 同版本＋载荷签名变 → 放行检查（live 一致 → already-installed，
  *        且 settings.systemServicesTriedPayload 已刷新为新签名）；
  *     L3 同版本＋旧设置无 triedPayload（r11 机器首启 r12）＋live USH
- *        不同 → 放行 → launched 补装（复测无需手动重置守门）；
+ *        不同 → 放行检查后返回 already-installed（A1，零拉起）；
  *     L4 载荷缺失无法签名＋同版本 → 退回只比版本 → tried-this-version；
  *     L5 owner UAC 在飞 defer 时 triedPayload 随 triedVersion 一并恢复。
  *     L6 部分载荷（缺 client）＋同版本＋签名与在位两件一致 →
@@ -89,13 +117,20 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
 (async () => {
   try {
     // ---- 抽取真实函数文本，并做防 stale 断言 ----
-    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath', 'leaPayloadPath', 'sha256File', 'leaPayloadSignature']
+    // r13：waitInstallResult 与 INSTALL_WAIT_MS 也须抽取——可观测桩使
+    // launched 后走等结果路径（旧无流桩恒早返，该依赖从未被需要过）。
+    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstalled', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath', 'leaPayloadPath', 'sha256File', 'leaPayloadSignature', 'scheduleLeaBackfillRecheck', 'waitInstallResult', 'leaHealthCheck', 'repairLeaService', 'maybeCheckLeaHealth', 'leaRegistryValue', 'leaServiceState']
       .map((n) => extractFunction(MAIN_SRC, n)).join('\n');
+    const waitMsDecl = MAIN_SRC.match(/const INSTALL_WAIT_MS = \d+;/);
+    if (!waitMsDecl) throw new Error('INSTALL_WAIT_MS not found');
     ok('X0_extract', fns.includes('leaServiceInstalled()') && fns.includes('LEA_DEGRADED')
       && fns.includes('system-services.lea-missing') && fns.includes('lea-backfill-deferred')
-      && fns.includes('sc.exe') && fns.includes('qf-lea-client.exe')
+      && fns.includes('sysPrograms.scPath()') && !fns.includes("'sc.exe'") && fns.includes('qf-lea-client.exe')
       && fns.includes('lea-hash-mismatch') && fns.includes('QFUserHelper.exe')
-      && fns.includes('systemServicesTriedPayload') && fns.includes('leaPayloadSignature()'));
+      && fns.includes('systemServicesTriedPayload') && fns.includes('leaPayloadSignature()')
+      && fns.includes('lea-repair.pending') && fns.includes('scheduleLeaBackfillRecheck')
+      && fns.includes('waitInstallResult') && fns.includes('leaHealthCheck()')
+      && fns.includes('--install-service') && fns.includes('repair-lea'));
 
     // ---- 夹具：四件被验文件＋白名单落在真临时目录（__dirname 即该目录），
     //      走真 sys-helper loadWhitelist／verifyFileHash ----
@@ -223,6 +258,8 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         saveSettings: () => {},
         currentGateUsername: () => '718983610',
         bootLog: (tag, detail) => { bootLogs.push(tag + (detail ? ':' + detail : '')); },
+        // r13：waitInstallResult 与 scheduleLeaBackfillRecheck 用真定时器。
+        setTimeout, clearTimeout,
         // 首调按场景（owner 换号且直接写不动 → 派 UAC）；再调视为 UAC 已完成，
         // 不再派发——模拟 defer 后下次登录的收敛态。
         syncLockOwner: async () => {
@@ -231,19 +268,29 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
           return { ok: true, changed: false, uacDispatched: false };
         },
         sysHelper: sh,
+        sysPrograms: require('../sys-programs'), // D-09：抽取函数内调绝对路径
         fs: fakeFs,
         path,
         require: (name) => {
           if (name === 'crypto') return crypto; // r12：sha256File 内联 require
           if (name === 'child_process') {
             return {
+              // r13：可观测桩（贴近真实 spawn：恒有 stdout/stderr 流，close
+              // 立即 0）。旧桩无流，恒走 launched-unobserved 早返，launched
+              // 后复核块在沙箱内永不可达；现桩使该块可达，M 组得以断言 pending。
               spawn: (file, args, opts2) => {
                 spawns.push({ file, args: args.slice(), opts: opts2 });
-                return { on: () => {} };
+                return {
+                  on: (ev, cb) => { if (ev === 'close' && typeof cb === 'function') cb(0); },
+                  stdout: { on: () => {} },
+                  stderr: { on: () => {} },
+                  kill: () => {},
+                };
               },
               spawnSync: (file, args, opts2) => {
                 spawnSyncCalls.push({ file, args: args.slice() });
-                if (file === 'sc.exe') {
+                // D-09：主进程传绝对路径，按 basename 匹配。
+                if (String(file).replace(/\\/g, '/').endsWith('/sc.exe')) {
                   return { status: o.svcRegistered ? 0 : 1060, stdout: o.svcRegistered ? 'SERVICE_NAME: QFRLEA' : '' };
                 }
                 return { status: 0, stdout: '' };
@@ -255,8 +302,11 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         console,
       };
       vm.createContext(sandbox);
-      vm.runInContext('let systemServicesInstallTried = false;\n' + fns, sandbox);
-      return { sandbox, spawns, spawnSyncCalls, bootLogs, o };
+      vm.runInContext('let systemServicesInstallTried = false;\nlet leaBackfillRecheckRunning = false;\n' + waitMsDecl[0] + '\n' + fns, sandbox);
+      // r13 M 组：轮询中翻转 live 内容，模拟 backfill 换件完成。
+      const livePathByName = { 'QFRLEA.exe': liveQfrPath, 'qf-lea-client.exe': liveClientPath, 'QFUserHelper.exe': liveUshPath };
+      return { sandbox, spawns, spawnSyncCalls, bootLogs, o,
+        setLive: (name, content) => { contentMap.set(livePathByName[name], Buffer.from(content)); } };
     }
     const run = async (ctx, force) => vm.runInContext(
       'maybeInstallSystemServices(' + (force ? 'true' : '') + ')', ctx.sandbox);
@@ -273,30 +323,32 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       ok('A4_absent', vm.runInContext('leaServiceInstalled()', c4.sandbox) === false);
       const c5 = makeCtx({ lockInstalled: false, leaExe: true, leaClient: true, leaVer: true, svcRegistered: false });
       ok('A5_no_service', vm.runInContext('leaServiceInstalled()', c5.sandbox) === false);
-      ok('A5b_sc_queried', c5.spawnSyncCalls.some((s) => s.file === 'sc.exe' && s.args.join(' ') === 'query QFRLEA'));
+      ok('A5b_sc_queried', c5.spawnSyncCalls.some((s) => String(s.file).replace(/\\/g, '/').endsWith('/sc.exe') && s.args.join(' ') === 'query QFRLEA'));
       const c6 = makeCtx({ lockInstalled: false, leaExe: true, leaClient: false, leaVer: true });
       ok('A6_no_client', vm.runInContext('leaServiceInstalled()', c6.sandbox) === false);
     }
 
-    // ---- B. 升级场景：锁已装＋LEA 缺失 → 补装拉起 ----
+    // ---- B. 升级场景：锁已装＋LEA 缺失 → A1：不再 UAC 补装 ----
+    // 登录只记 lea-missing:health-check 并返回 already-installed（锁已装），
+    // 零拉起；修复由 maybeCheckLeaHealth／repairLeaService 另行负责
+    // （见 lea-firstinstall-a1-test.js）。
     {
       const c = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false });
       const r = await run(c);
-      ok('B1_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
-      ok('B2_spawn_once', c.spawns.length === 1);
-      const argStr = c.spawns.length ? c.spawns[0].args.join(' ') : '';
-      ok('B3_spawn_ps1', argStr.includes('install-system-services.ps1'));
-      ok('B4_spawn_hash', argStr.includes('-LeaScriptHash') && argStr.includes(leaHash));
+      ok('B1_already', r && r.ok === true && r.reason === 'already-installed', { reason: r && r.reason });
+      ok('B2_no_spawn', c.spawns.length === 0);
+      ok('B3_no_ps1_launch', !c.spawns.some((s) => s.args.join(' ').includes('install-system-services.ps1')));
+      ok('B4_no_hash_arg', !c.spawns.some((s) => s.args.join(' ').includes('-LeaScriptHash')));
       ok('B5_log_missing', c.bootLogs.some((l) => l.startsWith('system-services.lea-missing')));
-      ok('B6_no_already', !c.bootLogs.some((l) => l.startsWith('system-services.already-installed')));
+      ok('B6_already_logged', c.bootLogs.some((l) => l.startsWith('system-services.already-installed')));
     }
 
-    // ---- C. 锁已装＋LEA 降级 → 补装拉起 ----
+    // ---- C. 锁已装＋LEA 降级 → A1：同样不再补装拉起 ----
     {
       const c = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, leaDegraded: true });
       const r = await run(c);
-      ok('C1_launched', r && r.ok === true && r.reason === 'launched');
-      ok('C2_spawn_once', c.spawns.length === 1);
+      ok('C1_already', r && r.ok === true && r.reason === 'already-installed', { reason: r && r.reason });
+      ok('C2_no_spawn', c.spawns.length === 0);
     }
 
     // ---- D. 锁已装＋LEA 齐全 → 原路返回，不拉起 ----
@@ -320,32 +372,35 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       ok('K1_match_already', r && r.ok === true && r.reason === 'already-installed', { reason: r && r.reason });
       ok('K1_match_no_spawn', c.spawns.length === 0);
       ok('K1_match_no_mismatch_log', !c.bootLogs.some((l) => l.startsWith('system-services.lea-hash-mismatch')));
-      // K2：live USH 哈希不同（r10 件）→ 未装 → launched 补装。
+      // K2：live USH 哈希不同（r10 件）→ 未装 → A1：不再 launched 补装，
+      // 返回 already-installed 且零拉起（修复走健康检查路径）。
       const c2 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUsh: 'live-USH-r10' });
       ok('K2_ush_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c2.sandbox) === false);
       ok('K2_ush_mismatch_log', c2.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFUserHelper.exe'));
       const r2 = await run(c2);
-      ok('K2_ush_launched', r2 && r2.ok === true && r2.reason === 'launched', { reason: r2 && r2.reason });
-      ok('K2_ush_spawn_once', c2.spawns.length === 1);
+      ok('K2_ush_already', r2 && r2.ok === true && r2.reason === 'already-installed', { reason: r2 && r2.reason });
+      ok('K2_ush_no_spawn', c2.spawns.length === 0);
       ok('K2_ush_missing_log', c2.bootLogs.some((l) => l.startsWith('system-services.lea-missing')));
-      // K3：live QFRLEA 哈希不同 → 未装 → launched 补装。
+      // K3：live QFRLEA 哈希不同 → 未装 → A1：already-installed，零拉起。
       const c3 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveQfr: 'live-QFRLEA-r10' });
       ok('K3_qfr_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c3.sandbox) === false);
       ok('K3_qfr_mismatch_log', c3.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFRLEA.exe'));
       const r3 = await run(c3);
-      ok('K3_qfr_launched', r3 && r3.ok === true && r3.reason === 'launched', { reason: r3 && r3.reason });
-      ok('K3_qfr_spawn_once', c3.spawns.length === 1);
+      ok('K3_qfr_already', r3 && r3.ok === true && r3.reason === 'already-installed', { reason: r3 && r3.reason });
+      ok('K3_qfr_no_spawn', c3.spawns.length === 0);
       // K4：载荷缺失 → 无法比对，按旧判据放行（already-installed）。
       const c4 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: false });
       ok('K4_no_payload_installed', vm.runInContext('leaServiceInstalled()', c4.sandbox) === true);
       const r4 = await run(c4);
       ok('K4_no_payload_already', r4 && r4.ok === true && r4.reason === 'already-installed', { reason: r4 && r4.reason });
       ok('K4_no_payload_no_spawn', c4.spawns.length === 0);
-      // K5：live 比随包新（用户降级应用）→ 同样判未装、与运行中应用对齐。
+      // K5：live 比随包新（用户降级应用）→ 同样判未装、与运行中应用对齐；
+      // A1：already-installed，零拉起。
       const c5 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveQfr: 'live-QFRLEA-vNEXT', liveUsh: 'live-USH-vNEXT' });
       ok('K5_newer_live_uninstalled', vm.runInContext('leaServiceInstalled()', c5.sandbox) === false);
       const r5 = await run(c5);
-      ok('K5_newer_live_launched', r5 && r5.ok === true && r5.reason === 'launched', { reason: r5 && r5.reason });
+      ok('K5_newer_live_already', r5 && r5.ok === true && r5.reason === 'already-installed', { reason: r5 && r5.reason });
+      ok('K5_newer_live_no_spawn', c5.spawns.length === 0);
       // K6：打包态（execPath 旁 LEA/）：一致 → 已装；USH 不同 → launched。
       const pkgExec = path.join(tmp, 'QFRemote.exe');
       const c6 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, packaged: true, execPath: pkgExec, payloadPresent: true });
@@ -356,22 +411,22 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       const c7 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, packaged: true, execPath: pkgExec, payloadPresent: true, liveUsh: 'live-USH-r10' });
       ok('K6b_pkg_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c7.sandbox) === false);
       const r7 = await run(c7);
-      ok('K6b_pkg_mismatch_launched', r7 && r7.ok === true && r7.reason === 'launched', { reason: r7 && r7.reason });
-      ok('K6b_pkg_mismatch_spawn_once', c7.spawns.length === 1);
-      // K7：live qf-lea-client.exe 哈希不同 → 未装 → launched 补装。
+      ok('K6b_pkg_mismatch_already', r7 && r7.ok === true && r7.reason === 'already-installed', { reason: r7 && r7.reason });
+      ok('K6b_pkg_mismatch_no_spawn', c7.spawns.length === 0);
+      // K7：live qf-lea-client.exe 哈希不同 → 未装 → A1：already-installed，零拉起。
       const c8 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveClient: 'live-qf-client-r10' });
       ok('K7_client_mismatch_uninstalled', vm.runInContext('leaServiceInstalled()', c8.sandbox) === false);
       ok('K7_client_mismatch_log', c8.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:qf-lea-client.exe'));
       const r8 = await run(c8);
-      ok('K7_client_launched', r8 && r8.ok === true && r8.reason === 'launched', { reason: r8 && r8.reason });
-      ok('K7_client_spawn_once', c8.spawns.length === 1);
-      // K8：live QFUserHelper.exe 文件缺失 → 未装 → launched 补装。
+      ok('K7_client_already', r8 && r8.ok === true && r8.reason === 'already-installed', { reason: r8 && r8.reason });
+      ok('K7_client_no_spawn', c8.spawns.length === 0);
+      // K8：live QFUserHelper.exe 文件缺失 → 未装 → A1：already-installed，零拉起。
       const c9 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUshPresent: false });
       ok('K8_live_ush_missing_uninstalled', vm.runInContext('leaServiceInstalled()', c9.sandbox) === false);
       ok('K8_live_ush_missing_log', c9.bootLogs.some((l) => l === 'system-services.lea-hash-mismatch:QFUserHelper.exe'));
       const r9 = await run(c9);
-      ok('K8_live_ush_missing_launched', r9 && r9.ok === true && r9.reason === 'launched', { reason: r9 && r9.reason });
-      ok('K8_live_ush_missing_spawn_once', c9.spawns.length === 1);
+      ok('K8_live_ush_missing_already', r9 && r9.ok === true && r9.reason === 'already-installed', { reason: r9 && r9.reason });
+      ok('K8_live_ush_missing_no_spawn', c9.spawns.length === 0);
       // K9：随包 USH 存在但读失败 → 单记 pkg-hash-read-error 并跳过该件，
       // 其余件一致 → 已装，不误触发补装。
       const c10 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, pkgReadFail: ['QFUserHelper.exe'] });
@@ -400,11 +455,11 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       ok('L2_changed_sig_no_spawn', c2.spawns.length === 0);
       ok('L2_sig_recorded', c2.sandbox.settings.systemServicesTriedPayload === curSig);
       // L3：同版本＋旧设置无 triedPayload（r11 机器首启 r12）＋live USH
-      // 不同 → 放行 → launched 补装。
+      // 不同 → A1：放行检查后返回 already-installed，零拉起（修复走健康检查）。
       const c3 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, prevVersion: '3.0.0', prevPayload: undefined, liveUsh: 'live-USH-r10' });
       const r3 = await run(c3);
-      ok('L3_legacy_no_sig_launched', r3 && r3.ok === true && r3.reason === 'launched', { reason: r3 && r3.reason });
-      ok('L3_legacy_no_sig_spawn_once', c3.spawns.length === 1);
+      ok('L3_legacy_no_sig_already', r3 && r3.ok === true && r3.reason === 'already-installed', { reason: r3 && r3.reason });
+      ok('L3_legacy_no_sig_no_spawn', c3.spawns.length === 0);
       // L4：载荷缺失无法签名＋同版本 → 退回只比版本 → tried-this-version。
       const c4 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: false, prevVersion: '3.0.0' });
       const r4 = await run(c4);
@@ -431,29 +486,32 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       ok('L7_partial_sig_changed_no_spawn', c7.spawns.length === 0);
     }
 
-    // ---- B7. 文件齐全但服务未注册 → 仍补装（Q1 保守方向） ----
+    // ---- B7. 文件齐全但服务未注册 → A1：同样不再补装拉起 ----
     {
       const c = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, svcRegistered: false });
       const r = await run(c);
-      ok('B7_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
-      ok('B8_spawn_once', c.spawns.length === 1);
+      ok('B7_already', r && r.ok === true && r.reason === 'already-installed', { reason: r && r.reason });
+      ok('B8_no_spawn', c.spawns.length === 0);
     }
 
-    // ---- J. F1 打包形态：-LeaDir 显式传 $INSTDIR\LEA；开发态不传 ----
+    // ---- J. F1 打包形态：锁未装时 wrapper 拉起仍传 -LeaDir／-LeaScriptHash ----
+    // A1：锁已装＋LEA 缺失不再拉起，故 J1/J2/J3 改走全新安装路径（锁未装）
+    // 断言同一套传参；J4 开发态同样改走全新路径断言不传 -LeaDir。
     {
       const pkgExec = path.join(tmp, 'QFRemote.exe');
       const pkgLeaDir = path.join(tmp, 'LEA');
-      const c = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false, packaged: true, execPath: pkgExec });
+      const c = makeCtx({ lockInstalled: false, packaged: true, execPath: pkgExec });
       const r = await run(c);
       ok('J1_pkg_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
       const argStr = c.spawns.length ? c.spawns[0].args.join(' ') : '';
       ok('J2_pkg_lea_dir', argStr.includes("'-LeaDir'") && argStr.includes(pkgLeaDir));
       ok('J3_pkg_hash', argStr.includes('-LeaScriptHash') && argStr.includes(leaHash));
-      const cDev = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false });
+      const cDev = makeCtx({ lockInstalled: false });
       await run(cDev);
       const devArgs = cDev.spawns.length ? cDev.spawns[0].args.join(' ') : '';
       ok('J4_dev_no_lea_dir', !devArgs.includes("'-LeaDir'"));
-      const cTam = makeCtx({ lockInstalled: true, leaExe: false, leaVer: false, packaged: true, execPath: pkgExec, tamperPkgLea: true });
+      // J5/J6：打包态 LEA 脚本被篡改 → 全新路径下仍 fail-closed（hash-mismatch，零拉起）。
+      const cTam = makeCtx({ lockInstalled: false, packaged: true, execPath: pkgExec, tamperPkgLea: true });
       const rTam = await run(cTam);
       ok('J5_pkg_tampered', rTam && rTam.ok === false && rTam.reason === 'hash-mismatch', { reason: rTam && rTam.reason });
       ok('J6_pkg_tampered_no_spawn', cTam.spawns.length === 0);
@@ -483,25 +541,26 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       ok('H3_log_deferred', c.bootLogs.some((l) => l.startsWith('system-services.lea-backfill-deferred')));
       ok('H4_guard_restored', c.sandbox.settings.systemServicesTriedVersion === '2.4.4');
       const r2 = await run(c);
-      ok('H5_retry_launched', r2 && r2.ok === true && r2.reason === 'launched', { reason: r2 && r2.reason });
-      ok('H6_retry_spawn', c.spawns.length === 1);
+      ok('H5_retry_already', r2 && r2.ok === true && r2.reason === 'already-installed', { reason: r2 && r2.reason });
+      ok('H6_retry_no_spawn', c.spawns.length === 0);
     }
 
-    // ---- I. 补装结果日志（Q3.2） ----
+    // ---- I. 哈希篡改 → fail-closed（全新路径，A1：锁已装时直接返回，
+    // 不再走到哈希门；门本身仍在全新路径上，见 E 组） ----
     {
-      const c = makeCtx({ lockInstalled: true, tamperLea: true });
+      const c = makeCtx({ lockInstalled: false, tamperLea: true });
       const r = await run(c);
       ok('I1_fail_log', r && r.reason === 'hash-mismatch'
-        && c.bootLogs.some((l) => l === 'system-services.lea-backfill-failed:hash-mismatch'));
+        && c.bootLogs.some((l) => l === 'system-services.hash-mismatch:install-lea.ps1'));
       fs.writeFileSync(P.leaPs1, leaOrig);
       const c2 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true });
       await run(c2);
       ok('I2_no_backfill_logs', !c2.bootLogs.some((l) => l.startsWith('system-services.lea-backfill')));
     }
 
-    // ---- E. 补装路径哈希篡改 → fail-closed ----
+    // ---- E. 补装路径哈希篡改 → fail-closed（全新路径） ----
     {
-      const c = makeCtx({ lockInstalled: true, tamperLea: true });
+      const c = makeCtx({ lockInstalled: false, tamperLea: true });
       const r = await run(c);
       ok('E1_hash_mismatch', r && r.ok === false && r.reason === 'hash-mismatch', { reason: r && r.reason });
       ok('E2_no_spawn', c.spawns.length === 0);
@@ -541,6 +600,94 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
       await run(c);
       ok('P1_launch_tag', c.bootLogs.some((l) => l.startsWith('system-services.lea-backfill-launched')),
         { gating: false, note: 'expected-absent: launch outcome tagged only by sequence correlation (see file header)' });
+    }
+
+    // ---- M. r13 minor ①：backfill 复核延迟重评 ----
+    {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // M1：轮询中 live 翻转为一致 → lea-installed，无 degraded、无 mismatch 行。
+      const c = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUsh: 'live-USH-r10' });
+      ok('M1_sched', vm.runInContext('scheduleLeaBackfillRecheck(20, 10)', c.sandbox) === true);
+      ok('M1_sched_once', vm.runInContext('scheduleLeaBackfillRecheck(20, 10)', c.sandbox) === false);
+      setTimeout(() => c.setLive('QFUserHelper.exe', 'live-USH-r11'), 25);
+      await sleep(200);
+      ok('M1_installed', c.bootLogs.some((l) => l === 'system-services.lea-installed'));
+      ok('M1_no_degraded', !c.bootLogs.some((l) => l.startsWith('system-services.lea-degraded')));
+      ok('M1_quiet_no_mismatch', !c.bootLogs.some((l) => l.startsWith('system-services.lea-hash-mismatch')));
+      // M2：永不一致 → 耗尽后记一次 lea-degraded，仍无 mismatch 行。
+      const c2 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUsh: 'live-USH-r10' });
+      ok('M2_sched', vm.runInContext('scheduleLeaBackfillRecheck(10, 3)', c2.sandbox) === true);
+      await sleep(120);
+      ok('M2_degraded_once', c2.bootLogs.filter((l) => l === 'system-services.lea-degraded').length === 1);
+      ok('M2_no_installed', !c2.bootLogs.some((l) => l === 'system-services.lea-installed'));
+      ok('M2_quiet_no_mismatch', !c2.bootLogs.some((l) => l.startsWith('system-services.lea-hash-mismatch')));
+      // M3 集成（A1）：哈希不符时不再 launched 补装——返回 already-installed，
+      // 无 pending、无 degraded；mismatch 仅首检一条（quiet 轮询不记行）。
+      const c3 = makeCtx({ lockInstalled: true, leaExe: true, leaClient: true, leaVer: true, payloadPresent: true, liveUsh: 'live-USH-r10' });
+      const r3 = await run(c3);
+      ok('M3_already', r3 && r3.ok === true && r3.reason === 'already-installed', { reason: r3 && r3.reason });
+      ok('M3_no_pending', !c3.bootLogs.some((l) => l === 'system-services.lea-backfill-pending'));
+      ok('M3_no_degraded_yet', !c3.bootLogs.some((l) => l.startsWith('system-services.lea-degraded')));
+      ok('M3_no_installed_yet', !c3.bootLogs.some((l) => l === 'system-services.lea-installed'));
+      ok('M3_mismatch_once', c3.bootLogs.filter((l) => l.startsWith('system-services.lea-hash-mismatch')).length === 1);
+      // M4：复核完成（installed）后守卫复位，可再次调度。
+      ok('M4_resched_after_done', vm.runInContext('scheduleLeaBackfillRecheck(10, 1)', c.sandbox) === true);
+    }
+
+    // ---- N. r13 minor ②：全新路径拉起仍传 -MainVersion（A1：锁已装时
+    // 不再拉起，N1/N2 改走全新路径） ----
+    {
+      // N1：开发态全新拉起参数含 -MainVersion 3.0.0。
+      const c = makeCtx({ lockInstalled: false });
+      const r = await run(c);
+      ok('N1_launched', r && r.ok === true && r.reason === 'launched', { reason: r && r.reason });
+      const argStr = c.spawns.length ? c.spawns[0].args.join(' ') : '';
+      ok('N1_main_version', argStr.includes("'-MainVersion'") && argStr.includes("'3.0.0'"));
+      // N2：打包态同样随行。
+      const pkgExec = path.join(tmp, 'QFRemote.exe');
+      const c2 = makeCtx({ lockInstalled: false, packaged: true, execPath: pkgExec });
+      const r2 = await run(c2);
+      ok('N2_launched', r2 && r2.ok === true && r2.reason === 'launched', { reason: r2 && r2.reason });
+      const argStr2 = c2.spawns.length ? c2.spawns[0].args.join(' ') : '';
+      ok('N2_main_version_pkg', argStr2.includes("'-MainVersion'") && argStr2.includes("'3.0.0'"));
+      // N3 静态：wrapper 声明 MainVersion 参数并转传给 install-lea.ps1。
+      const wrapperSrc = fs.readFileSync(path.join(__dirname, '..', 'install-system-services.ps1'), 'utf8');
+      ok('N3_wrapper_param', wrapperSrc.includes('[string]$MainVersion'));
+      ok('N3_wrapper_forward', wrapperSrc.includes('& $leaScript -LeaDir $LeaDir -MainVersion $MainVersion'));
+      // N4／N5（门禁）：白名单内 install-system-services.ps1 条目 == 磁盘实算。
+      const realSysPs1 = path.join(__dirname, '..', 'install-system-services.ps1');
+      const realWl = sh.loadWhitelist({ resourcesPath: '', dirname: path.join(__dirname, '..', 'syshelper') });
+      const realSysHash = sha256(fs.readFileSync(realSysPs1));
+      ok('N4_wl_sysps1_matches_disk', !!(realWl && realWl.files && realWl.files['install-system-services.ps1'] === realSysHash),
+        { wl: realWl && realWl.files && realWl.files['install-system-services.ps1'], disk: realSysHash });
+      ok('N5_verify_sysps1', sh.verifyFileHash(realSysPs1, realWl) === true);
+    }
+
+    // ---- O. r13 查因 ①：register-ush-task UserId（install-lea.ps1 静态） ----
+    {
+      const leaSrc = fs.readFileSync(path.join(__dirname, '..', 'install-lea.ps1'), 'utf8');
+      const nsiSrc = fs.readFileSync(path.join(__dirname, '..', 'installer.nsi'), 'utf8');
+      ok('O1_service_account_check', leaSrc.includes('function Test-LeaServiceAccount')
+        && leaSrc.includes("S-1-5-18") && leaSrc.includes("S-1-5-19") && leaSrc.includes("S-1-5-20")
+        && leaSrc.includes("'SYSTEM'") && leaSrc.includes("'LOCAL SERVICE'") && leaSrc.includes("'NETWORK SERVICE'"));
+      const svcIdx = leaSrc.indexOf('if (Test-LeaServiceAccount)');
+      const retryIdx = leaSrc.indexOf("Invoke-WithRetry 'register-ush-task'");
+      ok('O2_check_before_retry', svcIdx !== -1 && retryIdx !== -1 && svcIdx < retryIdx);
+      ok('O3_first_user_main_task', leaSrc.includes('$installUser = $interactiveUsers[0]')
+        && leaSrc.includes("Register-UshTaskForUser $installUser 'QFRLEA User Helper'"));
+      const enumIdx = leaSrc.indexOf('$interactiveUsers = @(Get-LeaInteractiveUsers)');
+      ok('O4_enumerate_once', enumIdx !== -1 && enumIdx < retryIdx
+        && leaSrc.includes('foreach ($u in $interactiveUsers)'));
+      ok('O5_diag_line', leaSrc.includes("install user context: USERNAME=") && leaSrc.includes('whoami='));
+      ok('O6_no_false_retry_wording', !leaSrc.includes('main app will retry on login'));
+      ok('O7_uninstall_suffix_tasks', nsiSrc.includes('QFRLEA User Helper - *')
+        && nsiSrc.includes('Unregister-ScheduledTask'));
+      const realWl2 = sh.loadWhitelist({ resourcesPath: '', dirname: path.join(__dirname, '..', 'syshelper') });
+      const realLeaHash = sha256(fs.readFileSync(path.join(__dirname, '..', 'install-lea.ps1')));
+      ok('O8_wl_lea_matches_disk', !!(realWl2 && realWl2.files && realWl2.files['install-lea.ps1'] === realLeaHash),
+        { wl: realWl2 && realWl2.files && realWl2.files['install-lea.ps1'], disk: realLeaHash });
+      ok('O9_skip_when_no_user', leaSrc.includes('main task registration skipped')
+        && leaSrc.includes("if ($installUser) {"));
     }
 
     result.pass = Object.values(result.cases).every((c) => c.gating === false || c.pass);

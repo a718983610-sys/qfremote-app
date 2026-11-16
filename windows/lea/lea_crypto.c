@@ -228,7 +228,8 @@ long lea_b64_encode(const unsigned char *in, size_t len, char *out, size_t out_s
  * （86/88 字符，含 '-''_'）。服务端签发用标准 base64（Node
  * crypto.sign → .toString('base64')），而旧占位只认 base64url——
  * 真实服务端签名约 94% 含 '+' 或 '/'，只认 base64url 会全部拒掉。
- * 规范串本身（CANONICAL-SIGNING-V1.md v1）不受影响。
+ * 规范串本身（信封 CANONICAL-SIGNING-V2.md v2、票据
+ * CANONICAL-SIGNING-V1.md §3 v1）不受影响。
  * 验签失败原因：missing-signature / bad-signature-format /
  * ed25519-pubkey-not-configured / ed25519-pubkey-invalid / bad-signature。
  * LEA_TEST_UNSIGNED 分支仅测试构建保留，生产构建绝不定义该宏。 */
@@ -296,6 +297,27 @@ const char *lea_server_pubkey_hex(void) {
     return NULL;
 }
 #endif
+
+/* RC-01 服务端公钥指纹（见 lea_crypto.h）：32 字节公钥 → 标准 base64
+ * （44 字符，含 '=' padding）→ SHA-256 → 前 16 位 hex。须与 JS
+ * signingPublicKeyFingerprint() 逐字节一致（JS 对 base64 公钥文本算
+ * SHA-256，取前 16 位 hex）；测试公钥 03a107… 的期望指纹为
+ * ff73a0647bbc29aa（见 test_lea.c，node 交叉算出）。 */
+int lea_server_pubkey_fingerprint(char out[17]) {
+    if (out) out[0] = '\0';
+    if (!out) return 0;
+    const char *hex = lea_server_pubkey_hex();
+    if (!hex) return 0;
+    unsigned char pub[32];
+    if (!hex_decode_exact(hex, pub, sizeof(pub))) return 0;
+    char b64[48] = { 0 };
+    if (lea_b64_encode(pub, sizeof(pub), b64, sizeof(b64)) != 44) return 0;
+    char full[65];
+    lea_sha256_hex((const unsigned char *)b64, 44, full);
+    memcpy(out, full, 16);
+    out[16] = '\0';
+    return 1;
+}
 
 static int verify_real(const char *signature, const char *canonical,
                        char *reason, size_t reason_size) {

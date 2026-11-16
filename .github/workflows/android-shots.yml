@@ -5,16 +5,23 @@ name: Android 截图与看护实测
 on:
   workflow_dispatch:
 
+# S-100/S-101：最小权限。actions: write 是上传截图产物所必需的最小写权限
+#（原 actions: read 下 upload-artifact 拿不到写授权）。
 permissions:
   contents: read
-  actions: read
+  actions: write
+
+# S-096：Flutter 版本单一变量复用——改这里即改全部步骤，不再各处写死。
+env:
+  FLUTTER_VERSION: '3.47.8'
 
 jobs:
   shots:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      # S-101：第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: 释放 runner 磁盘（模拟器步曾因 No space left on device 失败，2026-10-25 F-2）
         run: |
@@ -30,15 +37,15 @@ jobs:
           ls -la /dev/kvm
 
       - name: Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Flutter 3.32.8
-        uses: subosito/flutter-action@v2
+      - name: Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
@@ -46,9 +53,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RUN_ID=$(gh run list --repo ${{ github.repository }} --workflow android.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
-          echo "build run: $RUN_ID"
-          gh run download "$RUN_ID" --repo ${{ github.repository }} -n QFRemote-v2.3.2-apk -D prod
+          APP_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")
+          echo "期望版本（version.json 单一源）: $APP_VERSION"
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          export PATH="$ANDROID_HOME/build-tools/$BT:$PATH"
+          bash .github/scripts/fetch-prod-apk.sh \
+            --repo ${{ github.repository }} --workflow android.yml \
+            --expected-version "$APP_VERSION" --package com.qfremote.android \
+            --out-dir prod
           ls -la prod/
 
       - name: 编译测试包（指向本机夹具服务器）
@@ -66,7 +78,7 @@ jobs:
           curl -s http://127.0.0.1:8791/release.json | head -c 200; echo
 
       - name: 模拟器里跑截图与看护实测
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
         with:
           api-level: 34
           target: google_apis
@@ -80,7 +92,7 @@ jobs:
 
       - name: 上传预览图与日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: qfremote-android-previews
           path: shots/

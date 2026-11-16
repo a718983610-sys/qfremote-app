@@ -1,0 +1,261 @@
+/* QFRemote Windows 共享样式层（重做 2026-11-14，依据 REWORK-REPLY-A/B/C）
+ * Token 角色（A §3.0 / §4）：全局结构灰固定 6 级 BG0–BG5；文字灰独立 4 级；
+ * 单视图同时可见结构灰 ≤4 级；相邻面必须可分离（ΔL*≥5 / 1px hairline / elevation）。
+ * 旧 --surface-* 仅作别名保留（surface-0/2→BG3，surface-1→BG1，surface-3→BG2），
+ * 各页深色 surface-3 并入主背景的旧合并已撤销（A §4：不再为“≤6”合并 token）。
+ * 品牌蓝清零；状态色只做 6px 点 / 11-12px 小标签 / 1.5px 线，面积 ≤3%。
+ * 动效 tokens（B §0）：D0 60 / D1 110 / D2 140 / D3 170 / D4 210 / D5 250ms；
+ * E-S (.16,1,.3,1) 小中入场，E-L (.19,1,.22,1) 大面板/首开，E-X (.32,0,.78,.14) 空间退出，
+ * E-Q (.4,0,1,1) 快速消失，E-C (.22,1,.36,1) crossfade，E-OV (.34,1.08,.64,1) 仅 toggle knob。
+ * reduced motion：Chromium prefers-reduced-motion（映射 Windows UISettings.
+ * AnimationsEnabled）+ main.js web-contents-created 显式接线（.reduced-motion 类）。
+ */
+:root {
+  --font-sans: "Inter", "Inter Variable", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans SC", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+
+  /* 结构灰 BG0–BG5（浅色） */
+  --bg0: #FFFFFF;
+  --bg1: #F7F7F8;
+  --bg2: #F0F0F2;
+  --bg3: #E8E8EB;
+  --bg4: #DFDFE3;
+  --bg5: #D6D6DB;
+  /* 文字灰 4 级（浅色）：主 #111113 / 次 #4B4B55 / 三级 #6E6E78 / 禁用 #A1A1AA */
+  --text-1: #111113;
+  --text-2: #4B4B55;
+  --text-3: #6E6E78;
+  --text-disabled: #A1A1AA;
+  /* 分割线（浅色） */
+  --line: #E4E4E7;
+  --line-strong: #D4D4D8;
+
+  /* 兼容别名（旧名 → BG 角色） */
+  --bg: var(--bg0);
+  --surface-0: var(--bg3);
+  --surface-1: var(--bg1);
+  --surface-2: var(--bg3);
+  --surface-3: var(--bg2);
+  --sel-bg: var(--bg3);
+  --btn-line: var(--line-strong);
+  --line-hover: var(--line-strong);
+
+  /* 交互叠色（A §2.5）：hover 浅黑 4% / 深白 6%；selected 浅黑 6% / 深白 9%；pressed 浅黑 10% / 深白 13% */
+  --hover-ov: rgba(17, 17, 19, .04);
+  --sel-ov: rgba(17, 17, 19, .06);
+  --press-ov: rgba(17, 17, 19, .10);
+
+  /* 主操作（黑白）：浅色纯黑按钮 / 深色纯白按钮 */
+  --brand: #000000;
+  --brand-rgb: 0, 0, 0;
+  --brand-press: #18181B;
+  --on-brand: #FFFFFF;
+  --link: #111113;
+  --link-underline: #A1A1AA;
+  --on-status: #FFFFFF;
+
+  /* 状态色 B 组定稿（2026-11-15 站长委托、助手与大肥鱼共同定，取代 A 组旧值）：
+     只做点／线／小标签／浅底，不作正文色、不作白字实底——白字 on 浅色
+     绿仅 3.30:1、橙仅 3.56:1，均低于 4.5；小字正文一律中性墨色＋彩色点。
+     Toast 成功图标例外 #16A34A／#166534（白字 7.13:1）只用于成功图标
+     本身，不用于边线／正文／普通状态点；Windows 壳当前无成功 Toast
+     图标元素，故此处不设该 token。 */
+  --success: #16A34A;
+  --success-rgb: 22, 163, 74;
+  --danger: #DC2626;
+  --danger-rgb: 220, 38, 38;
+  --warning: #EA580C;
+  --warning-rgb: 234, 88, 12;
+  --info: #3F3F46;
+  --info-rgb: 63, 63, 70;
+  --tile-bg: #000000;
+
+  --radius-1: 8px;
+  --radius-2: 16px;
+  --radius-full: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* 阴影（A §3.0）：浅色 e1 0 1px 2px rgba(17,17,19,.06)；浮层再加 e2 */
+  --shadow-e1: 0 1px 2px rgba(17, 17, 19, .06);
+  --shadow-e2: 0 1px 2px rgba(17, 17, 19, .06), 0 8px 24px rgba(17, 17, 19, .08);
+  --shadow: var(--shadow-e2);
+
+  /* 动效 tokens（B §0） */
+  --d0: 60ms;
+  --d1: 110ms;
+  --d2: 140ms;
+  --d3: 170ms;
+  --d4: 210ms;
+  --d5: 250ms;
+  --e-s: cubic-bezier(.16, 1, .3, 1);
+  --e-l: cubic-bezier(.19, 1, .22, 1);
+  --e-x: cubic-bezier(.32, 0, .78, .14);
+  --e-q: cubic-bezier(.4, 0, 1, 1);
+  --e-c: cubic-bezier(.22, 1, .36, 1);
+  --e-ov: cubic-bezier(.34, 1.08, .64, 1);
+  /* 旧动效名 → B tokens（各页直接复用） */
+  --dur-press: var(--d0);
+  --dur-focus: var(--d1);
+  --dur-fast: var(--d1);
+  --dur-hover: var(--d2);
+  --dur-med: var(--d3);
+  --dur-view: var(--d4);
+  --dur-enter: var(--d5);
+  --ease-out: var(--e-s);
+  --ease-l: var(--e-l);
+  --ease-x: var(--e-x);
+  --ease-q: var(--e-q);
+  --ease-c: var(--e-c);
+
+  --overlay-scrim: rgba(17, 17, 19, .32);
+}
+
+html[data-theme="dark"] {
+  /* 结构灰 BG0–BG5（深色；W3 定夺 2026-11-14：BG1 #121214／BG2 #1C1C1E，
+     与安卓 theme.dart 同改；BG3 #17181A 与 BG2 仍可辨） */
+  --bg0: #08090A;
+  --bg1: #121214;
+  --bg2: #1C1C1E;
+  --bg3: #17181A;
+  --bg4: #1F2023;
+  --bg5: #27272A;
+  /* 文字灰 4 级（深色）：主 #F5F5F7 / 次 #B9B9C2 / 三级 #8A8A93（六项定夺①）/ 禁用 #5A5B64 */
+  --text-1: #F5F5F7;
+  --text-2: #B9B9C2;
+  --text-3: #8A8A93;
+  --text-disabled: #5A5B64;
+  --line: #2E2F34;
+  --line-strong: #3F3F46;
+
+  --bg: var(--bg0);
+  --surface-0: var(--bg3);
+  --surface-1: var(--bg1);
+  --surface-2: var(--bg3);
+  --surface-3: var(--bg2);
+  --sel-bg: var(--bg3);
+  --btn-line: var(--line-strong);
+  --line-hover: var(--line-strong);
+
+  --hover-ov: rgba(255, 255, 255, .06);
+  --sel-ov: rgba(255, 255, 255, .09);
+  --press-ov: rgba(255, 255, 255, .13);
+
+  --brand: #FFFFFF;
+  --brand-rgb: 255, 255, 255;
+  --brand-press: #EFEFF1;
+  --on-brand: #000000;
+  --link: #FFFFFF;
+  --link-underline: #5A5B64;
+  --success: #22C55E;
+  --success-rgb: 34, 197, 94;
+  --danger: #F87171;
+  --danger-rgb: 248, 113, 113;
+  --warning: #FB923C;
+  --warning-rgb: 251, 146, 60;
+  --info: #D4D4D8;
+  --info-rgb: 212, 212, 216;
+  --tile-bg: #FFFFFF;
+  /* 深色阴影：内高光 + 0 8px 24px rgba(0,0,0,.36) */
+  --shadow-e1: inset 0 1px 0 rgba(255, 255, 255, .04), 0 1px 2px rgba(0, 0, 0, .36);
+  --shadow-e2: inset 0 1px 0 rgba(255, 255, 255, .04), 0 8px 24px rgba(0, 0, 0, .36);
+  --shadow: var(--shadow-e2);
+  --overlay-scrim: rgba(0, 0, 0, .32); /* A2 定夺 2026-11-14：深色 .56→.32，两端同步 */
+}
+
+/* ---------- 基础重置 ---------- */
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+button { font-family: inherit; }
+button:disabled { cursor: default; }
+input, textarea, select { font-family: inherit; }
+input::placeholder { color: var(--text-2); }
+::selection { background: rgba(var(--brand-rgb), .24); }
+
+/* 字阶（A §2.2）：11/16、12/18、13/20、14/22、16/24、20/28、24/32、28/36；字重只用 400/500/600 */
+h1, .t-title { font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.01em; }
+.t-h { font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -.01em; }
+.t-body { font-size: 14px; line-height: 22px; font-weight: 400; }
+.t-meta { font-size: 12px; line-height: 18px; font-weight: 400; }
+.t-num { font-variant-numeric: tabular-nums; }
+
+/* 表面层级（A §2.1）：卡片 1px 内描边 + e1；只有浮层才加 e2；列表行默认无阴影 */
+.elev-1 {
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-e1);
+}
+html[data-theme="dark"] .elev-1 { border-color: rgba(255, 255, 255, .08); }
+.elev-2 {
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-e2);
+}
+html[data-theme="dark"] .elev-2 { border-color: rgba(255, 255, 255, .08); }
+
+/* ---------- 链接：主文字色＋始终下划线 ---------- */
+a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+}
+a:hover { text-decoration-color: var(--link); }
+
+/* ---------- Logo 单色化：icon.png 为白底黑标定稿（SHA 2278d206…）；深色下反色即黑底白标 ---------- */
+html[data-theme="dark"] .tile img,
+html[data-theme="dark"] .logo img { filter: invert(1); }
+
+/* ---------- 焦点环（A §2.5）：2px 实线 + 2px offset；深色 #F5F5F7 / 浅色 #111113 ---------- */
+button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--text-1);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+
+/* ---------- 共享动效（B §0/§3.2/§5） ---------- */
+/* 窗口首开：D5/E-L，opacity + scale(.992)，不横向滑动 */
+@keyframes win-in { from { opacity: 0; transform: scale(.992); } to { opacity: 1; transform: scale(1); } }
+/* 列表行进入：D3/E-S，y+8，stagger 22ms（JS 内联 delay，前 7 项） */
+@keyframes row-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+/* 路由切换：D3/E-S，x+12（退出 D2/E-X，x-8） */
+@keyframes route-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+/* 路由退出（F-Win2，B §3.2）：D2/E-X，x-8，opacity 1→0；播完由 JS 再 display:none */
+@keyframes route-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(-8px); } }
+/* 锁页错误 shake（B §3.2）：D4 内 0,-6,5,-4,3,0，仅一次，幅度 ≤6px，无旋转、无竖向 */
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-6px); } 40% { transform: translateX(5px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(3px); } }
+.shake { animation: shake var(--d4) var(--e-s) both; }
+/* 不确定进度：translateX 线性 900ms 循环（B：禁止 shimmer 渐变） */
+@keyframes load-indet { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
+/* 骨架脉冲：只做透明度 1200ms ease-in-out，不做渐变 shimmer */
+@keyframes skel-pulse { from { opacity: .6; } to { opacity: .9; } }
+/* 旧 rise：收束为 D5/E-L + y8（仅首屏容器用；列表行改用 row-in） */
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes slide { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(var(--warning-rgb), .5); } 55% { box-shadow: 0 0 0 6px rgba(var(--warning-rgb), 0); } }
+
+/* ---------- reduced motion（B §6.2）：取消位移/缩放/弹簧/shake/stagger，只留 80ms 内 opacity 或 instant ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+html.reduced-motion *, html.reduced-motion *::before, html.reduced-motion *::after {
+  animation: none !important; transition: none !important;
+}

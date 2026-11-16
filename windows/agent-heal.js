@@ -33,6 +33,7 @@ const dns = require('dns');
 const net = require('net');
 const tls = require('tls');
 const childProcess = require('child_process');
+const sysPrograms = require('./sys-programs'); // D-09：系统程序一律绝对路径
 
 const TARGET = 'wss://app.qfremote.top:8443/agent.ashx';
 const SERVICE_NAME = 'Mesh Agent';
@@ -216,10 +217,13 @@ function buildElevatedCommand(ps1Path, extraArgs) {
   if (Array.isArray(extraArgs)) {
     for (const a of extraArgs) args.push(String(a).replace(/'/g, "''"));
   }
-  const inner = "Start-Process -FilePath 'powershell.exe' -ArgumentList " +
+  // D-09：提权拉起的 powershell 必须走绝对路径（CVE-2026-119333 同款
+  // 裸名劫持），内嵌 Start-Process 的 -FilePath 同样用绝对路径。
+  const psAbs = sysPrograms.powershellPath();
+  const inner = "Start-Process -FilePath '" + psAbs + "' -ArgumentList " +
     args.map((a) => "'" + a + "'").join(',') + " -Verb RunAs -WindowStyle Hidden";
   return {
-    command: 'powershell.exe',
+    command: psAbs,
     args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inner]
   };
 }
@@ -430,7 +434,8 @@ async function probeConnectivity(deps) {
 function execFileAsync(file, args, opts) {
   return new Promise((resolve, reject) => {
     const spawnFn = (opts && opts.spawn) || childProcess.spawn;
-    const child = spawnFn(file, args, { windowsHide: true });
+    // D-09：工作目录显式设为 System32，不继承进程 cwd（防劫持）。
+    const child = spawnFn(file, args, { windowsHide: true, cwd: sysPrograms.safeCwd() });
     let out = '';
     let err = '';
     if (child.stdout) child.stdout.on('data', (d) => { out += d; });
@@ -467,7 +472,7 @@ async function checkAgentState(deps) {
   // 2. 候选路径都没找到：按服务 ImagePath 再找一次
   if (!mshPath) {
     try {
-      const qc = await execFn('sc', ['qc', SERVICE_NAME], {});
+      const qc = await execFn(sysPrograms.scPath(), ['qc', SERVICE_NAME], {});
       const img = (qc.stdout.match(/BINARY_PATH_NAME\s*:\s*(.+)/i) || [])[1];
       const alt = resolveMshFromImagePath(img ? img.trim() : null);
       if (alt) {
@@ -485,7 +490,7 @@ async function checkAgentState(deps) {
   }
   // 3. 服务状态（sc query；1060＝服务不存在）
   try {
-    const q = await execFn('sc', ['query', SERVICE_NAME], {});
+    const q = await execFn(sysPrograms.scPath(), ['query', SERVICE_NAME], {});
     result.service = parseScQuery(q.stdout || '');
     if (q.code === 1060 || /FAILED 1060/.test(q.stdout + q.stderr)) {
       result.service = { exists: false, status: null };
@@ -505,7 +510,7 @@ async function checkAgentState(deps) {
   if (prelim === 'none' && result.msh.found && result.msh.meshServer === TARGET &&
       result.service.status === 'RUNNING') {
     try {
-      const ps = await execFn('powershell.exe',
+      const ps = await execFn(sysPrograms.powershellPath(),
         ['-NoProfile', '-Command',
          "(Get-Process -Id (Get-CimInstance Win32_Service -Filter \"Name='Mesh Agent'\").ProcessId -ErrorAction SilentlyContinue).StartTime.ToString('o')"], {});
       result.procStart = parseProcessStartTime(ps.stdout || '');

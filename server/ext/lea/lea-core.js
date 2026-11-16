@@ -18,34 +18,102 @@
  *  - API Key 明文只在生成瞬间存在于内存，永不落盘、永不进日志；
  *    台账只存 salt + SHA-256( salt || 明文 )；
  *  - 审计只记 key_id 与 key 前缀，不记明文、不记完整 Key；
- *  - Ed25519 签名：若部署未提供真实私钥，本模块用进程内临时密钥对
- *    签名并明确标注 PLACEHOLDER（见 signingInfo），流程可跑通，
- *    但该签名不具备生产信任——LEA 客户端届时须配真实公钥验签。
- *    真实私钥接入点：opts.signingKeyFile（Base64 的 64 字节
- *    seed||pub，与 lock-envelope.loadDispatcherKey 同格式）
- *    或 opts.signingKeyPem（PEM）。
+ *  - Ed25519 签名（F-04，2026-11-14，生产 fail-closed）：真实私钥
+ *    是唯一生产签名方式。接入点：opts.signingKeyFile（Base64 的 64
+ *    字节 seed||pub，与 lock-envelope.loadDispatcherKey 同格式）
+ *    或 opts.signingKeyPem（PEM）。已配置但加载失败时 createLeaCore
+ *    直接抛错，LEA 签名能力拒绝启动（不静默回退临时密钥）；
+ *    未配置时 signing 模式为 disabled，signEnvelope／票据签名直接
+ *    拒，下发门（dispatchEnvelopeInner）非 real 一律拒绝并记审计。
+ *    进程内临时密钥只允许测试显式开启（opts.allowEphemeralSigning
+ *    === true，mode='placeholder-ephemeral'），生产永不启用；
+ *    即使显式开启，下发门仍只放行 mode='real'。启动日志以
+ *    signing_mode 明确记录当前模式（见 signingInfo），公钥只记
+ *    SHA-256 指纹，不记密钥内容。
  *
- * 签名规范串 v1（S1/S2/S4 定稿）：
- *   唯一规范源见 ~/workspace/qfremote/local-agent/ds-review-stage2/
- *   CANONICAL-SIGNING-V1.md。信封与票据的规范串均为固定行数的
- *   \n 连接串（信封 16 行、票据 9 行），params 只签其规范 JSON
- *   的 SHA-256，C 端（windows/lea/lea_protocol.c）按同一规范实现，
- *   两端字节级一致。改规范须升 v2，不得悄悄改 v1。
+ * 签名规范串 v2（F-02，2026-11-14；信封升 v2，票据仍为 v1）：
+ *   唯一规范源见 windows/lea/CANONICAL-SIGNING-V2.md（信封部分），
+ *   票据部分仍见 ds-review-stage2/CANONICAL-SIGNING-V1.md §3。
+ *   信封与票据的规范串均为固定行数的 \n 连接串（信封 20 行、票据
+ *   9 行），params 只签其规范 JSON 的 SHA-256，C 端
+ *   （windows/lea/lea_protocol.c）按同一规范实现，两端字节级一致。
+ *   v1 信封不再接受（无回落、无版本协商）。再改规范须升 v3，
+ *   不得悄悄改 v2。
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// S-083：统一诊断事件禁键过滤（server/ext/qf-diagnostics.js）。
+// 加载失败时退化为本地同名实现（审计永不因模块缺失而停摆）。
+let scrubForbiddenKeys;
+try {
+  scrubForbiddenKeys = require('../qf-diagnostics').scrubForbiddenKeys;
+} catch (e) {
+  const _FORBIDDEN = new Set(['password', 'passwd', 'pwd', 'cookie', 'cookies', 'api_key', 'apikey', 'api-key', 'secret', 'private_key', 'privatekey', 'private-key', 'authorization', 'token', 'access_token', 'refresh_token', 'id_token', 'input', 'content', 'plaintext', 'plain_text', 'cipher', 'ciphertext', 'sessioncopy', 'session_copy', 'wrappedpriv', 'wrappedvault']);
+  scrubForbiddenKeys = (fields) => {
+    const out = {};
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return out;
+    for (const k of Object.keys(fields)) { if (!_FORBIDDEN.has(String(k).toLowerCase())) out[k] = fields[k]; }
+    return out;
+  };
+}
 
 // ---------- 常量（DESIGN.md §3/§4/§6/§7/§11） ----------
 const KEY_PREFIX = 'qfr_lea_';
 const KEY_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const ENVELOPE_TTL_S = 60;            // expires_at - issued_at ≤ 60s
+// F-02：信封 JSON 顶层允许的全部字段（v2）。envelopeSigningBytes 拒绝
+// 在此集合之外的任何字段，与 C 端 lea_parse_envelope 顶层键白名单
+// （另含 trace_id，服务端不签发、设备端只接收）同规则。
+const ENVELOPE_FIELDS = new Set([
+  'version', 'request_id', 'batch_id', 'seq', 'device_id', 'account_id',
+  'api_key_id', 'binding_epoch', 'grant_epoch', 'nonce', 'issued_at',
+  'expires_at', 'idempotency_key', 'command', 'params', 'timeout_ms',
+  'job_id', 'mode', 'deadline_ms', 'signature',
+]);
 const TICKET_TTL_S = 24 * 3600;       // 绑定票据有效期 24h（规范串 v1 口径）
 const REPLAY_WINDOW_MS = 10 * 60 * 1000; // 服务端 nonce 去重表保留 ≥10 分钟
 const TIMESTAMP_SKEW_S = 60;          // HTTP 头时间戳允许偏差（LEA 端 ±30s，服务端取 60s 上限）
-const DISPATCH_TIMEOUT_MS = 5000;     // 下发 5s（DESIGN §3）
+const DISPATCH_TIMEOUT_MS = 8000;     // B1：下发 8s（客户端 ACK 2s＋结果 6s＝8s 上限；
+// 须 ≥ 客户端最坏 8s，客户端才能在通道杀进程前回 timeout JSON。
+// 边界竞态：ACK 恰在 2s 到达时客户端 timeout JSON 在 ~8.05s 才出，
+// 通道 8s 杀进程可能抢先一步；此时下发走通道超时分支，job 仍进
+// UNKNOWN→sweeper 10s 转 TIMED_OUT，终态一致，不影响 B1 验收。）
 const SYNC_WAIT_MS = 5000;            // HTTP 同步等待默认 5s，超时 202 + job_id
+// ---------- C1：自助绑定（PLAN.md §2 C1） ----------
+// 自助绑定票据：SPA（已登录会话）签发、USH 持票据＋设备签名换 Key。
+// 票据本身是一次性 bearer，但 complete 另须设备 P-256 签名（D3 TOFU），
+// 票据被盗无设备私钥也完不成。Key 默认 90 天，续期窗口 7 天。
+const SELFBIND_TICKET_PREFIX = 'sbt_';
+const SELFBIND_TICKET_TTL_S = 300;    // 票据有效期 5 分钟（一次点击流程内够用）
+const SELFBIND_KEY_DAYS = 90;         // 自助 Key 默认有效期 90 天
+const SELFBIND_RENEW_WINDOW_MS = 7 * 24 * 3600 * 1000; // 到期前 7 天内可续期
+const SELFBIND_RENEW_DAYS = 90;       // 续期延长 90 天（自续期时算起）
+const SELFBIND_MAX_TICKETS = 5;       // 每（账号，设备）未消费未过期票据上限
+const SELFBIND_ISSUE_MIN_INTERVAL_MS = 5000; // 同设备签发最小间隔 5 秒
+const SELFBIND_CANONICAL_V1 = 'qfr-lea-selfbind-v1'; // 自助绑定规范串版本（与信封 v1 隔离）
+const SELFBIND_RENEW_SKEW_S = 60;     // 续期时间戳允许偏差 60 秒
+// RC-04：断线重连票据（server/ext/lea/RC-04-RECONNECT-TICKET-SPEC.md）。
+// TTL 写死 300 秒；签发新票时同 (account, device, session) 旧未消费票据
+// 即原子作废（只留最新，规范 §3.1 第 3 条；RC-04 (b) 定夺 A）；同设备
+// 签发最小间隔 5 秒；作废条目过期前保留、由 prune 清理。
+const RECONNECT_TICKET_TTL_S = 300;
+const RECONNECT_CANONICAL_V1 = 'qfr-lea-reconnect-v1';
+const RECONNECT_ISSUE_MIN_INTERVAL_MS = 5000;
+// ---------- 卸载注销（2026-11-14 站长亲定）：卸载时一起删服务端记录 ----------
+// 只删设备登记（node 记录，由路由层经通道删）＋本设备绑定；付费 LEA 密钥、
+// 其他设备绑定、账号、grant、审计一律不动。规范串与自助绑定同款隔离版本。
+const DEREGISTER_CANONICAL_V1 = 'qfr-lea-deregister-v1';
+const DEREGISTER_SKEW_S = 300;        // 注销时间戳允许偏差 300 秒（固定契约）
 const JOB_RETENTION_MS = 24 * 3600 * 1000; // 长任务结果保留 24h
+// B1：UNKNOWN 超 10 秒判 TIMED_OUT（sweepB1Jobs 2 秒定时推进）。
+const B1_JOB_UNKNOWN_TIMEOUT_MS = 10 * 1000;
+// B1：每节点在途名额（在队＋在执行合计上限 8，与 LEA 端队列准入一致）。
+const B1_INFLIGHT_MAX = 8;
+// B1：sweepB1Jobs 定时（2 秒）。
+const B1_SWEEP_MS = 2000;
+// B1：连续 2 次下发超时即标 DEGRADED，进健康探测。
+const B1_HEALTH_FAILS = 2;
 const JOB_STALE_MS = 15 * 60 * 1000; // H14：job 失联阈值——RUNNING/UNKNOWN/PENDING
 // 超 15 分钟无更新即视为失联。边界论证（DS 复查要求硬核证明）：服务端每步
 // 只等 dispatchEnvelope（timeoutMs 固定 5000），普通命令最多 2 次尝试、
@@ -57,19 +125,33 @@ const IDEMPOTENT_RETENTION_MS = 7 * 24 * 3600 * 1000; // 幂等结果保留 ≥7
 const AUDIT_RETENTION_DAYS = 180;     // 服务端审计保留 ≥180 天（§11.2）
 const NONCE_RETENTION_MS = REPLAY_WINDOW_MS;
 
-// 命令集（DESIGN §4.4 MVP）与默认超时、所需 scope、是否危险。
+// 命令集（DESIGN §4.4 MVP）与默认超时、所需 scope、是否危险、分级。
 // 危险命令：必须带幂等键、禁自动重试、需 muse.execute.dangerous。
+// B1 分级 tier：0=内联短 lane（sys.*，不进队列）；1=普通同步 lane；
+// 2=长／危险（script.run、file.write——与 C 端 lea_command_spec_t 的
+// tier 逐项一致：C 端 tier 2 含义是“长／危险”，不是“异步”）。
+// tier 只决定 deadline_ms 上限（L0/L1=8s，L2=120s）；mode（sync/async）
+// 不由 tier 定，只由命令定——只有真正长命令 script.run 走 async，
+// file.write 虽是 tier 2（危险）仍走 sync（短命令，调用方等同步结果）。
+// tier 决定信封 mode（L2=async）与 deadline_ms 上限（L0/L1=8s，L2=120s），
+// 与 C 端 lea_command_tier／lea_job_deadline_ms 逐项一致。
 const COMMANDS = {
-  'app.open':    { scope: 'muse.execute', dangerous: false, timeoutMs: 15000, maxTimeoutMs: 60000 },
-  'app.close':   { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
-  'ui.click':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
-  'ui.input':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
-  'ui.snapshot': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
-  'ui.tree':     { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000 },
-  'script.run':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 30000, maxTimeoutMs: 300000 },
-  'file.read':   { scope: 'muse.execute', dangerous: false, timeoutMs: 10000, maxTimeoutMs: 30000 },
-  'file.write':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 10000, maxTimeoutMs: 60000 },
-  'sys.info':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000 },
+  'app.open':    { scope: 'muse.execute', dangerous: false, timeoutMs: 15000, maxTimeoutMs: 60000, tier: 1 },
+  'app.close':   { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000, tier: 1 },
+  'ui.click':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000, tier: 1 },
+  'ui.input':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000, tier: 1 },
+  'ui.snapshot': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000, tier: 1 },
+  'ui.tree':     { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 15000, tier: 1 },
+  'script.run':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 30000, maxTimeoutMs: 300000, tier: 2 },
+  'file.read':   { scope: 'muse.execute', dangerous: false, timeoutMs: 10000, maxTimeoutMs: 30000, tier: 1 },
+  'file.write':  { scope: 'muse.execute', dangerous: true,  timeoutMs: 10000, maxTimeoutMs: 60000, tier: 2 },
+  'sys.info':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  'sys.ping':    { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 8000, tier: 0 },
+  'sys.reset':   { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 8000, tier: 0 },
+  // RC-01：握手命令（tier 0 内联；见 buildHandshakeEnvelope／ensureHandshake）。
+  // params 带两项签名参数（server_pubkey_fp＋protocol_version），
+  // binding_epoch／grant_epoch 已是信封顶层签名覆盖字段。
+  'sys.handshake': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 8000, tier: 0 },
 };
 const DANGEROUS_SCOPE = 'muse.execute.dangerous';
 
@@ -88,6 +170,7 @@ const ERR = {
   NOT_INSTALLED: 'QFR_LEA_NOT_INSTALLED', // 503：设备未装 LEA 或通道不可达
   NOT_WHITELISTED: 'QFR_DEVICE_NOT_WHITELISTED', // 403：设备不在白名单（H04，DESIGN §6.2 第 ② 项）
   QUEUE_FULL: 'QFR_QUEUE_FULL', // 503：队列满（本版服务端不排队，仅透传 LEA 端此码）
+  HANDSHAKE_REQUIRED: 'QFR_LEA_HANDSHAKE_REQUIRED', // 403：设备端握手未完成（RC-01），业务命令拒绝投递
   VALIDATION: 'VALIDATION', // 400
 };
 
@@ -133,6 +216,19 @@ function createLeaCore(opts) {
   // H21：本机吊销表推送台账（revocations.json）——按设备记录待推送的
   // 吊销 key_id 全集（C 端 state/revoked_keys.txt 的服务端镜像）。
   const REVOCATIONS_FILE = path.join(dir, 'revocations.json');
+  // C1：自助绑定票据台账（selfbind-tickets.json）——只存票据 SHA-256
+  // ＋元数据，票据明文只在 issue 响应里出现一次，永不落盘。
+  const SELFBIND_TICKETS_FILE = path.join(dir, 'selfbind-tickets.json');
+  // RC-04：重连票据台账（reconnect-tickets.json）——只存票据 SHA-256
+  // ＋元数据（resume_id 只存哈希），票据明文只在 issue 响应里出现一次，
+  // 永不落盘、永不进日志（日志只记 resume_id 前 8 位 hex 与 api_key_id）。
+  const RECONNECT_TICKETS_FILE = path.join(dir, 'reconnect-tickets.json');
+  // 卸载注销墓碑（deregistered.json）：已注销设备的 {account_id,
+  // device_pubkey, deregistered_at, binding_epoch}。绑定条目本身已删，
+  // 墓碑只为让“已注销过也返回成功（幂等）”仍能验签——重复注销须凭
+  // 同一把设备私钥签名，验签不过仍拒绝，不留存在性预言口子；不存
+  // 任何 Key 明文／哈希／grant，重新绑定时由 recordBinding 清掉。
+  const DEREGISTERED_FILE = path.join(dir, 'deregistered.json');
 
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
 
@@ -177,6 +273,182 @@ function createLeaCore(opts) {
   function saveJobs(s) { writeJsonAtomic(JOBS_FILE, s); }
   function loadRevocations() { return readJson(REVOCATIONS_FILE, { devices: {} }); }
   function saveRevocations(s) { writeJsonAtomic(REVOCATIONS_FILE, s); }
+  function loadSelfBindTickets() { return readJson(SELFBIND_TICKETS_FILE, { tickets: {} }); }
+  function saveSelfBindTickets(s) { writeJsonAtomic(SELFBIND_TICKETS_FILE, s); }
+  function loadReconnectTickets() { return readJson(RECONNECT_TICKETS_FILE, { tickets: {} }); }
+  function saveReconnectTickets(s) { writeJsonAtomic(RECONNECT_TICKETS_FILE, s); }
+  function loadDeregistered() { return readJson(DEREGISTERED_FILE, { devices: {} }); }
+  function saveDeregistered(s) { writeJsonAtomic(DEREGISTERED_FILE, s); }
+
+  // ---------- 崩溃上报接收（CRASH-REPORT-SPEC.md；匿名接收＋强防护） ----------
+  // 报告只含技术信息（版本号／系统版本／模块／堆栈），不含账号／密码／
+  // 令牌／cookie／聊天／屏幕内容；上传发生在下次启动、用户未必已登录，
+  // 故端点不要求鉴权，防滥用靠形状校验＋限流（路由层）＋存储封顶。
+  // 存储：<dir>/crash-reports/<report_id>.json，0600，tmp+rename 原子写；
+  // 文件名即 report_id（UUID），由服务端校验后才用，永不信任路径。
+  const CRASH_REPORTS_DIR = path.join(dir, 'crash-reports');
+  const CRASH_BODY_MAX_BYTES = 200 * 1024;   // 请求体硬上限 200KB
+  const CRASH_STACK_MAX_BYTES = 128 * 1024;  // stack 字段上限 128KB
+  const CRASH_MAX_FILES = 5000;              // 落盘份数封顶（先到先轮转删最旧）
+  const CRASH_MAX_TOTAL_BYTES = 1024 * 1024 * 1024; // 落盘总量封顶 1GB
+  // 磁盘剩余不足拒收（CRASH-REPORT-SPEC.md）：低于 100MB 绝对值、或低于
+  // 总量 10% 时拒收。注意不用固定 2GB——小文件系统（如测试用的 512MB
+  // tmpfs）剩余空间本身就不到 2GB，固定值会把所有上报都拒掉。
+  const CRASH_REPORT_FIELDS = {
+    schema_version: 'int', report_id: 'uuid', app_version: 'str', platform: 'str',
+    os_version: 'str', arch: 'str', crash_time: 'iso', exception_type: 'str',
+    module: 'str', exit_code: 'int-or-null', stack: 'str',
+  };
+  const CRASH_SHORT_MAX = { app_version: 64, platform: 32, os_version: 256, arch: 32, exception_type: 128, module: 128 };
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  // L-02：严格 ISO-8601（Date.parse 另接受 "Nov 15 2026" 等非 ISO 写法，
+  // 须正则＋Date.parse 双重校验才放行）。
+  const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  // S-092 堆栈脱敏（与 windows/crash-handler.js scrubCrashStack 同口径，
+  // 服务端再洗一次作纵深防御）：用户目录前缀掩码＋疑似凭据形态掩码，
+  // 只留相对路径与行号。注意：只改 stack 字段，不动其它字段。
+  function scrubCrashStack(stack) {
+    if (typeof stack !== 'string' || !stack) return stack;
+    let s = stack;
+    // Windows 用户目录：C:\Users\<名>\ / C:/Users/<名>/
+    s = s.replace(/([A-Za-z]:[\\/]Users[\\/])[^\\/:\n\r"']+/gi, '$1<redacted>');
+    // POSIX 用户目录：/home/<名>/ / /Users/<名>/
+    s = s.replace(/(\/(?:home|Users)\/)[^\/:\n\r"']+/g, '$1<redacted>');
+    // UNC 用户目录：\\<host>\Users\<名>\
+    s = s.replace(/(\\\\[^\\:\n\r"']+\\Users\\)[^\\:\n\r"']+/gi, '$1<redacted>');
+    // 疑似凭据形态：key/token/password/secret 后跟的赋值内容掩码。
+    s = s.replace(/((?:api[_-]?key|password|passwd|secret|token)\s*[:=]\s*['"]?)[^\s'";,}]+/gi, '$1<redacted>');
+    return s;
+  }
+  // 校验崩溃报告体。返回 null=通过，否则返回错误原因（只记稳定文案，
+  // 绝不回显请求体内容）。白名单字段之外一律拒绝——含疑似敏感名的字段
+  // （password/token/cookie/secret 等）同样因不在白名单内被拒。
+  function validateCrashReport(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'body 须为 JSON 对象。';
+    for (const k of Object.keys(body)) {
+      // L-01：未知字段只回固定文案，不回显字段名（超长字段名可致响应膨胀）。
+      if (!Object.prototype.hasOwnProperty.call(CRASH_REPORT_FIELDS, k)) return '请求含未知字段。';
+    }
+    for (const k of Object.keys(CRASH_REPORT_FIELDS)) {
+      const kind = CRASH_REPORT_FIELDS[k];
+      const v = body[k];
+      if (kind === 'int-or-null') {
+        if (v !== null && v !== undefined && !Number.isSafeInteger(v)) return k + ' 须为整数或 null。';
+        continue;
+      }
+      // L-01：缺失字段只回固定文案，不回显字段名。
+      if (v === undefined || v === null) return '请求缺少必填字段。';
+      if (kind === 'int') {
+        if (!Number.isSafeInteger(v)) return k + ' 须为整数。';
+        if (k === 'schema_version' && v !== 1) return 'schema_version 只支持 1。';
+        continue;
+      }
+      if (kind === 'uuid') {
+        // L-03：入库前 toLowerCase 归一（Linux 文件名大小写敏感，
+        // 同一 UUID 大小写变体此前会落成两个文件）。
+        if (typeof v !== 'string' || !UUID_RE.test(v)) return 'report_id 须为 UUID v4。';
+        body.report_id = v.toLowerCase();
+        continue;
+      }
+      if (kind === 'iso') {
+        if (typeof v !== 'string') return k + ' 须为 ISO 时间字符串。';
+        // L-02：严格 ISO 正则＋Date.parse 双重校验。
+        if (!ISO_8601_RE.test(v)) return k + ' 须为 ISO-8601 时间字符串。';
+        const t = Date.parse(v);
+        if (Number.isNaN(t)) return k + ' 不是合法时间。';
+        if (t > now() + 5 * 60 * 1000) return k + ' 不得晚于现在 5 分钟以上。';
+        if (t < now() - 90 * 24 * 3600 * 1000) return k + ' 不得早于 90 天前。';
+        continue;
+      }
+      if (typeof v !== 'string') return k + ' 须为字符串。';
+      if (k === 'stack') {
+        if (Buffer.byteLength(v, 'utf8') > CRASH_STACK_MAX_BYTES) return 'stack 超过 128KB 上限。';
+      } else if (CRASH_SHORT_MAX[k] && Buffer.byteLength(v, 'utf8') > CRASH_SHORT_MAX[k]) {
+        return k + ' 超过长度上限。';
+      } else if (v.length === 0) {
+        return k + ' 不得为空。';
+      }
+    }
+    return null;
+  }
+  // 落盘一份已校验的崩溃报告。返回 { duplicate } 或抛错（err.code：
+  // QFR_CRASH_STORAGE_FULL=磁盘满/剩余不足，QFR_CRASH_STORAGE_ERROR=写失败）。
+  // 幂等：同一 report_id 已落盘时直接返回 duplicate，不重写。先写盘、后
+  // 轮转清理（总量／份数封顶，删最旧）；磁盘剩余不足时拒绝写入，绝不半写。
+  function storeCrashReport(report) {
+    // L-03 纵深：路由层已归一，此处再归一一次（直接调本函数时同样生效）。
+    const reportId = String(report.report_id || '').toLowerCase();
+    try { fs.mkdirSync(CRASH_REPORTS_DIR, { recursive: true }); } catch (e) {}
+    const file = path.join(CRASH_REPORTS_DIR, reportId + '.json');
+    if (fs.existsSync(file)) return { duplicate: true, bytes: 0 };
+    let freeBytes = null, totalBytes = null;
+    try {
+      const st = fs.statfsSync(CRASH_REPORTS_DIR);
+      // L-06：bfree 含 root 保留块会高估可用空间，改 bavail（普通用户实际可用）。
+      freeBytes = (typeof st.bavail === 'number' ? st.bavail : st.bfree) * st.bsize;
+      totalBytes = st.blocks * st.bsize;
+    } catch (e) { freeBytes = null; totalBytes = null; }
+    if (freeBytes !== null && (freeBytes < 100 * 1024 * 1024 ||
+        (totalBytes !== null && freeBytes < totalBytes * 0.1))) {
+      const e = new Error('磁盘剩余空间不足，拒绝接收崩溃报告。');
+      e.code = 'QFR_CRASH_STORAGE_FULL'; throw e;
+    }
+    // S-092：落盘前对 stack 脱敏（用户名／家目录／盘符路径掩码）。
+    const stored = Object.assign({}, report, { report_id: reportId, stack: scrubCrashStack(report.stack), received_at: new Date(now()).toISOString() });
+    const data = Buffer.from(JSON.stringify(stored), 'utf8');
+    const tmp = file + '.tmp-' + process.pid + '-' + randId(6);
+    try {
+      fs.writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' });
+      // L-04：existsSync 检查与写盘非原子，并发同 id 可双双 stored:true。
+      // 改用 link(2) 原子建链：目标已存在即 EEXIST，判 duplicate；成功后再删 tmp。
+      try {
+        fs.linkSync(tmp, file);
+      } catch (linkErr) {
+        if (linkErr && linkErr.code === 'EEXIST') {
+          try { fs.unlinkSync(tmp); } catch (e2) {}
+          return { duplicate: true, bytes: 0 };
+        }
+        // 极少数文件系统不支持硬链接时退回 rename（窗口极小：tmp 名唯一，
+        // 且写前已判不存在；rename 仍可能覆盖并发写入，属可接受降级）。
+        fs.renameSync(tmp, file);
+      }
+      try { fs.unlinkSync(tmp); } catch (e) {}
+      try { fs.chmodSync(file, 0o600); } catch (e) {}
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch (e2) {}
+      if (e && e.code === 'QFR_CRASH_STORAGE_FULL') throw e;
+      const e2 = new Error('崩溃报告落盘失败。');
+      e2.code = 'QFR_CRASH_STORAGE_ERROR'; throw e2;
+    }
+    pruneCrashReports();
+    return { duplicate: false, bytes: data.length };
+  }
+  function pruneCrashReports() {
+    try {
+      const names = fs.readdirSync(CRASH_REPORTS_DIR).filter((n) => n.endsWith('.json'));
+      const entries = names.map((n) => {
+        let st = null;
+        try { st = fs.statSync(path.join(CRASH_REPORTS_DIR, n)); } catch (e) { st = null; }
+        return { n, size: st ? st.size : 0, mtimeMs: st ? st.mtimeMs : 0 };
+      }).sort((a, b) => a.mtimeMs - b.mtimeMs);
+      let total = entries.reduce((s, e) => s + e.size, 0);
+      while ((entries.length > CRASH_MAX_FILES || total > CRASH_MAX_TOTAL_BYTES) && entries.length) {
+        const oldest = entries.shift();
+        try { fs.unlinkSync(path.join(CRASH_REPORTS_DIR, oldest.n)); total -= oldest.size; } catch (e) {}
+      }
+      // L-07：writeFileSync(tmp) 与 rename/link 之间进程崩溃会留孤儿
+      // <id>.json.tmp-<pid>-<rand>；此前 prune 只处理 *.json，孤儿不被清理
+      // 也不计入 1GB 封顶。超期（1 小时）孤儿一并清掉。
+      const tmpCutoff = now() - 3600 * 1000;
+      for (const n of fs.readdirSync(CRASH_REPORTS_DIR)) {
+        if (!/\.json\.tmp-\d+-/.test(n)) continue;
+        try {
+          const st = fs.statSync(path.join(CRASH_REPORTS_DIR, n));
+          if (st.mtimeMs < tmpCutoff) fs.unlinkSync(path.join(CRASH_REPORTS_DIR, n));
+        } catch (e) { /* 清理失败不影响已收下的报告 */ }
+      }
+    } catch (e) { /* 清理失败不影响已收下的报告 */ }
+  }
 
   // ---------- 审计（JSONL 按天，§11.2；保留 ≥180 天，定期清扫） ----------
   function auditFileName(d) {
@@ -184,16 +456,22 @@ function createLeaCore(opts) {
     return 'audit-' + d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + '.jsonl';
   }
   function audit(ev, fields) {
+    // S-083：审计字段过禁键过滤（密码／cookie／Key 明文等永不入审计；
+    // 字段名各异故只做禁键过滤，不做白名单）。写失败返回 null（L-08：
+    // 调用方据此决定是否 503；此前一律返回 rec，写失败也被当成功）。
     const rec = Object.assign({
       ts: new Date(now()).toISOString(), ev,
       // 审计字段（§11.2）：trace_id/request_id/batch_id/account_id/
       // device_id/api_key_id/binding_epoch/command/error_code/...
       // api_key 明文永不入审计，只记 key_id 与前缀脱敏。
-    }, fields || {});
+    }, scrubForbiddenKeys(fields || {}));
     try {
       fs.appendFileSync(path.join(dir, auditFileName(new Date(now()))),
         JSON.stringify(rec) + '\n', { mode: 0o600 });
-    } catch (e) { log({ ev: 'lea-audit-write-failed', err: String(e && e.message) }); }
+    } catch (e) {
+      try { log({ ev: 'lea-audit-write-failed', err: String(e && e.message) }); } catch (e2) {}
+      return null;
+    }
     return rec;
   }
   function pruneAudit() {
@@ -216,43 +494,144 @@ function createLeaCore(opts) {
   // 启动即推进一次：上轮进程崩溃／重启残留的失联 job 不等下一小时整点。
   sweepStaleJobs();
 
-  // ---------- Ed25519 签名（DESIGN §4.1） ----------
-  // PLACEHOLDER（占位实现，明确标注）：未配真实私钥时用进程内临时密钥对
-  // 签名，重启即换，LEA 客户端无法跨进程验签——仅用于跑通流程。
-  // 真实私钥接入后 mode='real'，签名方可被 LEA 客户端以服务端公钥验签。
-  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-  let signing = { mode: 'placeholder-ephemeral', privateKey: null, publicKeyBase64: null };
-  function loadSigningKey() {
+  // ---------- B1：in-flight 名额与通道健康 ----------
+  // in-flight：每节点当前下发中的 dispatchEnvelope 调用数（runcommands
+  // 在途），上限 B1_INFLIGHT_MAX（8，与 LEA 端队列准入一致）。dispatch
+  // 返回（成功／失败／超时）即释放——名额只约束“下发中”，不约束设备
+  // 侧已入队仍在执行的 job（那是 LEA 端队列的事）。
+  const inflightByNode = new Map(); // device_id -> count
+  function inflightAcquire(deviceId) {
+    const n = inflightByNode.get(deviceId) || 0;
+    if (n >= B1_INFLIGHT_MAX) return false;
+    inflightByNode.set(deviceId, n + 1);
+    return true;
+  }
+  function inflightRelease(deviceId) {
+    const n = (inflightByNode.get(deviceId) || 0) - 1;
+    if (n <= 0) inflightByNode.delete(deviceId);
+    else inflightByNode.set(deviceId, n);
+  }
+  // 健康：每节点连续下发超时计数与状态（OK／DEGRADED／RECOVERING）。
+  // 连续 B1_HEALTH_FAILS（2）次下发超时即标 DEGRADED；下次下发前先
+  // sys.ping 探测，失败进 RECOVERING（sys.reset＋sys.ping 验证），
+  // 验证通过才恢复业务；验证失败即拒绝本次下发（NOT_INSTALLED）。
+  // 注意：服务端 reset 只是第二层——LEA 端看门狗（QFRLEA）才是第一层
+  // 自愈（杀活动 job＋清队）；reset 信封走 sys.reset 内联，不进 LEA
+  // 队列，不会被堵住的命令挡在后面。
+  const healthByNode = new Map(); // device_id -> { fails, state }
+  function healthGet(deviceId) {
+    let h = healthByNode.get(deviceId);
+    if (!h) { h = { fails: 0, state: 'OK' }; healthByNode.set(deviceId, h); }
+    return h;
+  }
+  function healthNoteSuccess(deviceId) {
+    const h = healthGet(deviceId);
+    h.fails = 0; h.state = 'OK';
+  }
+  function healthNoteTimeout(deviceId) {
+    const h = healthGet(deviceId);
+    h.fails += 1;
+    if (h.fails >= B1_HEALTH_FAILS) h.state = 'DEGRADED';
+    return h;
+  }
+  // B1 推进器（2 秒定时）：UNKNOWN／DISPATCH_TIMEOUT 超 B1_JOB_UNKNOWN_TIMEOUT_MS
+  // （10 秒）即判 TIMED_OUT（结果未知→超时终态；调用方须快照确认，
+  // 勿直接重试危险操作）。与 sweepStaleJobs（1 小时／15 分钟失联阈值）并存：
+  // sweepB1Jobs 管“下发超时后 UNKNOWN／DISPATCH_TIMEOUT 的快速终态”，
+  // sweepStaleJobs 管“长时间失联的兜底推进”。DISPATCH_TIMEOUT 也须推进——
+  // 否则该态 job 与幂等 RUNNING 会永久卡住（sweepStaleJobs 只认
+  // RUNNING／UNKNOWN／PENDING，不认 DISPATCH_TIMEOUT）。
+  function sweepB1Jobs() {
     try {
-      if (opts.signingKeyFile) {
-        const raw = Buffer.from(String(fs.readFileSync(opts.signingKeyFile, 'utf8')).trim(), 'base64');
-        if (raw.length !== 64) throw new Error('LEA signing key must be base64 of 64 bytes (seed||pub)');
-        const der = Buffer.concat([ED25519_PKCS8_PREFIX, raw.subarray(0, 32)]);
-        const priv = crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
-        signing = { mode: 'real', privateKey: priv, publicKeyBase64: raw.subarray(32).toString('base64') };
-        log({ ev: 'lea-signing-real-key-loaded' });
-        return;
+      const st = loadJobs();
+      let dirty = false;
+      for (const [id, j] of Object.entries(st.jobs)) {
+        if (!j || (j.status !== 'UNKNOWN' && j.status !== 'DISPATCH_TIMEOUT')) continue;
+        if (now() - (j.updated_at || j.created_at || 0) <= B1_JOB_UNKNOWN_TIMEOUT_MS) continue;
+        j.status = 'TIMED_OUT'; j.error_code = 'QFR_LEA_TIMEOUT'; j.updated_at = now(); dirty = true;
+        if (j.idempotency_key && j.account_id && j.api_key_id) {
+          const ns = j.batch_id ? IDEM_NS.BATCH : IDEM_NS.EXEC;
+          const prev = idemLookup(j.account_id, j.api_key_id, j.idempotency_key, ns);
+          if (prev && prev.status === 'RUNNING') {
+            idemRecord(j.account_id, j.api_key_id, j.idempotency_key,
+              Object.assign({}, prev, { status: 'UNKNOWN' }), ns);
+          }
+        }
+        audit('lea-job-b1-timeout', {
+          job_id: id, account_id: j.account_id || null, device_id: j.device_id || null,
+          api_key_id: j.api_key_id || null, idempotency_key: j.idempotency_key || null,
+        });
       }
-      if (opts.signingKeyPem) {
-        const priv = crypto.createPrivateKey(opts.signingKeyPem);
-        const pubDer = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' });
-        signing = { mode: 'real', privateKey: priv, publicKeyBase64: pubDer.slice(-32).toString('base64') };
-        log({ ev: 'lea-signing-real-key-loaded' });
-        return;
+      if (dirty) saveJobs(st);
+      return true;
+    } catch (e) { return false; }
+  }
+  let sweepB1Timer = null;
+  if (opts.enableSweeps !== false) {
+    sweepB1Timer = setInterval(() => { try { sweepB1Jobs(); } catch (e) {} }, B1_SWEEP_MS);
+    if (sweepB1Timer && sweepB1Timer.unref) sweepB1Timer.unref();
+  }
+
+  // ---------- Ed25519 签名（DESIGN §4.1；F-04 fail-closed） ----------
+  // 生产唯一签名方式是真实私钥（mode='real'）。已配置但加载失败 →
+  // 抛错，createLeaCore 拒绝启动签名能力（不静默回退临时密钥）；
+  // 未配置 → mode='disabled'，签名函数直接拒；临时密钥只允许测试
+  // 显式开启（opts.allowEphemeralSigning === true），且即使开启，
+  // 下发门仍只放行 mode='real'。完整移除回退逻辑排 3.0.1 评估。
+  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+  let signing = { mode: 'disabled', privateKey: null, publicKeyBase64: null };
+  // 公钥指纹（SHA-256 前 16 位 hex）：日志／核对只用指纹，不记密钥内容。
+  function signingPublicKeyFingerprint() {
+    if (!signing.publicKeyBase64) return null;
+    return crypto.createHash('sha256').update(signing.publicKeyBase64).digest('hex').slice(0, 16);
+  }
+  function loadSigningKey() {
+    const configured = !!(opts.signingKeyFile || opts.signingKeyPem);
+    if (configured) {
+      try {
+        if (opts.signingKeyFile) {
+          const raw = Buffer.from(String(fs.readFileSync(opts.signingKeyFile, 'utf8')).trim(), 'base64');
+          if (raw.length !== 64) throw new Error('LEA signing key must be base64 of 64 bytes (seed||pub)');
+          const der = Buffer.concat([ED25519_PKCS8_PREFIX, raw.subarray(0, 32)]);
+          const priv = crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+          signing = { mode: 'real', privateKey: priv, publicKeyBase64: raw.subarray(32).toString('base64') };
+          log({ ev: 'lea-signing-real-key-loaded', signing_mode: 'real', public_key_fingerprint: signingPublicKeyFingerprint() });
+          return;
+        }
+        if (opts.signingKeyPem) {
+          const priv = crypto.createPrivateKey(opts.signingKeyPem);
+          const pubDer = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' });
+          signing = { mode: 'real', privateKey: priv, publicKeyBase64: pubDer.slice(-32).toString('base64') };
+          log({ ev: 'lea-signing-real-key-loaded', signing_mode: 'real', public_key_fingerprint: signingPublicKeyFingerprint() });
+          return;
+        }
+      } catch (e) {
+        // F-04：已配置但加载失败是生产 fail-closed 项——记审计后抛错，
+        // 拒绝启动 LEA 签名能力；绝不静默落入临时密钥。
+        log({ ev: 'lea-signing-key-load-failed', signing_mode: 'failed', err: String(e && e.message) });
+        throw new Error('LEA signing key configured but failed to load; refusing to start LEA signing capability: ' + String(e && e.message));
       }
-    } catch (e) {
-      log({ ev: 'lea-signing-key-load-failed', err: String(e && e.message) });
     }
-    const kp = crypto.generateKeyPairSync('ed25519');
-    const pubJwk = kp.publicKey.export({ format: 'jwk' });
-    signing = { mode: 'placeholder-ephemeral', privateKey: kp.privateKey, publicKeyBase64: pubJwk.x };
-    log({ ev: 'lea-signing-placeholder', msg: 'NO REAL LEA SIGNING KEY CONFIGURED: using ephemeral in-process Ed25519 key; signatures are NOT verifiable by LEA clients across restarts. Configure signingKeyFile before production use.' });
+    if (opts.allowEphemeralSigning === true) {
+      // 测试显式开启的临时密钥（TEST ONLY）：重启即换，真实客户端无法
+      // 验签；下发门仍只放行 mode='real'。生产调用方永不传此选项。
+      const kp = crypto.generateKeyPairSync('ed25519');
+      const pubJwk = kp.publicKey.export({ format: 'jwk' });
+      signing = { mode: 'placeholder-ephemeral', privateKey: kp.privateKey, publicKeyBase64: pubJwk.x };
+      log({ ev: 'lea-signing-placeholder', signing_mode: 'placeholder-ephemeral', msg: 'TEST ONLY: using ephemeral in-process Ed25519 key; signatures are NOT verifiable by LEA clients across restarts and dispatch is refused (mode != real). Configure signingKeyFile before production use.' });
+      return;
+    }
+    signing = { mode: 'disabled', privateKey: null, publicKeyBase64: null };
+    log({ ev: 'lea-signing-disabled', signing_mode: 'disabled', msg: 'No LEA signing key configured: LEA signing disabled; envelope/ticket signing and dispatch are refused. Configure signingKeyFile before production use.' });
   }
   loadSigningKey();
+  // 启动日志明确记录 signing_mode（F-04 最小门禁）。
+  log({ ev: 'lea-signing-mode', signing_mode: signing.mode, public_key_fingerprint: signingPublicKeyFingerprint() });
   function signingInfo() {
     return { mode: signing.mode, publicKeyBase64: signing.publicKeyBase64 };
   }
-  // ---------- 规范串 v1：stable JSON / 字段校验（见 CANONICAL-SIGNING-V1.md） ----------
+  // ---------- 规范串 v2（信封）／v1（票据）：stable JSON / 字段校验 ----------
+  // 信封规范见 CANONICAL-SIGNING-V2.md §2，票据规范见 CANONICAL-SIGNING-V1.md §3。
   // 整数索引键：符合 ^(0|[1-9]\d*)$ 且数值 ≤ 4294967294（2^32-2）。
   // 规范键序：整数索引键在前按数值升序，其余键在后按字典序升序——与
   // JSON.stringify 的属性输出顺序一致，故归一化后线上 JSON 的 params
@@ -357,10 +736,25 @@ function createLeaCore(opts) {
     }
     return env.timeout_ms;
   }
-  // 签名覆盖全部关键字段（DESIGN §4.1；规范串 v1，见 CANONICAL-SIGNING-V1.md §2）：
-  // 16 行 \n 连接串，params 只签 stable JSON 的 SHA-256，timeout 取有效超时。
+  // 签名覆盖全部关键字段（DESIGN §4.1；规范串 v2，见 CANONICAL-SIGNING-V2.md §2）：
+  // 20 行 \n 连接串（v1 的 19 行＋binding_epoch 之后一行 grant_epoch），
+  // params 只签 stable JSON 的 SHA-256，timeout 取有效超时。
+  // F-02：grant_epoch 为无符号整数，上限 2^53-1（JS 安全整数界，
+  // 与 C 端解析上限一致，见规范 §2.1）；最短十进制、无前导零、
+  // 无符号位——JS 侧由安全整数＋≥0 保证，C 侧由严格切片解析保证。
+  // 规范串行数固定：每一行都必须存在（B1 缺省值与 C 端解析缺省一致，
+  // job_id 缺省 ''、mode 缺省 ''、deadline_ms 缺省 0）；规范串签信封
+  // 原文值，不是派生值（C 端运行时 job_id 缺省即 request_id、deadline
+  // 缺省即分级默认值，那是运行时的回退，不是签名值）。
+  // 行尾：LF 连接、无结尾换行；字段值禁 CR／LF／NUL 等控制字符
+  // （checkToken／checkIdField／checkCanonicalString 已拦）。
   function envelopeSigningBytes(env) {
-    if (env.version !== 1) throw new Error('LEA canonical field invalid: version');
+    if (env.version !== 2) throw new Error('LEA canonical field invalid: version');
+    // 未知字段一律拒绝（与 C 端 lea_parse_envelope 顶层键白名单同规则）：
+    // 规范串只覆盖已知字段，多余字段不得悄悄带过签名。
+    for (const k of Object.keys(env || {})) {
+      if (!ENVELOPE_FIELDS.has(k)) throw new Error('LEA canonical field invalid: ' + k);
+    }
     checkToken(env.request_id, 'request_id');
     checkToken(env.nonce, 'nonce');
     checkToken(env.idempotency_key, 'idempotency_key');
@@ -379,9 +773,24 @@ function createLeaCore(opts) {
     for (const [name, v] of [['binding_epoch', env.binding_epoch], ['issued_at', env.issued_at], ['expires_at', env.expires_at]]) {
       if (!Number.isSafeInteger(v)) throw new Error('LEA canonical field invalid: ' + name);
     }
+    // F-02：grant_epoch 必填、无符号安全整数（缺失／负数／超 2^53-1 即拒签，
+    // 不得缺省为 0 后签名——0 只在字段显式为 0 时才是合法表示）。
+    if (!Number.isSafeInteger(env.grant_epoch) || env.grant_epoch < 0) {
+      throw new Error('LEA canonical field invalid: grant_epoch');
+    }
+    // B1：新字段校验（缺省即不校验，与 C 端解析缺省一致）。
+    if (env.job_id != null && env.job_id !== '') checkToken(env.job_id, 'job_id');
+    if (env.mode != null && env.mode !== '') {
+      if (env.mode !== 'sync' && env.mode !== 'async') throw new Error('LEA canonical field invalid: mode');
+    }
+    if (env.deadline_ms != null) {
+      if (!Number.isSafeInteger(env.deadline_ms) || env.deadline_ms < 1 || env.deadline_ms > 120000) {
+        throw new Error('LEA canonical field invalid: deadline_ms');
+      }
+    }
     const paramsHash = sha256Hex(stableStringify(env.params || {}));
     return [
-      'qfr-lea-envelope-v1',
+      'qfr-lea-envelope-v2',
       String(env.version),
       String(env.request_id),
       env.batch_id || '',
@@ -390,6 +799,7 @@ function createLeaCore(opts) {
       String(env.account_id),
       String(env.api_key_id),
       String(env.binding_epoch),
+      String(env.grant_epoch),
       String(env.nonce),
       String(env.issued_at),
       String(env.expires_at),
@@ -397,9 +807,14 @@ function createLeaCore(opts) {
       String(env.command),
       paramsHash,
       String(effectiveTimeoutMs(env)),
+      String(env.job_id || ''),
+      String(env.mode || ''),
+      String(env.deadline_ms != null ? env.deadline_ms : 0),
     ].join('\n');
   }
   function signEnvelope(env) {
+    // F-04：签名能力关闭（disabled）时直接拒，不签无密钥信封。
+    if (signing.mode === 'disabled' || !signing.privateKey) throw new Error('LEA signing disabled: no signing key configured (signing_mode=' + signing.mode + ')');
     const sig = crypto.sign(null, Buffer.from(envelopeSigningBytes(env), 'utf8'), signing.privateKey);
     return Object.assign({}, env, { signature: sig.toString('base64') });
   }
@@ -466,6 +881,8 @@ function createLeaCore(opts) {
     ].join('\n');
   }
   function signTicket(ticket) {
+    // F-04：签名能力关闭（disabled）时直接拒，不签无密钥票据。
+    if (signing.mode === 'disabled' || !signing.privateKey) throw new Error('LEA signing disabled: no signing key configured (signing_mode=' + signing.mode + ')');
     const sig = crypto.sign(null, Buffer.from(ticketSigningBytes(ticket), 'utf8'), signing.privateKey);
     return Object.assign({}, ticket, { ticket_signature: sig.toString('base64') });
   }
@@ -661,6 +1078,12 @@ function createLeaCore(opts) {
   }
   function keyPublicView(k) {
     // 列表只显 key_id / 前缀、创建时间、最后使用、状态，不显明文（§7.2）。
+    // C1：补设备名／平台／自助标记／最后在线（供三端 Key 行展示）。
+    let lastSeenAt = null;
+    try {
+      const b = k && k.device_scope ? getBinding(k.device_scope) : null;
+      if (b && Number.isSafeInteger(b.last_seen_at)) lastSeenAt = b.last_seen_at;
+    } catch (e) { /* ignore：列表不因 last_seen 读失败而整体失败 */ }
     return {
       key_id: k.key_id, prefix: maskKey(k.prefix),
       account_id: k.account_id, device_scope: k.device_scope,
@@ -668,6 +1091,8 @@ function createLeaCore(opts) {
       created_at: k.created_at, last_used_at: k.last_used_at || null,
       expires_at: k.expires_at || null, binding_epoch: k.binding_epoch,
       grant_epoch: (k.grant_epoch || 0),
+      device_name: k.device_name || null, platform: k.platform || null,
+      self_bind: !!k.self_bind, last_seen_at: lastSeenAt,
     };
   }
   function keyStatus(k) {
@@ -732,6 +1157,11 @@ function createLeaCore(opts) {
       key_epoch: 1,
       created_at: now(), last_used_at: null, expires_at: null,
       revoked_at: null, revoked_by: null, revoked_by_rebind: false, revoke_reason: null,
+      // C1：自助绑定带设备名／平台／自助标记（供三端 Key 行展示；控制台
+      // 生成的 Key 这三项为空，不影响既有记录）。
+      device_name: (optsGen.device_name && String(optsGen.device_name)) || null,
+      platform: (optsGen.platform && String(optsGen.platform)) || null,
+      self_bind: !!optsGen.self_bind,
     };
     if (optsGen.expires_in_days) rec.expires_at = now() + Math.floor(optsGen.expires_in_days) * 24 * 3600 * 1000;
     st.keys.push(rec);
@@ -754,12 +1184,20 @@ function createLeaCore(opts) {
     k.key_epoch = (k.key_epoch || 1) + 1; // 吊销后递增 key_epoch，缓存立即失效
     saveKeys(st);
     audit('lea-key-revoked', { account_id: k.account_id, device_id: k.device_scope || null, api_key_id: k.key_id, key_prefix: maskKey(k.prefix), by: by || null, reason: reason || null });
+    // RC-02：吊销即踢——在途下发作废＋服务端 job 取消（设备端踢出由路由层
+    // 经 kickRevokedSessions 做，见 lea-routes.js）。
+    markInflightRevoked([k.key_id]);
+    cancelJobsForKeys([k.key_id], reason || 'key-revoked');
+    // RC-04 §4：吊销即作废该 Key 名下未消费的重连票据（核验第 6 步实时
+    // 状态失败优先报 QFR_API_KEY_REVOKED；实时状态万一全通过，voided_at
+    // 仍兜底拒绝）。
+    try { voidReconnectTickets({ keyIds: [k.key_id] }, 'key-revoked'); } catch (e) {}
     // H21：记入本机吊销推送台账（有设备域只推该设备，无设备域推该账号全部已绑设备）。
     try {
       const devs = k.device_scope ? [k.device_scope] : devicesForAccount(k.account_id);
       recordRevocations(devs, [k.key_id], 'key-revoked');
     } catch (e) {}
-    return { ok: true, record: keyPublicView(k) };
+    return { ok: true, record: keyPublicView(k), revoked_key_ids: [k.key_id] };
   }
   function revokeAllKeys(accountId, by, reason) {
     const st = loadKeys();
@@ -773,9 +1211,14 @@ function createLeaCore(opts) {
     }
     if (count) saveKeys(st);
     audit('lea-keys-revoke-all', { account_id: String(accountId), revoked_count: count, by: by || null, reason: reason || null });
+    // RC-02：吊销即踢（在途作废＋job 取消；设备端踢出由路由层 kick）。
+    markInflightRevoked(revokedIds);
+    cancelJobsForKeys(revokedIds, reason || 'revoke-all');
+    // RC-04 §4：吊销即作废这些 Key 名下未消费的重连票据。
+    try { if (revokedIds.length) voidReconnectTickets({ keyIds: revokedIds }, 'revoke-all'); } catch (e) {}
     // H21：记入本机吊销推送台账（该账号全部已绑设备）。
     try { recordRevocations(devicesForAccount(accountId), revokedIds, 'revoke-all'); } catch (e) {}
-    return { ok: true, revoked_count: count };
+    return { ok: true, revoked_count: count, revoked_key_ids: revokedIds };
   }
   function listKeys(accountId) {
     return loadKeys().keys
@@ -788,6 +1231,753 @@ function createLeaCore(opts) {
       const st = loadKeys();
       const rec = st.keys.find((x) => x && x.key_id === k.key_id);
       if (rec) { rec.last_used_at = now(); saveKeys(st); }
+    } catch (e) {}
+  }
+
+  // ---------- C1：自助绑定（PLAN.md §2 C1；桌面一键链接本机助手） ----------
+  // 流程：SPA（已登录会话）调 issue 拿一次性票据 → 主进程经本地 IPC 交
+  // USH → USH 用设备 P-256 密钥签名调 complete 换 Key，明文只进 USH。
+  // 票据台账只存 SHA-256＋元数据；complete 验票据（一次性／未过期／
+  // device＋account＋nonce 一致）＋验设备签名（TOFU，见 D3）；通过即
+  // 生成 90 天 Key（self_bind 标记）＋自助建 grant（D4），明文仅本次
+  // 响应返回一次（调用方＝USH，有责任只存 DPAPI、不落日志）。
+  function pruneSelfBindTickets(st) {
+    // 清已消费／已过期票据（调用方写盘前先清，台账不无限膨胀）。
+    let dirty = false;
+    for (const [h, tk] of Object.entries(st.tickets || {})) {
+      if (!tk || tk.consumed_at || (tk.expires_at && nowSec() > tk.expires_at)) {
+        delete st.tickets[h]; dirty = true;
+      }
+    }
+    return dirty;
+  }
+  function issueSelfBindTicket(accountId, deviceId, optsIssue) {
+    optsIssue = optsIssue || {};
+    accountId = String(accountId || '');
+    deviceId = bareNodeId(String(deviceId || ''));
+    const deviceName = String(optsIssue.device_name || '').slice(0, 64);
+    const platform = String(optsIssue.platform || '').slice(0, 32);
+    const nonce = String(optsIssue.nonce || '');
+    if (!accountId) { const e = new Error('account_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!deviceId) { const e = new Error('device_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!nonce || nonce.length < 8 || nonce.length > 128 || /[^A-Za-z0-9_-]/.test(nonce)) {
+      const e = new Error('nonce must be 8..128 chars [A-Za-z0-9_-]'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    if (platform && !/^[A-Za-z0-9_-]{1,32}$/.test(platform)) {
+      const e = new Error('platform invalid'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    // 设备须已绑定到该账号且 ACTIVE（登录时 rebind 已建立；未绑定／绑他人
+    // 即拒绝，不在此处新建绑定——绑定归属是安全边界，不由 issue 越权）。
+    const binding = getBinding(deviceId);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== accountId) {
+      const e = new Error('device is not bound to this account');
+      e.code = 'QFR_LEA_NOT_BOUND'; throw e;
+    }
+    const st = loadSelfBindTickets();
+    pruneSelfBindTickets(st);
+    // 速率限制：同设备 5 秒内不重复签发；每（账号，设备）未消费票据 ≤5，
+    // 超了删最旧的（用户连点只留最新几张，旧票据自然过期作废）。
+    const mine = Object.entries(st.tickets || {})
+      .filter(([, tk]) => tk && tk.account_id === accountId && tk.device_id === deviceId)
+      .sort((a, b) => (a[1].created_at || 0) - (b[1].created_at || 0));
+    if (mine.length && now() - (mine[mine.length - 1][1].created_at || 0) < SELFBIND_ISSUE_MIN_INTERVAL_MS) {
+      const e = new Error('issue too frequent, retry in a few seconds');
+      e.code = 'QFR_RATE_LIMITED'; throw e;
+    }
+    while (mine.length >= SELFBIND_MAX_TICKETS) {
+      const oldest = mine.shift();
+      delete st.tickets[oldest[0]];
+    }
+    const ticket = SELFBIND_TICKET_PREFIX + crypto.randomBytes(32).toString('base64url');
+    const challenge = crypto.randomBytes(16).toString('base64url');
+    const expiresAt = nowSec() + SELFBIND_TICKET_TTL_S;
+    st.tickets[sha256Hex(ticket)] = {
+      account_id: accountId, device_id: deviceId,
+      device_name: deviceName || null, platform: platform || null,
+      nonce, challenge, expires_at: expiresAt,
+      created_at: now(), consumed_at: null,
+    };
+    saveSelfBindTickets(st);
+    audit('lea-selfbind-issued', {
+      account_id: accountId, device_id: deviceId,
+      device_name: deviceName || null, platform: platform || null,
+      ticket_hash: sha256Hex(ticket).slice(0, 16), expires_at: expiresAt,
+    });
+    return { ticket, challenge, expires_at: expiresAt, ttl_s: SELFBIND_TICKET_TTL_S };
+  }
+  // 自助完成规范串 v1（与信封 v1 隔离，独立版本）：
+  //   qfr-lea-selfbind-v1\n<account_id>\n<device_id>\n<ticket>\n<challenge>
+  //   \n<nonce>\n<device_pubkey_b64>\n<expires_at>
+  // device_id 一律用裸形（去 node// 前缀），与绑定台账键一致——
+  // 服务端在 complete/renew 里先 bareNodeId 归一化再验签，客户端
+  // （USH／SPA 桥）签名时也必须先归一化为裸形，否则验签必失败。
+  // device_pubkey_b64：65 字节未压缩 P-256 点（0x04||X||Y）的 base64。
+  // 签名：设备私钥对规范串 UTF-8 的 SHA-256 做 ECDSA P-256 签名，
+  // 以 IEEE P1363 格式（r||s，64 字节）base64 传回。
+  function selfBindCompleteSigningBytes(o) {
+    return [
+      SELFBIND_CANONICAL_V1,
+      String(o.account_id), String(o.device_id), String(o.ticket),
+      String(o.challenge), String(o.nonce), String(o.device_pubkey),
+      String(o.expires_at),
+    ].join('\n');
+  }
+  // ECDSA P-256 签名格式转换：USH（NCryptSignHash）与规范串用 IEEE
+  // P1363 原始格式（r||s，64 字节）；Node 的 crypto.sign/verify 在
+  // 本机 Node 24.22.1 上不接受 options 对象（第 4 个参数会被当成回
+  // 调，dsaEncoding 无法用），故手动在 DER 与 P1363 之间转换。
+  function ecdsaP1363ToDer(raw) {
+    if (!Buffer.isBuffer(raw) || raw.length !== 64) return null;
+    const intPart = (b) => {
+      let i = 0; while (i < b.length - 1 && b[i] === 0) i++;
+      let v = b.subarray(i);
+      if (v[0] & 0x80) v = Buffer.concat([Buffer.from([0]), v]);
+      return v;
+    };
+    const r = intPart(raw.subarray(0, 32));
+    const s = intPart(raw.subarray(32, 64));
+    const body = Buffer.concat([Buffer.from([0x02, r.length]), r, Buffer.from([0x02, s.length]), s]);
+    return Buffer.concat([Buffer.from([0x30, body.length]), body]);
+  }
+  function ecdsaDerToP1363(der) {
+    try {
+      if (!Buffer.isBuffer(der) || der.length < 8 || der[0] !== 0x30) return null;
+      let off = 2;
+      if (der[1] & 0x80) { const n = der[1] & 0x7f; if (n > 2) return null; off = 2 + n; }
+      if (der[off] !== 0x02) return null;
+      const rLen = der[off + 1]; const r = der.subarray(off + 2, off + 2 + rLen);
+      off = off + 2 + rLen;
+      if (der[off] !== 0x02) return null;
+      const sLen = der[off + 1]; const s = der.subarray(off + 2, off + 2 + sLen);
+      const pad32 = (b) => {
+        let v = b; while (v.length > 1 && v[0] === 0) v = v.subarray(1);
+        if (v.length > 32) return null;
+        const out = Buffer.alloc(32); v.copy(out, 32 - v.length); return out;
+      };
+      const rp = pad32(r); const sp = pad32(s);
+      if (!rp || !sp) return null;
+      return Buffer.concat([rp, sp]);
+    } catch (e) { return null; }
+  }
+  function selfBindParseDevicePubkey(b64) {
+    // 只认 65 字节未压缩点（首字节 0x04）；返回 {x, y}（base64url），
+    // 格式不对即 null。公钥本身公开，不涉密。
+    try {
+      const raw = Buffer.from(String(b64 || ''), 'base64');
+      if (raw.length !== 65 || raw[0] !== 0x04) return null;
+      return {
+        x: raw.subarray(1, 33).toString('base64url'),
+        y: raw.subarray(33, 65).toString('base64url'),
+      };
+    } catch (e) { return null; }
+  }
+  function selfBindVerifySignature(o) {
+    // o: {account_id, device_id, ticket, challenge, nonce, device_pubkey,
+    //     expires_at, signature}。验签失败返回 false，不抛错。
+    try {
+      const pt = selfBindParseDevicePubkey(o.device_pubkey);
+      if (!pt) return false;
+      const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: pt.x, y: pt.y }, format: 'jwk' });
+      const sig = Buffer.from(String(o.signature || ''), 'base64');
+      if (sig.length !== 64) return false;
+      const der = ecdsaP1363ToDer(sig);
+      if (!der) return false;
+      return crypto.verify('sha256', Buffer.from(selfBindCompleteSigningBytes(o), 'utf8'), pub, der);
+    } catch (e) { return false; }
+  }
+  function completeSelfBind(input) {
+    const ticket = String(input.ticket || '');
+    const accountId = String(input.account_id || '');
+    const deviceId = bareNodeId(String(input.device_id || ''));
+    const nonce = String(input.nonce || '');
+    const devicePubkey = String(input.device_pubkey || '');
+    const signature = String(input.signature || '');
+    if (!ticket.startsWith(SELFBIND_TICKET_PREFIX)) {
+      const e = new Error('ticket format invalid'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    const st = loadSelfBindTickets();
+    const tk = st.tickets[sha256Hex(ticket)];
+    if (!tk) { const e = new Error('ticket not found or expired'); e.code = 'QFR_TICKET_INVALID'; throw e; }
+    if (tk.consumed_at) { const e = new Error('ticket already used'); e.code = 'QFR_TICKET_REUSED'; throw e; }
+    if (now() > tk.expires_at * 1000) { const e = new Error('ticket expired'); e.code = 'QFR_TICKET_EXPIRED'; throw e; }
+    if (tk.account_id !== accountId || tk.device_id !== deviceId || tk.nonce !== nonce) {
+      const e = new Error('ticket does not match account/device/nonce'); e.code = 'QFR_TICKET_MISMATCH'; throw e;
+    }
+    // 验设备签名（规范串用服务端存量 challenge／expires_at，不用客户端
+    // 传来的值——客户端传来的 challenge 若被改，签名即对不上存量串）。
+    const okSig = selfBindVerifySignature({
+      account_id: accountId, device_id: deviceId, ticket, challenge: tk.challenge,
+      nonce, device_pubkey: devicePubkey, expires_at: tk.expires_at, signature,
+    });
+    if (!okSig) { const e = new Error('device signature invalid'); e.code = 'QFR_DEVICE_SIGNATURE_INVALID'; throw e; }
+    // 一次性消费：先标记再生成 Key（生成抛错也不回滚消费——票据已用过，
+    // 调用方须重新 issue；防票据重放窗口）。
+    tk.consumed_at = now();
+    saveSelfBindTickets(st);
+    // TOFU：设备公钥存到绑定记录（续期按此验签；换设备密钥须重新链接）。
+    try {
+      const bs = loadBindings();
+      const b = bs.bindings[deviceId];
+      if (b) { b.device_pubkey = devicePubkey; b.device_name = tk.device_name || b.device_name || null; b.platform = tk.platform || b.platform || null; saveBindings(bs); }
+    } catch (e) {}
+    // D4：自助建 grant（无授权时；不含 dangerous）。用户点「链接这台电脑」
+    // 即明示同意助手控制本机，属该意图的授权动作；站长仍可经 /grants 撤销。
+    if (!hasGrant(accountId)) {
+      grantMuse(accountId, accountId, {});
+      audit('lea-selfbind-grant', { account_id: accountId, device_id: deviceId, action: 'grant', by: 'self-bind' });
+    }
+    // 生成 90 天自助 Key（device_scope＝本设备；binding_epoch 取当前绑定）。
+    const out = generateKey(accountId, {
+      device_scope: deviceId, scopes: ['muse.execute'],
+      expires_in_days: SELFBIND_KEY_DAYS,
+      device_name: tk.device_name, platform: tk.platform, self_bind: true,
+      confirmMethod: 'self-bind',
+    });
+    audit('lea-selfbind-completed', {
+      account_id: accountId, device_id: deviceId,
+      api_key_id: out.record.key_id, key_prefix: maskKey(out.record.prefix),
+      binding_epoch: out.record.binding_epoch, expires_at: out.record.expires_at,
+    });
+    // 明文仅本次响应返回一次（调用方＝USH，有责任只存 DPAPI、不落日志）。
+    return { key: out.key, record: out.record, binding_epoch: out.record.binding_epoch };
+  }
+  // 续期规范串 v1：
+  //   qfr-lea-selfbind-renew-v1\n<account_id>\n<device_id>\n<key_id>\n<nonce>\n<timestamp>
+  // 验签用绑定记录存量设备公钥（TOFU）；timestamp 须在 ±60 秒内；
+  // nonce 按 key_id 去重（复用 nonceCheck，防重放）。
+  function selfBindRenewSigningBytes(o) {
+    return [
+      SELFBIND_CANONICAL_V1 + '-renew',
+      String(o.account_id), String(o.device_id), String(o.key_id),
+      String(o.nonce), String(o.timestamp),
+    ].join('\n');
+  }
+  function renewSelfBindKey(input) {
+    const keyId = String(input.key_id || '');
+    const deviceId = bareNodeId(String(input.device_id || ''));
+    const nonce = String(input.nonce || '');
+    const timestamp = Number(input.timestamp);
+    const signature = String(input.signature || '');
+    const rec = findKeyById(keyId);
+    if (!rec) { const e = new Error('key not found'); e.code = 'QFR_VALIDATION'; throw e; }
+    const accountId = rec.account_id;
+    if (!rec.self_bind) { const e = new Error('only self-bind keys can renew here'); e.code = 'QFR_SCOPE_DENIED'; throw e; }
+    if (keyStatus(rec) !== 'active') { const e = new Error('key is not active'); e.code = 'QFR_API_KEY_REVOKED'; throw e; }
+    if (bareNodeId(rec.device_scope || '') !== deviceId) { const e = new Error('key/device mismatch'); e.code = 'QFR_SCOPE_DENIED'; throw e; }
+    if (!Number.isSafeInteger(timestamp) || Math.abs(nowSec() - timestamp) > SELFBIND_RENEW_SKEW_S) {
+      const e = new Error('timestamp out of window'); e.code = 'QFR_REPLAY_DETECTED'; throw e;
+    }
+    if (!nonce || nonce.length < 8 || nonce.length > 128 || /[^A-Za-z0-9_-]/.test(nonce)) {
+      const e = new Error('nonce invalid'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    // 注意：续期 nonce 不在此处再做 nonceCheck——路由层 Bearer 鉴权
+    // （authenticate）已对同一 header nonce 做过去重，重复调用会误判
+    // 重放。重放防护由两层构成：① Bearer 层的 nonce 去重（同一 nonce
+    // 的完整请求第二次必被 authenticate 拦）；② 设备签名把 nonce＋
+    // timestamp 一并入串，换 nonce／换时间戳签名即失效。
+    const binding = getBinding(deviceId);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== accountId || !binding.device_pubkey) {
+      const e = new Error('device binding or device key missing'); e.code = 'QFR_LEA_NOT_BOUND'; throw e;
+    }
+    if (!hasGrant(accountId)) { const e = new Error('grant revoked'); e.code = 'QFR_GRANT_REVOKED'; throw e; }
+    // 验设备签名（存量公钥）。
+    let okSig = false;
+    try {
+      const pt = selfBindParseDevicePubkey(binding.device_pubkey);
+      if (pt) {
+        const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: pt.x, y: pt.y }, format: 'jwk' });
+        const sig = Buffer.from(signature, 'base64');
+        if (sig.length === 64) {
+          const der = ecdsaP1363ToDer(sig);
+          if (der) {
+            okSig = crypto.verify('sha256', Buffer.from(selfBindRenewSigningBytes({
+              account_id: accountId, device_id: deviceId, key_id: keyId, nonce, timestamp,
+            }), 'utf8'), pub, der);
+          }
+        }
+      }
+    } catch (e) { okSig = false; }
+    if (!okSig) { const e = new Error('device signature invalid'); e.code = 'QFR_DEVICE_SIGNATURE_INVALID'; throw e; }
+    // 仅到期前 7 天内可续期（过早续期即 409，带当前有效期；已过期须重新链接）。
+    if (!rec.expires_at || now() > rec.expires_at) { const e = new Error('key expired, relink required'); e.code = 'QFR_API_KEY_REVOKED'; throw e; }
+    if (rec.expires_at - now() > SELFBIND_RENEW_WINDOW_MS) {
+      const e = new Error('not within renewal window');
+      e.code = 'QFR_NOT_RENEWABLE'; e.renewable_at = rec.expires_at - SELFBIND_RENEW_WINDOW_MS; throw e;
+    }
+    const st = loadKeys();
+    const target = st.keys.find((x) => x && x.key_id === keyId);
+    if (!target) { const e = new Error('key not found'); e.code = 'QFR_VALIDATION'; throw e; }
+    target.expires_at = now() + SELFBIND_RENEW_DAYS * 24 * 3600 * 1000;
+    saveKeys(st);
+    audit('lea-selfbind-renewed', {
+      account_id: accountId, device_id: deviceId, api_key_id: keyId,
+      key_prefix: maskKey(target.prefix), expires_at: target.expires_at,
+    });
+    return { ok: true, record: keyPublicView(target) };
+  }
+  // 自助绑定状态（SPA 轮询；不含任何凭据）。
+  function selfBindStatus(accountId, deviceId) {
+    accountId = String(accountId || '');
+    deviceId = bareNodeId(String(deviceId || ''));
+    const binding = getBinding(deviceId);
+    if (!binding || binding.account_id !== accountId) {
+      return { status: 'none', device_id: deviceId, account_id: accountId, binding_state: binding ? binding.state : 'UNBOUND' };
+    }
+    const all = loadKeys().keys
+      .filter((k) => k && k.account_id === accountId && k.self_bind && bareNodeId(k.device_scope || '') === deviceId)
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    // 优先在效的；无在效时，已吊销的最新一张即报 revoked（SPA 据此
+    // 清本机凭据）；既无在效又无吊销，取最新一张的状态（expired 等）。
+    const k = all.find((x) => !x.revoked_at && keyStatus(x) === 'active')
+      || all.find((x) => x.revoked_at)
+      || all[0] || null;
+    if (!k) {
+      return { status: 'pending', device_id: deviceId, account_id: accountId, binding_state: binding.state,
+        device_name: binding.device_name || null, platform: binding.platform || null,
+        binding_epoch: binding.binding_epoch, last_seen_at: binding.last_seen_at || null };
+    }
+    return { status: keyStatus(k) === 'active' ? 'active' : keyStatus(k),
+      device_id: deviceId, account_id: accountId, binding_state: binding.state,
+      device_name: k.device_name || binding.device_name || null, platform: k.platform || binding.platform || null,
+      key_id: k.key_id, key_prefix: maskKey(k.prefix), expires_at: k.expires_at || null,
+      binding_epoch: binding.binding_epoch, last_seen_at: binding.last_seen_at || null };
+  }
+  // 自助 Key 吊销（无密码二次确认，只限 self_bind Key；控制台 Key 仍走
+  // 原密码路径）。调用方须是控制台会话（路由层验），且 Key 归属该账号。
+  function revokeSelfBindKey(accountId, keyId) {
+    const rec = findKeyById(String(keyId || ''));
+    if (!rec || rec.account_id !== String(accountId)) return { ok: false, code: 'NOT_FOUND' };
+    if (!rec.self_bind) return { ok: false, code: 'QFR_SCOPE_DENIED', reason: 'not-self-bind-key' };
+    return revokeKey(rec.key_id, accountId, 'self-bind-revoke');
+  }
+  function revokeAllSelfBindKeys(accountId) {
+    const st = loadKeys();
+    let count = 0;
+    const revokedIds = [];
+    for (const k of st.keys) {
+      if (k.account_id === String(accountId) && k.self_bind && !k.revoked_at) {
+        k.revoked_at = now(); k.revoked_by = accountId; k.revoke_reason = 'self-bind-revoke-all';
+        k.key_epoch = (k.key_epoch || 1) + 1; count++; revokedIds.push(k.key_id);
+      }
+    }
+    if (count) saveKeys(st);
+    audit('lea-selfbind-keys-revoke-all', { account_id: String(accountId), revoked_count: count, by: accountId });
+    // RC-02：吊销即踢（在途作废＋job 取消；设备端踢出由路由层 kick）。
+    markInflightRevoked(revokedIds);
+    cancelJobsForKeys(revokedIds, 'self-bind-revoke-all');
+    // RC-04 §4：吊销即作废这些 Key 名下未消费的重连票据。
+    try { if (revokedIds.length) voidReconnectTickets({ keyIds: revokedIds }, 'self-bind-revoke-all'); } catch (e) {}
+    try { recordRevocations(devicesForAccount(accountId), revokedIds, 'self-bind-revoke-all'); } catch (e) {}
+    return { ok: true, revoked_count: count, revoked_key_ids: revokedIds };
+  }
+
+  // ---------- RC-04：断线重连票据（规范 RC-04-RECONNECT-TICKET-SPEC.md） ----------
+  // 票据 10 字段（规范 §1），规范串 qfr-lea-reconnect-v1（§1.2），TTL 写死
+  // 300 秒（§2），单次消费（§3.2），吊销语义 7 码（§4）。
+  // 规范含糊处（按字面做，见收尾报告）：
+  //   (a) §5.1“只留最新”vs 旧 §3.1“同 session 最多 3 张、超了删最旧”——
+  //       已按 RC-04 (b) 定夺 A 统一：签发时原子作废同 session 旧未消费
+  //       票据（只留最新一张，见 issueReconnectTicket 前置 3）；3 张上
+  //       限已废止（旧实现删最旧，现改为作废，见规范 §3.1 第 3 条）。
+  //       成功消费后仍作废同 session 其余未消费票据（大肥鱼复核 R-2：
+  //       关掉旧票 300 秒内仍可恢复同一会话的窗口）。
+  //   (b) 旧 §1“同一 session_id 在票据过期／消费后不得凭另一张票据
+  //       恢复”已按 RC-04 (b) 定夺 A 改写（2026-11-15）：单次性保护的
+  //       是“一张票据只认一次”，同一 session 消费／过期后仍可凭仍在
+  //       效的 Key 重新签发新票据恢复（L3 恢复成功后即为同 session 再
+  //       领）；新票据须凭仍在效的 Key 重新签发（§3.1 前置 admit 全量
+  //       准入），旧票据消费后即作废（consumed_at 非空）。
+  //   (c) §5.2“5 秒固定间隔，不做指数退避”——服务端不管客户端重试
+  //       间隔；L3 已落地的 5s→30s 退避最坏 95 秒仍在 300 秒窗口内，
+  //       服务端不另作限制。
+  //   (d) §3.3“resume 成功……由服务端当即完成握手重建”——服务端只做
+  //       票据核验＋返回 epochs（resume 不下发 sys.handshake：设备
+  //       可能离线，下发必失败；握手在下一次业务下发时由
+  //       ensureHandshake 按核验返回的 epochs 重建）。画面恢复由各端
+  //       渲染层处理（规范 §7）。
+  //   (e) §4 作废方式“删条目或置 consumed_at＝吊销时刻”——实现取第三
+  //       种：置 voided_at 保留条目，核验时实时状态失败优先报具体码，
+  //       实时状态全通过但 voided_at 非空仍拒绝（QFR_TICKET_INVALID，
+  //       大肥鱼复核 R-1：voided_at 须 fail-closed 兜底——未来新增只作废
+  //       票据、不改 Key／绑定／授权的作废原因时，实时状态拦不住）。
+  //       删条目会丢码（变 INVALID），置 consumed_at 会错报 REUSED。
+  function reconnectTicketSigningBytes(t) {
+    checkIdField(t.account_id, 'account_id');
+    checkIdField(t.device_id, 'device_id');
+    checkIdField(t.api_key_id, 'api_key_id');
+    if (!/^k_[a-z0-9]{10}$/.test(t.api_key_id)) throw new Error('LEA reconnect ticket field invalid: api_key_id');
+    if (!/^resume-[0-9a-f]{16}$/.test(t.resume_id)) throw new Error('LEA reconnect ticket field invalid: resume_id');
+    if (!/^sess-[0-9a-f]{16}$/.test(t.session_id)) throw new Error('LEA reconnect ticket field invalid: session_id');
+    for (const [name, v] of [['binding_epoch', t.binding_epoch], ['grant_epoch', t.grant_epoch], ['issued_at', t.issued_at], ['expires_at', t.expires_at]]) {
+      if (!Number.isSafeInteger(v) || v < 0) throw new Error('LEA reconnect ticket field invalid: ' + name);
+    }
+    // 注意：ticket_signature 不进规范串、也不在此校验——签发时签名尚不
+    // 存在（signReconnectTicket 先算串再签名）；核验侧由形状检查（§3.2
+    // 第 1 步）与 verifyReconnectTicketSignature 把关。
+    return [
+      RECONNECT_CANONICAL_V1,
+      String(t.account_id),
+      String(t.device_id),
+      String(t.api_key_id),
+      String(t.binding_epoch),
+      String(t.grant_epoch),
+      String(t.resume_id),
+      String(t.session_id),
+      String(t.issued_at),
+      String(t.expires_at),
+    ].join('\n');
+  }
+  // 票据 JSON 的规范序列化（固定字段顺序）：台账键与验签输入均以此为准，
+  // 客户端字段顺序不同也不影响查表（核验时先按字段重建，不按原文哈希）。
+  function reconnectTicketCanonicalJson(t) {
+    return JSON.stringify({
+      account_id: t.account_id, device_id: t.device_id, api_key_id: t.api_key_id,
+      binding_epoch: t.binding_epoch, grant_epoch: t.grant_epoch,
+      resume_id: t.resume_id, session_id: t.session_id,
+      issued_at: t.issued_at, expires_at: t.expires_at,
+      ticket_signature: t.ticket_signature,
+    });
+  }
+  function signReconnectTicket(ticket) {
+    // F-04：签名能力须为 real（规范 §3.1 第 4 条）；disabled／
+    // placeholder-ephemeral 一律拒绝签发，不得签不可验票据。
+    if (signing.mode !== 'real' || !signing.privateKey) {
+      const e = new Error('LEA reconnect ticket signing requires real signing key (signing_mode=' + signing.mode + ')');
+      e.code = 'QFR_SIGNING_NOT_REAL'; throw e;
+    }
+    const sig = crypto.sign(null, Buffer.from(reconnectTicketSigningBytes(ticket), 'utf8'), signing.privateKey);
+    return Object.assign({}, ticket, { ticket_signature: sig.toString('base64') });
+  }
+  function verifyReconnectTicketSignature(ticket) {
+    try {
+      if (!ticket || !ticket.ticket_signature) return false;
+      if (!signing.publicKeyBase64) return false;
+      const pubJwk = { kty: 'OKP', crv: 'Ed25519', x: signing.publicKeyBase64 };
+      const pub = crypto.createPublicKey({ key: pubJwk, format: 'jwk' });
+      return crypto.verify(null, Buffer.from(reconnectTicketSigningBytes(ticket), 'utf8'), pub,
+        Buffer.from(String(ticket.ticket_signature), 'base64'));
+    } catch (e) { return false; }
+  }
+  function pruneReconnectTickets(st) {
+    // 清已过期票据（调用方写盘前先清，台账不无限膨胀；票据最长存活
+    // 300 秒，过期即清即够）。
+    // 注意：已消费／已作废条目在过期前必须保留——消费后 300 秒内重放
+    // 核验须报 QFR_TICKET_REUSED（§3.2 第 4 步），作废后未过期核验须
+    // 走到第 6 步报吊销码（见 (e)）；提前删会错报 QFR_TICKET_INVALID。
+    let dirty = false;
+    for (const [h, tk] of Object.entries(st.tickets || {})) {
+      if (!tk) { delete st.tickets[h]; dirty = true; continue; }
+      if (tk.expires_at && nowSec() > tk.expires_at) { delete st.tickets[h]; dirty = true; }
+    }
+    return dirty;
+  }
+  // 作废未消费票据（RC-04 §4）：按 Key 或按设备。只置 voided_at 保留条目
+  // （见 (e)），核验时实时状态失败优先报具体码、实时状态全通过但
+  // voided_at 非空仍拒绝（R-复核：voided_at fail-closed 兜底）；prune
+  // 时随过期一并清理。返回作废张数。只记 key_id／device_id／张数，
+  // 不记票据内容。
+  function voidReconnectTickets(filter, reason) {
+    const st = loadReconnectTickets();
+    let count = 0;
+    const keyIds = filter && Array.isArray(filter.keyIds) ? filter.keyIds : null;
+    const deviceId = filter && filter.deviceId ? bareNodeId(String(filter.deviceId)) : null;
+    const accountId = filter && filter.accountId ? String(filter.accountId) : null;
+    for (const tk of Object.values(st.tickets || {})) {
+      if (!tk || tk.consumed_at || tk.voided_at) continue;
+      const byKey = keyIds && keyIds.indexOf(tk.api_key_id) >= 0;
+      const byDevice = deviceId && bareNodeId(tk.device_id) === deviceId;
+      const byAccount = accountId && tk.account_id === accountId;
+      if (byKey || byDevice || byAccount) { tk.voided_at = now(); count++; }
+    }
+    if (count) {
+      saveReconnectTickets(st);
+      audit('lea-reconnect-voided', {
+        reason: reason || null, voided_count: count,
+        api_key_ids: keyIds || null, device_id: deviceId, account_id: accountId,
+      });
+    }
+    return { ok: true, voided_count: count };
+  }
+  // 签发（规范 §3.1）。input: { accountId, deviceId, keyId, sessionId }，
+  // 其中 keyId 须等于鉴权 Key 的 key_id（路由层传入 auth.key.key_id，
+  // 不得代他人签发）。epochs 取 admit() 已验证的值，不取调用方传值。
+  function issueReconnectTicket(input, optsIssue) {
+    const accountId = String((input && input.accountId) || '');
+    const deviceId = bareNodeId(String((input && input.deviceId) || ''));
+    const keyId = String((input && input.keyId) || '');
+    const sessionId = String((input && input.sessionId) || '');
+    if (!accountId) { const e = new Error('account_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!deviceId) { const e = new Error('device_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!/^k_[a-z0-9]{10}$/.test(keyId)) { const e = new Error('key_id invalid'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!/^sess-[0-9a-f]{16}$/.test(sessionId)) { const e = new Error('session_id must be sess- + 16 hex'); e.code = 'QFR_VALIDATION'; throw e; }
+    try { checkIdField(accountId, 'account_id'); checkIdField(deviceId, 'device_id'); }
+    catch (e) { const ve = new Error(e.message); ve.code = 'QFR_VALIDATION'; throw ve; }
+    const key = findKeyById(keyId);
+    if (!key || key.account_id !== accountId) {
+      const e = new Error('key not found or not owned by account'); e.code = 'QFR_API_KEY_REVOKED'; throw e;
+    }
+    if (keyStatus(key) !== 'active') {
+      const e = new Error('API Key revoked or expired'); e.code = 'QFR_API_KEY_REVOKED'; throw e;
+    }
+    // 前置 2：全量准入（sys.ping 准入：绑定 ACTIVE、epochs 一致、授权在效、
+    // 白名单在内）。失败码／状态原样透传（admit 的 status＋code）。
+    const adm = admit({ key, deviceId, command: 'sys.ping' });
+    if (!adm.ok) {
+      const e = new Error(adm.msg || 'admit failed'); e.code = adm.code; e.status = adm.status; throw e;
+    }
+    if (signing.mode !== 'real' || !signing.privateKey) {
+      const e = new Error('LEA reconnect ticket signing requires real signing key (signing_mode=' + signing.mode + ')');
+      e.code = 'QFR_SIGNING_NOT_REAL'; throw e;
+    }
+    const st = loadReconnectTickets();
+    pruneReconnectTickets(st);
+    // 前置 3：同设备 5 秒内不重复签发；签发新票时同 (account, device,
+    // session) 的旧未消费票据即原子作废（规范 §5.1“只留最新”；RC-04
+    // (b) 定夺 A 的前提）。作废用 voided_at 保留条目（与 voidReconnectTickets
+    // ／消费时作废同款语义），核验遇 voided_at 即拒绝；过期后由 prune
+    // 清理，不提前删条目（删条目会丢吊销码，见 pruneReconnectTickets
+    // 注释）。堆积由 5 秒限流＋300 秒过期清理封顶，不再另设张数上限。
+    const live = (tk) => tk && !tk.consumed_at && !tk.voided_at && !(tk.expires_at && nowSec() > tk.expires_at);
+    const devMine = Object.entries(st.tickets || {})
+      .filter(([, tk]) => live(tk) && tk.account_id === accountId && tk.device_id === deviceId)
+      .sort((a, b) => (a[1].created_at || 0) - (b[1].created_at || 0));
+    if (devMine.length && now() - (devMine[devMine.length - 1][1].created_at || 0) < RECONNECT_ISSUE_MIN_INTERVAL_MS) {
+      const e = new Error('issue too frequent, retry in a few seconds');
+      e.code = 'QFR_RATE_LIMITED'; throw e;
+    }
+    const mine = devMine.filter(([, tk]) => tk.session_id === sessionId);
+    for (const [, tk] of mine) tk.voided_at = now();
+    const resumeId = 'resume-' + crypto.randomBytes(8).toString('hex');
+    const issuedAt = nowSec();
+    const ticket = signReconnectTicket({
+      account_id: accountId, device_id: deviceId, api_key_id: keyId,
+      binding_epoch: adm.binding.binding_epoch, grant_epoch: adm.grant.grant_epoch,
+      resume_id: resumeId, session_id: sessionId,
+      issued_at: issuedAt, expires_at: issuedAt + RECONNECT_TICKET_TTL_S,
+    });
+    st.tickets[sha256Hex(reconnectTicketCanonicalJson(ticket))] = {
+      account_id: accountId, device_id: deviceId, api_key_id: keyId,
+      binding_epoch: ticket.binding_epoch, grant_epoch: ticket.grant_epoch,
+      resume_id_hash: sha256Hex(resumeId), session_id: sessionId,
+      issued_at: issuedAt, expires_at: ticket.expires_at,
+      created_at: now(), consumed_at: null, voided_at: null,
+    };
+    saveReconnectTickets(st);
+    audit('lea-reconnect-issued', {
+      account_id: accountId, device_id: deviceId, api_key_id: keyId,
+      // R-复核 (h)：记下 Key 是怎么选出来的（Bearer 直传／控制台自动取
+      // 最新），多 Key 并存时审计可查，不静默。
+      key_selection: (optsIssue && optsIssue.keySelection) || null,
+      resume_prefix: resumeId.slice(7, 15), session_id: sessionId,
+      binding_epoch: ticket.binding_epoch, grant_epoch: ticket.grant_epoch,
+      expires_at: ticket.expires_at,
+    });
+    return ticket;
+  }
+  // 核验＋消费（规范 §3.2；原子：验过即消费）。顺序即规范顺序，任一步
+  // 失败即拒绝且不消费（失败不消耗单次机会）；过期／已消费／epochs
+  // 不等是终态失败，重试同样失败。返回 { ok, account_id, device_id,
+  // api_key_id, session_id, binding_epoch, grant_epoch }。
+  function verifyReconnectTicket(ticket) {
+    const bad = (code, msg) => { const e = new Error(msg); e.code = code; throw e; };
+    // 1. 形状：对象、10 字段齐全、类型正确、未知字段拒绝、签名存在。
+    const FIELDS = ['account_id', 'device_id', 'api_key_id', 'binding_epoch', 'grant_epoch', 'resume_id', 'session_id', 'issued_at', 'expires_at', 'ticket_signature'];
+    if (!ticket || typeof ticket !== 'object' || Array.isArray(ticket)) bad('QFR_TICKET_INVALID', 'ticket must be an object');
+    for (const k of Object.keys(ticket)) {
+      if (FIELDS.indexOf(k) < 0) bad('QFR_TICKET_INVALID', 'unknown ticket field: ' + k);
+    }
+    for (const f of FIELDS) {
+      if (ticket[f] === undefined || ticket[f] === null) bad('QFR_TICKET_INVALID', 'missing ticket field: ' + f);
+    }
+    if (typeof ticket.account_id !== 'string' || typeof ticket.device_id !== 'string' ||
+        typeof ticket.api_key_id !== 'string' || typeof ticket.resume_id !== 'string' ||
+        typeof ticket.session_id !== 'string' || typeof ticket.ticket_signature !== 'string' ||
+        !Number.isSafeInteger(ticket.binding_epoch) || !Number.isSafeInteger(ticket.grant_epoch) ||
+        !Number.isSafeInteger(ticket.issued_at) || !Number.isSafeInteger(ticket.expires_at)) {
+      bad('QFR_TICKET_INVALID', 'ticket field type invalid');
+    }
+    try {
+      checkIdField(ticket.account_id, 'account_id'); checkIdField(ticket.device_id, 'device_id');
+      checkIdField(ticket.api_key_id, 'api_key_id');
+    } catch (e) { bad('QFR_TICKET_INVALID', 'ticket id field invalid'); }
+    if (!/^k_[a-z0-9]{10}$/.test(ticket.api_key_id)) bad('QFR_TICKET_INVALID', 'api_key_id invalid');
+    if (!/^resume-[0-9a-f]{16}$/.test(ticket.resume_id)) bad('QFR_TICKET_INVALID', 'resume_id invalid');
+    if (!/^sess-[0-9a-f]{16}$/.test(ticket.session_id)) bad('QFR_TICKET_INVALID', 'session_id invalid');
+    if (ticket.binding_epoch < 0 || ticket.grant_epoch < 0 || ticket.issued_at < 0 || ticket.expires_at < 0) {
+      bad('QFR_TICKET_INVALID', 'ticket numeric field invalid');
+    }
+    if (ticket.expires_at - ticket.issued_at !== RECONNECT_TICKET_TTL_S) {
+      bad('QFR_TICKET_INVALID', 'ticket TTL must be exactly 300');
+    }
+    // 2. 签名：按 §1.2 重建规范串，Ed25519 验签。
+    if (!verifyReconnectTicketSignature(ticket)) bad('QFR_TICKET_INVALID', 'ticket signature invalid');
+    // 3. 台账：按票据 SHA-256 查表；查无即不是本服务端签发的（或台账已清）。
+    const st = loadReconnectTickets();
+    const h = sha256Hex(reconnectTicketCanonicalJson(ticket));
+    const tk = st.tickets[h];
+    if (!tk) {
+      // R-复核 (g)：台账已清（过期清理删条目）时，已过期票据仍报 EXPIRED
+      // 而非 INVALID——过期与否只看票据自身时间（签名已验过，伪造票据
+      // 到不了此步）；未过期仍报 INVALID。
+      if (nowSec() > ticket.expires_at) bad('QFR_TICKET_EXPIRED', 'ticket expired');
+      bad('QFR_TICKET_INVALID', 'ticket not issued by this server');
+    }
+    // 台账条目须与票据逐项一致（防哈希碰撞／条目被改后仍放行）。
+    if (tk.account_id !== ticket.account_id || tk.device_id !== bareNodeId(ticket.device_id) ||
+        tk.api_key_id !== ticket.api_key_id || tk.session_id !== ticket.session_id ||
+        tk.binding_epoch !== ticket.binding_epoch || tk.grant_epoch !== ticket.grant_epoch ||
+        tk.resume_id_hash !== sha256Hex(ticket.resume_id) ||
+        tk.issued_at !== ticket.issued_at || tk.expires_at !== ticket.expires_at) {
+      bad('QFR_TICKET_INVALID', 'ticket does not match ledger entry');
+    }
+    // 4. 单次性：已消费 → 重放拒绝（QFR_TICKET_REUSED）。
+    if (tk.consumed_at) bad('QFR_TICKET_REUSED', 'ticket already used');
+    // 5. 有效期：过期 → QFR_TICKET_EXPIRED；时钟偏差超 60 秒 → INVALID。
+    if (nowSec() > tk.expires_at) bad('QFR_TICKET_EXPIRED', 'ticket expired');
+    if (nowSec() < ticket.issued_at - 60) bad('QFR_TICKET_INVALID', 'ticket issued_at too far in future');
+    // 6. 吊销语义（§4）：Key 须 active；绑定须 ACTIVE 且账号／epoch 一致；
+    // 授权须在效且 grant_epoch 一致。实时状态失败优先报具体码；实时状态
+    // 全通过但 voided_at 非空仍拒绝（R-复核 (e)：voided_at fail-closed
+    // 兜底，防未来只作废票据、不改 Key／绑定／授权的作废原因被放行）。
+    const key = findKeyById(ticket.api_key_id);
+    if (!key || keyStatus(key) !== 'active') bad('QFR_API_KEY_REVOKED', 'API Key revoked or expired');
+    const binding = getBinding(ticket.device_id);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== ticket.account_id ||
+        binding.binding_epoch !== ticket.binding_epoch) {
+      bad('QFR_BINDING_CHANGED', 'binding changed');
+    }
+    const grant = getGrant(ticket.account_id);
+    if (!grant || grant.revoked_at || grant.scope !== 'muse.execute' || grant.grant_epoch !== ticket.grant_epoch) {
+      bad('QFR_GRANT_REVOKED', 'grant revoked');
+    }
+    if (tk.voided_at) bad('QFR_TICKET_INVALID', 'ticket voided');
+    // 7. 消费：先写 consumed_at 落盘，再返回（生成／落盘抛错也不回滚消费，
+    // 与 completeSelfBind 同款口径——票据已用过，调用方须重新签发）。
+    // 原子性（R-复核）：本函数全程同步、无 await——单 Node 进程事件循环
+    // 内读-改-写不可能交错（与 nonce／idem／selfbind 台账同款 T13 口径；
+    // 生产只起一个实例，无多进程共享同一目录）。并发 resume 只会有一
+    // 个看到 consumed_at 为空。
+    tk.consumed_at = now();
+    // R-复核 (a)：成功消费后，作废同 (account, device, session) 其余未消
+    // 费票据——旧票 300 秒内仍可恢复同一会话的窗口就此关闭。L3 内存只持
+    // 最新一张，恢复成功后即重新签发新票，不受影响。
+    for (const other of Object.values(st.tickets || {})) {
+      if (other && other !== tk && !other.consumed_at && !other.voided_at &&
+          other.account_id === ticket.account_id && bareNodeId(other.device_id) === bareNodeId(ticket.device_id) &&
+          other.session_id === ticket.session_id) other.voided_at = now();
+    }
+    saveReconnectTickets(st);
+    audit('lea-reconnect-consumed', {
+      account_id: ticket.account_id, device_id: ticket.device_id, api_key_id: ticket.api_key_id,
+      resume_prefix: String(ticket.resume_id).slice(7, 15), session_id: ticket.session_id,
+      binding_epoch: ticket.binding_epoch, grant_epoch: ticket.grant_epoch,
+    });
+    return {
+      ok: true, account_id: ticket.account_id, device_id: bareNodeId(ticket.device_id),
+      api_key_id: ticket.api_key_id, session_id: ticket.session_id,
+      binding_epoch: ticket.binding_epoch, grant_epoch: ticket.grant_epoch,
+    };
+  }
+
+  // ---------- 卸载注销（固定契约；2026-11-14 站长亲定） ----------
+  // 规范串 v1：
+  //   qfr-lea-deregister-v1\n<account_id>\n<device_id>\n<nonce>\n<timestamp>
+  // device_id 一律裸形；签名：设备 P-256 私钥对规范串 UTF-8 的 SHA-256
+  // 做 ECDSA 签名，IEEE P1363 格式（r||s，64 字节）base64；验签复用
+  // selfBindParseDevicePubkey／ecdsaP1363ToDer，不另写一套验签。
+  function deregisterSigningBytes(o) {
+    return [
+      DEREGISTER_CANONICAL_V1,
+      String(o.account_id), String(o.device_id),
+      String(o.nonce), String(o.timestamp),
+    ].join('\n');
+  }
+  function deregisterVerifySignature(o, devicePubkeyB64) {
+    // o: {account_id, device_id, nonce, timestamp, signature}。验签失败
+    // 返回 false，不抛错（与 selfBindVerifySignature 同款）。
+    try {
+      const pt = selfBindParseDevicePubkey(devicePubkeyB64);
+      if (!pt) return false;
+      const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: pt.x, y: pt.y }, format: 'jwk' });
+      const sig = Buffer.from(String(o.signature || ''), 'base64');
+      if (sig.length !== 64) return false;
+      const der = ecdsaP1363ToDer(sig);
+      if (!der) return false;
+      return crypto.verify('sha256', Buffer.from(deregisterSigningBytes(o), 'utf8'), pub, der);
+    } catch (e) { return false; }
+  }
+  function deregisterDevice(input) {
+    const accountId = String(input.account_id || '');
+    const deviceId = bareNodeId(String(input.device_id || ''));
+    const nonce = String(input.nonce || '');
+    const timestamp = Number(input.timestamp);
+    const signature = String(input.signature || '');
+    if (!accountId || !deviceId) { const e = new Error('account_id/device_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    if (!nonce || nonce.length < 16 || nonce.length > 128 || /[^A-Za-z0-9_-]/.test(nonce)) {
+      const e = new Error('nonce must be 16..128 chars [A-Za-z0-9_-] (base64url of >=16 random bytes)'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    if (!Number.isSafeInteger(timestamp) || Math.abs(nowSec() - timestamp) > DEREGISTER_SKEW_S) {
+      const e = new Error('timestamp out of window'); e.code = 'QFR_REPLAY_DETECTED'; throw e;
+    }
+    // 重放防护：nonce 按设备分桶去重（复用 nonceCheck，落盘 10 分钟）；
+    // 先消费 nonce 再验签——验签失败的尝试也消耗该 nonce，防签名预言机
+    // 拿同一 nonce 反复试签；客户端每次尝试须用新 nonce（固定契约）。
+    if (!nonceCheck('deregister:' + deviceId, nonce)) {
+      const e = new Error('nonce replay detected'); e.code = 'QFR_REPLAY_DETECTED'; throw e;
+    }
+    // 验签公钥来源：① 在效绑定（ACTIVE＋账号一致＋已存设备公钥）；
+    // ② 注销墓碑（已注销过，凭同一把设备私钥验签后幂等成功）。
+    // 两者皆无／账号不一致／无公钥时一律报签名无效，不区分“从未绑定”
+    // 与“绑他人／已注销”，不留存在性预言口子。
+    const binding = getBinding(deviceId);
+    let pubkey = null;
+    let already = false;
+    let bindingEpoch = 0;
+    if (binding && binding.state === 'ACTIVE' && binding.account_id === accountId && binding.device_pubkey) {
+      pubkey = binding.device_pubkey; bindingEpoch = binding.binding_epoch || 0;
+    } else {
+      const tomb = (loadDeregistered().devices || {})[deviceId] || null;
+      if (tomb && tomb.account_id === accountId && tomb.device_pubkey) {
+        pubkey = tomb.device_pubkey; already = true; bindingEpoch = tomb.binding_epoch || 0;
+      }
+    }
+    if (!pubkey) { const e = new Error('device signature invalid'); e.code = 'QFR_DEVICE_SIGNATURE_INVALID'; throw e; }
+    const okSig = deregisterVerifySignature({ account_id: accountId, device_id: deviceId, nonce, timestamp, signature }, pubkey);
+    if (!okSig) { const e = new Error('device signature invalid'); e.code = 'QFR_DEVICE_SIGNATURE_INVALID'; throw e; }
+    if (!already) {
+      // 删绑定条目＋该设备的自助绑定票据；Keys／grants／吊销表／jobs／
+      // 幂等表一律不动（付费 LEA 密钥是账号级资产，绝不删）。
+      const bs = loadBindings();
+      delete bs.bindings[deviceId];
+      saveBindings(bs);
+      const tkSt = loadSelfBindTickets();
+      let tkDirty = false;
+      for (const [h, tk] of Object.entries(tkSt.tickets || {})) {
+        if (tk && tk.device_id === deviceId) { delete tkSt.tickets[h]; tkDirty = true; }
+      }
+      if (tkDirty) saveSelfBindTickets(tkSt);
+      // RC-04 §4：注销即作废该设备未消费的重连票据（绑定已删，核验第 6 步
+      // 仍以实时绑定状态判定报 QFR_BINDING_CHANGED）。
+      try { voidReconnectTickets({ deviceId }, 'deregister'); } catch (e) {}
+      // 立墓碑：重复注销凭同一把设备私钥验签后幂等成功。
+      const dg = loadDeregistered();
+      dg.devices[deviceId] = { account_id: accountId, device_pubkey: pubkey, deregistered_at: now(), binding_epoch: bindingEpoch };
+      saveDeregistered(dg);
+    }
+    audit('lea-deregistered', { account_id: accountId, device_id: deviceId, binding_epoch: bindingEpoch, already });
+    return { ok: true, already, device_id: deviceId, account_id: accountId, binding_epoch: bindingEpoch };
+  }
+  // 设备最后在线（下发成功／在线查询时 touch；60 秒节流，不写放大）。
+  function touchDeviceSeen(deviceId) {
+    try {
+      const id = bareNodeId(String(deviceId || ''));
+      if (!id) return;
+      const st = loadBindings();
+      const b = st.bindings[id];
+      if (!b) return;
+      if (b.last_seen_at && now() - b.last_seen_at < 60 * 1000) return;
+      b.last_seen_at = now();
+      saveBindings(st);
     } catch (e) {}
   }
 
@@ -832,13 +2022,21 @@ function createLeaCore(opts) {
     // 吊销推送台账（H21），让本机第二层也拒掉它们。keys.json 里的记录本身
     // 不改 revoked_at（admit 仍按授权撤销报 QFR_GRANT_REVOKED，保持既有
     // 错误码契约）；Key 的实际效力以 admit 为准。
+    // RC-02：授权撤销同样踢会话（在途作废＋job 取消；设备端踢出由路由层 kick）。
+    let revokedIds = [];
     try {
       const activeIds = loadKeys().keys
         .filter((k) => k && k.account_id === String(accountId) && !k.revoked_at)
         .map((k) => k.key_id);
+      revokedIds = activeIds;
       if (activeIds.length) recordRevocations(devicesForAccount(accountId), activeIds, 'grant-revoked');
+      markInflightRevoked(activeIds);
+      cancelJobsForKeys(activeIds, 'grant-revoked');
+      // RC-04 §4：授权撤销即作废该账号在用 Key 名下未消费的重连票据
+      // （核验第 6 步仍以实时 grant_epoch 判定报 QFR_GRANT_REVOKED）。
+      try { if (activeIds.length) voidReconnectTickets({ keyIds: activeIds }, 'grant-revoked'); } catch (e) {}
     } catch (e) {}
-    return { ok: true, grant_epoch: cur.grant_epoch };
+    return { ok: true, grant_epoch: cur.grant_epoch, revoked_key_ids: revokedIds };
   }
   function hasGrant(accountId) {
     const g = getGrant(accountId);
@@ -887,6 +2085,12 @@ function createLeaCore(opts) {
       state: 'ACTIVE', updated_at: now(), trigger: trigger || 'login',
     };
     saveBindings(st);
+    // 重新绑定即复活：清掉该设备的注销墓碑（旧公钥不得再用于验签；
+    // 在效绑定优先于墓碑，此处清掉只为不留过期墓碑）。
+    try {
+      const dg = loadDeregistered();
+      if (dg.devices && dg.devices[deviceId]) { delete dg.devices[deviceId]; saveDeregistered(dg); }
+    } catch (e) {}
     let revokedKeys = 0;
     const revokedKeyIds = [];
     if (oldAccount && oldAccount !== accountId) {
@@ -898,8 +2102,21 @@ function createLeaCore(opts) {
         }
       }
       if (revokedKeys) saveKeys(ks);
+      // RC-02：换绑吊销旧 Key 即踢其在途下发与服务端 job（设备端踢出由
+      // 路由层对换绑响应调 kick；旧 Key 的本机吊销表由 H21 推送＋客户端
+      // keys.sync-revoked 同步）。
+      markInflightRevoked(revokedKeyIds);
+      cancelJobsForKeys(revokedKeyIds, 'rebind');
       // H21：换绑吊销的 Key 同步记入本机吊销推送台账。
       try { recordRevocations([deviceId], revokedKeyIds, 'rebind'); } catch (e) {}
+      // RC-04 §4：换绑即作废被吊销旧 Key 名下未消费的重连票据。
+      try { if (revokedKeyIds.length) voidReconnectTickets({ keyIds: revokedKeyIds }, 'rebind'); } catch (e) {}
+    }
+    // RC-04 §4：绑定代次变了（换账号／同账号 epoch 前进），该设备未消费
+    // 的重连票据一并作废——核验第 6 步仍以实时 binding_epoch 判定报
+    // QFR_BINDING_CHANGED。代次未变（同账号重复绑定）不作废。
+    if (newEpoch !== oldEpoch) {
+      try { voidReconnectTickets({ deviceId }, 'binding-epoch-changed'); } catch (e) {}
     }
     audit('lea-rebind', {
       device_id: deviceId, old_account_id: oldAccount, new_account_id: accountId,
@@ -1030,17 +2247,27 @@ function createLeaCore(opts) {
   // 服务端 pushed_epoch 只在 generation 与当前台账一致时才追上，见
   // markRevocationsPushed，故陈旧推送不会误标已同步）。世代文件损坏
   // （非纯数字）即抛错不写盘（fail-closed；下次下发重试，admit 仍是
-  // 第一层控制）。写顺序：先写世代文件、再写 revoked_keys.txt——中途
-  // 失败时世代超前于表是安全方向（陈旧推送被拦，新表由下次重推补齐）；
-  // 反过来（表超前于世代）会留一个陈旧推送可覆盖新表的窗口。世代文件
-  // 用 tmp+rename 写（与 C 侧同范式），不断电写半截；tmp 名带 $PID，
-  // 防两路并发推送撞同名。
+  // 第一层控制）。X-01（大肥鱼复核后收紧）：.gen 缺失时分两种情形——
+  //   ① 无历史（binding.dat 不存在且表缺失／空表，首次安装）：写表＋
+  //      写 .gen，初始化；
+  //   ② 有历史（binding.dat 存在或表非空，旧版快照／表被删）：只写表、
+  //      跳过写 .gen——服务端恢复的是表内容（服务端全集权威、只增不减），
+  //      世代仍须管理员在设备上跑 QFRLEA.exe --migrate-revoked 显式授
+  //      予；设备在显式迁移前保持 DEGRADED（C 侧运行期检查：snap==-1
+  //      即 ERROR，与启动口径一致）。旧口径“表非空即抛错不写盘”会把
+  //      有历史＋表缺失的设备卡死（表回不来、工具又拒绝缺失文件），故
+  //      改为写表跳 .gen。写顺序：先写世代文件、再写 revoked_keys.txt——
+  //      中途失败时世代超前于表是安全方向（陈旧推送被拦，新表由下次
+  //      重推补齐）；反过来（表超前于世代）会留一个陈旧推送可覆盖新表
+  //      的窗口。世代文件用 tmp+rename 写（与 C 侧同范式），不断电写半
+  //      截；tmp 名带 $PID，防两路并发推送撞同名。
   // generation 必传：缺失／非安全整数／负数即抛错，绝不发无版本直写。
   function leaRevocationsWriteCmd(b64, generation) {
     if (typeof b64 !== 'string' || !b64) throw new Error('leaRevocationsWriteCmd: b64 required');
     if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('leaRevocationsWriteCmd: generation required');
     const genFile = LEA_REVOKED_PATH.replace(/\.txt$/i, '.gen');
-    return 'powershell -NoProfile -NonInteractive -Command "$genFile=\'' + genFile + '\'; $txtFile=\'' + LEA_REVOKED_PATH + '\'; $incoming=' + generation + '; $cur=0; if (Test-Path -LiteralPath $genFile) { $raw=[IO.File]::ReadAllText($genFile).Trim(); if ($raw -match \'^[0-9]+$\') { $cur=[int64]$raw } else { throw \'revoked generation file corrupt\' } }; if ($incoming -lt $cur) { exit 0 }; $tmpGen=$genFile + \'.\' + $PID + \'.tmp\'; [IO.File]::WriteAllText($tmpGen, [string]$incoming); Remove-Item -LiteralPath $genFile -ErrorAction SilentlyContinue; [IO.File]::Move($tmpGen, $genFile); [IO.File]::WriteAllBytes($txtFile,[Convert]::FromBase64String(\'' + b64 + '\'))"';
+    const bindFile = LEA_REVOKED_PATH.replace(/revoked_keys\.txt$/i, 'binding.dat');
+    return 'powershell -NoProfile -NonInteractive -Command "$genFile=\'' + genFile + '\'; $txtFile=\'' + LEA_REVOKED_PATH + '\'; $bindFile=\'' + bindFile + '\'; $incoming=' + generation + '; $cur=0; if (Test-Path -LiteralPath $genFile) { $raw=[IO.File]::ReadAllText($genFile).Trim(); if ($raw -match \'^[0-9]+$\') { $cur=[int64]$raw } else { throw \'revoked generation file corrupt\' } }; $hasHistory=(Test-Path -LiteralPath $bindFile) -or ((Test-Path -LiteralPath $txtFile) -and (Get-Item -LiteralPath $txtFile).Length -gt 0); $skipGen=(-not (Test-Path -LiteralPath $genFile)) -and $hasHistory; if ($incoming -lt $cur) { exit 0 }; if (-not $skipGen) { $tmpGen=$genFile + \'.\' + $PID + \'.tmp\'; [IO.File]::WriteAllText($tmpGen, [string]$incoming); Remove-Item -LiteralPath $genFile -ErrorAction SilentlyContinue; [IO.File]::Move($tmpGen, $genFile) }; [IO.File]::WriteAllBytes($txtFile,[Convert]::FromBase64String(\'' + b64 + '\'))"';
   }
   async function syncRevocations(channel, deviceId) {
     if (!channel || typeof channel.runCommand !== 'function') return { synced: false, reason: 'no-channel' };
@@ -1052,16 +2279,121 @@ function createLeaCore(opts) {
     const b64 = Buffer.from(text, 'utf8').toString('base64');
     if (b64.length > REVOCATION_SYNC_B64_LIMIT) {
       log({ ev: 'lea-revocation-sync-skipped', device_id: deviceId, reason: 'oversize', generation: snap.generation, revocation_epoch: snap.revocation_epoch });
-      return { synced: false, reason: 'oversize' };
+      return { synced: false, reason: 'oversize', generation: snap.generation };
     }
     try {
       await channel.runCommand(deviceId, leaRevocationsWriteCmd(b64, snap.generation), 15000);
     } catch (e) {
       log({ ev: 'lea-revocation-sync-failed', device_id: deviceId, generation: snap.generation, revocation_epoch: snap.revocation_epoch, err: String(e && e.message) });
-      return { synced: false, reason: 'write-failed' };
+      return { synced: false, reason: 'write-failed', generation: snap.generation };
     }
     markRevocationsPushed(deviceId, snap.generation);
     return { synced: true, reason: 'pushed', generation: snap.generation };
+  }
+
+  // ---------- RC-02：吊销即踢在线会话 ----------
+  // 吊销的即时效力分三层（admit 实时拦新命令是第零层，本节是其余三层）：
+  //   ① 在途下发：dispatchEnvelope 登记的 request_id（inflightDispatches）
+  //      在吊销时标 revoked，返回时结果作废（不回执行结果）；
+  //   ② 服务端 job：该 Key 名下 PENDING/RUNNING/UNKNOWN 的 job 即改为
+  //      CANCELLED（error_code QFR_API_KEY_REVOKED），幂等 RUNNING 记
+  //      UNKNOWN（与 sweepStaleJobs 同款，不卡重试——反正 admit 会拦）；
+  //   ③ 设备端：经通道向设备推吊销全集（syncRevocations）＋发内部踢出
+  //      命令（qf-lea-client.exe --internal-b64 <base64>，见 leaKeyRevokedCmd），
+  //      设备收到后把该 Key 的排队命令清掉、活动 job 强杀（见 QFRLEA.c
+  //      lea.key_revoked）。三层均为 best-effort 且有界：kick 总预算
+  //      KICK_TOTAL_BUDGET_MS（5000，RC-02 验收），超时／离线不阻断吊销
+  //      本身（吊销已落盘 keys.json，admit 即时生效）。
+  const KICK_TOTAL_BUDGET_MS = 5000;
+  const KICK_PER_DEVICE_MS = 4000;
+  const inflightDispatches = new Map(); // request_id -> { key_id, device_id, revoked }
+  function markInflightRevoked(keyIds) {
+    const set = new Set((keyIds || []).filter(Boolean));
+    if (!set.size) return 0;
+    let n = 0;
+    for (const e of inflightDispatches.values()) {
+      if (e && set.has(e.key_id) && !e.revoked) { e.revoked = true; n++; }
+    }
+    return n;
+  }
+  function cancelJobsForKeys(keyIds, reason) {
+    const set = new Set((keyIds || []).filter(Boolean));
+    if (!set.size) return { cancelled: 0, job_ids: [] };
+    let cancelled = 0;
+    const jobIds = [];
+    try {
+      const st = loadJobs();
+      for (const [id, j] of Object.entries(st.jobs)) {
+        if (!j || !set.has(j.api_key_id)) continue;
+        if (j.status !== 'PENDING' && j.status !== 'RUNNING' && j.status !== 'UNKNOWN') continue;
+        j.status = 'CANCELLED'; j.error_code = ERR.BAD_KEY; j.updated_at = now();
+        cancelled++; jobIds.push(id);
+        if (j.idempotency_key && j.account_id && j.api_key_id) {
+          const ns = j.batch_id ? IDEM_NS.BATCH : IDEM_NS.EXEC;
+          const prev = idemLookup(j.account_id, j.api_key_id, j.idempotency_key, ns);
+          if (prev && prev.status === 'RUNNING') {
+            idemRecord(j.account_id, j.api_key_id, j.idempotency_key,
+              Object.assign({}, prev, { status: 'UNKNOWN' }), ns);
+          }
+        }
+        audit('lea-job-cancelled-revoked', { job_id: id, account_id: j.account_id || null, device_id: j.device_id || null, api_key_id: j.api_key_id || null, reason: reason || 'key-revoked' });
+      }
+      if (cancelled) saveJobs(st);
+    } catch (e) {}
+    return { cancelled, job_ids: jobIds };
+  }
+  // 踢出命令（runcommands 字符串）：qf-lea-client.exe --internal-b64 <base64>。
+  // base64 字母表对 cmd.exe 安全（dispatch <b64> 同款形态）；不用 --internal
+  // 裸 JSON（JSON 内双引号会被 cmd.exe 截断）。设备端收到后：先把 key_ids
+  // 并集合并进本机吊销表，再清掉该 Key 的排队命令、强杀活动 job（见 QFRLEA.c）。
+  function leaKeyRevokedCmd(keyIds) {
+    const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
+    if (!ids.length) throw new Error('leaKeyRevokedCmd: keyIds required');
+    const json = JSON.stringify({ cmd: 'lea.key_revoked', key_ids: ids });
+    const b64 = Buffer.from(json, 'utf8').toString('base64');
+    return LEA_CLIENT_EXE + ' --internal-b64 ' + b64;
+  }
+  async function kickRevokedSessions(channel, optsKick) {
+    const o = optsKick || {};
+    const keyIds = [...new Set((o.keyIds || []).filter(Boolean))].sort();
+    let deviceIds = [...new Set((o.deviceIds || []).filter(Boolean).map(bareNodeId))].filter(Boolean).sort();
+    if (!deviceIds.length && o.accountId && typeof devicesForAccount === 'function') {
+      try { deviceIds = devicesForAccount(o.accountId) || []; } catch (e) { deviceIds = []; }
+    }
+    const started = Date.now();
+    const budgetMs = Number.isSafeInteger(o.timeoutMs) && o.timeoutMs > 0 ? o.timeoutMs : KICK_TOTAL_BUDGET_MS;
+    const deadline = started + budgetMs;
+    // 预算竞速：syncRevocations 内部 runCommand 超时 15 秒，直接等会拖垮
+    // 5 秒预算；race 到期即停等（底层调用继续跑，不可取消，但不阻塞返回）。
+    const timeoutRace = (p, ms) => Promise.race([p, sleep(Math.max(0, ms)).then(() => { throw new Error('kick-timeout'); })]);
+    // ①② 在途＋job（不依赖通道，立即做；revoke 函数内已做过一次，此处
+    // 再做是幂等的——已取消的 job 不会重复计数）。
+    const inflight = markInflightRevoked(keyIds);
+    const jobs = cancelJobsForKeys(keyIds, o.reason || 'key-revoked');
+    const devices = [];
+    // ③ 设备端：逐台推吊销全集＋发踢出命令；超预算即停（余下设备等下次下发前 H21 重推）。
+    for (const d of deviceIds) {
+      if (Date.now() >= deadline) { devices.push({ device_id: d, push: 'skipped-budget', kick: 'skipped-budget', ms: 0 }); continue; }
+      const t0 = Date.now();
+      let push = 'skipped-no-channel', kick = 'skipped-no-channel';
+      if (channel && typeof channel.runCommand === 'function') {
+        try {
+          const s = await timeoutRace(syncRevocations(channel, d), deadline - Date.now());
+          push = s && s.synced ? 'ok' : ('failed:' + (s.reason || 'unknown'));
+        } catch (e) { push = 'failed:' + String(e && e.message).slice(0, 80); }
+        if (Date.now() < deadline) {
+          try {
+            const remain = Math.max(0, Math.min(KICK_PER_DEVICE_MS, deadline - Date.now()));
+            const out = await channel.runCommand(d, leaKeyRevokedCmd(keyIds), remain);
+            kick = (typeof out === 'string' && out.includes('"ok":true')) ? 'ok' : 'unexpected-output';
+          } catch (e) { kick = 'failed:' + String(e && e.message).slice(0, 80); }
+        } else { kick = 'skipped-budget'; }
+      }
+      devices.push({ device_id: d, push, kick, ms: Date.now() - t0 });
+    }
+    const elapsedMs = Date.now() - started;
+    audit('lea-key-revoked-kick', { key_ids: keyIds, device_ids: deviceIds, inflight_revoked: inflight, jobs_cancelled: jobs.cancelled, devices, elapsed_ms: elapsedMs, within_5s: elapsedMs <= 5000, reason: o.reason || 'key-revoked' });
+    return { ok: true, key_ids: keyIds, device_ids: deviceIds, inflight_revoked: inflight, jobs_cancelled: jobs.cancelled, cancelled_job_ids: jobs.job_ids, devices, elapsed_ms: elapsedMs, within_5s: elapsedMs <= 5000 };
   }
 
   // ---------- 准入：七项校验（DESIGN §6.2），服务端先拦 ----------
@@ -1162,7 +2494,7 @@ function createLeaCore(opts) {
     return { ok: true, key };
   }
 
-  // ---------- 信封组包（DESIGN §4.1；规范串 v1） ----------
+  // ---------- 信封组包（DESIGN §4.1；规范串 v2） ----------
   function buildEnvelope(input) {
     const issued = nowSec();
     // params 必须是 JSON 对象（顶层数组／标量即拒绝）：C 端只接受 JSON 对象
@@ -1170,8 +2502,20 @@ function createLeaCore(opts) {
     if (input.params != null && (typeof input.params !== 'object' || Array.isArray(input.params))) {
       throw new Error('LEA envelope params must be an object');
     }
+    // F-02：grantEpoch 必填（来源：admit() 返回的 grant.grant_epoch，
+    // admit 已验证它等于 Key 的 grant_epoch）。缺失／非安全整数／负数
+    // 即抛错不发信封，不得缺省为 0 后签名。
+    if (!Number.isSafeInteger(input.grantEpoch) || input.grantEpoch < 0) {
+      throw new Error('LEA envelope grant_epoch missing or invalid');
+    }
+    // B1：分级派生 job_id／mode／deadline_ms（与 C 端 lea_command_tier／
+    // lea_job_deadline_ms 逐项一致；显式传入时照传入值，校验在规范串层）。
+    const spec = COMMANDS[input.command];
+    const tier = spec ? (spec.tier || 1) : 1;
+    const tierCap = tier === 2 ? 120000 : 8000;
+    const effTimeout = input.timeoutMs !== undefined ? input.timeoutMs : (spec ? spec.timeoutMs : 5000);
     const env = {
-      version: 1,
+      version: 2,
       request_id: input.requestId,
       batch_id: input.batchId || null,
       seq: input.seq || 1,
@@ -1179,6 +2523,7 @@ function createLeaCore(opts) {
       account_id: String(input.accountId),
       api_key_id: input.keyId,
       binding_epoch: input.bindingEpoch,
+      grant_epoch: input.grantEpoch,
       nonce: crypto.randomBytes(16).toString('base64url'),
       issued_at: issued,
       expires_at: issued + ENVELOPE_TTL_S,
@@ -1188,8 +2533,83 @@ function createLeaCore(opts) {
       // 线上 params 子串即 stable JSON，C 端对原文算哈希才能对上（§2.1）。
       params: normalizeParams(input.params || {}),
       timeout_ms: input.timeoutMs,
+      job_id: input.jobId || input.requestId,
+      mode: input.mode || (input.command === 'script.run' ? 'async' : 'sync'),
+      deadline_ms: input.deadlineMs !== undefined ? input.deadlineMs : Math.min(effTimeout, tierCap),
     };
     return signEnvelope(env);
+  }
+
+  // ---------- RC-01：LEA 握手（签名参数＋版本绑定） ----------
+  // 握手是设备端接受任何业务命令的前置条件（RustDesk key_exchange 同款
+  // 思路：签名过的参数——服务端公钥指纹＋协议版本＋授权世代——三项一致
+  // 才接受；验签未完成不投递任何命令）。
+  // 形态：复用 v2 信封（不升 v3——信封字段不变），命令为 sys.handshake
+  // （tier 0 内联），params 带两项签名参数：
+  //   server_pubkey_fp：服务端 Ed25519 公钥的 SHA-256 指纹前 16 位 hex
+  //     （与 signingPublicKeyFingerprint 同定义：对 base64 公钥文本算
+  //     SHA-256；设备端 lea_server_pubkey_fingerprint 按同一定义算）；
+  //   protocol_version：2（须等于 LEA_PROTOCOL_VERSION）。
+  // binding_epoch／grant_epoch 已是信封顶层签名覆盖字段，不再进 params。
+  // 服务端缓存：每设备只在 (fp, binding_epoch, grant_epoch) 不变时视为
+  // 已握手；任一变化即重新握手。设备重启丢握手态时，服务端凭设备回的
+  // QFR_LEA_HANDSHAKE_REQUIRED 重新握手一次再重试（见 dispatchEnvelope）。
+  const HANDSHAKE_PROTOCOL_VERSION = 2;
+  const handshakeByDevice = new Map(); // bare device_id -> { fp, grantEpoch, bindingEpoch, at }
+  function handshakeState(deviceId) {
+    const s = handshakeByDevice.get(bareNodeId(String(deviceId || '')));
+    return s ? Object.assign({}, s) : null;
+  }
+  function invalidateHandshake(deviceId) {
+    handshakeByDevice.delete(bareNodeId(String(deviceId || '')));
+  }
+  function buildHandshakeEnvelope(input) {
+    const fp = signingPublicKeyFingerprint();
+    if (!fp) throw new Error('LEA handshake requires a configured signing key (no public key fingerprint)');
+    return buildEnvelope({
+      requestId: 'hs-' + randId(12), batchId: null, seq: 1,
+      deviceId: input.deviceId, accountId: input.accountId, keyId: input.keyId,
+      bindingEpoch: input.bindingEpoch, grantEpoch: input.grantEpoch,
+      idempotencyKey: 'hs-' + randId(12),
+      command: 'sys.handshake',
+      params: { server_pubkey_fp: fp, protocol_version: HANDSHAKE_PROTOCOL_VERSION },
+      timeoutMs: 5000,
+    });
+  }
+  async function ensureHandshake(channel, env) {
+    // env 为本次业务信封（须含 device_id／account_id／api_key_id／
+    // binding_epoch／grant_epoch）。sys.handshake 自身不走本函数。
+    const deviceId = bareNodeId(String(env.device_id || ''));
+    const fp = signingPublicKeyFingerprint();
+    // F-04 形态保留：签名能力未就绪（disabled／临时密钥）时不走握手，
+    // 由调用方沿用既有“下发门”拒绝形态（signingBlocked＋审计）。
+    if (!fp || signing.mode !== 'real') return { ok: false, reason: 'signing-not-real' };
+    const cached = handshakeByDevice.get(deviceId);
+    if (cached && cached.fp === fp && cached.grantEpoch === env.grant_epoch && cached.bindingEpoch === env.binding_epoch) {
+      return { ok: true, cached: true };
+    }
+    if (!channel || typeof channel.runCommand !== 'function') return { ok: false, reason: 'no-channel' };
+    let hsEnv;
+    try {
+      hsEnv = buildHandshakeEnvelope({
+        deviceId: env.device_id, accountId: env.account_id, keyId: env.api_key_id,
+        bindingEpoch: env.binding_epoch, grantEpoch: env.grant_epoch,
+      });
+    } catch (e) { return { ok: false, reason: 'build-failed', error: e }; }
+    let r;
+    try {
+      // 直调内层（不走 dispatchEnvelope 外层——避免健康预检／in-flight
+      // 递归；握手本身是 5 秒短命令，失败即本次下发拒绝）。
+      r = await dispatchEnvelopeInner(channel, hsEnv, { timeoutMs: 5000 });
+    } catch (e) { return { ok: false, reason: 'dispatch-threw', error: e }; }
+    if (r && r.ok) {
+      handshakeByDevice.set(deviceId, { fp, grantEpoch: env.grant_epoch, bindingEpoch: env.binding_epoch, at: now() });
+      audit('lea-handshake-completed', { device_id: env.device_id, account_id: env.account_id, api_key_id: env.api_key_id, binding_epoch: env.binding_epoch, grant_epoch: env.grant_epoch });
+      return { ok: true, cached: false };
+    }
+    const code = (r && r.clientResult && r.clientResult.code) || (r && r.error && String(r.error.message)) || 'unknown';
+    log({ ev: 'lea-handshake-failed', device_id: env.device_id, command: env.command, reason: code });
+    return { ok: false, reason: 'device-rejected', code };
   }
 
   // ---------- Job（长任务，DESIGN §4.3） ----------
@@ -1312,17 +2732,141 @@ function createLeaCore(opts) {
       return buildEnvelope({
         requestId: env.request_id + '-r2', batchId: null, seq: 1,
         deviceId: env.device_id, accountId: env.account_id, keyId: env.api_key_id,
-        bindingEpoch: env.binding_epoch, idempotencyKey: env.idempotency_key,
+        bindingEpoch: env.binding_epoch, grantEpoch: env.grant_epoch,
+        idempotencyKey: env.idempotency_key,
         command: env.command, params: env.params || {}, timeoutMs: env.timeout_ms,
       });
     } catch (e) { return null; }
   }
+  // B1 健康探测（DEGRADED 时下发前调用）：sys.ping 探测→失败则 sys.reset
+  // ＋sys.ping 验证。直接调 channel.runCommand（不走 dispatchEnvelope，
+  // 避免递归进健康检查）。探测信封用 buildEnvelope 新签（fresh requestId／
+  // idempotencyKey，同 device／account／binding）。
+  async function probeNodeHealth(channel, env) {
+    const mkEnv = (command) => buildEnvelope({
+      requestId: 'ping-' + randId(12), batchId: null, seq: 1,
+      deviceId: env.device_id, accountId: env.account_id, keyId: env.api_key_id,
+      bindingEpoch: env.binding_epoch, grantEpoch: env.grant_epoch,
+      idempotencyKey: 'probe-' + randId(12),
+      command, params: {}, timeoutMs: 5000,
+    });
+    const runOne = async (command) => {
+      try {
+        const e = mkEnv(command);
+        const b64 = Buffer.from(JSON.stringify(e), 'utf8').toString('base64');
+        const out = await channel.runCommand(e.device_id, leaClientCmd(b64), DISPATCH_TIMEOUT_MS);
+        const p = parseClientOutput(out);
+        return !!(p.ok && p.result);
+      } catch (err) { return false; }
+    };
+    if (await runOne('sys.ping')) return true;
+    // ping 失败：进 RECOVERING，sys.reset 后再 ping 验证。
+    const h = healthGet(env.device_id);
+    h.state = 'RECOVERING';
+    try { await runOne('sys.reset'); } catch (e) {}
+    if (await runOne('sys.ping')) { h.fails = 0; h.state = 'OK'; return true; }
+    return false;
+  }
+
+  // B1 外层：健康预检＋in-flight 名额＋超时计数（内层只管单次下发）。
   async function dispatchEnvelope(channel, env, optsD) {
+    // RC-01：握手门——业务命令下发前须先完成握手（sys.handshake 自身除外）。
+    // 握手失败即拒绝本次下发（不投递任何命令），调用方按 503 处理。
+    if (env.command !== 'sys.handshake') {
+      let hs;
+      try { hs = await ensureHandshake(channel, env); } catch (e) { hs = { ok: false, reason: 'threw' }; }
+      if (!hs.ok) {
+        // F-04：签名能力未就绪时沿用既有“下发门”拒绝形态（signingBlocked＋
+        // lea-dispatch-signing-blocked 审计），不改成 handshakeBlocked。
+        if (hs.reason === 'signing-not-real') {
+          log({ ev: 'lea-dispatch-signing-blocked', device_id: env.device_id, command: env.command, signing_mode: signing.mode });
+          return { ok: false, error: new Error('lea-signing-not-real'), attempts: 0, signingBlocked: true };
+        }
+        return { ok: false, error: new Error('lea-handshake-failed: ' + (hs.reason || 'unknown')), handshakeBlocked: true, attempts: 0 };
+      }
+    }
+    // 健康预检：DEGRADED 时先探测；sys.ping／sys.reset 本身是恢复命令，不预检。
+    const h = healthGet(env.device_id);
+    if (h.state !== 'OK' && env.command !== 'sys.ping' && env.command !== 'sys.reset') {
+      let okProbe = false;
+      try { okProbe = await probeNodeHealth(channel, env); } catch (e) { okProbe = false; }
+      if (!okProbe) {
+        return { ok: false, error: new Error('node-degraded-probe-failed'), notInstalled: true, attempts: 0 };
+      }
+      healthNoteSuccess(env.device_id);
+    }
+    // RC-02：在途下发登记（dispatchEnvelopeInner 单次下发）。同一 request_id
+    // 在途时 Key 被吊销，即把本次结果作废（不回执行结果，调用方须快照确认）。
+    // queueFull 时直接返回，不登记。
+    async function runOnce(e) {
+      if (!inflightAcquire(e.device_id)) {
+        return { ok: false, error: new Error('inflight-full'), queueFull: true, attempts: 0 };
+      }
+      const entry = { key_id: e.api_key_id, device_id: e.device_id, revoked: false };
+      inflightDispatches.set(e.request_id, entry);
+      let out;
+      try { out = await dispatchEnvelopeInner(channel, e, optsD); }
+      finally { inflightDispatches.delete(e.request_id); inflightRelease(e.device_id); }
+      if (out && out.ok && entry.revoked) {
+        out = { ok: false, error: new Error('lea-key-revoked-during-dispatch'), revokedDuringDispatch: true, attempts: out.attempts || 0 };
+      }
+      return out;
+    }
+    let r = await runOnce(env);
+    // RC-01：设备丢了握手态（重启）→ 重新握手一次，再用全新信封重试一次。
+    // 批量步（batch_id 非空）换不出新信封时不重试，原错返回。
+    if (r && !r.ok && r.clientResult && r.clientResult.code === ERR.HANDSHAKE_REQUIRED && env.command !== 'sys.handshake') {
+      invalidateHandshake(env.device_id);
+      let hs2 = null;
+      try { hs2 = await ensureHandshake(channel, env); } catch (e) { hs2 = null; }
+      if (hs2 && hs2.ok) {
+        const fresh = freshRetryEnvelope(env);
+        if (fresh) r = await runOnce(fresh);
+      }
+    }
+    // C1：下发成功即记设备最后在线（60 秒节流，见 touchDeviceSeen）。
+    if (r && r.ok) { try { touchDeviceSeen(env.device_id); } catch (e) {} }
+    // 超时计数：下发超时（通道超时／客户端 timeout JSON 终态）记一次；
+    // 成功即清零。accepted（异步接纳）不记超时（命令已入队，结果未到
+    // 不是通道故障）。
+    if (r && r.timeout) healthNoteTimeout(env.device_id);
+    else if (r && r.ok) healthNoteSuccess(env.device_id);
+    else if (r && r.clientResult && r.clientResult.code === 'QFR_LEA_TIMEOUT') healthNoteTimeout(env.device_id);
+    return r;
+  }
+
+  async function dispatchEnvelopeInner(channel, env, optsD) {
     optsD = optsD || {};
-    // H21：下发前先把本机吊销表推到最新全集（best-effort，不拦本次命令；
-    // 同步失败只记日志，下次下发重试；admit 是第一层控制）。
-    try { await syncRevocations(channel, env.device_id); } catch (e) { log({ ev: 'lea-revocation-sync-failed', device_id: env.device_id, err: String(e && e.message) }); }
+    // F-04 下发门：非 real 签名模式一律拒绝下发并记审计（disabled 与
+    // placeholder-ephemeral 均拦；临时密钥签的信封永不离站）。
+    if (signing.mode !== 'real') {
+      log({ ev: 'lea-dispatch-signing-blocked', device_id: env.device_id, command: env.command, signing_mode: signing.mode });
+      return { ok: false, error: new Error('lea-signing-not-real'), attempts: 0, signingBlocked: true };
+    }
     const spec = COMMANDS[env.command] || { dangerous: false };
+    // H21＋F-01 分级门：下发前先把本机吊销表推到最新全集。同步成功／
+    // 本就已同步／无吊销时一切照常；同步失败时：
+    //   - 危险命令（spec.dangerous）禁止下发，返回 revocation-sync-failed
+    //     （不重试——重试同一信封会撞重放，调用方须持新信封显式重试）；
+    //   - 非危险命令与 sys.ping／sys.info（只读）／sys.reset（恢复命令）
+    //     继续下发：服务端 admit 仍是第一层实时控制（Key 吊销实时查），
+    //     设备端三态吊销检查同样覆盖 sys.* 内联路径。sys.reset 允许过门
+    //     的理由：它是 B1 通道自愈的指定恢复命令、无执行载荷、且 COMMANDS
+    //     里它本就不是 dangerous；把它拦在门外会让通道自愈无法恢复。
+    // 不做端到端吊销世代 ACK 门（后续项，F-01 不扩大范围）。
+    // 危险命令被门拦时记一条可审计日志（lea-revocation-sync-blocked）。
+    let sync = null;
+    try { sync = await syncRevocations(channel, env.device_id); } catch (e) { log({ ev: 'lea-revocation-sync-failed', device_id: env.device_id, err: String(e && e.message) }); sync = { synced: false, reason: 'sync-threw' }; }
+    if (sync && !sync.synced && spec.dangerous) {
+      log({ ev: 'lea-revocation-sync-blocked', device_id: env.device_id, command: env.command, generation: (sync && sync.generation) || null, reason: sync.reason || null });
+      return { ok: false, error: new Error('revocation-sync-failed'), attempts: 0, revocationSyncBlocked: true };
+    }
+    // R5（Q7 审阅第 7 点前置①）：同步失败但放行 sys.reset 时记一条
+    // 降级放行事件（lea-revocation-sync-degraded-allow，带 command／
+    // generation／reason）。只加事件，不改分级门逻辑、不改 sys.reset 行为。
+    if (sync && !sync.synced && env.command === 'sys.reset') {
+      log({ ev: 'lea-revocation-sync-degraded-allow', device_id: env.device_id, command: env.command, generation: (sync && sync.generation) || null, reason: sync.reason || null });
+    }
     const timeoutMs = optsD.timeoutMs || DISPATCH_TIMEOUT_MS;
     let attempts = 0;
     const maxAttempts = spec.dangerous ? 1 : 2; // 危险命令禁自动重试
@@ -1346,7 +2890,13 @@ function createLeaCore(opts) {
         // 回传：stdout 应含客户端 JSON 行；解析失败（无 JSON 行）即视为
         // 回传失败（DS 复核：状态未知，不自动重试，见下）。
         const parsed = parseClientOutput(out);
-        if (parsed.ok) return { ok: true, result: parsed.result, attempts, raw: out };
+        if (parsed.ok) return { ok: true, result: parsed.result, attempts, raw: out, accepted: parsed.accepted || undefined };
+        // B1：只有 ACK（异步已接纳，或结果行被截断／客户端在 ACK 后被杀）：
+        // 命令已入 LEA 队列，结果未知，不重试（重试会重复执行），走 job 异步。
+        // mode=async 时是预期内的异步接纳；mode=sync 时是结果丢失，按 UNKNOWN 处理。
+        if (parsed.acceptedOnly) {
+          return { ok: false, accepted: true, asyncExpected: curEnv.mode === 'async', acceptedResult: parsed.accepted, error: new Error('accepted-no-result'), attempts };
+        }
         // r9：客户端已回包且执行失败（ok:false）是终态，不是回传故障：
         // 不重试（同信封重试撞 REPLAY_DETECTED，新信封重试则会把一次已
         // 失败的执行再跑一遍），把真实错误带回调用方透传。
@@ -1386,19 +2936,28 @@ function createLeaCore(opts) {
     // bad-client-output（r8 实证：LEA 侧 click 78ms 已成功执行，服务端
     // 仍判下发失败；手动派发能通，只因人眼从 transcript 里挑出了 JSON 行）。
     // 修法：逐行扫描，取首个能解析为含布尔 ok 字段的 JSON 对象行。
+    // B1 两行协议：客户端先回 ACK 行（code QFR_LEA_ACCEPTED，ok:true），
+    // 再回结果行。ACK 不是终态：跳过它，取下一 JSON 行当结果；只有 ACK
+    // 无结果行时回 accepted（异步已接纳／结果未到，调用方按 job 异步处理，
+    // 不把 ACK 当成功结果——否则一次 ui.click 会被谎报已执行）。
     const lines = out.split(/\r?\n/);
+    let ack = null;
     for (const raw of lines) {
       const line = raw.trim();
       if (!line || line[0] !== '{') continue;
       let v;
       try { v = JSON.parse(line); } catch (e) { continue; }
       if (!v || typeof v !== 'object' || Array.isArray(v) || typeof v.ok !== 'boolean') continue;
+      if (v.code === 'QFR_LEA_ACCEPTED') { ack = v; continue; }
       // H15：只认 ok===true 为成功；ok===false 是客户端终态失败，把真实
       // 错误带回（不再谎报 bad-client-output），由 dispatchEnvelope 不重
       // 试、handleExecute 按客户端 code 透传。
-      if (v.ok === true) return { ok: true, result: v };
-      return { ok: false, clientResult: v };
+      if (v.ok === true) return { ok: true, result: v, accepted: ack || undefined };
+      return { ok: false, clientResult: v, accepted: ack || undefined };
     }
+    // 只有 ACK（异步已接纳，或结果行被截断／客户端在 ACK 后被杀）：
+    // 不是成功也不是失败，调用方按“已接纳、结果未知”走 job 异步。
+    if (ack) return { ok: false, accepted: ack, acceptedOnly: true };
     return { ok: false };
   }
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1406,18 +2965,42 @@ function createLeaCore(opts) {
   return {
     dir, log, audit, pruneAudit, pruneJobs,
     COMMANDS, ERR, KEY_PREFIX, IDEM_NS,
-    signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
+    DISPATCH_TIMEOUT_MS, SYNC_WAIT_MS,
+    B1_JOB_UNKNOWN_TIMEOUT_MS, B1_INFLIGHT_MAX, B1_SWEEP_MS, B1_HEALTH_FAILS,
+    signingInfo, signingPublicKeyFingerprint, signEnvelope, verifyEnvelope, envelopeSigningBytes,
+    // RC-01：握手（签名参数＋版本绑定）
+    HANDSHAKE_PROTOCOL_VERSION, buildHandshakeEnvelope, ensureHandshake, handshakeState, invalidateHandshake,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,
+    // C1：自助绑定（issue/complete/renew/status/自助吊销/最后在线）
+    issueSelfBindTicket, completeSelfBind, renewSelfBindKey, selfBindStatus,
+    revokeSelfBindKey, revokeAllSelfBindKeys, touchDeviceSeen,
+    // RC-04：断线重连票据（issue/verify+消费/作废）
+    issueReconnectTicket, verifyReconnectTicket, voidReconnectTickets,
+    reconnectTicketSigningBytes, signReconnectTicket, verifyReconnectTicketSignature,
+    RECONNECT_TICKET_TTL_S,
+    // 崩溃上报接收（CRASH-REPORT-SPEC.md）：匿名接收＋强防护
+    validateCrashReport, storeCrashReport, scrubCrashStack,
+    CRASH_BODY_MAX_BYTES, CRASH_STACK_MAX_BYTES, CRASH_MAX_FILES, CRASH_MAX_TOTAL_BYTES,
+    // 卸载注销（2026-11-14）：删绑定＋自助票据，Key／grant 不动
+    deregisterDevice, deregisterSigningBytes,
+    selfBindCompleteSigningBytes, selfBindRenewSigningBytes, selfBindParseDevicePubkey, selfBindVerifySignature,
+    ecdsaP1363ToDer, ecdsaDerToP1363,
+    SELFBIND_TICKET_TTL_S, SELFBIND_KEY_DAYS, SELFBIND_RENEW_WINDOW_MS, SELFBIND_RENEW_DAYS,
     grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId,
-    recordBinding, getBinding,
+    recordBinding, getBinding, devicesForAccount,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
-    createJob, getJob, updateJob, sweepStaleJobs,
+    // RC-02：吊销即踢在线会话
+    KICK_TOTAL_BUDGET_MS, markInflightRevoked, cancelJobsForKeys, leaKeyRevokedCmd, kickRevokedSessions,
+    createJob, getJob, updateJob, sweepStaleJobs, sweepB1Jobs,
+    // B1：供路由层／单测的健康与名额状态（不含任何 Key 明文）
+    healthGet, healthNoteSuccess, healthNoteTimeout, inflightAcquire, inflightRelease,
+    probeNodeHealth,
     getRevocations, syncRevocations, leaRevocationsWriteCmd,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
-    _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
+    _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, loadDeregistered, loadReconnectTickets, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
   };
 }
 
-module.exports = { createLeaCore, COMMANDS, ERR, KEY_PREFIX, ENVELOPE_TTL_S, TICKET_TTL_S, DISPATCH_TIMEOUT_MS, SYNC_WAIT_MS };
+module.exports = { createLeaCore, COMMANDS, ERR, KEY_PREFIX, ENVELOPE_TTL_S, TICKET_TTL_S, DISPATCH_TIMEOUT_MS, SYNC_WAIT_MS, B1_JOB_UNKNOWN_TIMEOUT_MS, B1_INFLIGHT_MAX, B1_SWEEP_MS, B1_HEALTH_FAILS };

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'constants.dart';
+import 'release_signature.dart';
 
 /// 更新清单（服务器 release.json）里一个平台的条目。
 /// 格式与 Windows 版 update.js 的 fetchManifest 完全一致：
@@ -40,13 +41,35 @@ class ReleaseEntry {
 /// 校验规则与 Windows 版对齐：版本号必须是 x.y.z、必须有下载地址、
 /// 下载地址只许指向可信 origin、SHA256 必须是完整 64 位十六进制。
 /// 任一不合规抛 FormatException，调用方安静处理（不弹错误框）。
+///
+/// F-05（3.0.0 严格阻断项）：清单签名必验。解析在结构校验通过后验
+/// signature={alg:'ed25519',key_id,sig}（规范与 Windows 版 H26 同款，
+/// 见 release_signature.dart）；验签不过即抛 FormatException、整单
+/// 拒绝（fail-closed），不许退回“只核 SHA256”。
+/// 2026-11-16 站长终局：r11③ 有界兼容垫片（缺签名且两端版本号都
+/// ≤2.4.4 时放行）已删——缺签名即拒绝，不再有“无签名旧清单放行”
+/// 的例外；线上清单须先带上有效签名，否则新版客户端取不到清单、
+/// 更新走不下去（发版前须先签发带签名的 release.json）。
+/// [verifyPublicKeyB64] 仅测试注入用（测试密钥对）；生产恒用内嵌公钥。
 class ReleaseManifest {
   final ReleaseEntry? windows;
   final ReleaseEntry? android;
 
-  const ReleaseManifest({required this.windows, required this.android});
+  /// 清单签名是否验证通过。parse 返回的清单恒为 true——验签失败时
+  /// parse 直接抛错，不会返回任何“带病清单”。
+  final bool signatureVerified;
 
-  static ReleaseManifest parse(String body, {String? trustedOrigin}) {
+  const ReleaseManifest({
+    required this.windows,
+    required this.android,
+    required this.signatureVerified,
+  });
+
+  static ReleaseManifest parse(
+    String body, {
+    String? trustedOrigin,
+    String? verifyPublicKeyB64,
+  }) {
     final origin = trustedOrigin ?? kTrustedOrigin;
     dynamic root;
     try {
@@ -98,9 +121,25 @@ class ReleaseManifest {
       );
     }
 
+    final windowsEntry = parseEntry(root);
+    final androidEntry = parseEntry(root['android']);
+
+    // F-05：结构校验通过后验清单签名。验签不过（缺签名、签名在场但
+    // 验不过、算法/代次不对）一律整单拒绝（fail-closed）；不存在
+    // “无签名旧清单放行”的例外（r11③ 垫片已于 2026-11-16 按站长
+    // 终局删除）。
+    final vr = verifyReleaseSignature(
+      root,
+      publicKeyB64: verifyPublicKeyB64,
+    );
+    if (!vr.ok) {
+      throw FormatException('更新清单签名无效（${vr.reason}），拒绝更新');
+    }
+
     return ReleaseManifest(
-      windows: parseEntry(root),
-      android: parseEntry(root['android']),
+      windows: windowsEntry,
+      android: androidEntry,
+      signatureVerified: true,
     );
   }
 }

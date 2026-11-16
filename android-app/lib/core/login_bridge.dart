@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../ui/theme.dart';
+
 /// 控制台登录页桥（2.3.0 安卓端）：原生层与 WebView 里 MeshCentral 登录页之间的约定。
 ///
 /// 背景：登录发生在控制台网页里（#loginpanel / #username / #password /
@@ -25,7 +27,7 @@ const String kHandlerLoginSubmit = 'qfLoginSubmit';
 const String kHandlerManualLogout = 'qfManualLogout';
 
 /// JS 处理器名：登录页许可入口导航（2.3.1 登录页版式 16:37 定版——
-/// 登录/注册区最后一行「购买密钥」黑底白字、其下「查询密钥」蓝色无边框
+/// 登录/注册区最后一行「购买密钥」黑底白字、其下「查询密钥」主文字色加下划线
 /// 文字链；其下另有「申诉换绑设备」文字链（§11.9，与查询密钥同式）；
 /// 点击经本处理器回原生层，由原生层在壳内打开 /purchase、/license/status
 /// 或带本机设备码打开 /license/rebind，不许整页外跳）。
@@ -143,11 +145,30 @@ String buildLoginBridgeJs({
   required bool rememberPasswordChecked,
   required bool rememberDeviceChecked,
   required bool fillSaved,
+  // A4（剩余-3 定夺，黑白化修订）：注入的「购买密钥」按钮黑底白字不变——
+  // 浅色 #000000、深色卡片色 #111113（6 项定夺②灰阶审计合并：深色由
+  // surface3 #18181B 并入卡片色，与原生 license_section 购买钮同值；
+  // 对 4px 白垫 18.86:1）；两端统一加主色 2px 边框（brand，
+  // 浅色 #000000／深色 #FFFFFF，不许第二处字面量）；focus-visible 白色
+  // 2px 描边、offset 2px（见注入样式 qfBuyKeyFocusStyle；登录页宿主恒为
+  // 深蓝渐变，白描边对其 6.00–12.61 清晰可见，故第 6 项改色只动原生
+  // license_section，不动此处）。
+  // 第 5 项（7 项定夺）：壳按钮外包 4px 白垫（见注入内 buyPad），边框改
+  // 主色：浅色 #000000 对白垫 21.00:1；深色白边框对白垫 1.0（与垫同色），
+  // 按钮边界改由 #111113 底色对白垫 18.86:1 承载。
+  bool isDark = false,
 }) {
   final u = jsonEncode(savedUsername ?? '');
   final p = jsonEncode(savedPassword ?? '');
   final hasSaved =
       (savedUsername ?? '').isNotEmpty && (savedPassword ?? '').isNotEmpty;
+  final buyBg = isDark ? '#111113' : '#000000';
+  final pal = QfPalette(isDark ? QfThemeMode.dark : QfThemeMode.blue);
+  final buyBorder = '2px solid ${pal.brandCssHex}';
+  // 查询／换绑文字链走链接色（定夺 §3.3：不用蓝，主文字色＋下划线）：
+  // 浅 #09090B＋下划线 #A1A1AA／深 #FFFFFF＋下划线 #52525B。
+  final linkHex = pal.linkCssHex;
+  final linkUnderlineHex = pal.linkUnderlineCssHex;
   return '''
 (function () {
   var SAVED_U = $u;
@@ -225,7 +246,7 @@ String buildLoginBridgeJs({
     }
   }
   // 2.3.1 登录页版式（16:37 定版）：登录区最后一行「购买密钥」黑底白字钮，
-  // 其下「查询密钥」「申诉换绑设备」蓝色无边框文字链。服务端登录页模板
+  // 其下「查询密钥」「申诉换绑设备」主文字色加下划线文字链。服务端登录页模板
   // 已注入同 id 的三行（隧道页即用它们），但其相对 href 在直连控制台源
   // 上指向本源路径、不可用；壳的口径：逐行处理——页面已有的行只接管
   // 点击（改走原生层壳内打开扩展源的 /purchase、/license/status 与换绑
@@ -253,19 +274,37 @@ String buildLoginBridgeJs({
       panel.appendChild(lbox);
     }
     if (!srvBuy && !document.getElementById('qfBuyKeyRowShell')) {
+      // A4 剩余-3 定夺：focus-visible 白色 2px 描边、offset 2px。
+      // 注入样式只建一次（id 守卫，与按钮同分支；服务端已有行不走此分支）。
+      if (!document.getElementById('qfBuyKeyFocusStyle')) {
+        var qfFocusStyle = document.createElement('style');
+        qfFocusStyle.id = 'qfBuyKeyFocusStyle';
+        qfFocusStyle.textContent = '#qfBuyKeyRowShell:focus-visible{outline:2px solid #FFFFFF;outline-offset:2px}';
+        var qfHead = document.head || document.documentElement;
+        qfHead.appendChild(qfFocusStyle);
+      }
       var buy = document.createElement('button');
       buy.type = 'button';
       buy.id = 'qfBuyKeyRowShell';
       buy.textContent = '购买密钥';
-      buy.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:#111;color:#fff;border:0;border-radius:9px;padding:11px 0;font-size:15px;cursor:pointer';
+      buy.style.cssText = 'display:block;width:100%;box-sizing:border-box;background:$buyBg;color:#fff;border:$buyBorder;border-radius:9px;padding:11px 0;font-size:15px;cursor:pointer';
       buy.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'purchase' }); });
-      lbox.appendChild(buy);
+      // 第 5 项定夺（2026-11-13，7 项；黑白化修订）：登录页深蓝渐变宿主上旧品牌蓝
+      // 边框仅 1.28–2.68:1；按钮外包 4px 白色垫层（Flutter Container 等效：
+      // padding 4／白底／圆角 12），边框改主色：浅色 #111 对白垫 18.88:1，
+      // 深色白边框对白垫 1.0、按钮底色对白垫 18.86:1。服务端已有行（白字无边框
+      // 链接）不在此列，桥仍只接管其点击。
+      var buyPad = document.createElement('div');
+      buyPad.id = 'qfBuyKeyRowPad';
+      buyPad.style.cssText = 'box-sizing:border-box;padding:4px;background:#FFFFFF;border-radius:12px';
+      buyPad.appendChild(buy);
+      lbox.appendChild(buyPad);
     }
     if (!srvQuery && !document.getElementById('qfQueryKeyRowShell')) {
       var query = document.createElement('div');
       query.id = 'qfQueryKeyRowShell';
       query.textContent = '查询密钥';
-      query.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0';
+      query.style.cssText = 'display:block;text-align:center;color:$linkHex;font-size:14px;padding:10px 0 2px 0;cursor:pointer;background:none;border:0;text-decoration:underline;text-decoration-color:$linkUnderlineHex;text-underline-offset:3px';
       query.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'status' }); });
       lbox.appendChild(query);
     }
@@ -273,7 +312,7 @@ String buildLoginBridgeJs({
       var rebind = document.createElement('div');
       rebind.id = 'qfRebindRowShell';
       rebind.textContent = '申诉换绑设备';
-      rebind.style.cssText = 'display:block;text-align:center;color:#2470E0;font-size:14px;padding:4px 0 2px 0;cursor:pointer;background:none;border:0';
+      rebind.style.cssText = 'display:block;text-align:center;color:$linkHex;font-size:14px;padding:4px 0 2px 0;cursor:pointer;background:none;border:0;text-decoration:underline;text-decoration-color:$linkUnderlineHex;text-underline-offset:3px';
       rebind.addEventListener('click', function () { call('$kHandlerLicenseNav', { target: 'rebind' }); });
       lbox.appendChild(rebind);
     }

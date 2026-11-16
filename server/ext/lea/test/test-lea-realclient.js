@@ -94,7 +94,7 @@ async function main() {
   const core = createLeaCore({ dir: tmpDir, enableSweeps: false });
   const DEV = 'node//test-device-1';
   const USER = 'alice';
-  core.grantMuse(USER, 'owner'); // T07：建 Key 前先授权，否则盖上的 grant_epoch 为 0
+  core.grantMuse(USER, 'owner'); // H06：建 Key 须先有授权
   const gen = core.generateKey(USER, { device_scope: DEV });
   let seq = 0;
 
@@ -160,7 +160,7 @@ async function main() {
   function mkEnv(requestId, command, params) {
     return core.buildEnvelope({
       requestId, batchId: null, seq: ++seq, deviceId: DEV, accountId: USER,
-      keyId: gen.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-' + requestId,
+      keyId: gen.record.key_id, bindingEpoch: 1, grantEpoch: 1, idempotencyKey: 'idem-' + requestId,
       command, params: params || {}, timeoutMs: 5000,
     });
   }

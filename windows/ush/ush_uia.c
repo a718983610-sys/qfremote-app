@@ -474,6 +474,146 @@ static HWND element_window(IUIAutomationElement *el) {
     return hwnd;
 }
 
+/* ---------- S-024：执行前目标信息 ---------- */
+/* hwnd 哈希（FNV-1a 64，16 位小写 hex）：结果里只给哈希，绝不暴露原始句柄值。 */
+static void hwnd_hash_hex(HWND hwnd, char out[17]) {
+    unsigned long long h = 1469598103934665603ULL;
+    unsigned long long v = (unsigned long long)(ULONG_PTR)hwnd;
+    for (int i = 0; i < 8; i++) {
+        h ^= (v >> (i * 8)) & 0xFFULL;
+        h *= 1099511628211ULL;
+    }
+    snprintf(out, 17, "%016llx", h);
+}
+
+/* 进程完整性级别名：low／medium／high／system；打不开进程／token 或
+ * 级别不在已知区间时填 "unknown"（fail-closed 到“未知”，不谎报级别）。 */
+static void integrity_level_name(DWORD pid, char *out, size_t out_size) {
+    const char *name = "unknown";
+    HANDLE hp = NULL;
+    if (pid && out && out_size) {
+        hp = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (hp) {
+            HANDLE tok = NULL;
+            if (OpenProcessToken(hp, TOKEN_QUERY, &tok)) {
+                DWORD len = 0;
+                GetTokenInformation(tok, TokenIntegrityLevel, NULL, 0, &len);
+                if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && len > 0) {
+                    TOKEN_MANDATORY_LABEL *tml = (TOKEN_MANDATORY_LABEL *)malloc(len);
+                    if (tml && GetTokenInformation(tok, TokenIntegrityLevel, tml, len, &len)) {
+                        DWORD sub = *GetSidSubAuthority(tml->Label.Sid, 0);
+                        if (sub == SECURITY_MANDATORY_LOW_RID) name = "low";
+                        else if (sub == SECURITY_MANDATORY_MEDIUM_RID) name = "medium";
+                        else if (sub == SECURITY_MANDATORY_HIGH_RID) name = "high";
+                        else if (sub == SECURITY_MANDATORY_SYSTEM_RID) name = "system";
+                    }
+                    free(tml);
+                }
+                CloseHandle(tok);
+            }
+            CloseHandle(hp);
+        }
+    }
+    if (out && out_size) snprintf(out, out_size, "%s", name);
+}
+
+/* UTF-8 安全截断：最多 max_bytes 字节，且不在多字节字符中间截断
+ *（截断点落在续字节 10xxxxxx 上时回退到该字符起始字节）。 */
+static void utf8_truncate_safe(const char *src, size_t max_bytes, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!src) return;
+    size_t len = strlen(src);
+    size_t cap = max_bytes;
+    if (cap >= out_size) cap = out_size - 1;
+    if (len <= cap) { snprintf(out, out_size, "%s", src); return; }
+    size_t cut = cap;
+    while (cut > 0 && (src[cut] & 0xC0) == 0x80) cut--;
+    if (cut == 0) { out[0] = '\0'; return; } /* 首字符本身超长，无安全截断点 */
+    memcpy(out, src, cut);
+    out[cut] = '\0';
+}
+
+/* 目标信息 JSON 对象（不含外层多余字段，调用方直接拼进 data_json）：
+ *   {"hwnd_hash":"…","title":"…","pid":123,"session_id":1,
+ *    "integrity":"medium","dpi":96,"coords":{"x":100,"y":200},
+ *    "pre_state":"…"}
+ * el 为 NULL 时 title 取窗口标题（GetWindowTextW）；hwnd 为 NULL 时
+ * hwnd_hash／pid／session_id 为 null，integrity 为 "unknown"，dpi
+ * fallback 96；title 最多 64 字节、pre_state 最多 256 字符，均按
+ * UTF-8 安全截断；取不到的字段填 null／"unknown"。
+ * 成功返回 1（out 已填对象原文）；空间不足返回 0（out 置空）。 */
+static int ush_uia_target_json(IUIAutomationElement *el, HWND hwnd, const POINT *pt,
+                               const char *pre_state, char *out, size_t out_size) {
+    if (!out || out_size == 0) return 0;
+    out[0] = '\0';
+    char hash[17] = { 0 };
+    char title_raw[512] = { 0 };
+    char title[128] = { 0 };
+    char title_esc[1024] = { 0 };
+    char pre[512] = { 0 };
+    char pre_esc[2048] = { 0 };
+    DWORD pid = 0;
+    DWORD sid = 0;
+    int have_pid = 0, have_sid = 0;
+    char integrity[16] = { 0 };
+    UINT dpi = 96;
+
+    if (hwnd) {
+        hwnd_hash_hex(hwnd, hash);
+        if (GetWindowThreadProcessId(hwnd, &pid) && pid) {
+            have_pid = 1;
+            if (ProcessIdToSessionId(pid, &sid)) have_sid = 1;
+            integrity_level_name(pid, integrity, sizeof(integrity));
+        } else {
+            snprintf(integrity, sizeof(integrity), "%s", "unknown");
+        }
+        UINT d = GetDpiForWindow(hwnd);
+        if (d != 0) dpi = d;
+    } else {
+        snprintf(integrity, sizeof(integrity), "%s", "unknown");
+    }
+    if (el) get_str_prop(el, UIA_NamePropertyId, title_raw, sizeof(title_raw));
+    if (!title_raw[0] && hwnd) {
+        WCHAR wt[256] = { 0 };
+        if (GetWindowTextW(hwnd, wt, 256) > 0) wide_to_utf8(wt, title_raw, sizeof(title_raw));
+    }
+    utf8_truncate_safe(title_raw, 64, title, sizeof(title));
+    ush_json_escape(title, title_esc, sizeof(title_esc));
+    if (pre_state) {
+        utf8_truncate_safe(pre_state, 256, pre, sizeof(pre));
+        ush_json_escape(pre, pre_esc, sizeof(pre_esc));
+    }
+    char coords[64] = { 0 };
+    if (pt) snprintf(coords, sizeof(coords), "{\"x\":%ld,\"y\":%ld}", (long)pt->x, (long)pt->y);
+    else snprintf(coords, sizeof(coords), "%s", "null");
+    char pid_s[32] = { 0 }, sid_s[32] = { 0 };
+    if (have_pid) snprintf(pid_s, sizeof(pid_s), "%lu", (unsigned long)pid);
+    else snprintf(pid_s, sizeof(pid_s), "%s", "null");
+    if (have_sid) snprintf(sid_s, sizeof(sid_s), "%lu", (unsigned long)sid);
+    else snprintf(sid_s, sizeof(sid_s), "%s", "null");
+    char title_j[1100] = { 0 };
+    if (title[0]) snprintf(title_j, sizeof(title_j), "\"%s\"", title_esc);
+    else snprintf(title_j, sizeof(title_j), "%s", "null");
+    char pre_j[2100] = { 0 };
+    if (pre_state) snprintf(pre_j, sizeof(pre_j), "\"%s\"", pre_esc);
+    else snprintf(pre_j, sizeof(pre_j), "%s", "null");
+    int n;
+    if (hwnd) {
+        n = snprintf(out, out_size,
+                     "{\"hwnd_hash\":\"%s\",\"title\":%s,\"pid\":%s,\"session_id\":%s,"
+                     "\"integrity\":\"%s\",\"dpi\":%u,\"coords\":%s,\"pre_state\":%s}",
+                     hash, title_j, pid_s, sid_s, integrity, dpi, coords, pre_j);
+    } else {
+        n = snprintf(out, out_size,
+                     "{\"hwnd_hash\":null,\"title\":%s,\"pid\":null,\"session_id\":null,"
+                     "\"integrity\":\"%s\",\"dpi\":%u,\"coords\":%s,\"pre_state\":%s}",
+                     title_j, integrity, dpi, coords, pre_j);
+    }
+    if (n < 0 || (size_t)n >= out_size) { out[0] = '\0'; return 0; }
+    return 1;
+}
+
 /* 仅坐标点击需要：还原并前置窗口。后台 Pattern 路径不调用。 */
 static void bring_window_forward(HWND hwnd) {
     if (!hwnd) return;
@@ -481,6 +621,17 @@ static void bring_window_forward(HWND hwnd) {
     else ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
     Sleep(50);
+}
+
+/* BoundingRectangle 回退中心点：UIA_BoundingRectanglePropertyId 返回的
+ * SAFEARRAY 是 UiaRect [left, top, width, height]（不是 [l,t,r,b]），
+ * 中心须为 left + width/2、top + height/2。N-10（2026-11-15）：旧代码
+ * 把 width/height 当右／下边沿算 (left+width)/2，点落在元素之外
+ * （如 left=100、width=50 时真中心 x=125，旧代码得 75），可能误触
+ * 别的控件。抽成独立函数供单测直验。 */
+static void bounding_rect_center(const double rect[4], POINT *pt) {
+    pt->x = (LONG)(rect[0] + rect[2] / 2.0);
+    pt->y = (LONG)(rect[1] + rect[3] / 2.0);
 }
 
 /* 取元素可点击点（ClickablePoint，失败则用 BoundingRectangle 中心）。 */
@@ -507,8 +658,7 @@ static int clickable_point(IUIAutomationElement *el, POINT *pt) {
                     double d = 0;
                     if (SafeArrayGetElement(sa, &(LONG){lb + i}, &d) == S_OK) rect[i] = d;
                 }
-                pt->x = (LONG)((rect[0] + rect[2]) / 2.0);
-                pt->y = (LONG)((rect[1] + rect[3]) / 2.0);
+                bounding_rect_center(rect, pt);
                 ok = 1;
             }
         }
@@ -658,14 +808,19 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
                 Sleep(150);
                 char *after = element_signature(el);
                 int changed = (!before && !after) ? 0 : (!before || !after || strcmp(before, after) != 0);
+                /* S-024：结果带执行前目标信息＋CONFIRMED（el 释放前建 target）。 */
+                char target[4096] = { 0 };
+                HWND thwnd = element_window(el);
+                ush_uia_target_json(el, thwnd, NULL, before, target, sizeof(target));
                 free(before);
                 free(after);
                 el->lpVtbl->Release(el);
                 /* Pattern Invoke 返回 S_OK 即为执行确认；change_observed 只是
                  * 附加信号（有些控件点击后自身属性不变，如导航按钮）。 */
                 snprintf(data_json, data_size,
-                    "{\"method\":\"pattern\",\"confirmed\":true,\"change_observed\":%s,\"retries\":%d}",
-                    changed ? "true" : "false", attempt);
+                    "{\"method\":\"pattern\",\"confirmed\":true,\"status\":\"CONFIRMED\","
+                    "\"target\":%s,\"change_observed\":%s,\"retries\":%d}",
+                    target[0] ? target : "null", changed ? "true" : "false", attempt);
                 scope->lpVtbl->Release(scope);
                 if (retry_count) *retry_count = attempt;
                 return 1;
@@ -681,13 +836,17 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
                 Sleep(150);
                 char *a2 = element_signature(el);
                 int changed = (!b2 && !a2) ? 0 : (!b2 || !a2 || strcmp(b2, a2) != 0);
+                /* S-024：坐标点击成功带目标信息＋CONFIRMED（el 释放前建 target）。 */
+                char target[4096] = { 0 };
+                ush_uia_target_json(el, hwnd, &pt, b2, target, sizeof(target));
                 free(b2);
                 free(a2);
                 el->lpVtbl->Release(el);
                 if (changed) {
                     snprintf(data_json, data_size,
-                        "{\"method\":\"coordinate\",\"x\":%ld,\"y\":%ld,\"confirmed\":true,\"retries\":%d}",
-                        (long)pt.x, (long)pt.y, attempt);
+                        "{\"method\":\"coordinate\",\"x\":%ld,\"y\":%ld,\"confirmed\":true,"
+                        "\"status\":\"CONFIRMED\",\"target\":%s,\"retries\":%d}",
+                        (long)pt.x, (long)pt.y, target[0] ? target : "null", attempt);
                     scope->lpVtbl->Release(scope);
                     if (retry_count) *retry_count = attempt;
                     return 1;
@@ -728,10 +887,17 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
             if (have_pt) {
                 bring_window_forward(hwnd);
                 send_mouse_click(pt);
+                /* S-024：无元素可确认的坐标点击只报 NOT_CONFIRMED，并附
+                 * WindowFromPoint 取到的目标窗口信息（点到哪个窗口可查，
+                 * 但不谎称“点中了预期控件”）。 */
+                HWND phwnd = WindowFromPoint(pt);
+                char target[4096] = { 0 };
+                ush_uia_target_json(NULL, phwnd, &pt, NULL, target, sizeof(target));
                 snprintf(data_json, data_size,
                     "{\"method\":\"coordinate\",\"x\":%ld,\"y\":%ld,\"confirmed\":false,"
+                    "\"status\":\"NOT_CONFIRMED\",\"target\":%s,"
                     "\"note\":\"coordinate click has no element to confirm against\",\"retries\":%d}",
-                    (long)pt.x, (long)pt.y, attempt);
+                    (long)pt.x, (long)pt.y, target[0] ? target : "null", attempt);
                 scope->lpVtbl->Release(scope);
                 if (retry_count) *retry_count = attempt;
                 return 1;
@@ -854,10 +1020,12 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
      * 基线读不到（焦点未落定/元素无 Value）或基线已等于文本时，焦点
      * 确认一律判 false（由截图复核），不把旧文本误认作本次填入。 */
     int focus_pre_state = 0; /* 0=基线未读到，1=基线可读且不等于文本，2=基线已等于文本 */
+    char *focus_pre_sig = NULL; /* S-024：打字前焦点元素状态签名（target 的 pre_state） */
     {
         IUIAutomationElement *pre = NULL;
         if (g_auto->lpVtbl->GetFocusedElement(g_auto, &pre) == S_OK && pre) {
             focus_pre_state = value_baseline_state(pre, text);
+            focus_pre_sig = element_signature(pre);
             pre->lpVtbl->Release(pre);
         }
     }
@@ -897,13 +1065,22 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
             focused->lpVtbl->Release(focused);
         }
     }
+    /* S-024：坐标打字结果带目标信息；确认了报 CONFIRMED，否则只报
+     * NOT_CONFIRMED（打字已发出、但读不回值，不谎称“已输在预期窗口”）。 */
+    char target[4096] = { 0 };
+    ush_uia_target_json(NULL, hwnd, &pt, focus_pre_sig, target, sizeof(target));
+    free(focus_pre_sig);
     if (confirmed) {
         snprintf(data_json, data_size,
-            "{\"method\":\"coordinate-click-type\",\"confirmed\":true}");
+            "{\"method\":\"coordinate-click-type\",\"confirmed\":true,"
+            "\"status\":\"CONFIRMED\",\"target\":%s}",
+            target[0] ? target : "null");
     } else {
         snprintf(data_json, data_size,
             "{\"method\":\"coordinate-click-type\",\"confirmed\":false,"
-            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
+            "\"status\":\"NOT_CONFIRMED\",\"target\":%s,"
+            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}",
+            target[0] ? target : "null");
     }
     return 1;
 }
@@ -1031,6 +1208,12 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     }
     scope->lpVtbl->Release(scope);
 
+    /* S-024：主尾部确认用的前置状态——scope 释放后、打字前取（ValuePattern
+     * 路径下写入已发生，此处取的是确认读取前的元素状态；sendinput 路径
+     * 下即打字前状态）。el 释放前建 target。 */
+    char *input_pre = element_signature(el);
+    HWND input_hwnd = element_window(el);
+    char input_target[4096] = { 0 };
     /* 优先 ValuePattern.SetValue（后台，无需前置/聚焦） */
     int done = 0;
     const char *method = NULL;
@@ -1074,16 +1257,23 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
             confirmed = 1; /* SetValue 返回 S_OK 即确认 */
         }
     }
+    /* S-024：el 释放前建 target（前置状态为 input_pre）。 */
+    ush_uia_target_json(el, input_hwnd, NULL, input_pre, input_target, sizeof(input_target));
+    free(input_pre);
     el->lpVtbl->Release(el);
     if (!confirmed && strcmp(method, "sendinput") == 0) {
         /* SendInput 路径读不回 Value（如密码框/富文本）：不谎称失败也不谎称确认，
          * 如实返回 confirmed=false，由调用方（LEA/Muse）决定是否截图复核。 */
         snprintf(data_json, data_size,
             "{\"method\":\"sendinput\",\"confirmed\":false,"
-            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
+            "\"status\":\"NOT_CONFIRMED\",\"target\":%s,"
+            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}",
+            input_target[0] ? input_target : "null");
         return 1;
     }
-    snprintf(data_json, data_size, "{\"method\":\"%s\",\"confirmed\":true}", method);
+    snprintf(data_json, data_size, "{\"method\":\"%s\",\"confirmed\":true,"
+             "\"status\":\"CONFIRMED\",\"target\":%s}",
+             method, input_target[0] ? input_target : "null");
     return 1;
 }
 

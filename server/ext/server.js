@@ -178,6 +178,34 @@ const profileCore = (_profileCoreMod && _profileReviewMod) ? _profileCoreMod.cre
   imageMod: profileImageMod,
 }) : null;
 const fileStage = createFilesCore({ dir: LIC_DIR, lic, log });
+// L5 画面与传输（RC-03/07/08/09/10）：协议＋服务端模块。加载失败不
+// 拖垮整服务——对应端点回 503（见下），启动日志留痕。
+let l5 = null;
+try {
+  const relayMod = require('./relay-core');
+  const idrMod = require('./idr-core');
+  const qualityMod = require('./quality-core');
+  const transferMod = require('./transfer-core');
+  const recordingMod = require('./recording-core');
+  const qualitySessions = new Map(); // sessionId -> quality session（每会话参数快照）
+  const idrGate = idrMod.createIdrGate({ log });
+  const transferCore = transferMod.createTransferCore({ dir: LIC_DIR, log, stageBuffer: fileStage.stageBuffer, limits: fileStage.limits });
+  const recordingCore = recordingMod.createRecordingCore({ dir: LIC_DIR, log, readConfig: () => lic.readConfig() || {} });
+  const l5SweepTimer = setInterval(() => {
+    try { transferCore.sweep(Date.now()); } catch (e) { log({ ev: 'l5-transfer-sweep-error', err: String(e && e.message || e) }); }
+    try { recordingCore.sweep(Date.now()); } catch (e) { log({ ev: 'l5-recording-sweep-error', err: String(e && e.message || e) }); }
+  }, 60000);
+  if (l5SweepTimer && typeof l5SweepTimer.unref === 'function') l5SweepTimer.unref();
+  l5 = { relayMod, idrMod, qualityMod, transferMod, recordingMod, qualitySessions, idrGate, transferCore, recordingCore };
+  log({ ev: 'l5-modules-loaded', items: ['RC-03', 'RC-07', 'RC-08', 'RC-09', 'RC-10'] });
+} catch (e) {
+  log({ ev: 'l5-modules-load-failed', err: String(e && e.stack || e) });
+}
+function l5Guard(res) {
+  if (l5) return true;
+  sendJson(res, 503, { ok: false, code: 'L5_UNAVAILABLE', msg: '画面与传输模块未加载。' });
+  return false;
+}
 const EXT_ASSETS_DIR = process.env.QFEXT_ASSETS_DIR || '/opt/qfremote-ext/assets';
 
 // ===== 互联窗观察（2.3.2 线 D，决策 #42）：只记录、不拒服 =====
@@ -698,6 +726,11 @@ function denyIfBanned(res, username) {
   return true;
 }
 
+// 在途校验单飞表：cacheKey -> Promise<auth|null>。管理页首刷 8 个接口并行
+// 到达时，同一 xid 原先各开一条 MC 控制 WS 校验（MC 挂起时 8 条连接各等
+// 16 秒、还放大 MC 负载）；现共享同一份在途校验，语义不变（等值结果、
+// 失败仍不缓存——X-06 口径不动），只省掉重复开通道。
+const validateInflight = new Map();
 async function validateConsoleCookie(cookieHeader, clientIpHint) {
   if (!cookieHeader) return null;
   // 只摘 xid / xid.sig（照好友服务 trySso 的拼法，不把其他 cookie 带给控制通道）
@@ -715,32 +748,39 @@ async function validateConsoleCookie(cookieHeader, clientIpHint) {
   if (rv && rv.exp > Date.now()) return null;
   const hit = validateCache.get(key);
   if (hit && Date.now() - hit.at < 30000) return hit.user ? { user: hit.user, siteadmin: hit.siteadmin } : null;
-  const parts = ['xid=' + jar.xid];
-  if (jar['xid.sig']) parts.push('xid.sig=' + jar['xid.sig']);
-  const cookieStr = parts.join('; ');
-  let out = null;
-  let lastErrMsg = '';
-  for (let attempt = 0; attempt < 2 && !out; attempt++) {
-    let sess = null;
-    try {
-      sess = await mcConnectCookie(cookieStr, 8000, [clientIpHint]);
-      const info = sess.userinfo || {};
-      const user = String(info._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
-      if (user) out = { user, siteadmin: info.siteadmin || 0 };
-    } catch (e) {
-      lastErrMsg = (e && e.message) || 'unknown';
-      if (e && e.message === 'mc-session-rejected') break; // 明确拒绝不再重试
-    } finally { if (sess) { try { sess.ws.close(); } catch (e) {} } }
-  }
-  pruneValidateCache(Date.now());
-  // X-06 缓存口径（2.4.5 定版，三类失败分开处理）：
-  //  成功 → 缓存 30 秒；明确拒绝（mc-session-rejected，真无效会话）→ 缓存 30 秒，防反复打 MC；
-  //  网络类失败（mc-connect-timeout / mc-conn-error / mc-auth-failed 等）→ 一律不缓存，
-  //  防一次服务端抖动放大成 30 秒全站 401（与 checkSession「网络异常不踢下线」口径对齐）。
-  if (out) validateCache.set(key, { at: Date.now(), user: out.user, siteadmin: out.siteadmin });
-  else if (lastErrMsg === 'mc-session-rejected') validateCache.set(key, { at: Date.now(), user: null, siteadmin: 0 });
-  else log({ ev: 'validate-not-cached', reason: lastErrMsg || 'unknown' });
-  return out;
+  const inflight = validateInflight.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    const parts = ['xid=' + jar.xid];
+    if (jar['xid.sig']) parts.push('xid.sig=' + jar['xid.sig']);
+    const cookieStr = parts.join('; ');
+    let out = null;
+    let lastErrMsg = '';
+    for (let attempt = 0; attempt < 2 && !out; attempt++) {
+      let sess = null;
+      try {
+        sess = await mcConnectCookie(cookieStr, 8000, [clientIpHint]);
+        const info = sess.userinfo || {};
+        const user = String(info._id || '').replace(/^user\/[^/]*\//, '').toLowerCase();
+        if (user) out = { user, siteadmin: info.siteadmin || 0 };
+      } catch (e) {
+        lastErrMsg = (e && e.message) || 'unknown';
+        if (e && e.message === 'mc-session-rejected') break; // 明确拒绝不再重试
+      } finally { if (sess) { try { sess.ws.close(); } catch (e) {} } }
+    }
+    pruneValidateCache(Date.now());
+    // X-06 缓存口径（2.4.5 定版，三类失败分开处理）：
+    //  成功 → 缓存 30 秒；明确拒绝（mc-session-rejected，真无效会话）→ 缓存 30 秒，防反复打 MC；
+    //  网络类失败（mc-connect-timeout / mc-conn-error / mc-auth-failed 等）→ 一律不缓存，
+    //  防一次服务端抖动放大成 30 秒全站 401（与 checkSession「网络异常不踢下线」口径对齐）。
+    if (out) validateCache.set(key, { at: Date.now(), user: out.user, siteadmin: out.siteadmin });
+    else if (lastErrMsg === 'mc-session-rejected') validateCache.set(key, { at: Date.now(), user: null, siteadmin: 0 });
+    else log({ ev: 'validate-not-cached', reason: lastErrMsg || 'unknown' });
+    return out;
+  })().catch((e) => { log({ ev: 'validate-unexpected-error', err: String((e && e.message) || e) }); return null; });
+  validateInflight.set(key, p);
+  try { return await p; }
+  finally { if (validateInflight.get(key) === p) validateInflight.delete(key); }
 }
 
 // ---------- 本站会话（qfr_ext，落盘，重启不丢） ----------
@@ -1970,7 +2010,11 @@ const server = http.createServer(async (req, res) => {
           if (action !== 'approve' && action !== 'reject' && action !== 'fake') return sendJson(res, 400, { ok: false, code: 'VALIDATION' });
           // #37：助手一审可判假（action=fake）——orders-core 一审判假分支直接
           // 驳回关单、不封号不到二审，并累计当日判假计数/入口冻结。
-          const out = payOrders.decide(refId, action, ACTOR, nowA, {});
+          // 阶段守卫（与站长后台同款）：调用方声明 stage 时强制核对，不符
+          // 即 409 零变更；未声明时沿旧口径（助手外部调用兼容）。
+          const wantStageA = Number(body.stage);
+          const hooksA = (wantStageA === 1 || wantStageA === 2) ? { expectStage: wantStageA } : {};
+          const out = payOrders.decide(refId, action, ACTOR, nowA, hooksA);
           if (out.ok) {
             if (out.stage === 1) reviewEvents.resolve('order', refId, ACTOR, 'review1-' + action);
             // owner 通道 stage2 判假：核心已封禁＋回收钥，补 MC 锁定位联动（与后台口径齐；stage1 判假不补，守 #37）
@@ -2724,7 +2768,17 @@ const server = http.createServer(async (req, res) => {
         try {
           if (!got || !fs.existsSync(got.fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '文件不存在或已过期。' });
           const buf = fs.readFileSync(got.fp);
-          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
+          // L5 RC-08（QF-STREAM-1）：Range 分片续传；无 Range 头时行为与旧版一致。
+          let range = null;
+          if (l5 && typeof req.headers.range === 'string') {
+            try { range = l5.transferMod.parseRange(req.headers.range, buf.length); } catch (e) { range = null; }
+          }
+          if (range) {
+            const slice = buf.subarray(range.start, range.end + 1);
+            res.writeHead(206, { 'Content-Type': 'application/octet-stream', 'Content-Length': slice.length, 'Content-Range': 'bytes ' + range.start + '-' + range.end + '/' + buf.length, 'Accept-Ranges': 'bytes', 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
+            return res.end(slice);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Accept-Ranges': 'bytes', 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(got.it.filename) + '"', 'Cache-Control': 'no-store' });
           return res.end(buf);
         } finally {
           if (got) got.release();
@@ -2733,6 +2787,145 @@ const server = http.createServer(async (req, res) => {
       const fileAckM = p.match(/^\/license\/api\/files\/([^/]+)\/ack$/);
       if (req.method === 'POST' && fileAckM) {
         return sendJson(res, 200, fileStage.ack(auth.user, decodeURIComponent(fileAckM[1]), now));
+      }
+      // ===== L5 画面与传输（RC-03/07/08/09/10，协议见 L5-DESIGN-CONFIRMATION.md）=====
+      // RC-07：服务端宣告中继白名单（GET /license/api/relays）
+      if (req.method === 'GET' && p === '/license/api/relays') {
+        if (!l5Guard(res)) return;
+        const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+        const origin = host ? 'https://' + host : '';
+        return sendJson(res, 200, { ok: true, relays: l5.relayMod.announceRelays(lic.readConfig() || {}, origin) });
+      }
+      // RC-09：探针上报＋降档决策＋背压（POST /license/api/session/probe）
+      if (req.method === 'POST' && p === '/license/api/session/probe') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        const sessionId = String(body.sessionId || '');
+        if (!sessionId) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '缺少 sessionId。' });
+        let qs = l5.qualitySessions.get(sessionId);
+        if (!qs) {
+          qs = l5.qualityMod.createQualitySession({ log, initialTier: String(body.tier || ''), tierTable: (lic.readConfig() || {}).qualityTiers });
+          l5.qualitySessions.set(sessionId, qs);
+        }
+        const out = qs.ingestProbe(body.probe || {}, now);
+        const bp = qs.backpressure(body.probe || {}, body.serverSignal || null, now);
+        qs.sweepAcks(now);
+        return sendJson(res, 200, { ok: true, tier: qs.tier(), decision: out, backpressure: bp });
+      }
+      // RC-09：手动升档 / 档位决策 ACK
+      if (req.method === 'POST' && p === '/license/api/session/quality/upgrade') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        const qs = l5.qualitySessions.get(String(body.sessionId || ''));
+        if (!qs) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在（须先上报探针）。' });
+        return sendJson(res, 200, qs.requestUpgrade(now));
+      }
+      if (req.method === 'POST' && p === '/license/api/session/quality/ack') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        const qs = l5.qualitySessions.get(String(body.sessionId || ''));
+        if (!qs) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在。' });
+        return sendJson(res, 200, qs.ack(String(body.decisionId || ''), now));
+      }
+      // RC-03：IDR 请求准入（POST /license/api/session/idr-request）
+      // 绑定说明：首次见到的 sessionId 按“先到先得”绑定到当前用户＋
+      // body.agentId，此后只认该绑定（防客户端指定任意 sessionId）；
+      // 权威绑定（agent 侧注册）待 agent 通道落地后以 LEA/控制通道为准。
+      if (req.method === 'POST' && p === '/license/api/session/idr-request') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        const sessionId = String(body.sessionId || '');
+        const agentId = String(body.agentId || '');
+        if (!sessionId || !agentId) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '缺少 sessionId/agentId。' });
+        l5.idrGate.bind(sessionId, auth.user, agentId, now);
+        const out = l5.idrGate.request({ sessionId, userId: auth.user, agentId, seq: Number(body.seq), reason: String(body.reason || ''), nowMs: now });
+        return sendJson(res, 200, Object.assign({ ok: out.decision === 'forward' || out.decision === 'coalesced' }, out));
+      }
+      // RC-08：分片文件流（QF-STREAM-1）
+      if (req.method === 'POST' && p === '/license/api/files/stream/init') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, l5.transferCore.init(auth.user, body, now));
+      }
+      const streamChunkM = p.match(/^\/license\/api\/files\/stream\/([^/]+)\/chunk$/);
+      if (req.method === 'POST' && streamChunkM) {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req, BODY_LIMIT_FILE);
+        if (body.__tooLarge) return sendJson(res, 200, { ok: false, code: 'TOO_LARGE', msg: '分片过大。' });
+        let buf = null;
+        try { buf = Buffer.from(String(body.contentBase64 || ''), 'base64'); } catch (e) { buf = null; }
+        if (!buf) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '分片内容不正确。' });
+        return sendJson(res, 200, l5.transferCore.putChunk(auth.user, decodeURIComponent(streamChunkM[1]), Number(body.index), buf, now));
+      }
+      const streamMissingM = p.match(/^\/license\/api\/files\/stream\/([^/]+)\/missing$/);
+      if (req.method === 'GET' && streamMissingM) {
+        if (!l5Guard(res)) return;
+        return sendJson(res, 200, l5.transferCore.missingChunks(auth.user, decodeURIComponent(streamMissingM[1])));
+      }
+      const streamCommitM = p.match(/^\/license\/api\/files\/stream\/([^/]+)\/commit$/);
+      if (req.method === 'POST' && streamCommitM) {
+        if (!l5Guard(res)) return;
+        return sendJson(res, 200, l5.transferCore.commit(auth.user, decodeURIComponent(streamCommitM[1]), now));
+      }
+      const streamCancelM = p.match(/^\/license\/api\/files\/stream\/([^/]+)\/cancel$/);
+      if (req.method === 'POST' && streamCancelM) {
+        if (!l5Guard(res)) return;
+        return sendJson(res, 200, l5.transferCore.cancel(auth.user, decodeURIComponent(streamCancelM[1]), now));
+      }
+      // RC-08：传输审计（只返回本人记录）
+      if (req.method === 'GET' && p === '/license/api/files/audit') {
+        if (!l5Guard(res)) return;
+        return sendJson(res, 200, { ok: true, audit: l5.transferCore.listAudit(auth.user, Number(u.searchParams.get('limit')) || 50) });
+      }
+      // RC-10：录像（QF-REC-1；默认不录，策略见 config.json recording）
+      if (req.method === 'POST' && p === '/license/api/recordings/start') {
+        if (!l5Guard(res)) return;
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, l5.recordingCore.startSession({ sessionId: body.sessionId, username: auth.user, deviceId: body.deviceId, groupId: body.groupId, tier: body.tier }, now));
+      }
+      const recEventM = p.match(/^\/license\/api\/recordings\/([^/]+)\/event$/);
+      if (req.method === 'POST' && recEventM) {
+        if (!l5Guard(res)) return;
+        const id = decodeURIComponent(recEventM[1]);
+        // QF-REC-1 鉴权补齐（2026-11-15）：写路径与 index/download 同口径——
+        // 只许本人（canAccess）；无权限与不存在同一 HTTP 404，不泄露录制会话存在性。
+        // 检查放在读请求体之前：未授权请求不解析、不落盘。
+        const acc = l5.recordingCore.canAccess(auth.user, id);
+        if (!acc.ok) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '录像不存在。' });
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, l5.recordingCore.appendEvent(id, body.event || {}, now));
+      }
+      const recEndM = p.match(/^\/license\/api\/recordings\/([^/]+)\/end$/);
+      if (req.method === 'POST' && recEndM) {
+        if (!l5Guard(res)) return;
+        const id = decodeURIComponent(recEndM[1]);
+        const acc = l5.recordingCore.canAccess(auth.user, id);
+        if (!acc.ok) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '录像不存在。' });
+        return sendJson(res, 200, l5.recordingCore.endSession(id, now));
+      }
+      if (req.method === 'GET' && p === '/license/api/recordings') {
+        if (!l5Guard(res)) return;
+        return sendJson(res, 200, { ok: true, recordings: l5.recordingCore.listRecordings(auth.user) });
+      }
+      const recIndexM = p.match(/^\/license\/api\/recordings\/([^/]+)\/index$/);
+      if (req.method === 'GET' && recIndexM) {
+        if (!l5Guard(res)) return;
+        const id = decodeURIComponent(recIndexM[1]);
+        const acc = l5.recordingCore.canAccess(auth.user, id);
+        if (!acc.ok) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '录像不存在。' });
+        return sendJson(res, 200, { ok: true, index: l5.recordingCore.readIndex(id) });
+      }
+      const recDlM = p.match(/^\/license\/api\/recordings\/([^/]+)\/download$/);
+      if (req.method === 'GET' && recDlM) {
+        if (!l5Guard(res)) return;
+        const id = decodeURIComponent(recDlM[1]);
+        const acc = l5.recordingCore.canAccess(auth.user, id);
+        if (!acc.ok) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '录像不存在。' });
+        const fp = l5.recordingCore.filePath(id);
+        if (!fs.existsSync(fp)) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '录像不存在。' });
+        const buf = fs.readFileSync(fp);
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': buf.length, 'Content-Disposition': 'attachment; filename="' + encodeURIComponent(id + '.qfrec') + '"', 'Cache-Control': 'no-store' });
+        return res.end(buf);
       }
       return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '该接口不存在。' });
     }
@@ -3263,7 +3456,12 @@ const server = http.createServer(async (req, res) => {
         const o = payOrders.getRaw(String(body.orderId || ''));
         if (!o) return sendJson(res, 404, { ok: false, code: 'NOT_FOUND', msg: '订单不存在。' });
         const decision = String(body.decision || '');
-        const out = payOrders.decide(o.id, decision, '站长', Date.now(), {});
+        // 阶段守卫（2026-11-13 实测：本站此前不传 expectStage，重复点「一审
+        // 通过」会走到 stage=2 分支直接二审结案，绕过到账核对。现强制要求
+        // 调用方声明所见阶段，与订单当前阶段不一致即 409 零变更拒绝）。
+        const wantStage = Number(body.stage);
+        if (wantStage !== 1 && wantStage !== 2) return sendJson(res, 400, { ok: false, code: 'VALIDATION', msg: '缺少订单阶段参数，请刷新页面重试。' });
+        const out = payOrders.decide(o.id, decision, '站长', Date.now(), { expectStage: wantStage });
         if (out.ok) {
           if (out.stage === 1) reviewEvents.resolve('order', o.id, '站长', 'review1-' + decision);
           if (out.fake) { await licLockAccount(o.username); }

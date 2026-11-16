@@ -1,0 +1,118 @@
+name: APK Signing Gate Verify (temp)
+
+# 临时 CI 作业（2026-11-16）：验证签名门禁 G1/G2 负向测试。
+# 独立于 android.yml，不跑 release job、不碰生产签名密钥、不发版。
+# G1：无 key.properties → release 构建必须失败，日志含 'Release signing is missing or incomplete'。
+# G2：设 QFR_ALLOW_DEBUG_RELEASE_SIGNING=1＋无 key.properties → 同样必须失败（变量绕不过）。
+# G3（正式签名）不在本次范围。
+# 仅 workflow_dispatch 手动触发；验证完即删本文件与临时分支。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+
+jobs:
+  m-static:
+    name: M 静态核对
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: M1-M6 静态核对（不跑 Gradle）
+        working-directory: android-app
+        run: bash tools/test_release_signing_gate.sh
+
+  g1-nokey:
+    name: G1 无 key.properties
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Flutter 3.47.8
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: 版本校验
+        run: node tools/check-release-version.js
+      - name: 拉依赖
+        working-directory: android-app
+        run: flutter pub get
+      - name: G1 release 构建（期望失败）
+        working-directory: android-app
+        run: |
+          set +e
+          flutter build apk --release > "$GITHUB_WORKSPACE/g1-build.log" 2>&1
+          BUILD_EXIT=$?
+          echo "EXIT=$BUILD_EXIT" >> "$GITHUB_WORKSPACE/g1-build.log"
+          tail -40 "$GITHUB_WORKSPACE/g1-build.log"
+          if [ "$BUILD_EXIT" = "0" ]; then echo "G1 FAIL: 构建竟成功（应失败）"; exit 1; fi
+          if grep -q 'Release signing is missing or incomplete' "$GITHUB_WORKSPACE/g1-build.log"; then
+            echo "G1 PASS: 构建失败且日志含签名门禁提示"
+          else
+            echo "G1 FAIL: 构建失败但日志不含签名门禁提示（可能是环境问题）"; exit 1
+          fi
+      - name: 上传 G1 日志
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: signing-gate-g1-log
+          path: g1-build.log
+          if-no-files-found: error
+
+  g2-envvar-nokey:
+    name: G2 设变量＋无 key.properties
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      QFR_ALLOW_DEBUG_RELEASE_SIGNING: '1'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Flutter 3.47.8
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: 版本校验
+        run: node tools/check-release-version.js
+      - name: 拉依赖
+        working-directory: android-app
+        run: flutter pub get
+      - name: G2 release 构建（期望失败，变量绕不过）
+        working-directory: android-app
+        run: |
+          set +e
+          flutter build apk --release > "$GITHUB_WORKSPACE/g2-build.log" 2>&1
+          BUILD_EXIT=$?
+          echo "EXIT=$BUILD_EXIT" >> "$GITHUB_WORKSPACE/g2-build.log"
+          tail -40 "$GITHUB_WORKSPACE/g2-build.log"
+          if [ "$BUILD_EXIT" = "0" ]; then echo "G2 FAIL: 构建竟成功（应失败，变量绕过了门）"; exit 1; fi
+          if grep -q 'Release signing is missing or incomplete' "$GITHUB_WORKSPACE/g2-build.log"; then
+            echo "G2 PASS: 构建失败且日志含签名门禁提示（变量绕不过）"
+          else
+            echo "G2 FAIL: 构建失败但日志不含签名门禁提示（可能是环境问题）"; exit 1
+          fi
+      - name: 上传 G2 日志
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: signing-gate-g2-log
+          path: g2-build.log
+          if-no-files-found: error

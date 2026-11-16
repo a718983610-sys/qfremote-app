@@ -28,7 +28,8 @@ const updater = require('../update');
 function signManifest(m) {
   const d = Object.assign({}, m);
   const sig = crypto.sign(null, Buffer.from(updater.canonicalReleaseJson(d), 'utf8'), _signKp.privateKey);
-  d.signature = { alg: 'ed25519', key_id: 'test', sig: sig.toString('base64url') };
+  // D-02：客户端强制核对 key_id（生产值 release-1），假签名须用同一值。
+  d.signature = { alg: 'ed25519', key_id: 'release-1', sig: sig.toString('base64url') };
   return d;
 }
 

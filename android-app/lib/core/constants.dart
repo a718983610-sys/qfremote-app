@@ -17,6 +17,16 @@ const int kServerPort = 443;
 const String kServerOrigin = 'https://$kServerHost';
 const String kConsoleUrl = '$kServerOrigin/';
 
+/// F-06 精确服务 origin 白名单（3.0.0）：只认这张写死表里的 origin，
+/// 不许子域通配、不许任意端口。线上 product.json 的 web.* 五字段现行
+/// 值（2026-11-09 v2.4.4 实测）全落在 `https://app.qfremote.top` 这
+/// 一个 origin 上；服务端若日后把某服务迁到新子域，须随应用发版同步
+/// 加表——旧版会把新地址判不信任并回落写死兜底，不会静默跟去新源。
+/// 比较一律走 [Uri.origin]：`https://app.qfremote.top:443` 的 origin
+/// 即 `https://app.qfremote.top`（默认端口归一），而 `:8443` 等非
+/// 默认端口的 origin 带端口后缀，不在表内。
+const Set<String> kTrustedSvcOrigins = {'https://app.qfremote.top'};
+
 /// 好友页（独立服务 qfremote-friends，经域名聚合路径到达）。
 const int kFriendsPort = 443;
 const String kFriendsUrl = '$kServerOrigin/friends';

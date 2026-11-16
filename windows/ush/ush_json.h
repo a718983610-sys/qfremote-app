@@ -31,6 +31,13 @@
 #define USH_CMD_INPUT 2
 #define USH_CMD_SNAPSHOT 3
 #define USH_CMD_TREE 4
+/* C1：自助绑定（桌面一键链接本机助手）。这四条不做 UI、不进会话门
+ * （锁屏也能链接／吊销／续期），但仍须过 H03 token 门（LEA 来路）。
+ * 凭据明文只进 USH 内存＋DPAPI 文件，永不经 QFRLEA／主进程。 */
+#define USH_CMD_SELFBIND 5          /* selfbind.deliver-ticket：签名调 complete 换凭据 */
+#define USH_CMD_SELFBIND_CLEAR 6    /* selfbind.clear-credential：删本机凭据＋元数据 */
+#define USH_CMD_SELFBIND_STATUS 7   /* selfbind.status：读元数据报链接态（不含凭据） */
+#define USH_CMD_SELFBIND_RENEW 8    /* selfbind.renew：静默续期（Bearer Key＋设备签名） */
 
 /* 错误码（与 DESIGN.md §4.5 同前缀风格；LEA 侧按 code 透传） */
 #define USH_ERR_BAD_REQUEST "bad-request"
@@ -44,6 +51,13 @@
 #define USH_ERR_NOT_SUPPORTED "QFR_USH_UNSUPPORTED"
 #define USH_ERR_FAILED "QFR_USH_FAILED"
 #define USH_ERR_TOO_LARGE "QFR_USH_SNAPSHOT_TOO_LARGE"
+/* C1 自助绑定错误码（LEA 侧按 code 透传；明文凭据永不进 error 文本） */
+#define USH_ERR_SELFBIND_NO_KEY "QFR_USH_SELFBIND_NO_KEY"             /* 本机无凭据（未链接／已清除） */
+#define USH_ERR_SELFBIND_BAD_TICKET "QFR_USH_SELFBIND_BAD_TICKET"     /* 票据字段缺失／非法 */
+#define USH_ERR_SELFBIND_SERVER "QFR_USH_SELFBIND_SERVER"             /* 服务端拒绝（complete/renew 非 200） */
+#define USH_ERR_SELFBIND_NETWORK "QFR_USH_SELFBIND_NETWORK"           /* 连不上服务端 */
+#define USH_ERR_SELFBIND_KEYSTORE "QFR_USH_SELFBIND_KEYSTORE"         /* 设备密钥库（CNG）失败 */
+#define USH_ERR_SELFBIND_STORE "QFR_USH_SELFBIND_STORE"               /* 凭据存取（DPAPI）失败 */
 
 typedef struct {
     int valid;               /* 1=解析通过 */
@@ -75,6 +89,9 @@ int ush_json_get_string(const char *json, const char *key, char *out, size_t out
 /* 取整数 / 布尔字段；找不到或类型不对返回 0。 */
 int ush_json_get_long(const char *json, const char *key, long *out);
 int ush_json_get_bool(const char *json, const char *key, int *out);
+/* 取 64 位整数字段（C1：expires_at 是毫秒时间戳，约 1.8e12，Windows
+ * long 只有 32 位，strtol 会截断／钳制，必须走 strtoll）。 */
+int ush_json_get_llong(const char *json, const char *key, long long *out);
 /* #11：取 JSON 数字字段（如 rel_x:0.5）；字符串形式（"0.5"）不认，
  * 调用方另用 ush_json_get_string 兼容。值后须为 , } 空白或串尾，
  * 否则 0.5x 之类非法尾巴一律拒绝；inf/nan 不接受。 */
