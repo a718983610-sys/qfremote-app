@@ -6,8 +6,12 @@ name: APK Signing Gate Verify (temp)
 # G2：设 QFR_ALLOW_DEBUG_RELEASE_SIGNING=1＋无 key.properties → 同样必须失败（变量绕不过）。
 # G3（正式签名）不在本次范围。
 # 仅 workflow_dispatch 手动触发；验证完即删本文件与临时分支。
+# 注：GitHub 只在默认分支注册 workflow_dispatch，因此另加 push 触发
+# （仅本临时分支），靠推送触发本次验证；验证完即删。
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/apk-verify-20261116]
 
 permissions:
   contents: read
