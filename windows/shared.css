@@ -11,6 +11,7 @@
  * AnimationsEnabled）+ main.js web-contents-created 显式接线（.reduced-motion 类）。
  */
 :root {
+  color-scheme: light;
   --font-sans: "Inter", "Inter Variable", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans SC", sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Cascadia Mono", Consolas, monospace;
 
@@ -119,6 +120,7 @@
 }
 
 html[data-theme="dark"] {
+  color-scheme: dark;
   /* 结构灰 BG0–BG5（深色；W3 定夺 2026-11-14：BG1 #121214／BG2 #1C1C1E，
      与安卓 theme.dart 同改；BG3 #17181A 与 BG2 仍可辨） */
   --bg0: #08090A;
@@ -216,7 +218,7 @@ html[data-theme="dark"] .tile img,
 html[data-theme="dark"] .logo img { filter: invert(1); }
 
 /* ---------- 焦点环（A §2.5）：2px 实线 + 2px offset；深色 #F5F5F7 / 浅色 #111113 ---------- */
-button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
   outline: 2px solid var(--text-1);
   outline-offset: 2px;
   box-shadow: none;
@@ -258,4 +260,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-vis
 }
 html.reduced-motion *, html.reduced-motion *::before, html.reduced-motion *::after {
   animation: none !important; transition: none !important;
+}
+
+/* Shared control finish: preserve keyboard focus, readable fields and inert disabled states. */
+button, input, textarea, select{-webkit-app-region:no-drag}
+input,textarea{caret-color:var(--text-1);user-select:text}
+button:disabled,button[aria-disabled="true"]{transform:none;filter:none}
+button:not(:disabled){touch-action:manipulation}
+@media (forced-colors:active){
+  button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid Highlight}
+  button:disabled{color:GrayText}
 }

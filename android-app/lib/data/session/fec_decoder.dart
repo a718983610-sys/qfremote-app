@@ -32,8 +32,7 @@ class FecProfile {
 
   int get symbolCount => k + m;
 
-  bool get isSupported =>
-      (k == 10 && m == 2) || (k == 20 && m == 1);
+  bool get isSupported => (k == 10 && m == 2) || (k == 20 && m == 1);
 
   @override
   bool operator ==(Object other) =>
@@ -108,10 +107,7 @@ List<List<int>>? gfInvertMatrix(List<List<int>> mat) {
   final n = mat.length;
   final a = List<List<int>>.generate(
     n,
-    (i) => [
-      ...mat[i],
-      ...List<int>.generate(n, (j) => i == j ? 1 : 0),
-    ],
+    (i) => [...mat[i], ...List<int>.generate(n, (j) => i == j ? 1 : 0)],
   );
   for (var col = 0; col < n; col++) {
     var pivot = -1;
@@ -187,7 +183,7 @@ class FecBlockHeader {
     if (m != 1 && m != 2) return false;
     if (k != 10 && k != 20) return false;
     if (symbolCount != k + m) return false;
-    if (symbolIndex >= symbolCount) return false;
+    if (symbolIndex < 0 || symbolIndex >= symbolCount) return false;
     if (symbolLength <= 0) return false;
     if (lastSymbolPadding < 0 || lastSymbolPadding >= symbolLength) {
       return false;
@@ -206,26 +202,28 @@ class FecBlockHeader {
   }
 
   Map<String, Object?> toJson() => {
-        'fecVersion': fecVersion,
-        'blockId': blockId,
-        'frameId': frameId,
-        'isKeyframe': isKeyframe,
-        'frameStart': frameStart,
-        'frameEnd': frameEnd,
-        'symbolIndex': symbolIndex,
-        'symbolCount': symbolCount,
-        'symbolLength': symbolLength,
-        'lastSymbolPadding': lastSymbolPadding,
-        'k': k,
-        'm': m,
-      };
+    'fecVersion': fecVersion,
+    'blockId': blockId,
+    'frameId': frameId,
+    'isKeyframe': isKeyframe,
+    'frameStart': frameStart,
+    'frameEnd': frameEnd,
+    'symbolIndex': symbolIndex,
+    'symbolCount': symbolCount,
+    'symbolLength': symbolLength,
+    'lastSymbolPadding': lastSymbolPadding,
+    'k': k,
+    'm': m,
+  };
 }
 
 /// RS 编码（与 fec-ref.js `encodeShards` 同款）：数据分片零填充到
 /// 等长后按 Vandermonde 校验行生成 m 个校验分片。
 /// 返回 (dataShards, parityShards, shardLen)；分片均为等长。
-({List<Uint8List> data, List<Uint8List> parity, int shardLen})
-    fecEncodeShards(List<Uint8List> dataBuffers, FecProfile profile) {
+({List<Uint8List> data, List<Uint8List> parity, int shardLen}) fecEncodeShards(
+  List<Uint8List> dataBuffers,
+  FecProfile profile,
+) {
   final k = profile.k;
   final m = profile.m;
   if (dataBuffers.length != k) {
@@ -281,7 +279,14 @@ List<Uint8List>? fecDecodeShards(
 ) {
   final k = profile.k;
   final m = profile.m;
-  if (shards.length != k + m) return null;
+  if (!profile.isSupported || shards.length != k + m || lengths.length != k)
+    return null;
+  final firstShard = shards.whereType<Uint8List>().firstOrNull;
+  if (firstShard == null || firstShard.isEmpty) return null;
+  final expectedLength = firstShard.length;
+  if (shards.any((s) => s != null && s.length != expectedLength) ||
+      lengths.any((length) => length < 0 || length > expectedLength))
+    return null;
   final missing = <int>[];
   for (var i = 0; i < k; i++) {
     if (shards[i] == null) missing.add(i);
@@ -303,8 +308,9 @@ List<Uint8List>? fecDecodeShards(
   if (first == null) return null;
   final shardLen = first.length;
   final rows = availParity.sublist(0, t);
-  final mat =
-      rows.map((j) => missing.map((i) => _Gf256.parityCoef(j, i)).toList()).toList();
+  final mat = rows
+      .map((j) => missing.map((i) => _Gf256.parityCoef(j, i)).toList())
+      .toList();
   final inv = gfInvertMatrix(mat);
   if (inv == null) return null;
   final out = List<Uint8List>.generate(t, (_) => Uint8List(shardLen));
@@ -397,7 +403,9 @@ class FecBlockCollector {
     Uint8List shard, {
     required int receivedAtMs,
   }) {
-    if (!header.isValid || !header.isSupportedProfile) {
+    if (!header.isValid ||
+        !header.isSupportedProfile ||
+        shard.length != header.symbolLength) {
       _blocks.remove(header.blockId);
       return (FecBlockOutcome.invalidHeader, null);
     }
@@ -411,13 +419,19 @@ class FecBlockCollector {
       _blocks.remove(header.blockId);
       return (FecBlockOutcome.invalidHeader, null);
     }
+    if (!_blocks.containsKey(header.blockId) && _blocks.length >= 256) {
+      _blocks.remove(_blocks.keys.first);
+    }
     final pending = _blocks.putIfAbsent(
       header.blockId,
-      () => _PendingBlock(
-        header: header,
-        firstSeenMs: receivedAtMs,
-      ),
+      () => _PendingBlock(header: header, firstSeenMs: receivedAtMs),
     );
+    if (pending.header.frameId != header.frameId ||
+        pending.header.symbolLength != header.symbolLength ||
+        pending.header.lastSymbolPadding != header.lastSymbolPadding) {
+      _blocks.remove(header.blockId);
+      return (FecBlockOutcome.invalidHeader, null);
+    }
     pending.shards[header.symbolIndex] = shard;
     return _tryDecode(pending);
   }
@@ -428,11 +442,13 @@ class FecBlockCollector {
       profile.symbolCount,
       (i) => pending.shards[i],
     );
-    final missingData =
-        shards.sublist(0, profile.k).where((s) => s == null).length;
+    final missingData = shards
+        .sublist(0, profile.k)
+        .where((s) => s == null)
+        .length;
     if (missingData == 0) {
       _blocks.remove(header.blockId);
-      _completedBlockIds.add(header.blockId);
+      _markCompleted(header.blockId);
       return (
         FecBlockOutcome.complete,
         fecDecodeShards(shards, profile, header.dataLengths),
@@ -442,14 +458,20 @@ class FecBlockCollector {
       // 超过恢复能力：先不判死刑，等超时窗口（迟到分片可能还在路上）。
       return (FecBlockOutcome.unrecoverable, null);
     }
-    final decoded =
-        fecDecodeShards(shards, profile, header.dataLengths);
+    final decoded = fecDecodeShards(shards, profile, header.dataLengths);
     if (decoded == null) {
       return (FecBlockOutcome.unrecoverable, null);
     }
     _blocks.remove(header.blockId);
-    _completedBlockIds.add(header.blockId);
+    _markCompleted(header.blockId);
     return (FecBlockOutcome.recovered, decoded);
+  }
+
+  void _markCompleted(int blockId) {
+    _completedBlockIds.add(blockId);
+    if (_completedBlockIds.length > 4096) {
+      _completedBlockIds.remove(_completedBlockIds.first);
+    }
   }
 
   /// 超时窗口届满仍不可恢复的块（§3 第 3 条）。
@@ -464,6 +486,7 @@ class FecBlockCollector {
   }) {
     final windowMs = rttMs + jitterMs + frameMs;
     final out = <int>[];
+    final completed = <int>[];
     for (final entry in _blocks.entries) {
       final pending = entry.value;
       if (nowMs - pending.firstSeenMs < windowMs) continue;
@@ -471,8 +494,10 @@ class FecBlockCollector {
         profile.symbolCount,
         (i) => pending.shards[i],
       );
-      final missingData =
-          shards.sublist(0, profile.k).where((s) => s == null).length;
+      final missingData = shards
+          .sublist(0, profile.k)
+          .where((s) => s == null)
+          .length;
       if (missingData == 0) continue;
       if (fecDecodeShards(shards, profile, pending.header.dataLengths) ==
           null) {
@@ -480,7 +505,12 @@ class FecBlockCollector {
       } else {
         // 窗口内迟到分片已补齐可解：直接清掉（下次 addShard 会重建）。
         // 这里不返回，调用方无需 IDR。
+        completed.add(entry.key);
       }
+    }
+    for (final id in completed) {
+      _blocks.remove(id);
+      _markCompleted(id);
     }
     return out;
   }

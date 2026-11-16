@@ -255,11 +255,12 @@ async function handleClearFreeze(req, res) {
   return jsonReply(res, 200, { ok: true, wasFrozen: true });
 }
 function clientIp(req) {
-  const cf = req.headers['cf-connecting-ip'];
-  if (cf) return String(cf);
-  const xff = req.headers['x-forwarded-for'];
-  if (xff) return String(xff).split(',')[0].trim();
-  return String(req.socket.remoteAddress || '');
+  const remote = String((req.socket && req.socket.remoteAddress) || '');
+  const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  const forwarded = String((req.headers && req.headers['cf-connecting-ip']) || '').trim();
+  // M-026: only our loopback proxy may supply this validated single-IP header.
+  if (loopback && require('net').isIP(forwarded)) return forwarded;
+  return remote.replace(/^::ffff:/, '');
 }
 function logAttempt(user, ok, ip, blocked) {
   try {
@@ -304,8 +305,7 @@ const WHOAMI_SITEADMIN_FULL = 4294967295;
 let _whoamiWebSocket = null;
 function whoamiLoadWebSocket() {
   if (_whoamiWebSocket) return _whoamiWebSocket;
-  try { _whoamiWebSocket = require('/opt/meshcentral/node_modules/ws'); }
-  catch (e) { _whoamiWebSocket = require('ws'); }
+  _whoamiWebSocket = require('ws'); // M-025: service-owned dependency
   return _whoamiWebSocket;
 }
 function whoamiSessionIp(cookieHeader) {
@@ -500,7 +500,7 @@ async function maybeBanAndRespond(req, res, key, usernameRaw, passwordRaw, ip, t
   }
 
   // 构造封禁数据头
-  const banView = base64UrlEncode(JSON.stringify({ mode, permanent, endsAt }));
+  const banView = base64UrlEncode(JSON.stringify({ mode, permanent, endsAt, category: typeof lc.banCategory === 'string' ? lc.banCategory.slice(0, 200) : '' }));
   const h = Object.assign({}, upstreamHeaders);
   h['x-qf-login-result'] = 'banned';
   h['x-qf-ban-view'] = banView;

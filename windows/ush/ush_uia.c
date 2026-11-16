@@ -15,19 +15,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "ush_uia.h"
 
 static IUIAutomation *g_auto = NULL;
+static DWORD g_uia_thread = 0;
+static int g_com_initialized = 0;
 
 /* ---------- 小工具 ---------- */
 
 static WCHAR *utf8_to_wide(const char *s) {
     if (!s) return NULL;
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
     if (n <= 0) return NULL;
     WCHAR *w = (WCHAR *)malloc((size_t)n * sizeof(WCHAR));
     if (!w) return NULL;
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, n)) { free(w); return NULL; }
     return w;
 }
 
@@ -238,8 +241,8 @@ void ush_parse_target(const char *params_json, ush_target_t *out) {
         out->has_rel = 1;
         out->has_xy = 0;
     }
-    out->rel_x = rx;
-    out->rel_y = ry;
+    out->rel_x = isfinite(rx) ? fmin(1.0, fmax(0.0, rx)) : 0.0;
+    out->rel_y = isfinite(ry) ? fmin(1.0, fmax(0.0, ry)) : 0.0;
     ush_json_get_string(src, "coords", out->coords, sizeof(out->coords));
     if (ush_json_get_string(src, "image_template", out->image_template, sizeof(out->image_template))) {
         out->has_image = 1;
@@ -249,24 +252,27 @@ void ush_parse_target(const char *params_json, ush_target_t *out) {
 /* ---------- UIA 初始化 / 会话门 ---------- */
 
 int ush_uia_init(void) {
-    if (g_auto) return 1;
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 0;
+    if (g_auto) return g_uia_thread == GetCurrentThreadId();
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hr)) return 0;
     hr = CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER,
                           &IID_IUIAutomation, (void **)&g_auto);
     if (FAILED(hr) || !g_auto) {
         g_auto = NULL;
+        CoUninitialize();
         return 0;
     }
+    g_uia_thread = GetCurrentThreadId();
+    g_com_initialized = 1;
     return 1;
 }
 
 void ush_uia_shutdown(void) {
-    if (g_auto) {
-        g_auto->lpVtbl->Release(g_auto);
-        g_auto = NULL;
-    }
-    CoUninitialize();
+    if (g_uia_thread != GetCurrentThreadId()) return;
+    if (g_auto) { g_auto->lpVtbl->Release(g_auto); g_auto = NULL; }
+    if (g_com_initialized) CoUninitialize();
+    g_com_initialized = 0;
+    g_uia_thread = 0;
 }
 
 int ush_session_interactive(char *err_code, size_t err_size) {
@@ -475,12 +481,21 @@ static HWND element_window(IUIAutomationElement *el) {
 }
 
 /* 仅坐标点击需要：还原并前置窗口。后台 Pattern 路径不调用。 */
-static void bring_window_forward(HWND hwnd) {
-    if (!hwnd) return;
-    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-    else ShowWindow(hwnd, SW_RESTORE);
-    SetForegroundWindow(hwnd);
-    Sleep(50);
+static int bring_window_forward(HWND hwnd) {
+    if (!hwnd) return 1; /* explicit desktop coordinates have no window */
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) return 0;
+    if (IsIconic(root)) ShowWindow(root, SW_RESTORE);
+    if (GetForegroundWindow() == root) return 1;
+    if (!SetForegroundWindow(root)) return 0;
+    return GetForegroundWindow() == root;
+}
+
+static int point_in_virtual_screen(POINT pt) {
+    LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN), top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN), height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    return width > 0 && height > 0 && pt.x >= left && pt.y >= top &&
+           (long long)pt.x < (long long)left + width && (long long)pt.y < (long long)top + height;
 }
 
 /* BoundingRectangle 回退中心点：UIA_BoundingRectanglePropertyId 返回的
@@ -528,15 +543,13 @@ static int clickable_point(IUIAutomationElement *el, POINT *pt) {
 }
 
 /* SendInput 鼠标左键点击物理坐标点。 */
-static void send_mouse_click(POINT pt) {
-    SetCursorPos(pt.x, pt.y);
+static int send_mouse_click(POINT pt) {
+    if (!point_in_virtual_screen(pt) || !SetCursorPos(pt.x, pt.y)) return 0;
     INPUT in[2];
     memset(in, 0, sizeof(in));
-    in[0].type = INPUT_MOUSE;
-    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    in[1].type = INPUT_MOUSE;
-    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(2, in, sizeof(INPUT));
+    in[0].type = INPUT_MOUSE; in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].type = INPUT_MOUSE; in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    return SendInput(2, in, sizeof(INPUT)) == 2;
 }
 
 /* ---------- Pattern 执行 ---------- */
@@ -616,7 +629,7 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
                  int *retry_count, char *window_title, size_t window_title_size) {
     if (retry_count) *retry_count = 0;
     if (window_title && window_title_size) window_title[0] = '\0';
-    if (!g_auto && !ush_uia_init()) {
+    if (!ush_uia_init()) {
         strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
         snprintf(err_text, err_text_size, "UIA init failed");
         return 0;
@@ -649,10 +662,11 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
         get_str_prop(scope, UIA_NamePropertyId, window_title, window_title_size);
     }
 
+    int click_sent = 0;
     int attempt = 0; /* 0=首次，1/2=重试 */
     for (;;) {
         DWORD remain = deadline > (GetTickCount() - start) ? deadline - (GetTickCount() - start) : 0;
-        if (remain == 0 && attempt > 0) break;
+        if (remain == 0) break;
         IUIAutomationElement *el = NULL;
         int found = 0;
         if (t.automation_id[0] || t.name[0] || t.class_name[0]) {
@@ -685,9 +699,12 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
             POINT pt;
             if (clickable_point(el, &pt)) {
                 HWND hwnd = element_window(el);
-                bring_window_forward(hwnd);
+                if (!bring_window_forward(hwnd) || GetTickCount() - start >= deadline) {
+                    el->lpVtbl->Release(el); break;
+                }
                 char *b2 = element_signature(el);
-                send_mouse_click(pt);
+                if (!send_mouse_click(pt)) { free(b2); el->lpVtbl->Release(el); break; }
+                click_sent = 1;
                 Sleep(150);
                 char *a2 = element_signature(el);
                 int changed = (!b2 && !a2) ? 0 : (!b2 || !a2 || strcmp(b2, a2) != 0);
@@ -714,8 +731,8 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
             POINT pt;
             int have_pt = 0;
             if (t.has_rel && hwnd && GetWindowRect(hwnd, &wr)) {
-                pt.x = (LONG)(wr.left + t.rel_x * (wr.right - wr.left));
-                pt.y = (LONG)(wr.top + t.rel_y * (wr.bottom - wr.top));
+                pt.x = (LONG)(wr.left + t.rel_x * (wr.right - wr.left - 1));
+                pt.y = (LONG)(wr.top + t.rel_y * (wr.bottom - wr.top - 1));
                 have_pt = 1;
             } else if (t.has_xy) {
                 pt.x = t.x;
@@ -729,15 +746,15 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
                 have_pt = 1;
             } else if (t.has_rel) {
                 /* 无窗口句柄：用主屏尺寸估算（scope 为桌面根时） */
-                int sw = GetSystemMetrics(SM_CXSCREEN);
-                int sh = GetSystemMetrics(SM_CYSCREEN);
-                pt.x = (LONG)(t.rel_x * sw);
-                pt.y = (LONG)(t.rel_y * sh);
+                int sw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int sh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                pt.x = GetSystemMetrics(SM_XVIRTUALSCREEN) + (LONG)(t.rel_x * (sw - 1));
+                pt.y = GetSystemMetrics(SM_YVIRTUALSCREEN) + (LONG)(t.rel_y * (sh - 1));
                 have_pt = 1;
             }
             if (have_pt) {
-                bring_window_forward(hwnd);
-                send_mouse_click(pt);
+                if (!bring_window_forward(hwnd) || GetTickCount() - start >= deadline || !send_mouse_click(pt)) break;
+                click_sent = 1;
                 snprintf(data_json, data_size,
                     "{\"method\":\"coordinate\",\"x\":%ld,\"y\":%ld,\"confirmed\":false,"
                     "\"note\":\"coordinate click has no element to confirm against\",\"retries\":%d}",
@@ -756,7 +773,7 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
         if (retry_count) *retry_count = attempt;
     }
     scope->lpVtbl->Release(scope);
-    strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
+    strncpy(err_code, click_sent ? USH_ERR_NOT_CONFIRMED : USH_ERR_NOT_FOUND, err_code_size - 1);
     snprintf(err_text, err_text_size,
         "element not found or click not confirmed after %d attempt(s)", attempt + 1);
     return 0;
@@ -765,28 +782,28 @@ int ush_ui_click(const ush_request_t *req, char *data_json, size_t data_size,
 /* ---------- ui.input ---------- */
 
 /* SendInput 打 Unicode 文本（逐字符 KEYEVENTF_UNICODE；换行转回车）。 */
-static void send_unicode_text(const char *utf8) {
+static int send_key_pair(WORD key, WORD scan, DWORD flags) {
+    INPUT in[2];
+    memset(in, 0, sizeof(in));
+    in[0].type = in[1].type = INPUT_KEYBOARD;
+    in[0].ki.wVk = in[1].ki.wVk = key;
+    in[0].ki.wScan = in[1].ki.wScan = scan;
+    in[0].ki.dwFlags = flags;
+    in[1].ki.dwFlags = flags | KEYEVENTF_KEYUP;
+    return SendInput(2, in, sizeof(INPUT)) == 2;
+}
+static int send_unicode_text(const char *utf8) {
     WCHAR *w = utf8_to_wide(utf8);
-    if (!w) return;
+    if (!w) return 0;
+    int ok = 1;
     for (WCHAR *p = w; *p; p++) {
-        INPUT in;
-        memset(&in, 0, sizeof(in));
-        in.type = INPUT_KEYBOARD;
-        if (*p == L'\n') {
-            in.ki.wVk = VK_RETURN;
-            SendInput(1, &in, sizeof(INPUT));
-            in.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &in, sizeof(INPUT));
-            continue;
-        }
-        in.ki.wVk = 0;
-        in.ki.wScan = *p;
-        in.ki.dwFlags = KEYEVENTF_UNICODE;
-        SendInput(1, &in, sizeof(INPUT));
-        in.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        SendInput(1, &in, sizeof(INPUT));
+        if (*p == L'\r' || *p == L'\n') {
+            if (*p == L'\r' && p[1] == L'\n') p++;
+            if (!send_key_pair(VK_RETURN, 0, 0)) { ok = 0; break; }
+        } else if (!send_key_pair(0, *p, KEYEVENTF_UNICODE)) { ok = 0; break; }
     }
     free(w);
+    return ok;
 }
 
 /* r9：坐标换算（与 ui.click 策略 4 同口径）：窗口内相对坐标按 scope
@@ -798,8 +815,8 @@ static int target_point(const ush_target_t *t, IUIAutomationElement *scope, POIN
     if (t->has_rel && hwnd) {
         RECT wr;
         if (GetWindowRect(hwnd, &wr)) {
-            pt->x = (LONG)(wr.left + t->rel_x * (wr.right - wr.left));
-            pt->y = (LONG)(wr.top + t->rel_y * (wr.bottom - wr.top));
+            pt->x = (LONG)(wr.left + t->rel_x * (wr.right - wr.left - 1));
+            pt->y = (LONG)(wr.top + t->rel_y * (wr.bottom - wr.top - 1));
             return 1;
         }
     }
@@ -815,10 +832,10 @@ static int target_point(const ush_target_t *t, IUIAutomationElement *scope, POIN
         return 1;
     }
     if (t->has_rel) {
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        pt->x = (LONG)(t->rel_x * sw);
-        pt->y = (LONG)(t->rel_y * sh);
+        int sw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int sh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        pt->x = GetSystemMetrics(SM_XVIRTUALSCREEN) + (LONG)(t->rel_x * (sw - 1));
+        pt->y = GetSystemMetrics(SM_YVIRTUALSCREEN) + (LONG)(t->rel_y * (sh - 1));
         return 1;
     }
     return 0;
@@ -855,66 +872,31 @@ static int input_by_click_and_type(const ush_target_t *t, IUIAutomationElement *
                                    char *data_json, size_t data_size) {
     POINT pt;
     if (!target_point(t, scope, &pt)) return 0;
-    HWND hwnd = element_window(scope);
-    bring_window_forward(hwnd);
-    send_mouse_click(pt);
-    Sleep(150); /* 与坐标点击后等属性稳定的 150ms 同口径 */
-    /* r9b-DS：打字前读一次焦点元素 Value 作基线——只有基线可读且不等于
-     * 输入文本、事后读回等于输入文本时，才能确认是本次打字填入的；
-     * 基线读不到（焦点未落定/元素无 Value）或基线已等于文本时，焦点
-     * 确认一律判 false（由截图复核），不把旧文本误认作本次填入。 */
-    int focus_pre_state = 0; /* 0=基线未读到，1=基线可读且不等于文本，2=基线已等于文本 */
-    {
-        IUIAutomationElement *pre = NULL;
-        if (g_auto->lpVtbl->GetFocusedElement(g_auto, &pre) == S_OK && pre) {
-            focus_pre_state = value_baseline_state(pre, text);
-            pre->lpVtbl->Release(pre);
-        }
+    if (!bring_window_forward(element_window(scope)) || !send_mouse_click(pt)) return 0;
+    Sleep(150);
+    IUIAutomationElement *before = NULL;
+    int has_focus = 0;
+    if (FAILED(g_auto->lpVtbl->GetFocusedElement(g_auto, &before)) || !before) return 0;
+    if (!get_bool_prop(before, UIA_HasKeyboardFocusPropertyId, &has_focus) || !has_focus) {
+        before->lpVtbl->Release(before);
+        return 0;
     }
-    send_unicode_text(text);
-    if (submit) {
-        INPUT in;
-        memset(&in, 0, sizeof(in));
-        in.type = INPUT_KEYBOARD;
-        in.ki.wVk = VK_RETURN;
-        SendInput(1, &in, sizeof(INPUT));
-        in.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &in, sizeof(INPUT));
-    }
-    /* 确认：重取该点元素读 Value，比对整串。 */
+    int baseline = value_baseline_state(before, text);
+    if (!send_unicode_text(text)) { before->lpVtbl->Release(before); return 0; }
+    IUIAutomationElement *after = NULL;
+    WINBOOL same = FALSE;
     int confirmed = 0;
-    IUIAutomationElement *el = NULL;
-    if (g_auto->lpVtbl->ElementFromPoint(g_auto, pt, &el) == S_OK && el) {
-        char cur[4096];
-        get_str_prop(el, UIA_ValueValuePropertyId, cur, sizeof(cur));
-        if (cur[0]) {
-            size_t tl = strlen(text), cl = strlen(cur);
-            confirmed = (cl == tl && strncmp(cur, text, tl) == 0);
-        }
-        el->lpVtbl->Release(el);
+    if (SUCCEEDED(g_auto->lpVtbl->GetFocusedElement(g_auto, &after)) && after) {
+        if (SUCCEEDED(g_auto->lpVtbl->CompareElements(g_auto, before, after, &same)) && same)
+            confirmed = baseline == 1 && value_baseline_state(after, text) == 2;
+        after->lpVtbl->Release(after);
     }
-    if (!confirmed) {
-        /* 该点元素读不到 Value（如搜索框容器）：读当前焦点元素的 Value——
-         * 打字实际落点就是焦点元素（点开搜索面板后焦点在面板编辑框）。 */
-        IUIAutomationElement *focused = NULL;
-        if (g_auto->lpVtbl->GetFocusedElement(g_auto, &focused) == S_OK && focused) {
-            char cur[4096];
-            get_str_prop(focused, UIA_ValueValuePropertyId, cur, sizeof(cur));
-            if (cur[0]) {
-                size_t tl = strlen(text), cl = strlen(cur);
-                confirmed = (cl == tl && strncmp(cur, text, tl) == 0 && focus_pre_state == 1);
-            }
-            focused->lpVtbl->Release(focused);
-        }
-    }
-    if (confirmed) {
-        snprintf(data_json, data_size,
-            "{\"method\":\"coordinate-click-type\",\"confirmed\":true}");
-    } else {
-        snprintf(data_json, data_size,
-            "{\"method\":\"coordinate-click-type\",\"confirmed\":false,"
-            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
-    }
+    before->lpVtbl->Release(before);
+    if (confirmed && submit && !send_key_pair(VK_RETURN, 0, 0)) return 0;
+    snprintf(data_json, data_size,
+        "{\"method\":\"coordinate-click-type\",\"confirmed\":%s%s}",
+        confirmed ? "true" : "false",
+        confirmed ? "" : ",\"note\":\"input target/value not confirmed; submit was withheld\"");
     return 1;
 }
 
@@ -948,7 +930,7 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
                  int *retry_count, char *window_title, size_t window_title_size) {
     if (retry_count) *retry_count = 0;
     if (window_title && window_title_size) window_title[0] = '\0';
-    if (!g_auto && !ush_uia_init()) {
+    if (!ush_uia_init()) {
         strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
         snprintf(err_text, err_text_size, "UIA init failed");
         return 0;
@@ -956,7 +938,11 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     char text[4096] = {0};
     char mode[32] = {0};
     int submit = 0;
-    ush_json_get_string(req->params_json, "text", text, sizeof(text));
+    if (!ush_json_get_string(req->params_json, "text", text, sizeof(text))) {
+        strncpy(err_code, USH_ERR_BAD_REQUEST, err_code_size - 1);
+        snprintf(err_text, err_text_size, "params.text must be a string of at most 4095 UTF-8 bytes");
+        return 0;
+    }
     ush_json_get_string(req->params_json, "mode", mode, sizeof(mode));
     ush_json_get_bool(req->params_json, "submit", &submit);
     if (!text[0]) {
@@ -967,6 +953,7 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     ush_target_t t;
     ush_parse_target(req->params_json, &t);
     DWORD deadline = (DWORD)req->timeout_ms;
+    DWORD started = GetTickCount();
     IUIAutomationElement *root = NULL;
     if (g_auto->lpVtbl->GetRootElement(g_auto, &root) != S_OK || !root) {
         strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
@@ -993,7 +980,8 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     int coord_vp_done = 0; /* 坐标分支 ValuePattern 已后台写入成功：走公共尾部做 submit＋确认 */
     int have_locator = (t.automation_id[0] || t.name[0] || t.class_name[0]);
     if (have_locator) {
-        if (!find_element(scope, &t, deadline, &el)) {
+        DWORD elapsed = GetTickCount() - started;
+        if (elapsed >= deadline || !find_element(scope, &t, deadline - elapsed, &el)) {
             scope->lpVtbl->Release(scope);
             strncpy(err_code, USH_ERR_NOT_FOUND, err_code_size - 1);
             snprintf(err_text, err_text_size, "input element not found");
@@ -1054,21 +1042,17 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
     if (!done) {
         /* 兜底：聚焦 + SendInput 打字（须窗口前置，元素需可聚焦） */
         HWND hwnd = element_window(el);
-        bring_window_forward(hwnd);
-        el->lpVtbl->SetFocus(el);
-        Sleep(80);
-        send_unicode_text(text);
+        int focused = 0;
+        if (!bring_window_forward(hwnd) || FAILED(el->lpVtbl->SetFocus(el)) ||
+            !get_bool_prop(el, UIA_HasKeyboardFocusPropertyId, &focused) || !focused ||
+            GetTickCount() - started >= deadline || !send_unicode_text(text)) {
+            el->lpVtbl->Release(el);
+            strncpy(err_code, USH_ERR_NOT_CONFIRMED, err_code_size - 1);
+            snprintf(err_text, err_text_size, "target focus or keyboard input could not be confirmed");
+            return 0;
+        }
         done = 1;
         method = "sendinput";
-    }
-    if (submit) {
-        INPUT in;
-        memset(&in, 0, sizeof(in));
-        in.type = INPUT_KEYBOARD;
-        in.ki.wVk = VK_RETURN;
-        SendInput(1, &in, sizeof(INPUT));
-        in.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &in, sizeof(INPUT));
     }
     /* 确认：能读回 Value 时比对（#12：必须整串相等才算确认。旧逻辑把
      * “现有值是输入文本前缀”也判 confirmed=true——要求输 "hello world"
@@ -1080,17 +1064,27 @@ int ush_ui_input(const ush_request_t *req, char *data_json, size_t data_size,
         if (cur[0]) {
             size_t tl = strlen(text), cl = strlen(cur);
             confirmed = (cl == tl && strncmp(cur, text, tl) == 0);
-        } else if (strcmp(method, "value-pattern") == 0) {
-            confirmed = 1; /* SetValue 返回 S_OK 即确认 */
+        }
+    }
+    if (confirmed && submit) {
+        HWND hwnd = element_window(el);
+        int focused = 0;
+        if (!bring_window_forward(hwnd) || FAILED(el->lpVtbl->SetFocus(el)) ||
+            !get_bool_prop(el, UIA_HasKeyboardFocusPropertyId, &focused) || !focused ||
+            !send_key_pair(VK_RETURN, 0, 0)) {
+            el->lpVtbl->Release(el);
+            strncpy(err_code, USH_ERR_NOT_CONFIRMED, err_code_size - 1);
+            snprintf(err_text, err_text_size, "text confirmed but submit target could not be confirmed");
+            return 0;
         }
     }
     el->lpVtbl->Release(el);
-    if (!confirmed && strcmp(method, "sendinput") == 0) {
+    if (!confirmed) {
         /* SendInput 路径读不回 Value（如密码框/富文本）：不谎称失败也不谎称确认，
          * 如实返回 confirmed=false，由调用方（LEA/Muse）决定是否截图复核。 */
         snprintf(data_json, data_size,
-            "{\"method\":\"sendinput\",\"confirmed\":false,"
-            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}");
+            "{\"method\":\"%s\",\"confirmed\":false,"
+            "\"note\":\"value not readable after typing; verify via ui.snapshot\"}", method);
         return 1;
     }
     snprintf(data_json, data_size, "{\"method\":\"%s\",\"confirmed\":true}", method);
@@ -1106,6 +1100,8 @@ typedef struct {
     int max_nodes;
     int max_depth;
     int truncated;
+    ULONGLONG deadline_tick;
+    int failed;
 } tree_ctx_t;
 
 static int tree_append(tree_ctx_t *c, const char *s) {
@@ -1114,7 +1110,7 @@ static int tree_append(tree_ctx_t *c, const char *s) {
         size_t nc = (c->cap ? c->cap * 2 : 8192);
         while (nc < c->len + sl + 1) nc *= 2;
         char *nb = (char *)realloc(c->buf, nc);
-        if (!nb) return 0;
+        if (!nb) { c->failed = 1; return 0; }
         c->buf = nb;
         c->cap = nc;
     }
@@ -1125,8 +1121,9 @@ static int tree_append(tree_ctx_t *c, const char *s) {
 }
 
 static void tree_walk(IUIAutomationElement *el, int depth, tree_ctx_t *c) {
-    if (c->nodes >= c->max_nodes || depth > c->max_depth) {
+    if (c->nodes >= c->max_nodes || depth > c->max_depth || GetTickCount64() >= c->deadline_tick) {
         c->truncated = 1;
+        tree_append(c, "null");
         return;
     }
     char name[256], aid[256], cls[128], esc[1024];
@@ -1160,16 +1157,16 @@ static void tree_walk(IUIAutomationElement *el, int depth, tree_ctx_t *c) {
 
     c->nodes++;
     for (int i = 0; i < depth; i++) tree_append(c, "  ");
-    ush_json_escape(name, esc, sizeof(esc));
+    if (!ush_json_escape(name, esc, sizeof(esc))) c->truncated = 1;
     char line[2048];
     snprintf(line, sizeof(line),
         "{\"name\":\"%s\",\"control_type\":\"%s\",\"control_type_id\":%d,",
         esc, control_type_name(ctid), ctid);
     tree_append(c, line);
-    ush_json_escape(aid, esc, sizeof(esc));
+    if (!ush_json_escape(aid, esc, sizeof(esc))) c->truncated = 1;
     snprintf(line, sizeof(line), "\"automation_id\":\"%s\",", esc);
     tree_append(c, line);
-    ush_json_escape(cls, esc, sizeof(esc));
+    if (!ush_json_escape(cls, esc, sizeof(esc))) c->truncated = 1;
     snprintf(line, sizeof(line), "\"class_name\":\"%s\",\"rect\":%s,\"enabled\":%s,\"children\":[",
         esc, rect_s, enabled ? "true" : "false");
     tree_append(c, line);
@@ -1181,11 +1178,12 @@ static void tree_walk(IUIAutomationElement *el, int depth, tree_ctx_t *c) {
             if (el->lpVtbl->FindAll(el, TreeScope_Children, tc, &arr) == S_OK && arr) {
                 int len = 0;
                 arr->lpVtbl->get_Length(arr, &len);
+                int emitted = 0;
                 for (int i = 0; i < len; i++) {
-                    if (c->nodes >= c->max_nodes) { c->truncated = 1; break; }
+                    if (c->nodes >= c->max_nodes || GetTickCount64() >= c->deadline_tick) { c->truncated = 1; break; }
                     IUIAutomationElement *child = NULL;
                     if (arr->lpVtbl->GetElement(arr, i, &child) != S_OK || !child) continue;
-                    if (i > 0) tree_append(c, ",");
+                    if (emitted++) tree_append(c, ",");
                     tree_append(c, "\n");
                     tree_walk(child, depth + 1, c);
                     child->lpVtbl->Release(child);
@@ -1205,7 +1203,7 @@ int ush_ui_tree(const ush_request_t *req, char *data_json, size_t data_size,
                 char *err_text, size_t err_text_size,
                 char *window_title, size_t window_title_size) {
     if (window_title && window_title_size) window_title[0] = '\0';
-    if (!g_auto && !ush_uia_init()) {
+    if (!ush_uia_init()) {
         strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
         snprintf(err_text, err_text_size, "UIA init failed");
         return 0;
@@ -1224,6 +1222,7 @@ int ush_ui_tree(const ush_request_t *req, char *data_json, size_t data_size,
         if (v > 5000) v = 5000;
         max_nodes = v;
     }
+    ULONGLONG deadline_tick = GetTickCount64() + (DWORD)req->timeout_ms;
     DWORD deadline = (DWORD)req->timeout_ms;
     IUIAutomationElement *root = NULL;
     if (g_auto->lpVtbl->GetRootElement(g_auto, &root) != S_OK || !root) {
@@ -1243,6 +1242,7 @@ int ush_ui_tree(const ush_request_t *req, char *data_json, size_t data_size,
     }
     tree_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.deadline_tick = deadline_tick;
     ctx.max_nodes = (int)max_nodes;
     ctx.max_depth = (int)max_depth;
     /* r11 tree 主修：删占位 head。旧代码先把 {"truncated":false,"nodes":0,
@@ -1252,6 +1252,12 @@ int ush_ui_tree(const ush_request_t *req, char *data_json, size_t data_size,
      * 只含 tree_walk 输出，data = 回填 head ＋根节点＋1 个 '}'，括号平衡。 */
     tree_walk(scope, 0, &ctx);
     scope->lpVtbl->Release(scope);
+    if (ctx.failed || !ctx.buf) {
+        free(ctx.buf);
+        strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
+        snprintf(err_text, err_text_size, "tree allocation failed");
+        return 0;
+    }
     /* 回填 truncated/nodes */
     char head[256];
     snprintf(head, sizeof(head), "{\"truncated\":%s,\"nodes\":%d,\"tree\":\n",

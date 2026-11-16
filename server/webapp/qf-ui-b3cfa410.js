@@ -283,7 +283,7 @@ async function prepareAvatar(file) {
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(img.width * scale)); canvas.height = Math.max(1, Math.round(img.height * scale));
     const actx = canvas.getContext('2d');
-    actx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim(); actx.fillRect(0, 0, canvas.width, canvas.height);
+    actx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--paper').trim() || 'white'; actx.fillRect(0, 0, canvas.width, canvas.height);
     actx.drawImage(img, 0, 0, canvas.width, canvas.height);
     let q = 0.85, blob = null;
     while (q >= 0.4) {
@@ -359,7 +359,10 @@ const QFComponents = {
   render(name, props) {
     const def = QFComponents._reg.get(name);
     if (!def) return '';
-    try { return def.render(props || {}); } catch (e) { return ''; }
+    try { return def.render(props || {}); } catch (e) {
+      console.warn('QFComponents render failed:', String(name)); // no props: they may contain user data
+      return '<div role="status" data-qf-error="' + esc(String(name)) + '"></div>';
+    }
   },
   list() { return Array.from(QFComponents._reg.keys()).sort(); },
   meta(name) { const d = QFComponents._reg.get(name); return d ? (d.meta || {}) : null; }
@@ -400,7 +403,10 @@ QFComponents.register('button', {
     const icon = p.icon ? ic(p.icon) : '';
     const aria = p.ariaLabel ? ` aria-label="${esc(p.ariaLabel)}"` : '';
     const attrs = qfSanitizeButtonAttrs(p.attrs);
-    return `<button class="btn${kind}${size}"${aria}${attrs ? ' ' + attrs : ''}>${icon}${label}</button>`;
+    const loading = p.loading === true;
+    const busy = loading ? ' disabled aria-busy="true"' : '';
+    const spinner = loading ? '<span class="btn-loader" aria-hidden="true"></span>' : '';
+    return `<button class="btn${kind}${size}${loading ? ' is-loading' : ''}"${aria}${attrs ? ' ' + attrs : ''}${busy}>${spinner}${icon}${label}</button>`;
   }
 });
 
@@ -448,6 +454,6 @@ function appShellHtml() {
   return '<div class="app"><aside class="side"></aside><div class="main"><div class="top"></div><main id="view"></main></div></div><aside class="drawer"></aside><nav class="bnav"></nav>';
 }
 QFComponents.register('app-shell', {
-  meta: { layer: 'layouts', a11y: 'drawer role=dialog, view aria-live=polite' },
+  meta: { layer: 'layouts', a11y: 'drawer role=dialog, navigation focus target with local status announcements' },
   render() { return appShellHtml(); }
 });

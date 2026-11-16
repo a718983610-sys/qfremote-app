@@ -37,15 +37,29 @@ class FriendsGate {
   constructor(file) {
     this.file = file;
     this.pairs = new Set();
+    this._signature = '';
+    this._errorLoggedAt = 0;
     this.reload();
   }
   reload() {
-    this.pairs = new Set();
     try {
+      const stat = fs.statSync(this.file);
+      const signature = [stat.dev, stat.ino, stat.mtimeMs, stat.ctimeMs, stat.size].join(':');
+      if (signature === this._signature) return;
       const data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      (data.pairs || []).forEach(p => { if (Array.isArray(p) && p.length === 2) this.pairs.add(pairKey(p[0], p[1])); });
-    } catch (e) { /* 文件不存在/损坏 → 空集合（拒发），不抛错 */ }
+      if (!data || !Array.isArray(data.pairs)) throw new Error('invalid-friends-file');
+      const next = new Set();
+      data.pairs.forEach(p => { if (Array.isArray(p) && p.length === 2) next.add(pairKey(p[0], p[1])); });
+      this.pairs = next; this._signature = signature;
+    } catch (e) {
+      this.pairs = new Set(); this._signature = '';
+      if (e.code !== 'ENOENT' && Date.now() - this._errorLoggedAt > 60000) {
+        this._errorLoggedAt = Date.now();
+        console.warn(JSON.stringify({ ev: 'friends-gate-read-failed', code: e.code || 'INVALID_DATA' }));
+      }
+    }
   }
+
   areFriends(a, b) {
     if (!a || !b || norm(a) === norm(b)) return false;
     if (isSupport(a) || isSupport(b)) return true; // 系统联系人：虚拟常驻关系（见文件头预留位说明）
@@ -75,6 +89,7 @@ class FriendsGate {
     const pairs = Array.from(this.pairs).map(k => JSON.parse(k));
     fs.writeFileSync(this.file + '.tmp', JSON.stringify({ pairs }, null, 2));
     fs.renameSync(this.file + '.tmp', this.file);
+    this._signature = ''; // next read observes the new atomic file
   }
 }
 

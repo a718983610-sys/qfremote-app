@@ -26,8 +26,7 @@ const fs = require('fs');
 const path = require('path');
 
 function loadWebSocket() {
-  try { return require('/opt/meshcentral/node_modules/ws'); }
-  catch (e) { return require('ws'); }
+  return require('ws');
 }
 
 // 与好友服务 server.js 的 mcConnect/mcCall 同口径：以服务账号凭据开控制

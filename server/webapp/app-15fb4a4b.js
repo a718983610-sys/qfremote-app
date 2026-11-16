@@ -496,7 +496,7 @@ Views.login = function (root, extra) {
             : '您的账号已被封禁' + (dateStr ? '，预计于 ' + dateStr + ' 解除' : '') + '，当前无法使用本控制台的各项功能。');
       fz.innerHTML = '<div class="note err">' + heading + '</div>'
         + '<div class="note mt-4">' + reason + '</div>'
-        + '<div class="hint mt-4">事由：违反平台规则</div>'
+        + '<div class="hint mt-4">事由：' + esc(b.category || b.reason || '暂未提供，请联系官方客服核实') + '</div>'
         + '<div class="hint mt-8">如您认为该处理存在疑问，可提交申诉或联系智能客服。</div>'
         + '<button class="btn block mt-10" id="li-ban-appeal" type="button">提交申诉</button>'
         + '<p class="hint mt-8">也可以先咨询<a href="#" id="li-ban-support">智能客服</a>，或在客服中申请转人工。'
@@ -575,7 +575,7 @@ Views.gate = function (root, extra) {
     G2: { t: '试用已到期', b: '免费试用已经结束。激活有效付费密钥后，即可继续使用网页版；积分兑换、赠送等免费来源密钥不包含网页版权益，无法用于开通网页版。' },
     G4: { t: '网页版尚未开通', b: '网页版需要真实付费购买密钥开通（赠送、活动发放与积分兑换等免费来源密钥不含网页版权益）。您仍可在软件端继续使用，或购买付费密钥后回到网页版。' },
     G5: { t: '密钥已过期', b: (typeof me.keyExpiresMs === 'number' && me.keyExpiresMs > 0 ? '您的密钥已于 ' + fmtDate(me.keyExpiresMs) + ' 到期。' : '您的密钥已过期。') + '重新购买或兑换新密钥后即可继续使用。' },
-    BAN: { t: '账号已被封禁', b: '封禁事由类别：' + esc((me.activeBan && (me.activeBan.category || me.activeBan.reason)) || '违反平台规则') + '。如有异议，可以提交申诉，审核结果将在申诉进度中显示。' },
+    BAN: { t: '账号已被封禁', b: '封禁事由类别：' + esc((me.activeBan && (me.activeBan.category || me.activeBan.reason)) || '暂未提供，请联系官方客服核实') + '。如有异议，可以提交申诉，审核结果将在申诉进度中显示。' },
     FROZEN: { t: '账号已被冻结', b: '冻结期间暂时无法登录使用，到期后自动解冻；也可以提交申诉提前处理。' }
   }[extra.code] || { t: '暂时无法进入', b: '当前状态下暂时无法进入控制台，请按下方入口处理。' };
   root.innerHTML = `<div class="authwrap"><div class="auth">${brandBlock()}
@@ -3040,6 +3040,8 @@ function ensureChatLibs() {
   chatLibsP.catch(() => { chatLibsP = null; });
   return chatLibsP;
 }
+// M-049: embedded console chat and friends/chat/chat-client.js share API contracts.
+// Changes to sending, polling, key recovery or deletion must be checked in both clients.
 const CH = {
   priv: '', vaultKey: '', pubCache: {}, convKeyCache: {},
   currentWith: '', lastEventSeq: 0, rendered: new Set(),
@@ -3106,9 +3108,11 @@ async function chIdbGet(key) {
 async function chIdbSet(key, val) {
   const db = await chIdbOpen();
   return new Promise((resolve, reject) => {
-    const rq = db.transaction('kv', 'readwrite').objectStore('kv').put(val, key);
-    rq.onsuccess = () => resolve();
-    rq.onerror = () => reject(rq.error);
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(val, key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error || new Error('device-key-write-aborted')); };
   });
 }
 let _chWebKeyP = null;
@@ -3144,16 +3148,27 @@ async function chWebUnwrap(blob, key) {
     return C.encBytes(new Uint8Array(pt));
   } catch (e) { return null; }
 }
-function chLocalDeviceKey(create) {
-  const C = CHC();
-  let k = null;
-  try { k = localStorage.getItem('qfchat-device-key-v1'); } catch (e) {}
-  if (!k && create) {
-    k = C.newDeviceKey();
-    try { localStorage.setItem('qfchat-device-key-v1', k); } catch (e) {}
-  }
-  return k;
+async function chLocalDeviceKey(create) {
+  // M-034: never create plaintext fallback keys. Preserve existing accounts by
+  // moving their shared legacy secret under a nonexportable WebCrypto key.
+  if (create) return null;
+  let legacy = null;
+  try { legacy = localStorage.getItem('qfchat-device-key-v1'); } catch (e) {}
+  try {
+    const key = await chWebDeviceKey(true);
+    if (!key) return null;
+    if (legacy) {
+      await chIdbSet('legacyDeviceKeyWrapped', await chWebWrap(legacy, key));
+      // Delete only after the IndexedDB transaction commits; other accounts
+      // using this same old device key can still recover from the wrapped copy.
+      try { localStorage.removeItem('qfchat-device-key-v1'); } catch (e) {}
+      return legacy;
+    }
+    const wrapped = await chIdbGet('legacyDeviceKeyWrapped');
+    return wrapped ? await chWebUnwrap(wrapped, key) : null;
+  } catch (e) { return null; } // failed migration keeps the original intact
 }
+function chMigrateLegacyDeviceKey() { chLocalDeviceKey(false).catch(() => {}); }
 async function chBuildDeviceCopyFor(kind, privB64, vaultB64) {
   const C = CHC();
   try {
@@ -3169,7 +3184,7 @@ async function chBuildDeviceCopyFor(kind, privB64, vaultB64) {
       return { deviceId: chDeviceIdFor('web'), platform: 'web', wrappedPriv: wp, wrappedVault: wv };
     }
     if (kind === 'local') {
-      const k = chLocalDeviceKey(true);
+      const k = await chLocalDeviceKey(true);
       if (!k) return null;
       return { deviceId: chDeviceIdFor('local'), platform: 'web', wrappedPriv: C.wrapWithKey(privB64, k), wrappedVault: C.wrapWithKey(vaultB64, k) };
     }
@@ -3218,7 +3233,7 @@ async function chTryDeviceUnlock() {
     }
   } catch (e) {}
   try {
-    const k = chLocalDeviceKey(false);
+    const k = await chLocalDeviceKey(false);
     if (k) {
       const c = await chFetchDeviceCopy(chDeviceIdFor('local'));
       if (c && adopt(C.unwrapWithKey(c.wrappedPriv, k), C.unwrapWithKey(c.wrappedVault, k))) return true;
@@ -3240,7 +3255,7 @@ async function chFetchSessionCopy() {
 async function chUploadSessionCopy() {
   if (!CH.priv || !CH.vaultKey) return false;
   const gen0 = CH.gen; // 扫表 S2：上传在飞期间换账号，不得把旧账号的 hasSessionCopy 标到新账号头上
-  try { await cq('POST', '/chat/api/keys/session-copy', { priv: CH.priv, vault: CH.vaultKey }); if (gen0 !== CH.gen) return false; CH.hasSessionCopy = true; return true; }
+  try { await cq('POST', '/chat/api/keys/session-copy', { priv: CH.priv, vault: CH.vaultKey }); if (gen0 !== CH.gen) return false; CH.hasSessionCopy = true; chMigrateLegacyDeviceKey(); return true; }
   catch (e) { return false; }
 }
 async function chCreateKeysSilently(password) {
@@ -3271,6 +3286,7 @@ async function chFinishSilentUnlock() {
     CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
     if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
   } catch (e) { /* 设备清单元数据失败不影响本次解锁 */ }
+  if (CH.hasSessionCopy) chMigrateLegacyDeviceKey();
   if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
   /* 历史失败已在 chLoadHistory 内部可见化并给出重试入口，这里再兜一层，
      保证后续的轮询启动与会话恢复一定执行（C-05/C-07）。 */
@@ -3978,7 +3994,8 @@ window.qfShellUnlock = async function (password) {
     if (gen0 !== CH.gen) return false; // rewrap/取副本在飞期间已换账号：不得把旧账号标为已解锁、不得为新账号登记设备副本
     CH.locked = false;
     chEnrollDeviceCopy().catch(() => {});
-    if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
+    if (CH.hasSessionCopy) chMigrateLegacyDeviceKey();
+  if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
     await chFinishSilentUnlock();
     return true;
   } catch (e) { return false; }
@@ -4359,6 +4376,7 @@ function methodName(m) { return m === 'alipay' ? '支付宝' : '微信支付'; }
    纯展示，不触碰订单状态与支付倒计时。支付方式由展开区顶部页签（[data-method]）切换
    （#47 定版结构），下方只独立展示选中方式的一张收款卡，放大热区（.qrzoom）与页签互不干扰。 */
 function openQrZoom(o) {
+  if (!o || (o.method !== 'wechat' && o.method !== 'alipay')) return; // M-044: validate at the boundary too
   const amt = String(o.amt == null ? '' : o.amt);
   const fb = /^[0-9.]+$/.test(amt) ? localPayCard(o.method, amt) : '';
   const root = showModal(methodName(o.method), `
@@ -5073,13 +5091,21 @@ Views.profile = async function (view) {
     if (r.status === 200 && r.json && r.json.ok) {
       box.innerHTML = profileRecordsHtml(r.json.records || r.json.list || []);
       box.querySelectorAll('[data-appeal]').forEach(b => { b.onclick = async () => {
-        const note = prompt('请输入申诉说明（最多 200 字）');
-        if (note == null) return;
-        const t = String(note).trim();
-        if ([...t].length > 200) { toast('申诉说明最多 200 字。', 'err'); return; }
-        const rr = await api('/profile/mod/' + encodeURIComponent(b.getAttribute('data-appeal')) + '/appeal', { method: 'POST', json: { note: t } });
-        if (rr.json && rr.json.ok) { toast('申诉已提交。', 'ok'); loadPfRecords(); }
-        else toast((rr.json && rr.json.msg) || PROFILE_BUSY_TEXT, 'err');
+        const root = showModal('提交申诉', '<div class="field"><label for="profileAppealNote">申诉说明（最多 200 字）</label><textarea id="profileAppealNote" maxlength="400" rows="4"></textarea><p id="profileAppealError" role="status"></p></div>', [{ label: '取消' }, { label: '提交申诉', primary: true }]);
+        const input = root.querySelector('#profileAppealNote');
+        const submit = root.querySelector('.mops button:last-child');
+        input.focus();
+        submit.onclick = async () => {
+          const t = input.value.trim();
+          const error = root.querySelector('#profileAppealError');
+          if ([...t].length > 200) { error.textContent = '申诉说明最多 200 字。'; input.focus(); return; }
+          submit.disabled = true; submit.setAttribute('aria-busy', 'true');
+          try {
+            const rr = await api('/profile/mod/' + encodeURIComponent(b.getAttribute('data-appeal')) + '/appeal', { method: 'POST', json: { note: t } });
+            if (rr.json && rr.json.ok) { closeModal(); toast('申诉已提交。', 'ok'); loadPfRecords(); }
+            else error.textContent = (rr.json && rr.json.msg) || PROFILE_BUSY_TEXT;
+          } finally { submit.disabled = false; submit.removeAttribute('aria-busy'); }
+        };
       }; });
     } else box.innerHTML = '<div class="statebox"><b>审核记录暂时不可用</b><p>请稍后重新加载本页。</p></div>';
   };
@@ -5551,7 +5577,9 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
   $('#bellBtn').innerHTML = ic('bell');
   $('#topSearch').innerHTML = ic('search') + '<input id="topSearchIn" placeholder="搜索功能">'; // r13：手机 390px 下搜索框实测仅 111px、原占位「搜索功能或关键词…」需 204px 被夹断；16px 字号不可缩（iOS 聚焦放大），改短占位＋CSS 隐藏 .grow 后搜索框约 212px、占位完整显示
   $('#burgerBtn').addEventListener('click', () => setDrawer(!drawerOpen));
-  $('#bellBtn').addEventListener('click', () => toast('暂无新的通知。版本公告将在论坛官方公告中发布。', 'info'));
+  $('#bellBtn').addEventListener('click', () => navigate('forum')); // M-032: real announcements, no invented unread status
+  $('#bellBtn').setAttribute('aria-label', '查看论坛公告');
+  $('#bellBtn').setAttribute('title', '论坛公告');
   $('#acctChip').addEventListener('click', () => $('#acctMenu').classList.toggle('open'));
   $('#topSearchIn').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -5605,7 +5633,7 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
     // 刚播种的 boot 快照清成 undefined（isAdmin 同理被 !!cache.isAdmin 清成
     // false）；注入没带的字段才回填。S.user 不动（换账号判定归 checkSession）。
     S.displayName = (bootData && bootData.displayName) ? bootData.displayName : (cache.displayName || cache.user);
-    S.isAdmin = (bootData && typeof bootData.isAdmin === 'boolean') ? bootData.isAdmin : !!cache.isAdmin;
+    S.isAdmin = false; // M-043: cached/bootstrap chrome never grants admin visibility; checkSession fills live permissions
     if (!bootData || !bootData.license) S.license = cache.license;
     S.points = cache.points;
     location.hash = '#home';

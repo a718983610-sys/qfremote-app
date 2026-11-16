@@ -30,7 +30,7 @@ function run(args) {
 }
 function genDoc() {
   const docPath = path.join(dir, 'release.json');
-  const r = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--out', docPath]);
+  const r = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--out', docPath, '--allow-unsigned']);
   if (r.status !== 0) throw new Error('生成失败：' + r.stderr);
   return { docPath, doc: JSON.parse(fs.readFileSync(docPath, 'utf8')) };
 }
@@ -41,7 +41,7 @@ function genSignedDoc(extraArgs) {
   fs.writeFileSync(privPem, kp.privateKey.export({ format: 'pem', type: 'pkcs8' }));
   const pubB64 = kp.publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
   const docPath = path.join(dir, 'release-signed-' + docSeq + '.json');
-  const r = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--sign-key', privPem, '--out', docPath].concat(extraArgs || []));
+  const r = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--sign-key', privPem, '--out', docPath, '--allow-unsigned'].concat(extraArgs || []));
   if (r.status !== 0) throw new Error('签名生成失败：' + r.stderr);
   return { docPath, doc: JSON.parse(fs.readFileSync(docPath, 'utf8')), pubB64 };
 }
@@ -115,7 +115,7 @@ try {
   const zip = path.join(dir, 'QFRemote-v3.0.0-portable.zip');
   fs.writeFileSync(zip, crypto.randomBytes(1024 * 1024 + 77));
   const zipDocPath = path.join(dir, 'release-zip.json');
-  const rZipGen = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--zip', zip, '--out', zipDocPath]);
+  const rZipGen = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--zip', zip, '--out', zipDocPath, '--allow-unsigned']);
   const zipDoc = JSON.parse(fs.readFileSync(zipDocPath, 'utf8'));
   t('D-04：--zip 生成 portable 段（url/sha256/size 齐全）', rZipGen.status === 0 && !!zipDoc.portable && zipDoc.portable.url.endsWith('/QFRemote-v3.0.0-portable.zip') && zipDoc.portable.size === fs.statSync(zip).size, rZipGen.stderr);
   const rZipCheck = run(['--check', zipDocPath, exe, apk, zip]);
@@ -128,6 +128,29 @@ try {
   t('D-04：zip 内容被改时 --check 失败', rZipBad.status === 1 && (rZipBad.stderr.includes('zip sha256') || rZipBad.stderr.includes('zip size')), rZipBad.stderr);
   const rZipNoSeg = run(['--check', base.docPath, exe, apk, zip]);
   t('D-04：文档无 portable 段却给了 zip 时 --check 失败', rZipNoSeg.status === 1 && rZipNoSeg.stderr.includes('无 portable 段'), rZipNoSeg.stderr);
+
+  const refusedOut = path.join(dir, 'unsigned-refused.json');
+  const unsigned = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--out', refusedOut]);
+  t('M-027：未显式允许的未签名清单不落盘', unsigned.status === 1 && !fs.existsSync(refusedOut));
+  const wrongExe = path.join(dir, 'QFRemote-Setup-v2.4.4.exe');
+  fs.copyFileSync(exe, wrongExe);
+  const wrongName = run(['--exe', wrongExe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0']);
+  t('M-161：旧版文件名不能生成新版清单', wrongName.status === 1 && wrongName.stderr.includes('文件名版本'));
+  const expectOld = check(base.docPath, ['--expect-version', '2.4.4']);
+  t('M-162：自洽清单仍须匹配指定版本', expectOld.status === 1 && expectOld.stderr.includes('--expect-version'));
+  t('M-162：匹配指定版本时通过', check(base.docPath, ['--expect-version', '3.0.0']).status === 0);
+  const corrupt = path.join(dir, 'broken.json');
+  fs.writeFileSync(corrupt, '{');
+  const broken = check(corrupt);
+  t('M-163：坏 JSON 只报可读错误，无堆栈', broken.status === 1 && !broken.stderr.includes('at JSON.parse'));
+  const absent = check(path.join(dir, 'missing.json'));
+  t('M-163：缺失文件诊断无原始堆栈', absent.status === 1 && !absent.stderr.includes('at Object.'));
+  t('M-163：帮助包含签名、便携与全部附加选项', ['--sign-key', '--zip', '--allow-unsigned', '--expect-version', '--interop-window'].every((flag) => run(['--help']).stdout.includes(flag)));
+  const customWindow = run(['--exe', exe, '--apk', apk, '--version', '3.0.0', '--min-usable', '3.0.0', '--interop-window', '3']);
+  t('M-164：互联窗口可显式配置', customWindow.status === 0 && JSON.parse(customWindow.stdout).interop.window === 3);
+  t('M-164：拒绝非法互联窗口', run(['--interop-window', '0']).status === 1);
+  t('M-165：覆盖验签公钥输出明确警告与公钥指纹', rSignedOk.stderr.includes('覆盖了正式验签信任根') && rSignedOk.stderr.includes('SHA256='));
+  t('M-160：原子替换后无临时文件残留', !fs.readdirSync(dir).some((name) => name.endsWith('.tmp')));
 } catch (e) {
   failed++;
   console.log('FAIL- 异常：' + e.message);

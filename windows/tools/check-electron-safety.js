@@ -108,7 +108,7 @@ function checkRendererFiles(root, violations) {
     const isPreload = /-preload\.js$/.test(name);
     const isMainSide = ['main.js', 'agent-heal.js', 'installer-launch.js', 'sys-helper.js',
       'watchdog.js', 'update.js', 'views.js', 'svc-urls.js', 'creds.js', 'autologin.js',
-      'device-key.js', 'license.js', 'device-code.js', 'devices.js', 'client-version.js',
+      'device-key.js', 'license.js', 'device-code.js', 'devices.js', 'client-version.js', 'screenshot-file.js',
       'ext-retry.js', 'ipc-trust.js', 'lock.js', 'sys-programs.js', 'crash-handler.js',
       'settings-store.js', 'startup-stages.js', 'reconnect-policy.js', 'reconnect-ticket.js', 'tray-manager.js',
       'qf-fec.js', 'qf-idr.js', 'qf-relay.js', 'qf-transfer.js', 'qf-quality.js', 'qf-recording.js', 'qf-protocol.js'].indexOf(name) >= 0;

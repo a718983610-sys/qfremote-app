@@ -419,12 +419,15 @@ static int ensure_data_dirs(void) {
     const char *subs[] = { "inbox", "logs", "state" };
     for (int i = 0; i < 3; i++) {
         snprintf(sub, sizeof(sub), "%s\\%s", base, subs[i]);
-        mkdir_one_u8(sub);
-        if (!set_dir_sys_admin_acl_u8(sub))
-            log_line("warning: acl failed for %s", sub);
+        if (!mkdir_one_u8(sub) || !set_dir_sys_admin_acl_u8(sub)) {
+            log_line("failed: directory creation/acl failed for %s", sub);
+            return 0;
+        }
     }
-    if (!set_dir_sys_admin_acl_u8(base))
-        log_line("warning: acl failed for %s", base);
+    if (!set_dir_sys_admin_acl_u8(base)) {
+        log_line("failed: acl failed for %s", base);
+        return 0;
+    }
     return 1;
 }
 
@@ -458,7 +461,7 @@ int lea_service_install(int repair) {
     read_old_main_version(dir, main_version, sizeof(main_version));
 
     /* ① 数据目录＋ACL（与 install-lea.ps1 ③步同款）。 */
-    ensure_data_dirs();
+    if (!ensure_data_dirs()) { write_pending_repair(); return 1; }
 
     /* ② 停旧服务（升级／修复时；全新安装时无服务即跳过）。 */
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);

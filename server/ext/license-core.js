@@ -328,6 +328,9 @@ function createLicenseCore(opts) {
       permanent: input.permanent === true, // DEV-27（七审 #1）：严格布尔——字符串 "false" 不得被 !! 折成永久封禁；现行调用方全传真布尔，语义不变
       startsAt: now, endsAt: input.permanent === true ? null : (Number.isFinite(input.endsAt) ? input.endsAt : (input.endsAt === null ? null : (Number.isFinite(input.days) && input.days > 0 ? now + input.days * 86400000 : null))), // DEV-27（七审 #2/#3）：endsAt 只认有限数（ISO 串等异型值回落 days 路径，不再透传成永不过期）；显式 null＝手动解除型（B8 站长冻结既定语义，调用点 server.js admin-freeze 在案）
       status: 'active', actor: input.actor || 'system', evidence: String(input.evidence || '').slice(0, 300),
+      // Only an intentionally public explanation may reach user-facing gates.
+      // Internal moderation evidence is never repurposed as a public reason.
+      publicReason: typeof input.publicReason === 'string' ? input.publicReason.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 160) : null,
       appealId: null, liftedAt: null, liftedBy: null,
     };
     state.bans.push(ban);
@@ -645,9 +648,9 @@ function createLicenseCore(opts) {
     }
     if (bans.length) {
       const perm = bans.find((b) => b.permanent);
-      if (perm) return Object.assign(base, { allow: false, code: 'BAN_PERM', banId: perm.id, banCode: perm.code, msgCode: perm.code === 'B6' ? 'L2' : 'L4' });
+      if (perm) return Object.assign(base, { allow: false, code: 'BAN_PERM', banId: perm.id, banCode: perm.code, banCategory: perm.publicReason || null, msgCode: perm.code === 'B6' ? 'L2' : 'L4' });
       const b = bans[0];
-      return Object.assign(base, { allow: false, code: 'BAN_UNTIL', banId: b.id, banCode: b.code, endsAt: b.endsAt, msgCode: b.code === 'B10' ? 'L12' : 'L5' });
+      return Object.assign(base, { allow: false, code: 'BAN_UNTIL', banId: b.id, banCode: b.code, banCategory: b.publicReason || null, endsAt: b.endsAt, msgCode: b.code === 'B10' ? 'L12' : 'L5' });
     }
     const keys = activeKeys(username, now);
     // DS-R01 P0 修复（2026-10-26）：门控只认已激活钥。未激活钥 effectiveExpiry

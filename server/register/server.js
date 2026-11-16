@@ -67,8 +67,7 @@ const CONFIG_PATH = process.env.QFREG_CONFIG || '/opt/qfremote-register/config.j
 let _WebSocket = null;
 function loadWebSocket() {
   if (_WebSocket) return _WebSocket;
-  try { _WebSocket = require('/opt/meshcentral/node_modules/ws'); }
-  catch (e) { _WebSocket = require('ws'); }
+  _WebSocket = require('ws'); // M-025: service-owned dependency, independent of MeshCentral upgrades
   return _WebSocket;
 }
 
@@ -175,11 +174,11 @@ function main() {
   }
 
   function clientIp(req) {
-    // 只认本机回环来的 X-Forwarded-For（将来若挂反代在本机），其余一律用连接地址
-    const remote = req.socket.remoteAddress || '';
-    if ((remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') && req.headers['x-forwarded-for']) {
-      return String(req.headers['x-forwarded-for']).split(',')[0].trim();
-    }
+    const remote = String((req.socket && req.socket.remoteAddress) || '');
+    const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    const forwarded = String((req.headers && req.headers['cf-connecting-ip']) || '').trim();
+    // M-026: only our loopback proxy may supply this validated single-IP header.
+    if (loopback && require('net').isIP(forwarded)) return forwarded;
     return remote.replace(/^::ffff:/, '');
   }
   function parseCookies(req) {

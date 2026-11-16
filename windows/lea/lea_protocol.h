@@ -245,7 +245,7 @@ int lea_json_top_level_string(const char *text, const char *key, char *out, size
  * 出现一次、值为 JSON 数组、元素全为字符串（按 JSON 转义解码）。
  * 返回元素个数（0=空数组），-1=缺失／类型错／重复键／元素溢出。 */
 int lea_json_top_level_string_array(const char *text, const char *key,
-                                    char out[][128], int max_items);
+                                    char out[][129], int max_items);
 /* 严格 JSON 值校验（H09：幂等快照写盘前校验行合法性）。 */
 int lea_json_is_valid(const char *text);
 int lea_json_object_raw(const char *text, const char *key, char *out, size_t out_size);

@@ -96,10 +96,11 @@ function Get-ServiceStatus {
 function Detect-Code {
   $status = Get-ServiceStatus
   if (-not $status) { return 'service-missing' }
+  if ($status -eq 'StartPending' -or $status -eq 'StopPending') { return 'service-pending' }
   $msh = Resolve-MshPath
   if (-not $msh) { return 'msh-missing' }
-  if ($status -eq 'StartPending' -or $status -eq 'StopPending') { return 'service-pending' }
-  $raw = [IO.File]::ReadAllText($msh)
+  try { $raw = [IO.File]::ReadAllText($msh) }
+  catch { Write-HealLog 'DETECT: cannot read msh'; return 'msh-missing' }
   if ($raw -notmatch '(?m)^MeshServer=wss://app\.qfremote\.top:8443/agent\.ashx\r?$') {
     return 'msh-wrong-target'
   }
@@ -131,9 +132,15 @@ if (-not $msh) {
 }
 Write-HealLog ('msh resolved: ' + $msh)
 
-$bytes = [IO.File]::ReadAllBytes($msh)
+try {
+  $bytes = [IO.File]::ReadAllBytes($msh)
+  $raw = [IO.File]::ReadAllText($msh)
+} catch {
+  Write-HealLog 'RESULT: msh_read_failed'
+  Write-Output 'RESULT: msh_read_failed'
+  exit 1
+}
 $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
-$raw = [IO.File]::ReadAllText($msh)
 
 $fixed = $false
 if ($raw -match '(?m)^MeshServer=wss://app\.qfremote\.top:8443/agent\.ashx\r?$') {

@@ -33,6 +33,11 @@ permissions:
 # 产物版只读 version.json（tools/check-release-version.js 全值校验）。
 env:
   FLUTTER_VERSION: '3.47.8'
+  BUILD_TOOLS_VERSION: '35.0.0'
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -58,6 +63,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 安装固定 Android build-tools
+        run: sdkmanager "build-tools;$BUILD_TOOLS_VERSION"
+
       - name: 读取 version.json（唯一版本源）并全值校验
         run: |
           node tools/check-release-version.js
@@ -73,7 +81,7 @@ jobs:
 
       - name: 拉依赖
         working-directory: android-app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: 静态检查
         working-directory: android-app
@@ -87,21 +95,25 @@ jobs:
         working-directory: android-app
         run: flutter test test/updater_chain_test.dart --dart-define=QF_CHAIN_TEST=true --dart-define=QF_RELEASE_URL=http://127.0.0.1:18791/release.json
 
-      - name: 构建 release APK（dev：无正式签名，Gradle 回退调试签名）
+      - name: 构建 dev APK（显式允许调试签名，不可发布）
         working-directory: android-app
+        env:
+          QFR_ALLOW_DEBUG_RELEASE_SIGNING: '1'
         run: flutter build apk --release
 
       - name: 验包（包名/版本/签名指纹）并写 channel sidecar
         working-directory: android-app
         run: |
           APK=build/app/outputs/flutter-apk/app-release.apk
-          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          BT="$BUILD_TOOLS_VERSION"
           echo "build-tools: $BT"
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-dev-$SHORT_SHA.apk"
+          APK_SHA256=$(sha256sum "$APK" | cut -d ' ' -f1)
+          APK_SIZE=$(stat -c%s "$APK")
           cat > "build/app/outputs/flutter-apk/build-channel.json" <<EOF
-          {"version": "$APP_VERSION", "channel": "dev", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION-dev-$SHORT_SHA.apk"}
+          {"version": "$APP_VERSION", "channel": "dev", "commit": "$GITHUB_SHA", "sha256": "$APK_SHA256", "size": $APK_SIZE, "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION-dev-$SHORT_SHA.apk"}
           EOF
           cat build/app/outputs/flutter-apk/build-channel.json
           ls -la build/app/outputs/flutter-apk/
@@ -141,6 +153,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 安装固定 Android build-tools
+        run: sdkmanager "build-tools;$BUILD_TOOLS_VERSION"
+
       - name: 读取 version.json（唯一版本源）并全值校验
         run: |
           node tools/check-release-version.js
@@ -173,7 +188,7 @@ jobs:
 
       - name: 拉依赖
         working-directory: android-app
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: 静态检查
         working-directory: android-app
@@ -195,13 +210,15 @@ jobs:
         working-directory: android-app
         run: |
           APK=build/app/outputs/flutter-apk/app-release.apk
-          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          BT="$BUILD_TOOLS_VERSION"
           echo "build-tools: $BT"
           "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK" | head -3
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$APK"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION.apk"
+          APK_SHA256=$(sha256sum "$APK" | cut -d ' ' -f1)
+          APK_SIZE=$(stat -c%s "$APK")
           cat > "build/app/outputs/flutter-apk/build-channel.json" <<EOF
-          {"version": "$APP_VERSION", "channel": "production", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION.apk"}
+          {"version": "$APP_VERSION", "channel": "production", "commit": "$GITHUB_SHA", "sha256": "$APK_SHA256", "size": $APK_SIZE, "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION.apk"}
           EOF
           cat build/app/outputs/flutter-apk/build-channel.json
           ls -la build/app/outputs/flutter-apk/

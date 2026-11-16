@@ -42,6 +42,9 @@
  * QFRLEA 服务两层做）；只做管道搬运。
  */
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +96,7 @@ static const char *json_skip_string(const char *p) {
                 }
                 p += 6;
             } else {
+                if (!strchr("\"\\/bfnrt", p[1])) return NULL;
                 p += 2;
             }
         } else if (*p == '"') {
@@ -148,7 +152,20 @@ static const char *json_skip_value(const char *p) {
         const char *s = p;
         if (*s == '-') s++;
         if (!(*s >= '0' && *s <= '9')) return NULL;
-        while ((*s >= '0' && *s <= '9') || *s == '.' || *s == 'e' || *s == 'E' || *s == '+' || *s == '-') s++;
+        if (*s == '0') s++;
+        else { while (*s >= '0' && *s <= '9') s++; }
+        if (*s == '.') {
+            s++;
+            if (*s < '0' || *s > '9') return NULL;
+            while (*s >= '0' && *s <= '9') s++;
+        }
+        if (*s == 'e' || *s == 'E') {
+            s++;
+            if (*s == '+' || *s == '-') s++;
+            if (*s < '0' || *s > '9') return NULL;
+            while (*s >= '0' && *s <= '9') s++;
+        }
+        if (*s && *s != ',' && *s != '}' && *s != ']' && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n') return NULL;
         return s;
     }
 }
@@ -205,7 +222,9 @@ static int read_file_all(const char *path, char *buf, size_t size) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     size_t total = fread(buf, 1, size - 1, f);
+    int bad = ferror(f) || !feof(f) || memchr(buf, 0, total) != NULL;
     fclose(f);
+    if (bad) { buf[0] = 0; return 0; }
     buf[total] = '\0';
     while (total > 0 && (buf[total - 1] == '\n' || buf[total - 1] == '\r'))
         buf[--total] = '\0';
@@ -362,7 +381,7 @@ int main(int argc, char **argv) {
          * 超长时退出 2，绝不把动词或乱码发往管道。 */
         long n = lea_b64_decode(argv[2], (unsigned char *)envelope,
                                 sizeof(envelope) - 1);
-        if (n <= 0) {
+        if (n <= 0 || memchr(envelope, 0, (size_t)n) != NULL) {
             print_error_json("QFR_LEA_CLIENT_BAD_DISPATCH", "dispatch-base64-decode-failed");
             return 2;
         }
@@ -399,7 +418,7 @@ int main(int argc, char **argv) {
          * 发往管道（与 dispatch 同款 fail-closed）。 */
         long n = lea_b64_decode(argv[2], (unsigned char *)envelope,
                                 sizeof(envelope) - 1);
-        if (n <= 0) {
+        if (n <= 0 || memchr(envelope, 0, (size_t)n) != NULL) {
             print_error_json("QFR_LEA_CLIENT_BAD_DISPATCH", "internal-b64-decode-failed");
             return 2;
         }
@@ -425,7 +444,7 @@ int main(int argc, char **argv) {
     /* B1：硬时限与信封 timeout_ms 脱钩——提交后 ACK 2 秒、结果 6 秒
      *（绝对 deadline，以写完提交时刻起算；request_id 供超时 JSON 关联）。
      * 内部命令（--internal）同样走硬时限，不再另给 10 秒。 */
-    char req_id[64] = { 0 };
+    char req_id[129] = { 0 };
     extract_request_id(envelope, req_id, sizeof(req_id));
     /* 低项 2：async 只对 tier 2 命令生效（与服务端 QFRLEA.c 同规则）；
      * L0／L1 信封纵写 async 也被服务端强制同步，客户端须等结果行。 */

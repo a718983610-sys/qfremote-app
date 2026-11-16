@@ -34,7 +34,7 @@
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600 /* GetNamedPipeClientProcessId（H03）须 ≥0x0600 */
+#define _WIN32_WINNT 0x0A00 /* UIA/DPI runtime targets Windows 10, same as build.sh. */
 #endif
 #include <windows.h>
 #include <sddl.h>
@@ -63,9 +63,11 @@ static HANDLE g_stop_event = NULL;
  * 生成失败返回 0：此时 g_ush_token 为空，全部 LEA 命令都会因 token
  * 不匹配被拒（fail-closed），只记日志继续跑，等下次启动重试。 */
 static char g_ush_token[65] = { 0 };
+static int g_ush_token_persisted = 0;
 
 static int ush_token_init(void) {
     unsigned char raw[32];
+    if (!g_ush_token[0]) {
     if (BCryptGenRandom(NULL, raw, sizeof(raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
         return 0;
     static const char hexd[] = "0123456789abcdef";
@@ -74,6 +76,7 @@ static int ush_token_init(void) {
         g_ush_token[i * 2 + 1] = hexd[raw[i] & 0xF];
     }
     g_ush_token[64] = '\0';
+    }
     /* 文件名用活动控制台会话 id（H03 第二轮）：与 LEA 的 ush_token_read
      * 用同一来源，RDP／多会话下不错配。旧版用自身会话 id
      * （ProcessIdToSessionId），RDP 会话里的 USH 与 LEA 读的控制台会
@@ -90,19 +93,19 @@ static int ush_token_init(void) {
     }
     WCHAR wpd[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return 1; /* token 在内存，文件写失败只记日志 */
+    if (n == 0 || n >= MAX_PATH) return 0;
     WCHAR wpath[MAX_PATH];
-    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu.txt",
-               wpd, (unsigned long)session_id);
+    if (_snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu.txt",
+               wpd, (unsigned long)session_id) < 0) return 0;
     FILE *f = _wfopen(wpath, L"wb");
     if (!f) {
         ush_log_event("ush-token-file-failed", "cannot write ush token file; LEA forwards will fail closed");
-        return 1;
+        return 0;
     }
-    fwrite(g_ush_token, 1, 64, f);
-    fputc('\n', f);
-    fclose(f);
-    return 1;
+    int ok = fwrite(g_ush_token, 1, 64, f) == 64 && fputc('\n', f) != EOF;
+    if (fclose(f) != 0) ok = 0;
+    g_ush_token_persisted = ok;
+    return ok;
 }
 
 /* 管道调用方鉴别：返回 0=拒绝，1=LEA 服务（QFRLEA.exe，可发全部命令，
@@ -124,8 +127,18 @@ static int ush_caller_kind(HANDLE pipe) {
         WCHAR expect_lea[MAX_PATH], expect_self[MAX_PATH];
         _snwprintf(expect_lea, MAX_PATH, L"%s\\QFRLEA.exe", self);
         _snwprintf(expect_self, MAX_PATH, L"%s\\QFUserHelper.exe", self);
-        if (_wcsicmp(img, expect_lea) == 0) kind = 1;
-        else if (_wcsicmp(img, expect_self) == 0) kind = 2;
+        if (_wcsicmp(img, expect_lea) == 0) {
+            HANDLE token = NULL;
+            if (OpenProcessToken(h, TOKEN_QUERY, &token)) {
+                DWORD bytes = 0;
+                GetTokenInformation(token, TokenUser, NULL, 0, &bytes);
+                TOKEN_USER *user = bytes ? (TOKEN_USER *)malloc(bytes) : NULL;
+                if (user && GetTokenInformation(token, TokenUser, user, bytes, &bytes) &&
+                    IsWellKnownSid(user->User.Sid, WinLocalSystemSid)) kind = 1;
+                free(user);
+                CloseHandle(token);
+            }
+        } else if (pid == GetCurrentProcessId() && _wcsicmp(img, expect_self) == 0) kind = 2;
     }
     CloseHandle(h);
     return kind;
@@ -223,10 +236,11 @@ static int read_request_line(HANDLE pipe, char *buf, size_t buf_size) {
         BOOL r = ReadFile(pipe, chunk, want, &got, &ov);
         if (!r && GetLastError() == ERROR_IO_PENDING) {
             ULONGLONG now = GetTickCount64();
-            if (now >= deadline_tick) { CancelIo(pipe); timed_out = 1; break; }
+            if (now >= deadline_tick) { CancelIoEx(pipe, &ov); GetOverlappedResult(pipe, &ov, &got, TRUE); timed_out = 1; break; }
             DWORD wait_ms = (DWORD)(deadline_tick - now);
             if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
-                CancelIo(pipe);
+                CancelIoEx(pipe, &ov);
+                GetOverlappedResult(pipe, &ov, &got, TRUE);
                 timed_out = 1;
                 break;
             }
@@ -250,8 +264,8 @@ static int read_request_line(HANDLE pipe, char *buf, size_t buf_size) {
     }
     CloseHandle(ev);
     buf[n] = '\0';
-    if (timed_out) return 0;
-    return n > 0 ? 1 : 0;
+    (void)timed_out;
+    return 0; /* M095: EOF/read errors and oversize never execute partial JSON. */
 }
 
 /* #14：重叠写响应（带超时；实例句柄为 FILE_FLAG_OVERLAPPED，同步
@@ -272,10 +286,11 @@ static int ush_pipe_write_all(HANDLE pipe, const char *buf, size_t len) {
         BOOL r = WriteFile(pipe, buf + sent, want, &chunk, &ov);
         if (!r && GetLastError() == ERROR_IO_PENDING) {
             ULONGLONG now = GetTickCount64();
-            if (now >= deadline_tick) { CancelIo(pipe); break; }
+            if (now >= deadline_tick) { CancelIoEx(pipe, &ov); GetOverlappedResult(pipe, &ov, &chunk, TRUE); break; }
             DWORD wait_ms = (DWORD)(deadline_tick - now);
             if (WaitForSingleObject(ev, wait_ms) != WAIT_OBJECT_0) {
-                CancelIo(pipe);
+                CancelIoEx(pipe, &ov);
+                GetOverlappedResult(pipe, &ov, &chunk, TRUE);
                 break;
             }
             if (!GetOverlappedResult(pipe, &ov, &chunk, FALSE)) break;
@@ -423,6 +438,24 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size,
     free(data_buf);
 }
 
+
+static DWORD WINAPI ush_flush_worker(LPVOID pipe) {
+    return FlushFileBuffers((HANDLE)pipe) ? 0 : 1;
+}
+static void ush_flush_bounded(HANDLE pipe) {
+    HANDLE thread = CreateThread(NULL, 0, ush_flush_worker, pipe, 0, NULL);
+    if (!thread) return;
+    HANDLE waits[2] = { thread, g_stop_event };
+    DWORD result = g_stop_event ? WaitForMultipleObjects(2, waits, FALSE, 10000)
+                               : WaitForSingleObject(thread, 10000);
+    if (result != WAIT_OBJECT_0) {
+        CancelSynchronousIo(thread);
+        DisconnectNamedPipe(pipe);
+        WaitForSingleObject(thread, INFINITE);
+    }
+    CloseHandle(thread);
+}
+
 /* ---------- 管道循环 ---------- */
 static DWORD WINAPI pipe_loop(LPVOID unused) {
     (void)unused;
@@ -436,6 +469,11 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
+    if (!ush_uia_init()) {
+        /* UIA 初始化失败不致命：ui.ping 仍可回答，UI 命令会报 QFR_USH_FAILED。
+         * 记日志继续跑，等 LEA 探活看到 ping 通但 UI 失败时再处置。 */
+        ush_log_event("uia-init-failed", "CoCreateInstance CUIAutomation failed; UI commands will fail");
+    }
     ush_log_event("pipe-listening", "pipe=\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");
     static char req_buf[USH_MAX_REQUEST + 1];
     char *resp_buf = (char *)malloc(USH_MAX_RESPONSE);
@@ -443,7 +481,10 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
         LocalFree(sd);
         return 1;
     }
+    unsigned collision_failures = 0;
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
+        if (!g_ush_token_persisted && !ush_token_init())
+            ush_log_event("ush-token-file-retry", "token publication unavailable; retrying without rotating the in-memory token");
         /* 注意：CreateNamedPipe 的缓冲大小只是内核缓冲，不是消息上限
          * （WriteFile 可分片写大响应）；给 16MB 会建管道失败，须用小值。
          * #14：实例以 FILE_FLAG_OVERLAPPED 创建，连接与读写一律走重叠 I/O，
@@ -470,7 +511,14 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
                     if (g_stop_event) SetEvent(g_stop_event);
                     break;
                 }
-                Sleep(1000);
+                if (++collision_failures >= 8) {
+                    ush_log_event("fatal", "pipe holder failed repeated probes; supervisor must recover holder");
+                    InterlockedExchange(&g_running, 0);
+                    if (g_stop_event) SetEvent(g_stop_event);
+                    break;
+                }
+                DWORD backoff = 250u << (collision_failures > 5 ? 5 : collision_failures);
+                if (g_stop_event) WaitForSingleObject(g_stop_event, backoff); else Sleep(backoff);
                 continue;
             }
             Sleep(1000);
@@ -489,10 +537,11 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
         cov.hEvent = cev;
         BOOL connected = ConnectNamedPipe(pipe, &cov);
         if (!connected && GetLastError() == ERROR_IO_PENDING) {
-            if (WaitForSingleObject(cev, INFINITE) == WAIT_OBJECT_0) {
-                DWORD dummy = 0;
-                connected = GetOverlappedResult(pipe, &cov, &dummy, FALSE);
-            }
+            HANDLE waits[2] = { cev, g_stop_event };
+            DWORD waited = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+            DWORD dummy = 0;
+            if (waited == WAIT_OBJECT_0) connected = GetOverlappedResult(pipe, &cov, &dummy, FALSE);
+            else { CancelIoEx(pipe, &cov); GetOverlappedResult(pipe, &cov, &dummy, TRUE); }
         }
         CloseHandle(cev);
         if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
@@ -507,7 +556,7 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             ush_build_response(deny, sizeof(deny), 0, USH_ERR_CALLER_NOT_ALLOWED, "", 0,
                                NULL, "pipe caller is not QFRLEA.exe or QFUserHelper.exe");
             ush_pipe_write_all(pipe, deny, strlen(deny));
-            FlushFileBuffers(pipe);
+            ush_flush_bounded(pipe);
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
             ush_log_event("caller-rejected", "non-LEA process attempted USH pipe");
@@ -518,10 +567,11 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
             handle_request(req_buf, resp_buf, USH_MAX_RESPONSE, &dur, caller);
             ush_pipe_write_all(pipe, resp_buf, strlen(resp_buf));
         }
-        FlushFileBuffers(pipe);
+        ush_flush_bounded(pipe);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
     }
+    ush_uia_shutdown();
     free(resp_buf);
     LocalFree(sd);
     ush_log_event("pipe-stopped", "pipe loop exited");
@@ -595,12 +645,8 @@ int main(int argc, char **argv) {
     }
 
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_stop_event) { if (mutex) CloseHandle(mutex); return 1; }
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
-    if (!ush_uia_init()) {
-        /* UIA 初始化失败不致命：ui.ping 仍可回答，UI 命令会报 QFR_USH_FAILED。
-         * 记日志继续跑，等 LEA 探活看到 ping 通但 UI 失败时再处置。 */
-        ush_log_event("uia-init-failed", "CoCreateInstance CUIAutomation failed; UI commands will fail");
-    }
     HANDLE loop_thread = CreateThread(NULL, 0, pipe_loop, NULL, 0, NULL);
     if (!loop_thread) {
         ush_log_event("fatal", "cannot start pipe thread");
@@ -614,8 +660,12 @@ int main(int argc, char **argv) {
             0, NULL, OPEN_EXISTING, 0, NULL);
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
-    WaitForSingleObject(loop_thread, 5000);
-    ush_uia_shutdown();
+    if (WaitForSingleObject(loop_thread, 5000) != WAIT_OBJECT_0) {
+        ush_log_event("shutdown-pending", "waiting for UIA worker to finish before closing resources");
+        WaitForSingleObject(loop_thread, INFINITE);
+    }
+    CloseHandle(loop_thread);
+    CloseHandle(g_stop_event); g_stop_event = NULL;
     if (mutex) CloseHandle(mutex);
     ush_log_event("ush-stopped", "shutdown complete");
     return 0;

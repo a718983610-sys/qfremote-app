@@ -737,7 +737,7 @@ function Test-LeaSelfCheck([string]$pendingVersion = '') {
   $checks.service_present = Test-Path -LiteralPath (Join-Path $installDir $serviceExeName)
   $checks.ush_present = Test-Path -LiteralPath (Join-Path $installDir $ushExeName)
   $checks.version_bound = ((Test-Path -LiteralPath (Join-Path $installDir 'version.json')) -or ($pendingVersion -ne ''))
-  $checks.all_ok = $checks.service_running -and $checks.client_present -and $checks.service_present -and $checks.version_bound
+  $checks.all_ok = $checks.service_running -and $checks.pipe_exists -and $checks.client_present -and $checks.service_present -and $checks.ush_present -and $checks.version_bound
   return $checks
 }
 

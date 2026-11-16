@@ -1,4 +1,6 @@
 'use strict';
+// M-049: check console app.js chat adapter too (ASSETS.json maps its current file).
+// Sending, polling, key recovery and deletion contracts are shared by both clients.
 /*
  * QFRemote 好友聊天页（三端同一套网页：网页版 / Windows 壳 / 安卓壳）
  * 内容只在本页内加解密；服务器对消息与记录只见密文。流程：
@@ -108,8 +110,8 @@ function fmtTime(at) { const d = new Date(at); return d.getMonth() + 1 + '/' + d
 //     qfShellDeviceUnlock / qfShellDeviceEnroll），页面不落盘保存；
 //   web   —— 浏览器直开时用 WebCrypto 生成不可导出密钥，存入本机
 //     IndexedDB，密钥原件无法被脚本读出，只能在本机参与加解密；
-//   local —— 以上能力都不可用时的兜底：随机设备密钥存本机
-//     localStorage（仍只在本设备，但保护级别较低，仅作兼容路径）。
+//   legacy local —— only read an existing legacy key to migrate it; new
+//     recoverable device keys are never written to localStorage (M-034).
 // 每路有独立的设备标识（deviceId），服务端可并存多份副本、可单独撤销。
 function deviceIdFor(kind) {
   const key = 'qfchat-device-id-' + kind;
@@ -144,9 +146,11 @@ async function idbGet(key) {
 async function idbSet(key, val) {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
-    const rq = db.transaction('kv', 'readwrite').objectStore('kv').put(val, key);
-    rq.onsuccess = () => resolve();
-    rq.onerror = () => reject(rq.error);
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(val, key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onabort = () => { db.close(); reject(tx.error || new Error('device-key-write-aborted')); };
   });
 }
 let _webKeyPromise = null;
@@ -161,7 +165,7 @@ function webDeviceKey(create) {
         try { await idbSet('deviceKey', k); } catch (e) { return null; }
       }
       return k || null;
-    })().catch(() => null);
+    })().then(k => { if (!k) _webKeyPromise = null; return k; }, () => { _webKeyPromise = null; return null; });
   }
   return _webKeyPromise;
 }
@@ -176,15 +180,27 @@ async function webUnwrap(blob, key) {
     return C.encBytes(new Uint8Array(pt));
   } catch (e) { return null; }
 }
-function localDeviceKey(create) {
-  let k = null;
-  try { k = localStorage.getItem('qfchat-device-key-v1'); } catch (e) {}
-  if (!k && create) {
-    k = C.newDeviceKey();
-    try { localStorage.setItem('qfchat-device-key-v1', k); } catch (e) {}
-  }
-  return k;
+async function localDeviceKey(create) {
+  // M-034: never create plaintext fallback keys. Preserve existing accounts by
+  // moving their shared legacy secret under a nonexportable WebCrypto key.
+  if (create) return null;
+  let legacy = null;
+  try { legacy = localStorage.getItem('qfchat-device-key-v1'); } catch (e) {}
+  try {
+    const key = await webDeviceKey(true);
+    if (!key) return null;
+    if (legacy) {
+      await idbSet('legacyDeviceKeyWrapped', await webWrap(legacy, key));
+      // Delete only after the IndexedDB transaction commits; other accounts
+      // using this same old device key can still recover from the wrapped copy.
+      try { localStorage.removeItem('qfchat-device-key-v1'); } catch (e) {}
+      return legacy;
+    }
+    const wrapped = await idbGet('legacyDeviceKeyWrapped');
+    return wrapped ? await webUnwrap(wrapped, key) : null;
+  } catch (e) { return null; } // failed migration keeps the original intact
 }
+function migrateLegacyDeviceKey() { localDeviceKey(false).catch(() => {}); }
 // 为一份秘密原件构建指定路径的设备副本（失败返回 null，绝不阻断主流程）
 async function buildDeviceCopyFor(kind, privB64, vaultB64) {
   try {
@@ -200,7 +216,7 @@ async function buildDeviceCopyFor(kind, privB64, vaultB64) {
       return { deviceId: deviceIdFor('web'), platform: 'web', wrappedPriv: wp, wrappedVault: wv };
     }
     if (kind === 'local') {
-      const k = localDeviceKey(true);
+      const k = await localDeviceKey(true);
       if (!k) return null;
       return { deviceId: deviceIdFor('local'), platform: 'web', wrappedPriv: C.wrapWithKey(privB64, k), wrappedVault: C.wrapWithKey(vaultB64, k) };
     }
@@ -251,7 +267,7 @@ async function tryDeviceUnlock() {
     }
   } catch (e) {}
   try {
-    const k = localDeviceKey(false);
+    const k = await localDeviceKey(false);
     if (k) {
       const c = await fetchDeviceCopy(deviceIdFor('local'));
       if (c && adopt(C.unwrapWithKey(c.wrappedPriv, k), C.unwrapWithKey(c.wrappedVault, k))) return true;
@@ -280,6 +296,7 @@ async function uploadSessionCopy() {
   try {
     await api('POST', '/chat/api/keys/session-copy', { priv: state.priv, vault: state.vaultKey });
     state.hasSessionCopy = true;
+    migrateLegacyDeviceKey(); // server has durably accepted the migration
     return true;
   } catch (e) { return false; }
 }
@@ -311,6 +328,7 @@ async function finishSilentUnlock() {
     state.deviceMeta = r.keys ? (r.keys.devices || []) : [];
     if (r.keys) state.hasSessionCopy = !!r.keys.hasSessionCopy;
   } catch (e) {}
+  if (state.hasSessionCopy) migrateLegacyDeviceKey();
   if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {}); // 静默迁移：成功解锁后补写托管副本
   await loadHistory();
   await renderFriends();
@@ -384,7 +402,8 @@ async function unlockKeys(password) {
           wrappedVault: C.wrapWithPassword(state.vaultKey, password)
         });
       } catch (e) { /* 重新包装失败不影响本次已解开的状态 */ }
-      if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {});
+      if (state.hasSessionCopy) migrateLegacyDeviceKey();
+  if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {});
       enrollDeviceCopy().catch(() => {});
       return;
     }
@@ -394,6 +413,7 @@ async function unlockKeys(password) {
   }
   state.priv = priv; state.vaultKey = vaultKey;
   enrollDeviceCopy().catch(() => {}); // 密码可得时刻的静默迁移：后台补写设备副本
+  if (state.hasSessionCopy) migrateLegacyDeviceKey();
   if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {}); // 同一时刻补写托管副本
 }
 
@@ -470,7 +490,7 @@ function avatarImgHtml(name, view) {
 }
 async function renderFriends() {
   const r = await api('GET', '/chat/api/friends');
-  const peers = r.peers || r.friends.map(n => ({ name: n, type: 'user' }));
+  const peers = Array.isArray(r.peers) ? r.peers.filter(p => p && typeof p.name === 'string') : (Array.isArray(r.friends) ? r.friends : []).filter(n => typeof n === 'string').map(n => ({ name: n, type: 'user' }));
   // 会话补集：客服号与普通用户的关系是虚拟常驻关系、不落 pairs；客服端登录后
   // 要能从这里点开曾给它发过消息的用户。普通用户删好友后保留的历史会话同理。
   // convMeta 同时带每会话的 lastSeq/myRead（服务端既有字段），供未读点判定。
@@ -900,7 +920,8 @@ window.qfShellUnlock = async function (password) {
     state.password = password;
     state.locked = false;
     enrollDeviceCopy().catch(() => {}); // 凭据解锁成功时刻的静默迁移：后台补写设备副本
-    if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {}); // 同一时刻补写托管副本
+    if (state.hasSessionCopy) migrateLegacyDeviceKey();
+  if (!state.hasSessionCopy) uploadSessionCopy().catch(() => {}); // 同一时刻补写托管副本
     await finishSilentUnlock();
     return true;
   } catch (e) { return false; }
@@ -944,6 +965,21 @@ window.addEventListener('DOMContentLoaded', async () => {
   try { localStorage.removeItem('qfchat-theme'); } catch (e) {} // P0-2：旧私自键一次清掉，之后只用控制台共用键 qf-theme
   try { if (window.qfLea && typeof window.qfLea.onTheme === 'function') { window.qfLea.onTheme((resolved, mode) => chatOnShellTheme(resolved, mode)); } } catch (e) {}
   try { if (window.qfLea && typeof window.qfLea.getThemeState === 'function') { window.qfLea.getThemeState().then((s) => { if (s) chatOnShellTheme(s.resolved, s.mode); }).catch(() => {}); } } catch (e) {}
+  // M-005: revoke remote remembered sessions without interrupting this device.
+  const revokeSessions = document.createElement('button');
+  revokeSessions.type = 'button'; revokeSessions.textContent = '退出其他聊天设备';
+  revokeSessions.className = 'hidden'; revokeSessions.id = 'revokeOtherSessionsBtn';
+  $('logoutBtn').before(revokeSessions);
+  const syncSessionActions = () => revokeSessions.classList.toggle('hidden', !state.token);
+  new MutationObserver(syncSessionActions).observe($('logoutBtn'), { attributes: true, attributeFilter: ['class'] });
+  syncSessionActions();
+  revokeSessions.onclick = async () => {
+    if (!confirm('退出其他设备的聊天登录？当前设备将保持登录；已打开页面中的内容无法远程收回。')) return;
+    revokeSessions.disabled = true;
+    try { await api('POST', '/chat/api/sessions/revoke-others'); toast('其他设备的聊天登录已退出。', 'ok'); }
+    catch (e) { toast(e.message || '暂时无法退出其他设备，请重试。', 'err'); }
+    finally { revokeSessions.disabled = false; }
+  };
   $('logoutBtn').onclick = async () => {
     try { await api('POST', '/chat/api/logout'); } catch (e) {}
     localStorage.removeItem('qfchat-remember');

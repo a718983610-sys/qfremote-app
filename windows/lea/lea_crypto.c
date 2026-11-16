@@ -4,6 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* M-017: artifact scanners can distinguish unsafe test/no-key binaries even
+ * after filename changes. Keep this linked data in every service/client build. */
+#if defined(LEA_TEST_UNSIGNED) && LEA_TEST_UNSIGNED
+const char lea_build_mode_marker[] = "QFRLEA_TEST_UNSIGNED_BUILD";
+#elif !defined(LEA_SERVER_PUBKEY_HEX)
+const char lea_build_mode_marker[] = "QFRLEA_NO_PRODUCTION_PUBLIC_KEY";
+#else
+const char lea_build_mode_marker[] = "QFRLEA_PRODUCTION_SIGNED_BUILD";
+#endif
+
 /* ================= SHA-256（FIPS 180-4） ================= */
 #define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
@@ -135,7 +145,9 @@ int lea_sha256_file_hex(const char *path, char out_hex[65]) {
     unsigned char buf[8192];
     size_t r;
     while ((r = fread(buf, 1, sizeof(buf), f)) > 0) sha256_update(&c, buf, r);
-    fclose(f);
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    if (failed) { out_hex[0] = '\0'; return 0; }
     sha256_final(&c, digest);
     static const char hexd[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
@@ -168,10 +180,20 @@ static int b64url_val(char c) {
 static long b64_decode_impl(const char *in, unsigned char *out, size_t out_size,
                             int url) {
     if (!in || !out) return -1;
-    size_t len = strlen(in);
-    /* 去掉末尾 padding 再算 */
+    size_t encoded_len = strlen(in), len = encoded_len;
     while (len > 0 && in[len - 1] == '=') len--;
-    if (len % 4 == 1) return -1;
+    size_t padding = encoded_len - len;
+    if (len % 4 == 1 || padding > 2) return -1;
+    if (padding && (encoded_len % 4 != 0 || padding != (4 - len % 4) % 4)) return -1;
+    /* RFC 4648 canonical padding bits: do not accept alternate encodings of
+     * the same signed bytes (M-068). */
+    if (len % 4 == 2) {
+        int v = url ? b64url_val(in[len - 1]) : b64_val(in[len - 1]);
+        if (v < 0 || (v & 15) != 0) return -1;
+    } else if (len % 4 == 3) {
+        int v = url ? b64url_val(in[len - 1]) : b64_val(in[len - 1]);
+        if (v < 0 || (v & 3) != 0) return -1;
+    }
     size_t need = (len * 3) / 4;
     if (need > out_size) return -1;
     size_t o = 0;
@@ -372,7 +394,9 @@ int lea_verify_ticket_signature(const char *signature, const char *canonical,
 
 /* ================= Key 脱敏 ================= */
 void lea_redact_key_prefix(const char *key_prefix, char *out, size_t out_size) {
-    if (!out || out_size < 4) return;
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (out_size < 4) return;
     if (!key_prefix || key_prefix[0] == '\0') {
         snprintf(out, out_size, "%s", "-");
         return;

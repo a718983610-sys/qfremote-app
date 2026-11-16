@@ -22,14 +22,16 @@
  * /admin 与 /points/api 也直接接受手动附带的控制台 cookie（App 主
  * 进程就是这样调的）。
  *
- * Node 无第三方依赖；WS 客户端照好友服务口径取 MeshCentral 自带模块
- * /opt/meshcentral/node_modules/ws（服务器 Node v20、ws 8.21.1 已核）。
+ * WS 客户端由本服务 package.json/package-lock.json 声明，部署用 npm ci；
+ * 不依赖 MeshCentral 的私有 node_modules 路径。
  */
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { trustedClientIp, readRebindForm } = require('./request-context');
+const { createProductionBootHandler } = require('./webapp-boot');
 const { execFile } = require('child_process');
 const pointsCore = require('./points-core');
 const { adminPageHtml } = require('./page');
@@ -239,8 +241,7 @@ function log(obj) {
 let _WebSocket = null;
 function loadWebSocket() {
   if (_WebSocket) return _WebSocket;
-  try { _WebSocket = require('/opt/meshcentral/node_modules/ws'); }
-  catch (e) { _WebSocket = require('ws'); }
+  _WebSocket = require('ws');
   return _WebSocket;
 }
 
@@ -296,13 +297,9 @@ async function mcConnectCookie(cookieHeader, timeoutMs, extraIps) {
   }
   throw lastErr;
 }
-// 请求来源 IP（与好友服务 clientIp 同口径：本机回环来的才认 X-Forwarded-For）
+// M-026：只信本机代理覆写的边缘 IP；不信任客户端构造的 XFF。
 function clientIpFromReq(req) {
-  const remote = (req.socket && req.socket.remoteAddress) || '';
-  if ((remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') && req.headers['x-forwarded-for']) {
-    return String(req.headers['x-forwarded-for']).split(',')[0].trim();
-  }
-  return remote.replace(/^::ffff:/, '');
+  return trustedClientIp(req);
 }
 
 function parseCookies(req) {
@@ -1898,11 +1895,19 @@ function resolveDeviceByName(nodesByMesh, queryName) {
   return { ok: true, nodeid: one.nodeid, name: one.name, online: true };
 }
 
+// M-031: deployment must route its SPA upstream to this renderer, with the
+// webapp template/module directory installed alongside its versioned assets.
+const webappDir = process.env.QFR_WEBAPP_DIR || (fs.existsSync('/opt/qfremote-webapp/boot-data.mjs')
+  ? '/opt/qfremote-webapp' : path.resolve(__dirname, '../webapp'));
+const handleWebappIndex = createProductionBootHandler({ webappDir, resolveAuth, buildHomeStats, license: lic, log });
+
 // ---------- 路由 ----------
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
     const p = u.pathname;
+
+    if ((p === '/' || p === '/index.html') && await handleWebappIndex(req, res)) return;
 
     if (req.method === 'GET' && p === '/health') return sendJson(res, 200, { ok: true });
 
@@ -2363,6 +2368,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/license/rebind') {
       if (!rebindPageHtml) return sendJson(res, 500, { ok: false, msg: '换绑申诉页模块未加载。' });
       return sendHtml(res, 200, rebindPageHtml({ deviceCode: u.searchParams.get('dc') || '', platform: u.searchParams.get('platform') || '', channel: u.searchParams.get('ch') || 'web' }));
+    }
+    if (req.method === 'POST' && p === '/license/rebind') {
+      if (!rebindPageHtml) return sendJson(res, 503, { ok: false, code: 'UNAVAILABLE', msg: '换绑申诉页暂不可用。' });
+      const form = await readRebindForm(req);
+      if (form.status !== 200) return sendJson(res, form.status, { ok: false, code: form.code });
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      return sendHtml(res, 200, rebindPageHtml(form.value));
     }
 
     // ===== 许可公开接口（控制台会话鉴权） =====

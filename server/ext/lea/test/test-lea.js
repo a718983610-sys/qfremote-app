@@ -2651,7 +2651,7 @@ const mockChannel = {
   }
 
   // ---------- 12) 崩溃上报接收端（CRASH-REPORT-SPEC.md） ----------
-  // 注意：限流按 IP 计数，本节每个用例用不同 x-forwarded-for，避免互相
+  // 注意：限流按 IP 计数，本节每个用例用不同 cf-connecting-ip，避免互相
   // 挤占 5 份/小时额度；限流用例单独用一个 IP 连发 6 次。
   function crashBody(over) {
     return Object.assign({
@@ -2669,7 +2669,7 @@ const mockChannel = {
     }, over || {});
   }
   function crashHeaders(ip) {
-    return { 'content-type': 'application/json', 'x-forwarded-for': ip };
+    return { 'content-type': 'application/json', 'cf-connecting-ip': ip };
   }
   async function callCrash(body, ip, extraHeaders) {
     return callRoute('POST', '/api/lea/v1/crash-report',
@@ -2728,16 +2728,16 @@ const mockChannel = {
     let codes = [];
     for (let i = 0; i < 6; i++) {
       const rr = await callRoute('POST', '/api/lea/v1/crash-report',
-        { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4, 203.0.113.9' },
+        { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4, 203.0.113.9', 'cf-connecting-ip': '203.0.113.9' },
         crashBody({ report_id: '123e4567-e89b-42d3-a456-4266141741' + String(i).padStart(2, '0') }));
       codes.push(rr.code);
     }
     t('S-091 XFF 伪造首段不决定限流键（末段 203.0.113.9 计 5×200＋429）',
       JSON.stringify(codes) === JSON.stringify([200, 200, 200, 200, 200, 429]));
     r = await callRoute('POST', '/api/lea/v1/crash-report',
-      { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4' },
+      { 'content-type': 'application/json', 'x-forwarded-for': '1.2.3.4', 'cf-connecting-ip': '198.51.100.99' },
       crashBody({ report_id: '123e4567-e89b-42d3-a456-426614174199' }));
-    t('S-091 伪造首段 1.2.3.4 单独成桶（不受 203.0.113.9 限流牵连）', r.code === 200);
+    t('S-091 边缘 IP 不同则分桶，XFF 首段无影响', r.code === 200);
     // CF-Connecting-IP 优先于 XFF。
     codes = [];
     for (let i = 0; i < 6; i++) {
@@ -2759,7 +2759,7 @@ const mockChannel = {
     t('S-091 非回环直连忽略 XFF（socket 203.0.113.50 计 5×200＋429）',
       JSON.stringify(codes) === JSON.stringify([200, 200, 200, 200, 200, 429]));
     r = await callCrash(crashBody({ report_id: '123e4567-e89b-42d3-a456-426614174399' }), '10.0.12.200');
-    t('S-091 直连后回环 XFF 10.0.12.200 另成桶（200）', r.code === 200);
+    t('S-091 直连后可信代理边缘 IP 另成桶（200）', r.code === 200);
     // S-091：非法请求不再耗尽全局额度——同一 IP 25 份非法体后，
     // 该 IP 的合法报告仍 200（非法桶 20/小时满后才 429，与全局无关）。
     for (let i = 0; i < 21; i++) {

@@ -51,10 +51,10 @@ class RecordingEvent {
   });
 
   Map<String, Object?> toJson() => {
-        'kind': kind.name,
-        't': timestampMs,
-        'ref': payloadRef,
-      };
+    'kind': kind.name,
+    't': timestampMs,
+    'ref': payloadRef,
+  };
 }
 
 /// 录制会话（客户端状态机，纯逻辑）。
@@ -66,6 +66,8 @@ class RecordingSession {
 
   bool _recording = false;
   final List<RecordingEvent> _events = [];
+  static const int maxBufferedEvents = 10000;
+  bool capacityExceeded = false;
 
   bool get isRecording => _recording;
   int get eventCount => _events.length;
@@ -85,6 +87,13 @@ class RecordingSession {
   /// 记录一条事件：未在录制时丢弃（不攒）。
   void record(RecordingEvent event) {
     if (!_recording) return;
+    if (_events.isNotEmpty && event.timestampMs < _events.last.timestampMs)
+      return;
+    if (_events.length >= maxBufferedEvents) {
+      capacityExceeded = true;
+      _recording = false;
+      return;
+    }
     _events.add(event);
   }
 

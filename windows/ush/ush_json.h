@@ -47,6 +47,7 @@
 #define USH_ERR_SESSION_LOCKED "QFR_USH_SESSION_LOCKED"
 #define USH_ERR_NO_SESSION "QFR_USH_NO_INTERACTIVE_SESSION"
 #define USH_ERR_NOT_FOUND "QFR_USH_ELEMENT_NOT_FOUND"
+#define USH_ERR_NOT_CONFIRMED "QFR_USH_NOT_CONFIRMED"
 #define USH_ERR_TIMEOUT "QFR_USH_TIMEOUT"
 #define USH_ERR_NOT_SUPPORTED "QFR_USH_UNSUPPORTED"
 #define USH_ERR_FAILED "QFR_USH_FAILED"
@@ -72,7 +73,7 @@ typedef struct {
     char api_key_id[32];     /* 仅记 key_id，不记明文（LEA 不传明文） */
     long binding_epoch;
     char nonce[64];
-    int seq;
+    long long seq;
     long timeout_ms;         /* 已夹取到 [1, USH_MAX_TIMEOUT_MS]，缺省 5000 */
     int dangerous;           /* 1=危险按钮：禁止自动重试 */
     char params_json[USH_MAX_PARAMS]; /* params 对象原文（含花括号），可能为空对象 */
@@ -82,7 +83,7 @@ typedef struct {
     char error[64];          /* valid=0 时的错误码 */
 } ush_request_t;
 
-/* ---------- JSON 取值（只读，不改原串；key 为平铺字段名） ---------- */
+/* ---------- JSON 取值（只读，不改原串；key 只匹配当前对象顶层字段） ---------- */
 /* 取字符串字段：完整支持 \" \\ \/ \b \f \n \r \t \uXXXX（含代理对转 UTF-8）。
  * 找不到字段返回 0；字段存在但值不是字符串、转义非法或放不下返回 0。 */
 int ush_json_get_string(const char *json, const char *key, char *out, size_t out_size);

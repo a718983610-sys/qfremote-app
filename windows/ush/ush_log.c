@@ -135,7 +135,7 @@ void ush_log_command(const ush_request_t *req, const char *result,
     ProcessIdToSessionId(GetCurrentProcessId(), &session_id);
     snprintf(line, sizeof(line),
         "{\"ts\":\"%s\",\"trace_id\":\"%s\",\"request_id\":\"%s\",\"batch_id\":\"%s\","
-        "\"seq\":%d,\"account_id\":\"%s\",\"device_id\":\"%s\",\"api_key_id\":\"%s\","
+        "\"seq\":%lld,\"account_id\":\"%s\",\"device_id\":\"%s\",\"api_key_id\":\"%s\","
         "\"binding_epoch\":%ld,\"command\":\"%s\",\"params_hash\":\"%s\","
         "\"idempotency_key\":\"%s\",\"nonce\":\"%s\",\"result\":\"%s\",\"error_code\":\"%s\","
         "\"duration_ms\":%ld,\"ush_session_id\":%lu,\"process_id\":%lu,"

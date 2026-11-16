@@ -24,8 +24,9 @@ try { var _t = localStorage.getItem('qf-theme'); if (_t === 'dark' || _t === 'li
 
   <!-- 登录区（统一壳：桌面固定边栏 / 移动单行顶栏＋底部导航，视图同框切换） -->
   <div id="shellRoot" hidden>
+    <button class="skip-link" id="skipToContent" type="button">跳到主要内容</button>
     <div class="app">
-      <aside class="side" id="sidebar"></aside>
+      <aside class="side" id="sidebar" aria-label="主导航"></aside>
       <div class="main">
         <div class="top">
           <button class="burger" id="burgerBtn" aria-label="打开主菜单"></button>
@@ -38,17 +39,17 @@ try { var _t = localStorage.getItem('qf-theme'); if (_t === 'dark' || _t === 'li
             <span class="acctmenu" id="acctMenu"></span>
           </span>
         </div>
-        <main id="view" aria-live="polite"></main>
+        <main id="view" tabindex="-1" aria-label="主要内容"></main>
         <div class="foot">QFRemote 3.0 · 让远程连接更简单</div>
       </div>
     </div>
     <div class="dscrim" id="drawerScrim" aria-hidden="true"></div>
     <aside class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="主菜单"></aside>
-    <nav class="bnav" id="bnav"></nav>
+    <nav class="bnav" id="bnav" aria-label="底部导航"></nav>
   </div>
 
   <!-- 提示层（恒在最上层）与弹窗层 -->
-  <div id="toasts" role="status" aria-live="polite"></div>
+  <div id="toasts" role="status" aria-live="polite" aria-relevant="additions text"></div>
   <div id="modalRoot"></div>
 
   <!-- 启动兜底（W4-2）：app.js 加载或执行失败时不白页；显根后自动隐藏，10 秒未显根换失败文案 -->
@@ -57,6 +58,10 @@ try { var _t = localStorage.getItem('qf-theme'); if (_t === 'dark' || _t === 'li
   <script>
   (function(){
     var b=document.getElementById('bootFail'), m=document.getElementById('bootMsg'), n=0;
+    // Skip navigation without changing the SPA route hash.
+    document.getElementById('skipToContent').addEventListener('click',function(){
+      document.getElementById('view').focus();
+    });
     var t=setInterval(function(){
       var a=document.getElementById('authRoot'), s=document.getElementById('shellRoot');
       if((a&&!a.hidden)||(s&&!s.hidden)){ b.style.display='none'; clearInterval(t); return; }

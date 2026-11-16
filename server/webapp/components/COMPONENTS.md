@@ -2,7 +2,7 @@
 
 - 注册表：`qf-ui.js` 的 `QFComponents`（`register/render/list/meta`）。
 - 故事文件：本目录 `*.stories.mjs`（Storybook CSF 格式；视觉验收见
-  `server/webapp/tests/components.spec.mjs`，四视口 × 双主题）。
+  `server/webapp/tests/components.spec.mjs`，每个故事桌面浅色＋手机深色，Primary 另跑四视口 × 双主题）。
 
 ## 一、新代码放哪（Supabase 三层划分）
 
@@ -33,7 +33,7 @@
 
 | 名称 | props | 层 |
 |---|---|---|
-| `button` | `label, kind(primary/grey/ghost/danger), size(sm), icon, ariaLabel, attrs` | ui |
+| `button` | `label, kind(primary/grey/ghost/danger), size(sm), icon, ariaLabel, attrs, loading` | ui |
 | `empty-state` | `title, sub, actions[{label, go, kind}]` | ui |
 | `stat-card` | `icon, label, value, sub` | ui |
 | `reconnect-strip` | `attempt, max, state`（文案走 `t()`） | ui |
@@ -43,5 +43,5 @@
 
 - 故事文件为标准 CSF（`title`＋具名导出＋`args`），可直接由 Storybook 加载。
 - 沙箱内未跑 `storybook dev` 服务（重型安装，见证据说明）；视觉验收由
-  Playwright 画廊（`components.spec.mjs`）覆盖：每个故事在 390／820／1440／
-  1920 四视口 × 浅／深双主题下渲染截图，存 `tests/test-results/gallery/`。
+  Playwright 画廊（`components.spec.mjs`）覆盖：每个具名故事在 1440px 浅色＋390px 深色下渲染截图；button/Primary 额外覆盖 390／820／1440／1920 四视口 × 浅／深双主题。截图存 `tests/test-results/gallery/`。
+- 状态故事覆盖按钮禁用、加载、仅图标的无障碍名与 attrs，空结果／加载失败、数据缺失／零值和重连首轮／取消。故事数据仅为测试夹具。

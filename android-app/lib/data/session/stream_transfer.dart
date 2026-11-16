@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import 'session_response.dart';
 import '../../core/constants.dart';
 import '../../services/points.dart' show ConsoleCookieProvider;
 import '../../services/probe.dart' show trustedHttpClient;
@@ -52,9 +53,10 @@ class StreamTransferConstants {
 /// 服务端文件名处理（§2.1）：截断至 200 字符，`/` 与 `\` 替换为 `_`，
 /// 为空则记为 `file`。客户端先按同一口径处理再 init。
 String sanitizeStreamFilename(String filename) {
-  final truncated =
-      filename.length > 200 ? filename.substring(0, 200) : filename;
-  final replaced = truncated.replaceAll(RegExp(r'[/\\]'), '_');
+  final truncated = filename.length > 200
+      ? filename.substring(0, 200)
+      : filename;
+  final replaced = truncated.replaceAll(RegExp(r'[/\\\x00-\x1f\x7f]'), '_');
   return replaced.isEmpty ? 'file' : replaced;
 }
 
@@ -64,7 +66,9 @@ String sha256Hex(List<int> bytes) => sha256.convert(bytes).toString();
 /// 分片器：按服务端返回的 chunkSize 切分（§2.1：客户端须用返回的
 /// chunkSize 切分，不得用自己请求的值）。
 class StreamChunker {
-  const StreamChunker(this.totalBytes, {required this.chunkSize});
+  const StreamChunker(this.totalBytes, {required this.chunkSize})
+    : assert(totalBytes >= 0),
+      assert(chunkSize > 0);
 
   final int totalBytes;
   final int chunkSize;
@@ -74,6 +78,9 @@ class StreamChunker {
 
   /// 第 [index] 片的字节范围（左闭右开）；末片按实际剩余长度。
   (int, int) chunkRange(int index) {
+    if (index < 0 || index >= totalChunks) {
+      throw const StreamApiException('INVALID_CHUNK', '分片序号超出范围');
+    }
     final start = index * chunkSize;
     final end = totalBytes < start + chunkSize ? totalBytes : start + chunkSize;
     return (start, end);
@@ -86,9 +93,9 @@ class StreamChunker {
   }
 
   List<int> missingFromReceived(Set<int> received) => List<int>.generate(
-        totalChunks,
-        (i) => i,
-      ).where((i) => !received.contains(i)).toList();
+    totalChunks,
+    (i) => i,
+  ).where((i) => !received.contains(i)).toList();
 }
 
 /// init 请求的客户端侧校验（与服务端 §2.1 的 VALIDATION / TOO_LARGE
@@ -230,8 +237,7 @@ class StreamInboxFile {
   final int createdAtMs;
   final int expiresAtMs;
 
-  bool get isExpired =>
-      DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
+  bool get isExpired => DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
 
   factory StreamInboxFile.fromJson(Map<String, Object?> json) =>
       StreamInboxFile(
@@ -317,10 +323,10 @@ class HttpStreamTransport implements StreamTransport {
     String? baseUrl,
     ConsoleCookieProvider? cookieProvider,
     int? maxDownloadBytes,
-  })  : _baseUrl = baseUrl ?? kServerOrigin,
-        _cookieProvider = cookieProvider,
-        _maxDownloadBytes =
-            maxDownloadBytes ?? StreamTransferConstants.defaultMaxBytes;
+  }) : _baseUrl = baseUrl ?? kServerOrigin,
+       _cookieProvider = cookieProvider,
+       _maxDownloadBytes =
+           maxDownloadBytes ?? StreamTransferConstants.defaultMaxBytes;
 
   final String _baseUrl;
   static const _timeout = Duration(seconds: 30);
@@ -353,17 +359,19 @@ class HttpStreamTransport implements StreamTransport {
       req.write(jsonEncode(body));
       final res = await req.close().timeout(_timeout);
       final text = await res.transform(utf8.decoder).join().timeout(_timeout);
-      if (res.statusCode == 401 || res.statusCode == 403) {
-        throw const StreamApiException('UNAUTHORIZED');
-      }
-      if (res.statusCode == 503) {
-        throw const StreamApiException('L5_UNAVAILABLE');
-      }
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, Object?>) {
-        throw const FormatException('stream 响应不是 JSON 对象');
-      }
-      return decoded;
+      return decodeSessionResponse(
+        res.statusCode,
+        text,
+        (code, message) => StreamApiException(code, message),
+      );
+    } on FormatException {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const StreamApiException('TIMEOUT');
+    } on IOException {
+      throw const StreamApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -377,17 +385,19 @@ class HttpStreamTransport implements StreamTransport {
       await _attachCookie(req);
       final res = await req.close().timeout(_timeout);
       final text = await res.transform(utf8.decoder).join().timeout(_timeout);
-      if (res.statusCode == 401 || res.statusCode == 403) {
-        throw const StreamApiException('UNAUTHORIZED');
-      }
-      if (res.statusCode == 503) {
-        throw const StreamApiException('L5_UNAVAILABLE');
-      }
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, Object?>) {
-        throw const FormatException('stream 响应不是 JSON 对象');
-      }
-      return decoded;
+      return decodeSessionResponse(
+        res.statusCode,
+        text,
+        (code, message) => StreamApiException(code, message),
+      );
+    } on FormatException {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const StreamApiException('TIMEOUT');
+    } on IOException {
+      throw const StreamApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -420,10 +430,17 @@ class HttpStreamTransport implements StreamTransport {
       'toNode': toNode,
     };
     if (fromNode != null) body['fromNode'] = fromNode;
-    final json = _requireOk(await _postJson(
-      '/license/api/files/stream/init',
-      body,
-    ));
+    final json = _requireOk(
+      await _postJson('/license/api/files/stream/init', body),
+    );
+    if (json['transferId'] is! String ||
+        (json['transferId'] as String).isEmpty ||
+        json['chunkSize'] is! int ||
+        (json['chunkSize'] as int) <= 0 ||
+        json['totalChunks'] is! int ||
+        (json['totalChunks'] as int) <= 0) {
+      throw const StreamApiException('INVALID_RESPONSE');
+    }
     return (
       transferId: json['transferId'] as String,
       chunkSize: json['chunkSize'] as int,
@@ -437,18 +454,20 @@ class HttpStreamTransport implements StreamTransport {
     required int index,
     required List<int> bytes,
   }) async {
-    final json = _requireOk(await _postJson(
-      '/license/api/files/stream/$transferId/chunk',
-      {'index': index, 'contentBase64': base64Encode(bytes)},
-    ));
+    final json = _requireOk(
+      await _postJson('/license/api/files/stream/$transferId/chunk', {
+        'index': index,
+        'contentBase64': base64Encode(bytes),
+      }),
+    );
     return json['received'] as int? ?? 0;
   }
 
   @override
   Future<List<int>> missing({required String transferId}) async {
-    final json = _requireOk(await _getJson(
-      '/license/api/files/stream/$transferId/missing',
-    ));
+    final json = _requireOk(
+      await _getJson('/license/api/files/stream/$transferId/missing'),
+    );
     final raw = json['missing'];
     if (raw is! List) return const [];
     return raw.map((e) => e as int).toList();
@@ -475,37 +494,38 @@ class HttpStreamTransport implements StreamTransport {
         : const <int>[];
     return switch (code) {
       'INCOMPLETE' => StreamCommitResult(
-          outcome: StreamCommitOutcome.incomplete,
-          missing: missing,
-          code: code,
-          message: json['msg'] as String?,
-        ),
+        outcome: StreamCommitOutcome.incomplete,
+        missing: missing,
+        code: code,
+        message: json['msg'] as String?,
+      ),
       'CORRUPT' => StreamCommitResult(
-          outcome: StreamCommitOutcome.corrupt,
-          code: code,
-          message: json['msg'] as String?,
-        ),
+        outcome: StreamCommitOutcome.corrupt,
+        code: code,
+        message: json['msg'] as String?,
+      ),
       _ => StreamCommitResult(
-          outcome: StreamCommitOutcome.failed,
-          code: code,
-          message: json['msg'] as String?,
-        ),
+        outcome: StreamCommitOutcome.failed,
+        code: code,
+        message: json['msg'] as String?,
+      ),
     };
   }
 
   @override
   Future<void> cancel({required String transferId}) async {
-    _requireOk(await _postJson(
-      '/license/api/files/stream/$transferId/cancel',
-      {},
-    ));
+    _requireOk(
+      await _postJson('/license/api/files/stream/$transferId/cancel', {}),
+    );
   }
 
   @override
   Future<List<StreamInboxFile>> inbox({required String node}) async {
-    final json = _requireOk(await _getJson(
-      '/license/api/files/inbox?node=${Uri.encodeComponent(node)}',
-    ));
+    final json = _requireOk(
+      await _getJson(
+        '/license/api/files/inbox?node=${Uri.encodeComponent(node)}',
+      ),
+    );
     final raw = json['files'];
     if (raw is! List) return const [];
     return raw
@@ -552,16 +572,12 @@ class HttpStreamTransport implements StreamTransport {
   }) async {
     final client = trustedHttpClient(connectionTimeout: _timeout);
     try {
-      final uri = Uri.parse(_baseUrl).resolve(
-        '/license/api/files/$stagedId/download',
-      );
+      final uri = Uri.parse(_baseUrl)
+          .resolve('/license/api/files/$stagedId/download');
       final req = await client.getUrl(uri).timeout(_timeout);
       if (rangeStart != null) {
         final endPart = rangeEnd == null ? '' : '$rangeEnd';
-        req.headers.set(
-          HttpHeaders.rangeHeader,
-          'bytes=$rangeStart-$endPart',
-        );
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=$rangeStart-$endPart');
       }
       await _attachCookie(req);
       final res = await req.close().timeout(_timeout);
@@ -589,6 +605,14 @@ class HttpStreamTransport implements StreamTransport {
       }
       // 200：全文件（Range 非法回落亦然，按全文件处理，不得拼装）。
       return StreamDownloadResult(bytes: bytes, isPartial: false);
+    } on FormatException {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const StreamApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const StreamApiException('TIMEOUT');
+    } on IOException {
+      throw const StreamApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -660,16 +684,18 @@ class StreamUploadSession {
   /// 取消按钮只在 uploading 态可用（§4）。
   bool get canCancel => state == StreamUploadState.uploading;
 
-  double get progress =>
-      totalChunks <= 0 ? 0 : receivedChunks / totalChunks;
+  double get progress => totalChunks <= 0 ? 0 : receivedChunks / totalChunks;
 
   int get transferredBytes =>
       (receivedChunks * chunkSize).clamp(0, fileBytes.length);
 
-  String get sha256 => sha256Hex(fileBytes);
+  late final String sha256 = sha256Hex(fileBytes);
 
   /// init：本地算好 SHA-256 再发；用服务端返回的 chunkSize 切分。
   Future<void> start() async {
+    if (state != StreamUploadState.idle) {
+      throw const StreamApiException('STATE', '传输已经开始');
+    }
     final validationError = validateStreamInit(
       filename: filename,
       size: fileBytes.length,
@@ -683,16 +709,28 @@ class StreamUploadSession {
       throw StreamApiException(validationError);
     }
     state = StreamUploadState.uploading;
-    final result = await transport.init(
-      filename: sanitizeStreamFilename(filename),
-      size: fileBytes.length,
-      sha256: sha256,
-      toNode: toNode,
-      fromNode: fromNode,
-    );
-    transferId = result.transferId;
-    chunkSize = result.chunkSize;
-    totalChunks = result.totalChunks;
+    try {
+      final result = await transport.init(
+        filename: sanitizeStreamFilename(filename),
+        size: fileBytes.length,
+        sha256: sha256,
+        toNode: toNode,
+        fromNode: fromNode,
+      );
+      if (result.transferId.isEmpty ||
+          result.chunkSize <= 0 ||
+          result.totalChunks !=
+              (fileBytes.length + result.chunkSize - 1) ~/ result.chunkSize) {
+        throw const StreamApiException('INVALID_RESPONSE', '传输初始化响应无效');
+      }
+      transferId = result.transferId;
+      chunkSize = result.chunkSize;
+      totalChunks = result.totalChunks;
+    } catch (error) {
+      state = StreamUploadState.failed;
+      lastErrorCode = error is StreamApiException ? error.code : 'INIT_FAILED';
+      rethrow;
+    }
   }
 
   StreamChunker get _chunker =>
@@ -707,8 +745,17 @@ class StreamUploadSession {
         state != StreamUploadState.interrupted) {
       return;
     }
+    if (transferId == null) {
+      throw const StreamApiException('STATE', '未初始化传输');
+    }
+    final requested = indices.toList(growable: false);
+    for (final index in requested) {
+      _chunker.chunkRange(
+        index,
+      ); // Validate the entire retry list before sending.
+    }
     state = StreamUploadState.uploading;
-    for (final index in indices) {
+    for (final index in requested) {
       final (start, end) = _chunker.chunkRange(index);
       final received = await transport.putChunk(
         transferId: transferId!,
@@ -722,7 +769,11 @@ class StreamUploadSession {
   /// 断网/切后台后自动续传（§4）：调 missing 查缺片，只补传缺片，
   /// 不得从头重传已收分片。
   Future<List<int>> resumeAfterInterruption() async {
-    if (transferId == null) return const [];
+    if (transferId == null ||
+        (state != StreamUploadState.uploading &&
+            state != StreamUploadState.interrupted)) {
+      return const [];
+    }
     state = StreamUploadState.interrupted;
     final missing = await transport.missing(transferId: transferId!);
     receivedChunks = totalChunks - missing.length;
@@ -733,14 +784,22 @@ class StreamUploadSession {
   /// commit：INCOMPLETE → 回 uploading 补传缺片后调用方可再 commit；
   /// CORRUPT → failed 终态，整单作废；成功 → staged。
   Future<StreamCommitResult> commit() async {
-    if (state == StreamUploadState.committing) {
-      throw const StreamApiException('STATE', '提交进行中，禁止重复提交');
+    if (state != StreamUploadState.uploading &&
+        state != StreamUploadState.interrupted) {
+      throw const StreamApiException('STATE', '当前传输状态不允许提交');
     }
     if (transferId == null) {
       throw const StreamApiException('STATE', '未初始化传输');
     }
     state = StreamUploadState.committing;
-    final result = await transport.commit(transferId: transferId!);
+    final StreamCommitResult result;
+    try {
+      result = await transport.commit(transferId: transferId!);
+    } catch (_) {
+      state = StreamUploadState.interrupted;
+      lastErrorCode = 'COMMIT_INTERRUPTED';
+      rethrow;
+    }
     switch (result.outcome) {
       case StreamCommitOutcome.staged:
         state = StreamUploadState.staged;
@@ -774,10 +833,10 @@ class StreamUploadSession {
   /// 重新发送入口（CORRUPT 后）：重新 init 一个新传输（新 transferId），
   /// 重传同一文件须重新算 SHA-256、重新上传全部分片。
   StreamUploadSession newAttempt() => StreamUploadSession(
-        transport: transport,
-        filename: filename,
-        fileBytes: fileBytes,
-        toNode: toNode,
-        fromNode: fromNode,
-      );
+    transport: transport,
+    filename: filename,
+    fileBytes: fileBytes,
+    toNode: toNode,
+    fromNode: fromNode,
+  );
 }

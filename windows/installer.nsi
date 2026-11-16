@@ -23,6 +23,10 @@ SetCompress off
 !ifndef BUILD_VERSION
 !define BUILD_VERSION "3.0.0"
 !endif
+!ifndef HEAL_SCRIPT_SHA256
+  !error "Use tools/build-installer.sh: HEAL_SCRIPT_SHA256 is required"
+!endif
+!searchparse /file "privacy-lock/install-manifest.template.json" '"componentVersion":"' LOCK_COMPONENT_VERSION '"'
 !addplugindir "${STAGING_DIR}/plugins"
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -61,6 +65,7 @@ VIAddVersionKey /LANG=1033 "ProductVersion" "${BUILD_VERSION}"
 !insertmacro MUI_LANGUAGE "English"
 
 ; A1 内层状态（$R0–$R8 只在函数内临时用；跨段状态用 Var）。
+Var UninstallOwnedRoot
 Var A1HadBackup
 Var A1OldLeaVersion
 Var A1ClearFailed
@@ -181,13 +186,22 @@ Function QFHealAgentMsh
   StrCpy $R5 ""
   StrCpy $R4 0
   StrCpy $R3 0
-  IfFileExists "$TEMP\qf-agent-heal.ps1" detectRun
+  IfFileExists "$PLUGINSDIR\qf-agent-heal.ps1" detectRun
   StrCpy $R9 "INSTALLER: heal script missing, skip$\r$\n"
   StrCpy $R5 "$R5$R9"
   Goto healReturn
 detectRun:
+  ; M-130: compare the extracted script against its build-time digest before execution.
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "try { if ((Get-FileHash -LiteralPath '$PLUGINSDIR\qf-agent-heal.ps1' -Algorithm SHA256).Hash -ne '${HEAL_SCRIPT_SHA256}') { exit 1 } } catch { exit 1 }"`
+  Pop $R0
+  Pop $R1
+  StrCmp $R0 "0" healHashOk
+  StrCpy $R9 "INSTALLER: heal script hash failed, refuse execution$\r$\n"
+  StrCpy $R5 "$R5$R9"
+  Goto healReturn
+healHashOk:
   ClearErrors
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$TEMP\qf-agent-heal.ps1" -Mode Detect'
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\qf-agent-heal.ps1" -Mode Detect'
   Pop $R0
   Pop $R1
   StrCmp $R0 "0" detectParsed
@@ -234,18 +248,12 @@ pendingSleep:
   Sleep 10000
   Goto detectRun
 launchHelper:
-  DetailPrint "正在修复本机远程服务配置（需确认一次系统提示）…"
-  StrCpy $R9 "INSTALLER: launch runas$\r$\n"
-  StrCpy $R5 "$R5$R9"
-  ClearErrors
-  ExecShell "runas" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File '$TEMP\qf-agent-heal.ps1'"
-  IfErrors 0 launchVerify
-  StrCpy $R9 "INSTALLER: runas failed, fallback Start-Process$\r$\n"
-  StrCpy $R5 "$R5$R9"
-  nsExec::ExecToStack "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -Command $\"Start-Process -FilePath '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$TEMP\qf-agent-heal.ps1' -Verb RunAs -WindowStyle Hidden$\""
+  ; The inner installer already runs elevated after the outer installer's single UAC.
+  DetailPrint "正在修复本机远程服务配置…"
+  nsExec::ExecToStack '$"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$" -NoProfile -ExecutionPolicy Bypass -File $"$PLUGINSDIR\qf-agent-heal.ps1$" -Mode Repair'
   Pop $R0
   Pop $R1
-  StrCpy $R9 "INSTALLER: fallback exit=[$R0]$\r$\n"
+  StrCpy $R9 "INSTALLER: heal repair exit=[$R0]$\r$\n"
   StrCpy $R5 "$R5$R9"
 launchVerify:
   StrCpy $R4 1
@@ -453,7 +461,7 @@ appManifestEnd:
 
   ; 2.4.3 本机 agent 自愈（装后段）：先把提权助手脚本备到临时目录
   ; （仅约 2KB，不随 App 安装），是否执行由预检函数决定。
-  File "/oname=$TEMP\qf-agent-heal.ps1" "qf-agent-heal.ps1"
+  File "/oname=$PLUGINSDIR\qf-agent-heal.ps1" "qf-agent-heal.ps1"
   Call QFHealAgentMsh
 SectionEnd
 
@@ -470,7 +478,7 @@ Section "隐私锁组件" SEC_LOCK
   File "privacy-lock\app\QFLockUI.exe"
   File "privacy-lock\app\qf-lockctl.exe"
   File "privacy-lock\app\qf-lockupdater.exe"
-  DetailPrint "隐私锁组件 v2.0.3 已安装（$INSTDIR\Lock）"
+  DetailPrint "隐私锁组件 v${LOCK_COMPONENT_VERSION} 已安装（$INSTDIR\Lock）"
 SectionEnd
 
 Section "LEA 本地代理" SEC_LEA
@@ -685,6 +693,10 @@ a1TasksDone:
 SectionEnd
 
 Section "Uninstall"
+  StrCpy $UninstallOwnedRoot "0"
+  Push "$INSTDIR"
+  Call un.IsOwnedAppDirectory
+  Pop $UninstallOwnedRoot
   ; 卸载全清（3.0.0）：0) 服务端注销→1) 停进程→锁组件清数据→停删服务→
   ; 删任务→恢复 MeshAgent.msh→删全部文件/目录/注册表→延迟自删。
   ; 逐项 best-effort：单项失败不阻塞卸载。不写卸载日志文件
@@ -782,8 +794,20 @@ meshPd:
 meshDone:
   ; 5) 删文件/目录：安装目录、Program Files、两处 ProgramData、
   ;    AppData、%TEMP% 残留、Downloads 下的安装包。
+  StrCmp $UninstallOwnedRoot "1" 0 skipUnownedInstallRoot
   RMDir /r "$INSTDIR"
-  RMDir /r "$PROGRAMFILES\QFRemote"
+  Goto installRootDone
+skipUnownedInstallRoot:
+  DetailPrint "安装目录特征不匹配，保留目录和未知文件。"
+  ; Only fixed application filenames can be removed in an unrecognized directory.
+  Delete "$INSTDIR\QFRemote.exe"
+  Delete "$INSTDIR\Uninstall QFRemote.exe"
+installRootDone:
+  Push "$PROGRAMFILES\QFRemote"
+  Call un.IsOwnedAppDirectory
+  Pop $R9
+  StrCmp $R9 "1" 0 +2
+    RMDir /r "$PROGRAMFILES\QFRemote"
   ClearErrors
   ReadEnvStr $R0 "ProgramData"
   IfErrors programDataDone
@@ -794,7 +818,7 @@ programDataDone:
   RMDir /r "$APPDATA\QFRemote"
   Delete "$TEMP\QFRSetupAdmin.done"
   Delete "$TEMP\qfr-verify.log" ; F-WIN-10（2026-11-15）：卸载全清含校验日志
-  Delete "$TEMP\qf-agent-heal.ps1"
+  Delete "$PLUGINSDIR\qf-agent-heal.ps1"
   Delete "$TEMP\qf-agent-heal.log"
   Delete "$TEMP\qf-system-install.log"
   Delete "$TEMP\qf-lea-install.log"
@@ -820,7 +844,9 @@ programDataDone:
   ; 8) 延迟自删 $INSTDIR：运行中的卸载器自身 RMDir 删不掉，起一个
   ;    不等待的 cmd，约 3 秒后（卸载器已退出）把目录连同卸载器
   ;    exe 一并清掉。
-  ExecShell "" "cmd.exe" '/c ping 127.0.0.1 -n 4 > nul & rd /s /q "$INSTDIR"'
+  StrCmp $UninstallOwnedRoot "1" 0 delayedRemoveDone
+  ExecShell "" "$SYSDIR\cmd.exe" '/d /c $"$SYSDIR\ping.exe$" 127.0.0.1 -n 4 > nul & rd /s /q $"$INSTDIR$"'
+delayedRemoveDone:
   ; S-019：卸载报告（machine-readable）。写在最后，前面删 $TEMP 残留的
   ; 步骤删不到它；文件在系统临时目录，不算程序残留（本段“不写卸载日志”
   ; 指的是不留程序日志文件）。卸载段用 un.GetTime（FileFunc.nsh）。
@@ -838,4 +864,36 @@ Function un.RestoreMeshAgent
   IfFileExists "$R0\MeshAgent.msh.qfbak" 0 +3
     CopyFiles /SILENT "$R0\MeshAgent.msh.qfbak" "$R0\MeshAgent.msh"
     Delete "$R0\MeshAgent.msh.qfbak"
+FunctionEnd
+
+; M-021: only an application root with both executable and packaged resources is owned.
+; Never recursively remove a reparse point or a Windows/user/system parent directory.
+Function un.IsOwnedAppDirectory
+  Exch $R0
+  Push $R1
+  Push $R2
+  StrCpy $R2 "0"
+  GetFullPathName $R1 "$R0"
+  StrCmp $R1 "" ownedDirDone
+  StrLen $R0 $R1
+  IntCmp $R0 4 ownedDirDone ownedDirDone +1
+  StrCmp $R1 "$WINDIR" ownedDirDone
+  StrCmp $R1 "$SYSDIR" ownedDirDone
+  StrCmp $R1 "$PROGRAMFILES" ownedDirDone
+  StrCmp $R1 "$PROFILE" ownedDirDone
+  StrCmp $R1 "$APPDATA" ownedDirDone
+  StrCmp $R1 "$LOCALAPPDATA" ownedDirDone
+  StrCmp $R1 "$DESKTOP" ownedDirDone
+  System::Call 'kernel32::GetFileAttributesW(w rR1)i.rR0'
+  IntOp $R0 $R0 & 0x400
+  IntCmp $R0 0 +2
+    Goto ownedDirDone
+  IfFileExists "$R1\QFRemote.exe" 0 ownedDirDone
+  IfFileExists "$R1\resources\app.asar" 0 ownedDirDone
+  StrCpy $R2 "1"
+ownedDirDone:
+  StrCpy $R0 $R2
+  Pop $R2
+  Pop $R1
+  Exch $R0
 FunctionEnd

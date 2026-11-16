@@ -26,12 +26,14 @@ class ShellWebPage extends StatefulWidget {
   final QfPalette palette;
   final String title;
   final String url;
+  final Uint8List? postBody;
 
   const ShellWebPage({
     super.key,
     required this.palette,
     required this.title,
     required this.url,
+    this.postBody,
   });
 
   @override
@@ -52,9 +54,9 @@ class _ShellWebPageState extends State<ShellWebPage> {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('无法打开此外链，请稍后重试。')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('无法打开此外链，请稍后重试。')));
       }
     }
   }
@@ -66,7 +68,11 @@ class _ShellWebPageState extends State<ShellWebPage> {
       backgroundColor: p.pageColor,
       body: Column(
         children: [
-          QfPageHeader(palette: p, title: widget.title, onBack: () => Navigator.of(context).pop()),
+          QfPageHeader(
+            palette: p,
+            title: widget.title,
+            onBack: () => Navigator.of(context).pop(),
+          ),
           if (_httpFailed)
             Container(
               width: double.infinity,
@@ -83,59 +89,70 @@ class _ShellWebPageState extends State<ShellWebPage> {
                       _rendererGone
                           ? '页面进程已退出，请重试。'
                           : _httpStatus == 404
-                              ? '页面不存在（HTTP 404），请重试。'
-                              : '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
+                          ? '页面不存在（HTTP 404），请重试。'
+                          : '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
                       // A9 修订（定夺）：条底改分区色后，危险色两端直接
                       // 用 p.danger（浅 4.51／深 5.54），不再即兴深红。
-                      style: TextStyle(
-                          color: p.danger, fontSize: QfScale.fs13),
+                      style: TextStyle(color: p.danger, fontSize: QfScale.fs13),
                     ),
                   ),
-                  QfButtonTapTarget(child: TextButton(
-                    onPressed: () {
-                      // S-027：渲染进程已死时 reload 旧实例无效，换 Key
-                      // 重建新实例（初始 URL 即当前页）；否则正常 reload。
-                      if (_rendererGone) {
-                        setState(() {
-                          _rendererGone = false;
-                          _httpFailed = false;
-                          _rendererGeneration++;
-                        });
-                      } else {
-                        setState(() => _httpFailed = false);
-                        _controller?.reload();
-                      }
-                    },
-                    // A1：重试按钮补显式色 p.onCard（浅色 10.59／深色 16.81）；
-                    // 只靠 textButtonTheme 的 textSecondary，浅色同轨也只有 4.01。
-                    style: TextButton.styleFrom(
-                        foregroundColor: p.onCard),
-                    child: const Text('重试'),
-                  )),
+                  QfButtonTapTarget(
+                    child: TextButton(
+                      onPressed: () {
+                        // S-027：渲染进程已死时 reload 旧实例无效，换 Key
+                        // 重建新实例（初始 URL 即当前页）；否则正常 reload。
+                        if (_rendererGone) {
+                          setState(() {
+                            _rendererGone = false;
+                            _httpFailed = false;
+                            _rendererGeneration++;
+                          });
+                        } else {
+                          setState(() => _httpFailed = false);
+                          _controller?.reload();
+                        }
+                      },
+                      // A1：重试按钮补显式色 p.onCard（浅色 10.59／深色 16.81）；
+                      // 只靠 textButtonTheme 的 textSecondary，浅色同轨也只有 4.01。
+                      style: TextButton.styleFrom(foregroundColor: p.onCard),
+                      child: const Text('重试'),
+                    ),
+                  ),
                   // C §2.5：复制日志（真实错误码 HTTP 状态＋URL，
                   // 不编造 NET-xxxx）。
-                  QfButtonTapTarget(child: TextButton(
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(
-                          text:
-                              '页面加载失败（HTTP ${_httpStatus ?? '—'}）\n${widget.url}'));
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('错误信息已复制。')),
+                  QfButtonTapTarget(
+                    child: TextButton(
+                      onPressed: () async {
+                        await Clipboard.setData(
+                          ClipboardData(
+                            text:
+                                '页面加载失败（HTTP ${_httpStatus ?? '—'}）\n${widget.url}',
+                          ),
                         );
-                      }
-                    },
-                    style: TextButton.styleFrom(
-                        foregroundColor: p.onCard),
-                    child: const Text('复制日志'),
-                  )),
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('错误信息已复制。')),
+                          );
+                        }
+                      },
+                      style: TextButton.styleFrom(foregroundColor: p.onCard),
+                      child: const Text('复制日志'),
+                    ),
+                  ),
                 ],
               ),
             ),
           Expanded(
             child: InAppWebView(
               key: ValueKey('shell-$_rendererGeneration'),
-              initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+              initialUrlRequest: URLRequest(
+                url: WebUri(widget.url),
+                method: widget.postBody == null ? 'GET' : 'POST',
+                body: widget.postBody,
+                headers: widget.postBody == null
+                    ? null
+                    : {'Content-Type': 'application/x-www-form-urlencoded'},
+              ),
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
@@ -155,9 +172,7 @@ class _ShellWebPageState extends State<ShellWebPage> {
               onWebViewCreated: (controller) => _controller = controller,
               // S-027：渲染进程死亡 → 失败条＋重试按钮（重试即换 Key 重建）。
               onRenderProcessGone: (controller, detail) {
-                debugPrint(
-                  'QFRenderer shell gone didCrash=${detail.didCrash}',
-                );
+                debugPrint('QFRenderer shell gone didCrash=${detail.didCrash}');
                 if (mounted) {
                   setState(() {
                     _rendererGone = true;

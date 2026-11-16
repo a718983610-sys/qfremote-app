@@ -79,8 +79,9 @@ class LoginProbe {
       return LoginProbe(
         state: state as String,
         username: v['username'] is String ? v['username'] as String : '',
-        rememberDevice:
-            v['rememberDevice'] is bool ? v['rememberDevice'] as bool : null,
+        rememberDevice: v['rememberDevice'] is bool
+            ? v['rememberDevice'] as bool
+            : null,
         rememberPassword: v['rememberPassword'] is bool
             ? v['rememberPassword'] as bool
             : null,
@@ -157,6 +158,7 @@ String buildLoginBridgeJs({
   // 主色：浅色 #000000 对白垫 21.00:1；深色白边框对白垫 1.0（与垫同色），
   // 按钮边界改由 #111113 底色对白垫 18.86:1 承载。
   bool isDark = false,
+  String bridgeCapability = '',
 }) {
   final u = jsonEncode(savedUsername ?? '');
   final p = jsonEncode(savedPassword ?? '');
@@ -171,6 +173,8 @@ String buildLoginBridgeJs({
   final linkUnderlineHex = pal.linkUnderlineCssHex;
   return '''
 (function () {
+  if (window.top !== window.self) return 'untrusted-frame';
+  var BRIDGE_CAPABILITY = ${jsonEncode(bridgeCapability)};
   var SAVED_U = $u;
   var SAVED_P = $p;
   var HAS_SAVED = $hasSaved;
@@ -187,6 +191,7 @@ String buildLoginBridgeJs({
   function call(name, data) {
     try {
       if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        data.bridgeCapability = BRIDGE_CAPABILITY;
         window.flutter_inappwebview.callHandler(name, data);
       }
     } catch (e) {}
@@ -214,7 +219,7 @@ String buildLoginBridgeJs({
         var txt = (t.textContent || '').trim();
         if (txt === '退出登录' || txt === 'Logout') lo = t;
       }
-      if (lo) call('$kHandlerManualLogout', {});
+      if (lo && e.isTrusted) call('$kHandlerManualLogout', {});
     }, true);
   }
   var panel = document.getElementById('loginpanel');
@@ -355,9 +360,13 @@ String buildLoginBridgeJs({
 /// QF-04（3.0.0 中组）：[rememberDevice] 为真时才勾选 lgRemember——只有
 /// 用户在控制台登录处勾过「记住此设备」才建 30 天持久会话；默认不勾，
 /// 也不替用户改复选框状态（不强制勾选、也不强制取消，由页面默认值决定）。
-String buildChatBridgeJs(
-    {String? username, String? password, bool rememberDevice = false}) {
-  final hasCreds = username != null &&
+String buildChatBridgeJs({
+  String? username,
+  String? password,
+  bool rememberDevice = false,
+}) {
+  final hasCreds =
+      username != null &&
       username.isNotEmpty &&
       password != null &&
       password.isNotEmpty;

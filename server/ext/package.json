@@ -1,1 +1,14 @@
-{"description":"QFRemote extension service: points + owner admin (new service, touches no existing files)","main":"server.js","name":"qfremote-ext","private":true,"scripts":{"start":"node server.js","test":"node test-points.js"},"version":"2.2.0"}
+{
+  "description": "QFRemote 扩展服务：许可、设备、订单与本地代理授权",
+  "main": "server.js",
+  "name": "qfremote-ext",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-points.js"
+  },
+  "version": "3.0.0",
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

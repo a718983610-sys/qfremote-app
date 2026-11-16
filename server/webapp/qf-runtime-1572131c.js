@@ -417,7 +417,7 @@ const BanLock = {
       html += '<h1>' + esc(title) + '</h1>';
       if (nm) html += '<div class="psub">' + nm + '</div>';
       html += '<div class="note err">' + esc(body) + '</div>';
-      if (st === 'locked') html += '<div class="note">事由：违反平台规则</div>';
+      if (st === 'locked') html += '<div class="note">事由：' + esc((d && (d.category || d.reason)) || '暂未提供，请联系官方客服核实') + '</div>';
       if (st === 'expired') html += '<button class="btn block" id="bn-relogin">重新登录</button>';
       else html += '<button class="btn block" id="bn-appeal">提交申诉</button>';
       html += '<div class="mt-10 text-center" id="bn-links">';
@@ -542,7 +542,8 @@ function parseBanView(str) {
     return {
       mode: obj.mode === 'frozen' ? 'frozen' : 'banned',
       permanent: !!obj.permanent,
-      endsAt: obj.endsAt || null
+      endsAt: obj.endsAt || null,
+      category: typeof obj.category === 'string' ? obj.category.slice(0, 200) : ''
     };
   } catch (e) {
     // 数据缺失或损坏时也能画门，只是没有日期/类型可能偏封禁

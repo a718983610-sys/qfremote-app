@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'session_response.dart';
+import 'session_history.dart';
 import '../../core/constants.dart';
 import '../../services/points.dart' show ConsoleCookieProvider;
 import '../../services/probe.dart' show trustedHttpClient;
@@ -196,24 +198,22 @@ class QualityProbeSample {
   }
 
   Map<String, Object?> toProbeJson() => {
-        'rttMs': rttMs,
-        'lossPct': lossPct,
-        if (lossSamples != null) 'lossSamples': lossSamples,
-        'jitterMs': jitterMs,
-        if (decodeLagMs != null) 'decodeLagMs': decodeLagMs,
-        if (pendingFrames != null) 'pendingFrames': pendingFrames,
-        if (frameCorrupt != null) 'frameCorrupt': frameCorrupt,
-        if (serverQueueBytes != null) 'serverQueueBytes': serverQueueBytes,
-      };
+    'rttMs': rttMs,
+    'lossPct': lossPct,
+    if (lossSamples != null) 'lossSamples': lossSamples,
+    'jitterMs': jitterMs,
+    if (decodeLagMs != null) 'decodeLagMs': decodeLagMs,
+    if (pendingFrames != null) 'pendingFrames': pendingFrames,
+    if (frameCorrupt != null) 'frameCorrupt': frameCorrupt,
+    if (serverQueueBytes != null) 'serverQueueBytes': serverQueueBytes,
+  };
 
   Map<String, Object?>? get serverSignalJson {
-    if (serverSignalQueueBytes == null &&
-        serverSignalSendBlockedMs == null) {
+    if (serverSignalQueueBytes == null && serverSignalSendBlockedMs == null) {
       return null;
     }
     return {
-      if (serverSignalQueueBytes != null)
-        'queueBytes': serverSignalQueueBytes,
+      if (serverSignalQueueBytes != null) 'queueBytes': serverSignalQueueBytes,
       if (serverSignalSendBlockedMs != null)
         'sendBlockedMs': serverSignalSendBlockedMs,
     };
@@ -230,8 +230,7 @@ Duration probeInterval({
 }) {
   if (hidden) return const Duration(seconds: 5);
   if (weakNetwork) return const Duration(milliseconds: 500);
-  if (tierChangedAtMs != null &&
-      nowMs - tierChangedAtMs < 10000) {
+  if (tierChangedAtMs != null && nowMs - tierChangedAtMs < 10000) {
     return const Duration(milliseconds: 500);
   }
   return const Duration(seconds: 1);
@@ -281,20 +280,18 @@ class QualityDecision {
     return QualityDecision(
       kind: kind,
       decisionId: json['decisionId'] as String? ?? '',
-      from: SpecQualityTierWire.fromWireOrDefault(
-        json['from'] as String?,
-      ),
+      from: SpecQualityTierWire.fromWireOrDefault(json['from'] as String?),
       to: SpecQualityTierWire.fromWireOrDefault(json['to'] as String?),
       hot: hotRaw is Map<String, Object?>
           ? hotRaw
           : hotRaw is Map
-              ? Map<String, Object?>.from(hotRaw)
-              : const {},
+          ? Map<String, Object?>.from(hotRaw)
+          : const {},
       reconfig: reconfigRaw is Map<String, Object?>
           ? reconfigRaw
           : reconfigRaw is Map
-              ? Map<String, Object?>.from(reconfigRaw)
-              : const {},
+          ? Map<String, Object?>.from(reconfigRaw)
+          : const {},
       mustAckByMs: json['mustAckByMs'] as int? ?? 0,
       needsIdr: json['needsIdr'] as bool? ?? false,
     );
@@ -322,8 +319,7 @@ class BackpressureDecision {
 
   /// 仅客户端自报堆积，不触发背压（§5.2）：服务端只记日志，
   /// 返回 level/action 为 null。客户端此时不得擅自降档。
-  bool get isHintOnly =>
-      level == null && note.contains('仅客户端自报');
+  bool get isHintOnly => level == null && action == null;
 
   factory BackpressureDecision.fromJson(Map<String, Object?> json) =>
       BackpressureDecision(
@@ -369,18 +365,10 @@ class QualityProbeResponse {
     final bp = bpRaw is Map<String, Object?>
         ? BackpressureDecision.fromJson(bpRaw)
         : bpRaw is Map
-            ? BackpressureDecision.fromJson(
-                Map<String, Object?>.from(bpRaw),
-              )
-            : const BackpressureDecision(
-                level: null,
-                action: null,
-                note: '无背压。',
-              );
+        ? BackpressureDecision.fromJson(Map<String, Object?>.from(bpRaw))
+        : const BackpressureDecision(level: null, action: null, note: '无背压。');
     return QualityProbeResponse(
-      tier: SpecQualityTierWire.fromWireOrDefault(
-        json['tier'] as String?,
-      ),
+      tier: SpecQualityTierWire.fromWireOrDefault(json['tier'] as String?),
       decision: decision,
       backpressure: bp,
       probeIncomplete: incomplete,
@@ -429,7 +417,7 @@ abstract class QualityTransport {
   });
 
   Future<({QualityDecision? decision, QualityUpgradeRejection? rejection})>
-      upgrade({required String sessionId});
+  upgrade({required String sessionId});
 
   Future<({bool ok, String? code, SpecQualityTier? tier, int? rttMs})> ack({
     required String sessionId,
@@ -447,8 +435,8 @@ class QualityApiException implements Exception {
 
 class HttpQualityTransport implements QualityTransport {
   HttpQualityTransport({String? baseUrl, ConsoleCookieProvider? cookieProvider})
-      : _baseUrl = baseUrl ?? kServerOrigin,
-        _cookieProvider = cookieProvider;
+    : _baseUrl = baseUrl ?? kServerOrigin,
+      _cookieProvider = cookieProvider;
 
   final String _baseUrl;
   static const _timeout = Duration(seconds: 15);
@@ -478,17 +466,19 @@ class HttpQualityTransport implements QualityTransport {
       req.write(jsonEncode(body));
       final res = await req.close().timeout(_timeout);
       final text = await res.transform(utf8.decoder).join().timeout(_timeout);
-      if (res.statusCode == 401 || res.statusCode == 403) {
-        throw const QualityApiException('UNAUTHORIZED');
-      }
-      if (res.statusCode == 503) {
-        throw const QualityApiException('L5_UNAVAILABLE');
-      }
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, Object?>) {
-        throw const FormatException('quality 响应不是 JSON 对象');
-      }
-      return decoded;
+      return decodeSessionResponse(
+        res.statusCode,
+        text,
+        (code, message) => QualityApiException(code, message),
+      );
+    } on FormatException {
+      throw const QualityApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const QualityApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const QualityApiException('TIMEOUT');
+    } on IOException {
+      throw const QualityApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -513,16 +503,12 @@ class HttpQualityTransport implements QualityTransport {
 
   @override
   Future<({QualityDecision? decision, QualityUpgradeRejection? rejection})>
-      upgrade({required String sessionId}) async {
-    final json = await _postJson(
-      '/license/api/session/quality/upgrade',
-      {'sessionId': sessionId},
-    );
+  upgrade({required String sessionId}) async {
+    final json = await _postJson('/license/api/session/quality/upgrade', {
+      'sessionId': sessionId,
+    });
     if (json['ok'] == true) {
-      return (
-        decision: QualityDecision.fromJson(json),
-        rejection: null,
-      );
+      return (decision: QualityDecision.fromJson(json), rejection: null);
     }
     return (
       decision: null,
@@ -539,10 +525,10 @@ class HttpQualityTransport implements QualityTransport {
     required String sessionId,
     required String decisionId,
   }) async {
-    final json = await _postJson(
-      '/license/api/session/quality/ack',
-      {'sessionId': sessionId, 'decisionId': decisionId},
-    );
+    final json = await _postJson('/license/api/session/quality/ack', {
+      'sessionId': sessionId,
+      'decisionId': decisionId,
+    });
     if (json['ok'] == true) {
       return (
         ok: true,
@@ -551,12 +537,7 @@ class HttpQualityTransport implements QualityTransport {
         rttMs: json['rttMs'] as int?,
       );
     }
-    return (
-      ok: false,
-      code: json['code'] as String?,
-      tier: null,
-      rttMs: null,
-    );
+    return (ok: false, code: json['code'] as String?, tier: null, rttMs: null);
   }
 }
 
@@ -582,12 +563,12 @@ class QualitySessionClient {
     void Function(QualityDecision decision)? onHotApplied,
     void Function(QualityDecision decision)? onReconfigApplied,
     void Function()? onClearReferenceFrames,
-  })  : _transport = transport,
-        _idrRequester = idrRequester,
-        _tier = initialTier,
-        _onHotApplied = onHotApplied,
-        _onReconfigApplied = onReconfigApplied,
-        _onClearReferenceFrames = onClearReferenceFrames;
+  }) : _transport = transport,
+       _idrRequester = idrRequester,
+       _tier = initialTier,
+       _onHotApplied = onHotApplied,
+       _onReconfigApplied = onReconfigApplied,
+       _onClearReferenceFrames = onClearReferenceFrames;
 
   final String sessionId;
   final QualityTransport _transport;
@@ -619,9 +600,9 @@ class QualitySessionClient {
     required int nowMs,
   }) async {
     if (!sample.isComplete) {
-      return const QualityProbeResponse(
-        tier: SpecQualityTier.balanced,
-        backpressure: BackpressureDecision(
+      return QualityProbeResponse(
+        tier: _tier,
+        backpressure: const BackpressureDecision(
           level: null,
           action: null,
           note: '无背压。',
@@ -631,7 +612,8 @@ class QualitySessionClient {
     }
     final outOfRange = sample.outOfRangeFields;
     if (outOfRange.isNotEmpty) {
-      diagnosticLog.add(
+      appendSessionHistory(
+        diagnosticLog,
         'quality-probe-downweighted: ${outOfRange.join(',')}',
       );
     }
@@ -642,9 +624,10 @@ class QualitySessionClient {
       tier: _tier,
       sample: sample,
     );
-    _tier = response.tier;
     if (response.decision != null) {
       await applyDecision(response.decision!, nowMs: nowMs);
+    } else {
+      _tier = response.tier;
     }
     if (response.backpressure.hasAction) {
       await applyBackpressure(response.backpressure, nowMs: nowMs);
@@ -668,10 +651,16 @@ class QualitySessionClient {
       if (decision.reconfig.isNotEmpty) {
         _onReconfigApplied?.call(decision);
       }
+      if (decision.needsIdr) {
+        _onClearReferenceFrames?.call();
+        final idr = _idrRequester;
+        if (idr != null) await idr.sendQualityChange();
+      }
     } catch (e) {
       // 执行失败：保持旧档位、记本地日志，不发 ACK。
       _tier = previousTier;
-      diagnosticLog.add(
+      appendSessionHistory(
+        diagnosticLog,
         'quality-decision-apply-failed: ${decision.decisionId} $e',
       );
       return false;
@@ -679,13 +668,6 @@ class QualitySessionClient {
     _tier = decision.to;
     _tierChangedAtMs = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     _pendingDecision = decision;
-    if (decision.needsIdr) {
-      _onClearReferenceFrames?.call();
-      final idr = _idrRequester;
-      if (idr != null) {
-        await idr.sendQualityChange();
-      }
-    }
     return true;
   }
 
@@ -696,18 +678,32 @@ class QualitySessionClient {
     final at = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     if (at > decision.mustAckByMs) {
       // 已超时：服务端已清除该项，只记日志，不补 ACK、不重发。
-      ackTimedOutDecisionIds.add(decision.decisionId);
-      diagnosticLog.add('quality-ack-timeout: ${decision.decisionId}');
+      appendSessionHistory(ackTimedOutDecisionIds, decision.decisionId);
+      appendSessionHistory(
+        diagnosticLog,
+        'quality-ack-timeout: ${decision.decisionId}',
+      );
       _pendingDecision = null;
       return false;
     }
-    final result = await _transport.ack(
-      sessionId: sessionId,
-      decisionId: decision.decisionId,
-    );
+    final ({bool ok, String? code, SpecQualityTier? tier, int? rttMs}) result;
+    try {
+      result = await _transport.ack(
+        sessionId: sessionId,
+        decisionId: decision.decisionId,
+      );
+    } catch (_) {
+      _pendingDecision = null;
+      appendSessionHistory(
+        diagnosticLog,
+        'quality-ack-network-failed: ${decision.decisionId}',
+      );
+      return false;
+    }
     if (!result.ok) {
       // UNKNOWN_DECISION：不得重试同一 decisionId。
-      diagnosticLog.add(
+      appendSessionHistory(
+        diagnosticLog,
         'quality-ack-rejected: ${decision.decisionId} ${result.code}',
       );
       _pendingDecision = null;
@@ -723,8 +719,11 @@ class QualitySessionClient {
     final decision = _pendingDecision;
     if (decision == null) return const [];
     if (nowMs > decision.mustAckByMs) {
-      ackTimedOutDecisionIds.add(decision.decisionId);
-      diagnosticLog.add('quality-ack-timeout: ${decision.decisionId}');
+      appendSessionHistory(ackTimedOutDecisionIds, decision.decisionId);
+      appendSessionHistory(
+        diagnosticLog,
+        'quality-ack-timeout: ${decision.decisionId}',
+      );
       _pendingDecision = null;
       return [decision.decisionId];
     }
@@ -735,10 +734,19 @@ class QualitySessionClient {
   /// [QualityUpgradeRejection.displayText] 对应的原因。
   /// 成功时按决策执行（同 applyDecision，一次只升一档）。
   Future<({QualityDecision? decision, QualityUpgradeRejection? rejection})>
-      requestUpgrade({int? nowMs}) async {
+  requestUpgrade({int? nowMs}) async {
     final result = await _transport.upgrade(sessionId: sessionId);
     if (result.decision != null) {
-      await applyDecision(result.decision!, nowMs: nowMs);
+      final applied = await applyDecision(result.decision!, nowMs: nowMs);
+      if (!applied) {
+        return (
+          decision: null,
+          rejection: const QualityUpgradeRejection(
+            code: 'APPLY_FAILED',
+            message: '画质调整未完成，请稍后重试。',
+          ),
+        );
+      }
     }
     return result;
   }

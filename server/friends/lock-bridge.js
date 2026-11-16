@@ -21,7 +21,7 @@
 const fs = require('fs');
 const crypto = require('crypto');
 let WebSocket;
-try { WebSocket = require('/opt/meshcentral/node_modules/ws'); } catch (e) { WebSocket = require('ws'); }
+WebSocket = require('ws'); // M-025: service-owned dependency
 const envelope = require('./lock-envelope');
 
 const ERR = {

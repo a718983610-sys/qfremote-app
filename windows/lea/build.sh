@@ -21,6 +21,22 @@ cd "$(dirname "$0")"
 
 ED25519_SRCS="ed25519/verify.c ed25519/ge.c ed25519/fe.c ed25519/sc.c ed25519/sha512.c"
 
+# Product version comes from the repository's release source, never a second
+# hand-maintained LEA version (M-124).
+BUILD_VERSION=$(python3 -c 'import json; print(json.load(open("../../version.json"))["version"])')
+OUTPUT_DIR=.
+if [ "${LEA_TEST_UNSIGNED:-0}" = "1" ]; then
+  if [ -z "${LEA_TEST_OUTPUT_DIR:-}" ] || [ "$LEA_TEST_OUTPUT_DIR" = "." ]; then
+    echo "ERROR: test builds require a separate LEA_TEST_OUTPUT_DIR; normal package paths are forbidden" >&2
+    exit 1
+  fi
+  mkdir -p "$LEA_TEST_OUTPUT_DIR"
+  OUTPUT_DIR=$(cd "$LEA_TEST_OUTPUT_DIR" && pwd)
+  if [ "$OUTPUT_DIR" = "$(pwd)" ]; then
+    echo "ERROR: LEA_TEST_OUTPUT_DIR must not be the production directory" >&2
+    exit 1
+  fi
+fi
 python3 gen_whitelist.py
 if [ "${LEA_TEST_UNSIGNED:-0}" = "1" ]; then
   echo "WARNING: test-only build (LEA_TEST_UNSIGNED=1): TEST-UNSIGNED accepted. NEVER ship this."
@@ -43,20 +59,38 @@ if [ -n "${LEA_SERVER_PUBKEY_HEX:-}" ]; then
   echo "Ed25519 verify: server pubkey baked in (${LEA_SERVER_PUBKEY_HEX})"
   PUBKEY_FLAG="-DLEA_SERVER_PUBKEY_HEX=$LEA_SERVER_PUBKEY_HEX"
 else
-  echo "Ed25519 verify: NO server pubkey baked in (fail-closed; pass LEA_SERVER_PUBKEY_HEX=<64 hex> for production)"
+  if [ "${LEA_TEST_UNSIGNED:-0}" != "1" ]; then
+    echo "ERROR: production build requires LEA_SERVER_PUBKEY_HEX; no-key fail-closed verification builds belong in test/run_tests.sh" >&2
+    exit 1
+  fi
   PUBKEY_FLAG=""
 fi
 
 # shellcheck disable=SC2086
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_install.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG -ladvapi32 -lcrypt32 -lwtsapi32
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -o "$OUTPUT_DIR/QFRLEA.exe" QFRLEA.c lea_install.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG -ladvapi32 -lcrypt32 -lwtsapi32
 # shellcheck disable=SC2086
 # S3：客户端用 lea_crypto.c 的 lea_b64_decode 解析 dispatch <base64>（纯 C，无需额外库）。
 # lea_crypto.c 引用 ed25519_verify，故客户端同样须链 ed25519 源文件。
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o qf-lea-client.exe qf-lea-client.c lea_crypto.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -o "$OUTPUT_DIR/qf-lea-client.exe" qf-lea-client.c lea_crypto.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG
 python3 gen_whitelist.py --check
-# H19：每次构建重写 version.txt（与 install-lea.ps1 的默认值 0.1.0 一致）。
-printf '0.1.0\n' > version.txt
+# M-017/M-127: check actual artifacts and keep unsafe output away from installers.
+if [ "${LEA_TEST_UNSIGNED:-0}" = "1" ]; then
+  for artifact in "$OUTPUT_DIR/QFRLEA.exe" "$OUTPUT_DIR/qf-lea-client.exe"; do
+    strings "$artifact" | grep -q QFRLEA_TEST_UNSIGNED_BUILD || { echo "ERROR: missing test marker" >&2; exit 1; }
+  done
+  sha256sum "$OUTPUT_DIR/QFRLEA.exe" "$OUTPUT_DIR/qf-lea-client.exe"
+  printf '%s-test-only\n' "$BUILD_VERSION" > "$OUTPUT_DIR/version.txt"
+  exit 0
+fi
+for artifact in QFRLEA.exe qf-lea-client.exe; do
+  if strings "$artifact" | grep -q QFRLEA_TEST_UNSIGNED_BUILD; then
+    echo "ERROR: test-only marker in normal build" >&2; exit 1
+  fi
+done
+printf '%s\n' "$BUILD_VERSION" > version.txt
+sha256sum QFRLEA.exe qf-lea-client.exe
 # H17/H20：刚编出的 exe 哈希已变，同步刷新安装脚本的载荷哈希与白名单。
 python3 gen_whitelist.py --update-installer
 python3 ../syshelper/gen_whitelist.py
+node ../tools/native-build-receipt.js --record lea
 ls -l QFRLEA.exe qf-lea-client.exe whitelist.h version.txt

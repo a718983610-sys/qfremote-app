@@ -4,14 +4,15 @@
   "description": "QFRemote 友聊模块（二期）：加密聊天＋记录同步（A案）",
   "main": "chat-server.js",
   "scripts": {
-    "test": "node test-e2e.js"
+    "test": "node test-e2e.js",
+    "test:security": "node test-completeness.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "libsodium-wrappers": "^0.8.4",
-    "libsodium-wrappers-sumo": "^0.8.4",
-    "ws": "^8.22.0"
+    "libsodium-wrappers": "0.8.4",
+    "libsodium-wrappers-sumo": "0.8.4",
+    "ws": "8.22.0"
   }
 }

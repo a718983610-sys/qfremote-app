@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'session_response.dart';
 import '../../core/constants.dart';
 import '../../services/points.dart' show ConsoleCookieProvider;
 import '../../services/probe.dart' show trustedHttpClient;
@@ -94,8 +95,7 @@ class IdrResult {
 
   /// `ok` 为真当且仅当 decision 是 forward 或 coalesced（§2.2）。
   bool get ok =>
-      decision == IdrDecision.forward ||
-      decision == IdrDecision.coalesced;
+      decision == IdrDecision.forward || decision == IdrDecision.coalesced;
 
   /// 是否放行（等下一关键帧到达后渲染，不得再发一次）。
   bool get forwarded => decision == IdrDecision.forward;
@@ -129,6 +129,14 @@ class IdrResult {
   }
 }
 
+class IdrApiException implements Exception {
+  const IdrApiException(this.code, [this.message = '']);
+  final String code;
+  final String message;
+  @override
+  String toString() => 'IdrApiException($code)';
+}
+
 /// IDR 请求传输接口（测试用假实现；生产实现见 [HttpIdrTransport]）。
 abstract class IdrTransport {
   Future<IdrResult> request({
@@ -144,8 +152,8 @@ abstract class IdrTransport {
 /// 承载——本传输不另发明鉴权头）。
 class HttpIdrTransport implements IdrTransport {
   HttpIdrTransport({String? baseUrl, ConsoleCookieProvider? cookieProvider})
-      : _baseUrl = baseUrl ?? kServerOrigin,
-        _cookieProvider = cookieProvider;
+    : _baseUrl = baseUrl ?? kServerOrigin,
+      _cookieProvider = cookieProvider;
 
   final String _baseUrl;
 
@@ -165,28 +173,29 @@ class HttpIdrTransport implements IdrTransport {
       connectionTimeout: const Duration(seconds: 15),
     );
     try {
-      final uri = Uri.parse(_baseUrl).resolve(
-        '/license/api/session/idr-request',
-      );
-      final req = await client.postUrl(uri).timeout(
-            const Duration(seconds: 15),
-          );
+      final uri = Uri.parse(_baseUrl)
+          .resolve('/license/api/session/idr-request');
+      final req = await client
+          .postUrl(uri)
+          .timeout(const Duration(seconds: 15));
       req.headers.contentType = ContentType.json;
       final cookie = await _cookieProvider?.call();
       if (cookie != null && cookie.isNotEmpty) {
         req.headers.set(HttpHeaders.cookieHeader, cookie);
       }
-      req.write(jsonEncode({
-        'sessionId': sessionId,
-        'agentId': agentId,
-        'seq': seq,
-        'reason': reason.wire,
-      }));
+      req.write(
+        jsonEncode({
+          'sessionId': sessionId,
+          'agentId': agentId,
+          'seq': seq,
+          'reason': reason.wire,
+        }),
+      );
       final res = await req.close().timeout(const Duration(seconds: 15));
-      final text =
-          await res.transform(utf8.decoder).join().timeout(
-                const Duration(seconds: 15),
-              );
+      final text = await res
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
         return IdrResult(
           decision: IdrDecision.rejected,
@@ -203,11 +212,20 @@ class HttpIdrTransport implements IdrTransport {
           seq: seq,
         );
       }
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, Object?>) {
-        throw const FormatException('IDR 响应不是 JSON 对象');
-      }
+      final decoded = decodeSessionResponse(
+        res.statusCode,
+        text,
+        (code, message) => IdrApiException(code, message),
+      );
       return IdrResult.fromJson(decoded, seq);
+    } on FormatException {
+      throw const IdrApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const IdrApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const IdrApiException('TIMEOUT');
+    } on IOException {
+      throw const IdrApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -225,11 +243,16 @@ class IdrRequester {
     required this.sessionId,
     required this.agentId,
     required IdrTransport transport,
-  }) : _transport = transport;
+    int Function()? nowMs,
+  }) : _transport = transport,
+       _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
 
   final String sessionId;
   final String agentId;
   final IdrTransport _transport;
+  final int Function() _nowMs;
+  final Map<IdrReason, int> _lastSentAt = {};
+  final Map<IdrReason, int> _lastSentSeq = {};
 
   /// 下一次发送用的 seq（从 1 开始，§2.4）。
   int _nextSeq = 1;
@@ -242,17 +265,41 @@ class IdrRequester {
   /// 发一次 IDR 请求。REPLAY 时用新 seq 重试一次（仍 REPLAY 则返回
   /// 该结果停手，不原样重发、不无限重试）。
   Future<IdrResult> send(IdrReason reason) async {
+    final at = _nowMs();
+    final previous = _lastSentAt[reason];
+    if (previous != null &&
+        at >= previous &&
+        at - previous < reason.coalesceWindow.inMilliseconds) {
+      return IdrResult(
+        decision: IdrDecision.coalesced,
+        code: 'COALESCED_LOCAL',
+        message: '',
+        seq: _lastSentSeq[reason]!,
+        retryAfterMs: reason.coalesceWindow.inMilliseconds - (at - previous),
+      );
+    }
     final seq = _nextSeq++;
-    var result = await _transport.request(
-      sessionId: sessionId,
-      agentId: agentId,
-      seq: seq,
-      reason: reason,
-    );
+    _lastSentAt[reason] = at;
+    _lastSentSeq[reason] = seq;
+    final IdrResult first;
+    try {
+      first = await _transport.request(
+        sessionId: sessionId,
+        agentId: agentId,
+        seq: seq,
+        reason: reason,
+      );
+    } catch (_) {
+      if (_lastSentSeq[reason] == seq) {
+        _lastSentAt.remove(reason);
+        _lastSentSeq.remove(reason);
+      }
+      rethrow;
+    }
+    var result = first;
     if (result.code == 'REPLAY') {
-      // 本地 seq 已单调递增（§2.4 实现口径：只要保证每次发送的 seq
-      // 大于之前所有已发送的 seq 即可），用新 seq 再试一次。
       final retrySeq = _nextSeq++;
+      _lastSentSeq[reason] = retrySeq;
       result = await _transport.request(
         sessionId: sessionId,
         agentId: agentId,

@@ -1,0 +1,38 @@
+name: Server regression tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, lea-local-agent]
+    paths: ['server/**', 'tools/**', '.github/workflows/server.yml']
+  pull_request:
+    branches: [main, lea-local-agent]
+    paths: ['server/**', 'tools/**', '.github/workflows/server.yml']
+permissions:
+  contents: read
+concurrency:
+  group: server-ci-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install locked server dependencies
+        run: |
+          npm ci --prefix server/ext
+          npm ci --prefix server/friends/chat
+      - name: Extension and LEA unit tests (no production services)
+        run: |
+          set -e
+          for test in server/ext/test-*.js; do node "$test"; done
+          node server/ext/lea/test/test-lea.js
+          node --test tools/test-product-release.js
+      - name: Chat regression and inbox pressure (local fake control server)
+        run: |
+          node server/friends/chat/test-completeness.js
+          node server/friends/chat/test-chat-c4.js
+          node server/friends/chat/stress-inbox-test.js

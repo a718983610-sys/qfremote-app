@@ -173,6 +173,28 @@ function checkManifest(payloadDir) {
   else bad('file-manifest 与 payload 一致', (r.stderr || r.stdout || '').trim());
 }
 
+function checkLeaBuildMarkers(tree, payloadDir) {
+  const forbidden = ['QFRLEA_TEST_UNSIGNED_BUILD', 'QFRLEA_NO_PRODUCTION_PUBLIC_KEY'];
+  const files = [];
+  // NSIS embeds service/client directly from the source tree; app.7z may also carry copies.
+  for (const name of ['QFRLEA.exe', 'qf-lea-client.exe']) {
+    files.push(path.join(tree, 'windows', 'lea', name));
+    for (const dir of ['LEA', 'lea', 'resources/app.asar.unpacked/lea']) {
+      const candidate = path.join(payloadDir, dir, name);
+      if (fileExists(candidate)) files.push(candidate);
+    }
+  }
+  for (const file of files) {
+    if (!fileExists(file)) { bad('LEA production build in place', file + ' missing'); continue; }
+    const bytes = fs.readFileSync(file);
+    const marker = forbidden.find((m) => bytes.includes(Buffer.from(m, 'ascii')));
+    if (marker) bad('LEA production build', path.basename(file) + ' contains ' + marker);
+    else if (!bytes.includes(Buffer.from('QFRLEA_PRODUCTION_SIGNED_BUILD', 'ascii'))) {
+      bad('LEA production build', path.basename(file) + ' lacks affirmative production build marker');
+    } else ok('LEA production build', path.basename(file));
+  }
+}
+
 function checkStageCopy2(tree) {
   const src = fs.readFileSync(path.join(tree, 'windows', 'tools', 'stage-asar-unpacked.py'), 'utf8');
   if (src.includes('shutil.copy2')) ok('stage-asar-unpacked.py 用 copy2', '保留时间戳');
@@ -245,6 +267,11 @@ function main() {
   checkApp7z(a.app7z);
   checkVersions(a, tree);
   checkManifest(a.payloadDir);
+  checkLeaBuildMarkers(tree, a.payloadDir);
+  for (const name of ['lea', 'ush', 'syshelper']) {
+    try { require('./native-build-receipt').verify(name, path.join(tree, 'windows')); ok('native build receipt', name); }
+    catch (e) { bad('native build receipt', e.message); }
+  }
   checkStageCopy2(tree);
   checkMakensisLog('内层', a.logInner);
   checkMakensisLog('外层', a.logOuter);
@@ -254,4 +281,5 @@ function main() {
   if (failures) { console.error('release-gate：' + failures + ' 项未通过，不许发版。'); process.exit(1); }
   console.log('release-gate：全部通过。');
 }
-main();
+if (require.main === module) main();
+module.exports = { checkLeaBuildMarkers };

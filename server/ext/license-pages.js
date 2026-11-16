@@ -1,28 +1,31 @@
 'use strict';
-/* QFRemote 许可相关页面（购买页 / 账户状态查询页），自包含单页，风格随阶段 B 令牌：
- * 底 #F4F7FB、卡片白底圆角 14 边 #DFE7F2、品牌蓝 #2470E0、深蓝标题 #0B2B5B。 */
+/* QFRemote 许可相关页面：与三端一致的黑白主题、彩色状态边线和系统减弱动态效果。 */
 function shell(title, sub, inner) {
   return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
-    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark">'
+    + '<script>try{var t=new URLSearchParams(location.search).get("t")||localStorage.getItem("qf-theme");if(t==="dark"||t==="light")document.documentElement.dataset.theme=t}catch(e){}</script>'
     + '<title>' + title + ' · QFRemote</title><style>'
-    + 'body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}'
-    + '.wrap{max-width:430px;margin:0 auto;padding:26px 16px 40px}.brand{font-size:20px;font-weight:700;color:#1450b4;margin:8px 2px 4px}'
-    + '.sub{font-size:13px;color:#5b6b7d;margin:0 2px 18px}.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:22px 20px}'
-    + 'h1{font-size:18px;color:#0B2B5B;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#43536a}'
-    + 'label{display:block;font-size:13px;color:#43536a;margin:14px 0 6px}input,select{box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:11px;font-size:15px;min-height:44px}'
-    + '.btn{display:block;width:100%;box-sizing:border-box;text-align:center;border:0;border-radius:9px;background:#2470E0;color:#fff;font-size:16px;padding:12px;margin-top:18px;cursor:pointer;text-decoration:none}'
-    + '.btn.black{background:#111;color:#fff}.note{font-size:13px;color:#5b6b7d;line-height:1.7}'
-    + '.err{background:#fdf0f0;border:1px solid #f3c2c2;color:#a40000;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7;margin-top:14px}'
-    + '.ok{background:#eefaf0;border:1px solid #bfe6c8;color:#14632a;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7;margin-top:14px}'
-    + '.kv{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #EDF1F7;font-size:14px}.kv:first-of-type{border-top:0}'
-    + '.kv b{color:#0B2B5B;font-weight:600;text-align:right;word-break:break-all}.eye{cursor:pointer;color:#2470E0;font-size:13px;margin-left:8px}'
-    + '.plan{display:flex;justify-content:space-between;align-items:center;border:1px solid #DFE7F2;border-radius:10px;padding:12px 14px;margin-top:10px;cursor:pointer}.plan.sel{border-color:#2470E0;background:#F4F8FF}'
-    + '.plan-sub{margin:6px 2px 0}.drawer{border:1px solid #2470E0;border-top:0;border-radius:0 0 10px 10px;padding:4px 14px 16px;background:#FBFDFF}'
-    + '.payseg{display:flex;gap:8px;margin-top:12px}.payopt{flex:1;text-align:center;border:1px solid #DFE7F2;border-radius:10px;padding:10px 8px;cursor:pointer;background:#fff;font-size:14px;color:#0B2B5B;font-family:inherit}.payopt.sel{border-color:#2470E0;background:#F4F8FF;color:#2470E0;font-weight:600}'
-    + '.paycard{margin-top:10px;text-align:center;border:1px solid #DFE7F2;border-radius:10px;padding:10px 8px;background:#fff}.paycard img{display:block;width:100%;max-width:180px;margin:8px auto 4px;border:1px solid #DFE7F2;border-radius:8px}.paycard .pc-name{font-size:14px;color:#0B2B5B;font-weight:600}'
+    + ':root{color-scheme:light;--bg:#FFFFFF;--card:#FFFFFF;--tx:#111113;--sub:#4B4B55;--line:#E4E4E7;--tint:#F7F7F8;--brand:#000000;--on-brand:#FFFFFF;--ok:#16A34A;--err:#DC2626}'
+    + '@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#08090A;--card:#111113;--tx:#F5F5F7;--sub:#B9B9C2;--line:#2E2F34;--tint:#17181A;--brand:#FFFFFF;--on-brand:#08090A;--ok:#22C55E;--err:#F87171}}'
+    + ':root[data-theme="dark"]{color-scheme:dark;--bg:#08090A;--card:#111113;--tx:#F5F5F7;--sub:#B9B9C2;--line:#2E2F34;--tint:#17181A;--brand:#FFFFFF;--on-brand:#08090A;--ok:#22C55E;--err:#F87171}'
+    + '*{box-sizing:border-box}body{margin:0;font-family:"Segoe UI Variable",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--tx);line-height:1.6;font-variant-numeric:tabular-nums}'
+    + '.wrap{max-width:480px;margin:0 auto;padding:32px 20px 40px}.brand{font-size:20px;font-weight:600;letter-spacing:-.02em;color:var(--tx);margin:8px 2px 4px}'
+    + '.sub{font-size:13px;color:var(--sub);margin:0 2px 20px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}'
+    + 'h1{font-size:20px;line-height:28px;font-weight:600;color:var(--tx);margin:0 0 12px}p{font-size:14px;line-height:1.7;color:var(--sub);overflow-wrap:break-word}'
+    + 'label{display:block;font-size:13px;color:var(--tx);margin:16px 0 8px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:11px 12px;font:inherit;font-size:16px;min-height:44px;background:var(--bg);color:var(--tx);transition:border-color 110ms ease}'
+    + '.btn{display:block;width:100%;text-align:center;border:1px solid transparent;border-radius:8px;background:var(--brand);color:var(--on-brand);font:inherit;font-size:14px;font-weight:600;padding:12px;margin-top:20px;cursor:pointer;text-decoration:none;min-height:44px;transition:opacity 140ms ease,transform 60ms ease}'
+    + '.btn.black{background:var(--brand);color:var(--on-brand)}.btn:hover{opacity:.88}.btn:active{transform:scale(.985)}.btn:disabled{background:var(--tint);color:var(--sub);cursor:default;transform:none}.note{font-size:13px;color:var(--sub);line-height:1.7}'
+    + '.err,.ok{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--err);color:var(--tx);border-radius:8px;padding:10px 12px;font-size:14px;line-height:1.7;margin-top:16px}.ok{border-left-color:var(--ok)}'
+    + '.kv{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid var(--line);font-size:14px}.kv:first-of-type{border-top:0}'
+    + '.kv b{color:var(--tx);font-weight:600;text-align:right;word-break:break-all}.eye{cursor:pointer;color:var(--tx);font-size:13px;margin-left:8px;text-decoration:underline;text-underline-offset:3px}'
+    + '.plan{display:flex;justify-content:space-between;gap:12px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-top:12px;cursor:pointer;min-height:48px;transition:background 140ms ease,border-color 140ms ease}.plan:hover{background:var(--tint)}.plan.sel{border-color:var(--brand);background:var(--tint)}'
+    + '.plan-sub{margin:6px 2px 0}.drawer{border:1px solid var(--brand);border-top:0;border-radius:0 0 8px 8px;padding:4px 14px 16px;background:var(--card)}'
+    + '.payseg{display:flex;gap:8px;margin-top:12px}.payopt{flex:1;text-align:center;border:1px solid var(--line);border-radius:8px;padding:10px 8px;cursor:pointer;background:var(--card);font:inherit;font-size:14px;color:var(--tx);min-height:44px;transition:background 140ms ease,border-color 140ms ease}.payopt.sel{border-color:var(--brand);background:var(--tint);color:var(--tx);font-weight:600}'
+    + '.paycard{margin-top:12px;text-align:center;border:1px solid var(--line);border-radius:8px;padding:12px 8px;background:var(--card)}.paycard img{display:block;width:100%;max-width:180px;margin:8px auto 4px;border:1px solid var(--line);border-radius:8px}.paycard .pc-name{font-size:14px;color:var(--tx);font-weight:600}'
+    + 'a{color:var(--tx);text-underline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--brand);outline-offset:3px}@media(max-width:360px){.wrap{padding:20px 12px}.card{padding:20px 16px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}'
     + '</style></head><body><div class="wrap"><div class="brand">QFRemote</div><p class="sub">' + sub + '</p>'
     + '<div class="card">' + inner + '</div>'
-    + '<p class="note" style="text-align:center;margin-top:18px"><a href="/" style="color:#2470E0">返回登录页</a> · <a href="/support" style="color:#2470E0">智能客服</a></p>'
+    + '<p class="note" style="text-align:center;margin-top:18px"><a href="/">返回登录页</a> · <a href="/support">智能客服</a></p>'
     + '</div></body></html>';
 }
 
@@ -196,7 +199,7 @@ function statusPageHtml() {
 
 function rebindPageHtml(opts) {
   // 换绑申诉提交页（设计稿 §11.9）：须由新设备本人经软件端打开，壳自动
-  // 带入本机设备码（查询参数 dc＋platform＋ch）；纯浏览器打开时无设备码，
+  // 带入本机设备码（POST 表单 dc＋platform＋ch）；纯浏览器打开时无设备码，
   // 页面只显示正式指引、不开放提交（提交接口同样会拒，口径一致）。
   const o = opts || {};
   const dc = String(o.deviceCode || '');
@@ -206,7 +209,7 @@ function rebindPageHtml(opts) {
   const hasDc = !!(dc && platform);
   const deviceBlock = hasDc
     ? '<div class="ok">本机设备码已由本设备软件自动带入（' + slotName + '），提交后将申请以本设备替换已绑定的同类旧设备。</div>'
-    + '<input id="r-dc" type="hidden" value="' + dc.replace(/"/g, '&quot;') + '">'
+    + '<input id="r-dc" type="hidden" value="' + dc.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') + '">'
     + '<input id="r-platform" type="hidden" value="' + platform + '">'
     + '<input id="r-channel" type="hidden" value="' + channel + '">'
     : '<div class="err">请在新设备的 QFRemote 软件内提交换绑申诉。本页面需要由新设备上的软件打开，系统会自动带入本机设备码；在浏览器中直接打开本页无法提交。</div>';

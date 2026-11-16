@@ -97,10 +97,7 @@ class RelayEntry {
 
   /// 解析宣告列表：去重（同 id 只留第一条）、上限 32 条、排序
   /// tier 升序 → priority 降序 → id 字典序（与服务端同款）。
-  static List<RelayEntry> parseAnnouncements(
-    List<Object?> raw, {
-    int? nowMs,
-  }) {
+  static List<RelayEntry> parseAnnouncements(List<Object?> raw, {int? nowMs}) {
     const maxRelays = 32;
     final out = <RelayEntry>[];
     for (final item in raw) {
@@ -122,13 +119,13 @@ class RelayEntry {
   }
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'url': url,
-        'tier': tier,
-        'priority': priority,
-        'ttlSec': ttlSec,
-        'issuedAt': issuedAt,
-      };
+    'id': id,
+    'url': url,
+    'tier': tier,
+    'priority': priority,
+    'ttlSec': ttlSec,
+    'issuedAt': issuedAt,
+  };
 }
 
 /// 白名单校验（与服务端 `isAllowedRelay` 同款，建连前必调，§3）：
@@ -177,9 +174,7 @@ PickRelayResult pickRelay(
   Map<int, int> inFlightByTier = const {},
   int maxInflightPerTier = 8,
 }) {
-  final sorted = list
-      .where((e) => !failedIds.contains(e.id))
-      .toList()
+  final sorted = list.where((e) => !failedIds.contains(e.id)).toList()
     ..sort(RelayEntry._compare);
   for (final entry in sorted) {
     final cur = inFlightByTier[entry.tier] ?? 0;
@@ -187,16 +182,21 @@ PickRelayResult pickRelay(
     return PickRelayResult(
       relay: entry,
       tier: entry.tier,
-      reason: failedIds.isEmpty ? 'primary' : 'fallback-after-failure',
+      reason:
+          list.any(
+            (candidate) =>
+                failedIds.contains(candidate.id) &&
+                RelayEntry._compare(candidate, entry) < 0,
+          )
+          ? 'fallback-after-failure'
+          : 'primary',
       degraded: false,
     );
   }
   return PickRelayResult(
     relay: null,
     tier: 0,
-    reason: sorted.isNotEmpty
-        ? 'tier-inflight-full'
-        : 'all-tiers-exhausted',
+    reason: sorted.isNotEmpty ? 'tier-inflight-full' : 'all-tiers-exhausted',
     degraded: true,
   );
 }
@@ -216,7 +216,8 @@ class ForgedRelayRejection {
   String get userMessage => '该中继不在服务端宣告列表内，已拒绝连接';
 
   /// 本地诊断日志行：只记 URL 与时间，不记密钥/会话口令。
-  String get logLine => 'relay-forged-rejected url=$url at=${at.toIso8601String()}';
+  String get logLine =>
+      'relay-forged-rejected url=$url at=${at.toIso8601String()}';
 }
 
 /// 宣告列表传输接口（测试用假实现；生产实现见 [HttpRelayTransport]）。
@@ -226,8 +227,8 @@ abstract class RelayTransport {
 
 class HttpRelayTransport implements RelayTransport {
   HttpRelayTransport({String? baseUrl, ConsoleCookieProvider? cookieProvider})
-      : _baseUrl = baseUrl ?? kServerOrigin,
-        _cookieProvider = cookieProvider;
+    : _baseUrl = baseUrl ?? kServerOrigin,
+      _cookieProvider = cookieProvider;
 
   final String _baseUrl;
 
@@ -243,18 +244,16 @@ class HttpRelayTransport implements RelayTransport {
     );
     try {
       final uri = Uri.parse(_baseUrl).resolve('/license/api/relays');
-      final req = await client.getUrl(uri).timeout(
-            const Duration(seconds: 15),
-          );
+      final req = await client.getUrl(uri).timeout(const Duration(seconds: 15));
       final cookie = await _cookieProvider?.call();
       if (cookie != null && cookie.isNotEmpty) {
         req.headers.set(HttpHeaders.cookieHeader, cookie);
       }
       final res = await req.close().timeout(const Duration(seconds: 15));
-      final text =
-          await res.transform(utf8.decoder).join().timeout(
-                const Duration(seconds: 15),
-              );
+      final text = await res
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
         // 与“空列表”区分：401 是登录已死，不是“无可用中继”，
         // 调用方须按 UNAUTHORIZED 处理，不得误判为降级态。
@@ -296,7 +295,7 @@ class RelayUnavailableException implements Exception {
 ///   不得泄漏计数导致后续全部跳过。
 class RelaySessionController {
   RelaySessionController({required RelayTransport transport})
-      : _transport = transport;
+    : _transport = transport;
 
   final RelayTransport _transport;
 
@@ -316,16 +315,35 @@ class RelaySessionController {
   }
 
   Future<void> loadAnnouncements() async {
+    _list = [];
     _list = await _transport.fetchRelays();
   }
 
   /// 选下一条候选。返回 degraded:true 时进入降级态（§2.3）。
-  PickRelayResult pickNext() =>
-      pickRelay(_list, _failedIds, inFlightByTier: _inFlightByTier);
+  PickRelayResult pickNext({int? nowMs}) => pickRelay(
+    _list
+        .where(
+          (entry) => !entry.isExpiredAt(
+            nowMs ?? DateTime.now().millisecondsSinceEpoch,
+          ),
+        )
+        .toList(),
+    _failedIds,
+    inFlightByTier: _inFlightByTier,
+  );
 
   /// 建连前必调白名单校验（§3）：不通过即视为该条不可用，加入
   /// failedIds 并选下一条，不得绕过校验直接拨号。
-  bool checkAllowed(String dialUrl) => isAllowedRelay(dialUrl, _list);
+  bool checkAllowed(String dialUrl, {int? nowMs}) => isAllowedRelay(
+    dialUrl,
+    _list
+        .where(
+          (entry) => !entry.isExpiredAt(
+            nowMs ?? DateTime.now().millisecondsSinceEpoch,
+          ),
+        )
+        .toList(),
+  );
 
   /// 伪造中继：拒绝拨号＋界面提示＋本地日志（§3）；不进 failedIds。
   ForgedRelayRejection rejectForged(String url) =>

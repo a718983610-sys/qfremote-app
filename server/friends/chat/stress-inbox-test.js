@@ -24,6 +24,8 @@ const { createChatHandler } = require('./chat-server');
 const C = require('./crypto-core');
 
 const TESTDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qfchat-stress-'));
+fs.mkdirSync(path.join(TESTDIR, 'provider-mirror', 'license'), { recursive: true });
+fs.writeFileSync(path.join(TESTDIR, 'provider-mirror', 'license', 'status.json'), '{}');
 const ALICE = 'alice'; const ALICE_PW = 'AlicePass123';
 const BOB = 'bob'; const BOB_PW = 'BobPass12345';
 const CAROL = 'carol'; const CAROL_PW = 'CarolPass123';

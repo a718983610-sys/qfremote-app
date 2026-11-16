@@ -27,6 +27,9 @@
  *   脚本改动后必须重新生成＋重新编译，否则 hash 对不上、服务拒绝执行。
  * 调试：QFSysHelper.exe debug —— 前台跑管道循环（不注册 SCM），供 Wine 自测。
  */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
@@ -66,13 +69,13 @@ static void log_line(const char *fmt, ...) {
     {
         WCHAR parent[MAX_PATH];
         if (wcscpy_s(parent, MAX_PATH, dir) != 0) return;
-        wcscat_s(parent, MAX_PATH, L"\\QFRemote");
+        if (wcscat_s(parent, MAX_PATH, L"\\QFRemote") != 0) return;
         CreateDirectoryW(parent, NULL);
     }
-    wcscat_s(dir, MAX_PATH, LOG_DIR_SUFFIX);
+    if (wcscat_s(dir, MAX_PATH, LOG_DIR_SUFFIX) != 0) return;
     CreateDirectoryW(dir, NULL);
     if (wcscpy_s(file, MAX_PATH, dir) != 0) return;
-    wcscat_s(file, MAX_PATH, L"\\helper.log");
+    if (wcscat_s(file, MAX_PATH, L"\\helper.log") != 0) return;
     char line[2048];
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -105,6 +108,7 @@ static int sha256_file_hex(const WCHAR *wpath, char out_hex[65]) {
         while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
             if (BCryptHashData(hash, buf, (ULONG)r, 0) != 0) goto done;
         }
+        if (ferror(f)) goto done;
         unsigned char digest[32];
         if (BCryptFinishHash(hash, digest, sizeof(digest), 0) != 0) goto done;
         static const char hexd[] = "0123456789abcdef";
@@ -151,7 +155,8 @@ static int powershell_path(WCHAR *out, size_t out_chars) {
 static int run_powershell_script(const WCHAR *script_path, const char *owner_utf8, DWORD *exit_code) {
     WCHAR ps_path[MAX_PATH] = { 0 };
     if (!powershell_path(ps_path, MAX_PATH)) return 0; /* 绝对路径不可用即拒绝 */
-    WCHAR cmdline[2048];
+    WCHAR cmdline[2048] = { 0 };
+    int cmd_chars;
     if (owner_utf8 && owner_utf8[0]) {
         /* R-C2：初始化缓冲区并检查转换返回值；MB_ERR_INVALID_CHARS 使
          * 无效 UTF-8 转换失败即拒绝执行，绝不把未初始化栈内存拼入命令行。 */
@@ -160,14 +165,15 @@ static int run_powershell_script(const WCHAR *script_path, const char *owner_utf
             return 0;
         }
         /* Owner 已由协议层验过字符集，此处只做引号包裹，不拼接任何其他参数 */
-        _snwprintf(cmdline, 2048,
+        cmd_chars = _snwprintf(cmdline, 2048,
             L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Owner \"%s\"",
             ps_path, script_path, wowner);
     } else {
-        _snwprintf(cmdline, 2048,
+        cmd_chars = _snwprintf(cmdline, 2048,
             L"\"%s\" -NoProfile -ExecutionPolicy Bypass -File \"%s\"",
             ps_path, script_path);
     }
+    if (cmd_chars < 0 || cmd_chars >= 2048) return 0;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
@@ -175,23 +181,25 @@ static int run_powershell_script(const WCHAR *script_path, const char *owner_utf
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     ZeroMemory(&pi, sizeof(pi));
-    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
+    if (!CreateProcessW(ps_path, cmdline, NULL, NULL, FALSE,
             CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         return 0;
     }
-    DWORD w = WaitForSingleObject(pi.hProcess, EXEC_TIMEOUT_MS);
-    if (w == WAIT_TIMEOUT) {
+    HANDLE waits[2] = { pi.hProcess, g_stop_event };
+    DWORD w = g_stop_event ? WaitForMultipleObjects(2, waits, FALSE, EXEC_TIMEOUT_MS)
+                          : WaitForSingleObject(pi.hProcess, EXEC_TIMEOUT_MS);
+    if (w != WAIT_OBJECT_0) {
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        return -1; /* 超时 */
+        return w == WAIT_TIMEOUT ? -1 : 0;
     }
     DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
+    BOOL exit_ok = GetExitCodeProcess(pi.hProcess, &code);
     if (exit_code) *exit_code = code;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return 1;
+    return exit_ok && code != STILL_ACTIVE;
 }
 
 /* ---------- 单次请求处理 ---------- */
@@ -204,8 +212,11 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size) {
     }
     const char *expected = (rq.cmd == 0) ? W_HEAL_PS1_SHA256 : W_LOCK_INSTALL_PS1_SHA256;
     const char *base = (rq.cmd == 0) ? "qf-agent-heal.ps1" : "install.ps1";
-    WCHAR wpath[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, rq.path, -1, wpath, MAX_PATH);
+    WCHAR wpath[MAX_PATH] = { 0 };
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rq.path, -1, wpath, MAX_PATH)) {
+        snprintf(resp, resp_size, "{\"ok\":false,\"code\":\"bad-path\"}\n");
+        return;
+    }
     char hex[65] = { 0 };
     if (!sha256_file_hex(wpath, hex)) {
         log_line("REJECT cmd=%s path-missing base=%s", rq.cmd == 0 ? "heal-agent" : "install-lock", base);
@@ -234,95 +245,113 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size) {
     snprintf(resp, resp_size, "{\"ok\":true,\"code\":\"done\",\"detail\":\"exit=%lu\"}\n", (unsigned long)exit_code);
 }
 
+/* Complete or cancel every overlapped operation before its stack frame and
+ * event disappear. Shutdown interrupts connect/read/write waits immediately. */
+static int pipe_complete(HANDLE pipe, OVERLAPPED *ov, DWORD timeout, DWORD *bytes) {
+    HANDLE waits[2] = { ov->hEvent, g_stop_event };
+    DWORD result = g_stop_event ? WaitForMultipleObjects(2, waits, FALSE, timeout)
+                               : WaitForSingleObject(ov->hEvent, timeout);
+    if (result == WAIT_OBJECT_0) return GetOverlappedResult(pipe, ov, bytes, FALSE);
+    CancelIoEx(pipe, ov);
+    GetOverlappedResult(pipe, ov, bytes, TRUE);
+    return 0;
+}
+static int pipe_read_line(HANDLE pipe, HANDLE ev, char *buf, size_t size) {
+    size_t used = 0;
+    ULONGLONG deadline = GetTickCount64() + QF_PIPE_READ_TIMEOUT_MS;
+    while (used + 1 < size && InterlockedCompareExchange(&g_running, 1, 1)) {
+        OVERLAPPED ov = { 0 };
+        ov.hEvent = ev;
+        ResetEvent(ev);
+        DWORD got = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) return 0;
+        BOOL ok = ReadFile(pipe, buf + used, (DWORD)(size - used - 1), &got, &ov);
+        if (!ok && GetLastError() == ERROR_IO_PENDING)
+            ok = pipe_complete(pipe, &ov, (DWORD)(deadline - now), &got);
+        if (!ok || !got) return 0;
+        char *nl = memchr(buf + used, '\n', got);
+        if (nl) { *nl = 0; return 1; }
+        used += got;
+    }
+    return 0; /* EOF, oversize and partial requests never execute. */
+}
+static int pipe_write_response(HANDLE pipe, HANDLE ev, const char *buf) {
+    size_t length = strlen(buf), sent = 0;
+    ULONGLONG deadline = GetTickCount64() + QF_PIPE_WRITE_TIMEOUT_MS;
+    while (sent < length) {
+        OVERLAPPED ov = { 0 };
+        ov.hEvent = ev;
+        ResetEvent(ev);
+        DWORD written = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) return 0;
+        BOOL ok = WriteFile(pipe, buf + sent, (DWORD)(length - sent), &written, &ov);
+        if (!ok && GetLastError() == ERROR_IO_PENDING)
+            ok = pipe_complete(pipe, &ov, (DWORD)(deadline - now), &written);
+        if (!ok || !written) return 0;
+        sent += written;
+    }
+    return 1;
+}
+
+static DWORD WINAPI qf_flush_worker(LPVOID pipe) {
+    return FlushFileBuffers((HANDLE)pipe) ? 0 : 1;
+}
+static void qf_flush_bounded(HANDLE pipe) {
+    HANDLE thread = CreateThread(NULL, 0, qf_flush_worker, pipe, 0, NULL);
+    if (!thread) return;
+    HANDLE waits[2] = { thread, g_stop_event };
+    DWORD result = g_stop_event ? WaitForMultipleObjects(2, waits, FALSE, 10000)
+                               : WaitForSingleObject(thread, 10000);
+    if (result != WAIT_OBJECT_0) {
+        CancelSynchronousIo(thread);
+        DisconnectNamedPipe(pipe);
+        WaitForSingleObject(thread, INFINITE);
+    }
+    CloseHandle(thread);
+}
+
 /* ---------- 管道循环 ---------- */
 static DWORD WINAPI pipe_loop(LPVOID unused) {
     (void)unused;
     PSECURITY_DESCRIPTOR sd = NULL;
-    /* 仅认证用户＋SYSTEM＋管理员可连管道 */
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;GA;;;AU)(A;;GA;;;SY)(A;;GA;;;BA)",
-            SDDL_REVISION_1, &sd, NULL)) {
+            L"D:(A;;GA;;;AU)(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &sd, NULL)) {
         log_line("FATAL pipe security descriptor failed");
         return 1;
     }
-    SECURITY_ATTRIBUTES sa;
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = sd;
-    sa.bInheritHandle = FALSE;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), sd, FALSE };
     log_line("START pipe listening");
-    while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
+    while (InterlockedCompareExchange(&g_running, 1, 1)) {
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1, QF_MAX_REQUEST, QF_MAX_REQUEST, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             log_line("ERROR CreateNamedPipe failed %lu", (unsigned long)GetLastError());
-            Sleep(1000);
+            if (g_stop_event) WaitForSingleObject(g_stop_event, 1000); else Sleep(1000);
             continue;
         }
-        BOOL connected = ConnectNamedPipe(pipe, NULL);
-        if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
-            CloseHandle(pipe);
-            continue;
-        }
-        /* 低项 1（2026-11-15）：旧实现同步 ReadFile 无超时——任一可连管道
-         * 的本地 AU 用户连上不发数据即可永久占住唯一实例，heal-agent／
-         * install-lock 被堵死直至服务重启（QFRLEA／USH 同类问题已按 #14
-         * 修为 30s deadline，此处未修）。修法与 USH #14 同口径：实例以
-         * FILE_FLAG_OVERLAPPED 创建，重叠读 30s deadline、重叠写 10s
-         * 超时；超时即断开，不处理半行。ConnectNamedPipe 仍阻塞等待
-         * （停止时主线程自唤醒连接，见 service_main）。 */
         HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
-        if (ev) {
-            char buf[QF_MAX_REQUEST + 1];
-            DWORD read = 0;
-            OVERLAPPED ov;
-            memset(&ov, 0, sizeof(ov));
-            ov.hEvent = ev;
-            BOOL ok = FALSE;
-            BOOL r = ReadFile(pipe, buf, QF_MAX_REQUEST, &read, &ov);
-            if (!r && GetLastError() == ERROR_IO_PENDING) {
-                if (WaitForSingleObject(ev, QF_PIPE_READ_TIMEOUT_MS) == WAIT_OBJECT_0)
-                    ok = GetOverlappedResult(pipe, &ov, &read, FALSE);
-                else {
-                    CancelIo(pipe);
-                    log_line("TIMEOUT read no data in %lu ms, disconnecting",
-                             (unsigned long)QF_PIPE_READ_TIMEOUT_MS);
-                }
-            } else {
-                ok = r;
+        if (!ev) { CloseHandle(pipe); break; }
+        OVERLAPPED cov = { 0 };
+        cov.hEvent = ev;
+        BOOL connected = ConnectNamedPipe(pipe, &cov);
+        DWORD error = connected ? ERROR_SUCCESS : GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            DWORD unused_bytes = 0;
+            connected = pipe_complete(pipe, &cov, INFINITE, &unused_bytes);
+        } else if (error == ERROR_PIPE_CONNECTED) connected = TRUE;
+        if (connected && InterlockedCompareExchange(&g_running, 1, 1)) {
+            char buf[QF_MAX_REQUEST + 1], response[512];
+            if (pipe_read_line(pipe, ev, buf, sizeof(buf))) {
+                handle_request(buf, response, sizeof(response));
+                if (pipe_write_response(pipe, ev, response)) qf_flush_bounded(pipe);
             }
-            if (ok && read > 0) {
-                buf[read] = '\0';
-                char *nl = strchr(buf, '\n');
-                if (nl) *nl = '\0';
-                char resp[512];
-                handle_request(buf, resp, sizeof(resp));
-                size_t resp_len = strlen(resp);
-                size_t sent = 0;
-                ResetEvent(ev);
-                while (sent < resp_len) {
-                    OVERLAPPED wov;
-                    memset(&wov, 0, sizeof(wov));
-                    wov.hEvent = ev;
-                    DWORD written = 0;
-                    BOOL wr = WriteFile(pipe, resp + sent, (DWORD)(resp_len - sent), &written, &wov);
-                    if (!wr && GetLastError() == ERROR_IO_PENDING) {
-                        if (WaitForSingleObject(ev, QF_PIPE_WRITE_TIMEOUT_MS) != WAIT_OBJECT_0) {
-                            CancelIo(pipe);
-                            log_line("TIMEOUT write response, disconnecting");
-                            break;
-                        }
-                        if (!GetOverlappedResult(pipe, &wov, &written, FALSE)) break;
-                    } else if (!wr) {
-                        break;
-                    }
-                    sent += written;
-                }
-            }
-            CloseHandle(ev);
         }
-        FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);
+        CloseHandle(ev);
         CloseHandle(pipe);
     }
     LocalFree(sd);
@@ -368,6 +397,10 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
        为简单起见，循环内每次建管道前检查 g_running，停止信号到后，
        当前 ConnectNamedPipe 仍在等连接：用一个本地客户端连一次自唤醒。 */
     HANDLE loop_thread = CreateThread(NULL, 0, pipe_loop, NULL, 0, NULL);
+    if (!loop_thread) {
+        CloseHandle(g_stop_event); g_stop_event = NULL;
+        report_status(SERVICE_STOPPED, 0); return;
+    }
     WaitForSingleObject(g_stop_event, INFINITE);
     InterlockedExchange(&g_running, 0);
     /* 自唤醒：连一次管道让 ConnectNamedPipe 返回 */
@@ -376,7 +409,14 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
             0, NULL, OPEN_EXISTING, 0, NULL);
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
-    if (loop_thread) WaitForSingleObject(loop_thread, 5000);
+    DWORD stopped = WaitForSingleObject(loop_thread, 5000);
+    if (stopped != WAIT_OBJECT_0) {
+        log_line("ERROR pipe thread did not stop in 5s; waiting before reporting STOPPED");
+        report_status(SERVICE_STOP_PENDING, EXEC_TIMEOUT_MS);
+        WaitForSingleObject(loop_thread, INFINITE);
+    }
+    CloseHandle(loop_thread);
+    CloseHandle(g_stop_event); g_stop_event = NULL;
     report_status(SERVICE_STOPPED, 0);
     log_line("SERVICE stopped");
 }

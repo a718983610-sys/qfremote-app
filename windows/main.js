@@ -2405,12 +2405,15 @@ function createHomeView() {
   return v;
 }
 
-async function loadHomeView(url) {
+async function loadHomeView(url, postData) {
   const v = homeView;
   if (!v || v.webContents.isDestroyed()) return;
   await transplantSessionToExt();
   if (!v.webContents.isDestroyed()) {
-    try { v.webContents.loadURL(url || svcUrls.homeUrl()); } catch (e) { /* ignore */ }
+    try { await v.webContents.loadURL(url || svcUrls.homeUrl(), postData ? {
+      postData: [{ type: 'rawData', bytes: Buffer.from(postData, 'utf8') }],
+      extraHeaders: 'Content-Type: application/x-www-form-urlencoded\r\n'
+    } : {}); } catch (e) { /* ignore */ }
   }
 }
 
@@ -2442,7 +2445,8 @@ const EXT_PAGE_DEFS = {
   purchase: () => ({ title: '购买密钥', url: svcUrls.purchaseUrl() }),
   status: () => ({ title: '查询密钥', url: svcUrls.licenseStatusUrl() }),
   // 换绑申诉（§11.9）：打开表单时由壳自动带入本机设备码，用户不手填
-  rebind: () => ({ title: '申诉换绑设备', url: svcUrls.rebindUrl() + '?dc=' + encodeURIComponent(deviceCodeStore.ensure() || '') + '&platform=pc&ch=windows' }),
+  rebind: () => ({ title: '申诉换绑设备', url: svcUrls.rebindUrl(),
+    postData: new URLSearchParams({ dc: deviceCodeStore.ensure() || '', platform: 'pc', ch: 'windows' }).toString() }),
   appeal: () => ({ title: '提交申诉', url: svcUrls.appealUrl() + (gateUsername ? '?u=' + encodeURIComponent(gateUsername) : '') }),
   support: () => ({ title: '智能客服', url: svcUrls.supportUrl() })
 };
@@ -2455,10 +2459,11 @@ async function openExtPage(target) {
   extReturnGate = !!gateDecision;
   extReturnRecheck = target === 'purchase';
   browsingExt = true;
-  ensureExtBarView(def().title);
+  const page = def();
+  ensureExtBarView(page.title);
   applyViewVisibility();
   layout();
-  await loadHomeView(def().url);
+  await loadHomeView(page.url, page.postData);
   if (win && !win.isDestroyed()) { if (!win.isVisible()) win.show(); win.focus(); }
 }
 trustedOn('qf-extbar-back', async () => {
@@ -3091,9 +3096,9 @@ async function doScreenshot() {
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const name = 'QFRemote-' + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) +
-      '-' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()) + '.png';
-    fs.writeFileSync(path.join(app.getPath('downloads'), name), img.toPNG());
-    feedback(true, '截图已保存到下载文件夹：' + name);
+      '-' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()) + '-' + String(now.getMilliseconds()).padStart(3, '0') + '.png';
+    const saved = require('./screenshot-file').writeScreenshot(app.getPath('downloads'), name, img.toPNG());
+    feedback(true, '截图已保存到下载文件夹：' + path.basename(saved));
   } catch (e) {
     feedback(false, '截图失败：' + e.message);
   }

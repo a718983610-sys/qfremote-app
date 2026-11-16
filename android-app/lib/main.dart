@@ -1349,12 +1349,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _deviceCode ??= await _deviceCodeStore.getOrCreate();
     await _openShellWeb(
       '申诉换绑设备',
-      '${SvcUrls.instance.rebindUrl}?dc=${Uri.encodeQueryComponent(_deviceCode ?? '')}&platform=mobile&ch=android',
+      SvcUrls.instance.rebindUrl,
+      postFields: {
+        'dc': _deviceCode ?? '',
+        'platform': 'mobile',
+        'ch': 'android',
+      },
     );
   }
 
   /// 在壳内打开自有网页（购买/查询/申诉/客服）：先移植会话，再推壳内页。
-  Future<void> _openShellWeb(String title, String url) async {
+  Future<void> _openShellWeb(
+    String title,
+    String url, {
+    Map<String, String>? postFields,
+  }) async {
     // 打开前顺手刷新服务地址解析：此前解析失败过的，本次重试（H-6 的
     // 失败不缓存与此配合）；当次 url 由调用方以 getter 取值，getter 的
     // 退役源过滤＋正式兜底保证不落死链（H-1）。
@@ -1365,7 +1374,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ShellWebPage(palette: _palette, title: title, url: url),
+        builder: (_) => ShellWebPage(
+          palette: _palette,
+          title: title,
+          url: url,
+          postBody: postFields == null
+              ? null
+              : Uint8List.fromList(
+                  utf8.encode(Uri(queryParameters: postFields).query),
+                ),
+        ),
       ),
     );
   }
@@ -1545,20 +1563,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         domStorageEnabled: true,
         databaseEnabled: true,
         cacheEnabled: true,
-        thirdPartyCookiesEnabled:
-            WebViewCookiePolicy.thirdPartyCookiesEnabled(slot),
+        thirdPartyCookiesEnabled: WebViewCookiePolicy.thirdPartyCookiesEnabled(
+          slot,
+        ),
         useOnRenderProcessGone: true,
-    supportZoom: true,
-    builtInZoomControls: true,
-    displayZoomControls: false,
-    useShouldOverrideUrlLoading: true,
-    mediaPlaybackRequiresUserGesture: false,
-    allowsInlineMediaPlayback: true,
-    iframeAllow: 'fullscreen',
-    applicationNameForUserAgent: 'QFRemote',
-    // target=_blank / window.open 不另开窗：onCreateWindow 里就地打开
-    supportMultipleWindows: true,
-  );
+        supportZoom: true,
+        builtInZoomControls: true,
+        displayZoomControls: false,
+        useShouldOverrideUrlLoading: true,
+        mediaPlaybackRequiresUserGesture: true,
+        allowsInlineMediaPlayback: true,
+        iframeAllow: 'fullscreen',
+        applicationNameForUserAgent: 'QFRemote',
+        // target=_blank / window.open 不另开窗：onCreateWindow 里就地打开
+        supportMultipleWindows: true,
+      );
 
   /// 新窗口请求（target=_blank 等）：自有源才就地打开；外站新窗口一律
   /// 走系统浏览器（B19），不许在壳内打开（顶栏仍是 QFRemote，易钓鱼），
@@ -1622,12 +1641,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _pushThemeToWebView(InAppWebViewController c) async {
     final isDark = _themeMode == QfThemeMode.dark;
     final pref = _settings?.themePref;
-    final mode =
-        (pref != null && pref.isNotEmpty) ? _themeMode.prefValue : 'system';
+    final mode = (pref != null && pref.isNotEmpty)
+        ? _themeMode.prefValue
+        : 'system';
     try {
       await c
           .evaluateJavascript(
-              source: buildThemeStateEventJs(isDark: isDark, mode: mode))
+            source: buildThemeStateEventJs(isDark: isDark, mode: mode),
+          )
           .timeout(const Duration(seconds: 5));
     } catch (_) {
       // 页面已切走：下一页加载完成时再推
@@ -1975,6 +1996,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// JSBridge 来源守卫（F-07）：handler 回调无来源元数据，调用前先
   /// 核对当前主 frame URL（[_currentUrl]，导航开始即同步更新）。
   /// 不过门即丢弃并记一条会话日志，不执行任何回调逻辑。
+  String _bridgeCapability = _newBridgeCapability();
+
+  static String _newBridgeCapability() {
+    final random = math.Random.secure();
+    return base64UrlEncode(List<int>.generate(32, (_) => random.nextInt(256)));
+  }
+
+  bool _hasBridgeCapability(List<dynamic> args) =>
+      args.isNotEmpty &&
+      args.first is Map &&
+      (args.first as Map)['bridgeCapability'] == _bridgeCapability;
+
   bool _jsbridgeAllowed(String handler, bool Function(String?) check) {
     if (check(_currentUrl)) return true;
     debugPrint('QFJSBRIDGE rejected $handler from $_currentUrl');
@@ -1994,6 +2027,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       callback: (args) {
         // F-07：登录密码 handler 只允许登录页主 frame；会话页／外站
         // frame 冒名提交一律丢弃。
+        if (!_hasBridgeCapability(args)) return;
         if (!_jsbridgeAllowed(kHandlerLoginSubmit, isLoginSubmitAllowed)) {
           return;
         }
@@ -2018,6 +2052,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       callback: (args) {
         // F-07：手动退出只允许控制台根 SPA 主 frame；外站 frame 冒名
         // 调「退出」清凭据一律丢弃（原生菜单／/logout 导航另走它路）。
+        if (!_hasBridgeCapability(args)) return;
         if (!_jsbridgeAllowed(kHandlerManualLogout, isManualLogoutAllowed)) {
           return;
         }
@@ -2030,6 +2065,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       handlerName: kHandlerLicenseNav,
       callback: (args) {
         // F-07：购买／查询／换绑三行只注在登录面板里，只允许登录页主 frame。
+        if (!_hasBridgeCapability(args)) return;
         if (!_jsbridgeAllowed(kHandlerLicenseNav, isLicenseNavAllowed)) {
           return;
         }
@@ -2049,42 +2085,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 不再另设 JS 处理器——页面不主动取钥匙，钥匙只经壳单向递入内存。
   }
 
-  /// 会话阶段打点处理器（2.4.5 A1）：网页层在 markSessionStage 时经
-  /// window.flutter_inappwebview.callHandler('qfSessionStage', {...})
-  /// 回传 {stage: 'iframe-attach'|'iframe-load'|'webapp-ready'|
-  /// 'peer-connecting'|'video-ready', nodeid}；Dart 侧据此推进阶段
-  /// watcher、重置本阶段超时计时。handler 未就绪时由 1 秒探针兜底。
-  void _registerSessionStageHandler(InAppWebViewController controller) {
-    controller.addJavaScriptHandler(
-      handlerName: 'qfSessionStage',
-      callback: (args) {
-        // F-07：阶段打点只允许会话路由主 frame；非会话页 frame 冒名
-        // 推进阶段 watcher 一律丢弃（1 秒探针仍作兜底读数）。
-        if (!_jsbridgeAllowed('qfSessionStage', isSessionStageAllowed)) {
-          return;
-        }
-        if (args.isEmpty) return;
-        final first = args.first;
-        String? stageName;
-        if (first is Map) {
-          stageName = first['stage']?.toString();
-          final nid = first['nodeid']?.toString();
-          if (nid != null && nid.isNotEmpty) _sessionNodeid = nid;
-        } else if (first is String) {
-          stageName = first;
-        }
-        final stage = switch (stageName) {
-          'iframe-attach' => SessionStage.iframeAttach,
-          'iframe-load' => SessionStage.iframeLoad,
-          'webapp-ready' => SessionStage.webappReady,
-          'peer-connecting' => SessionStage.peerConnecting,
-          'video-ready' => SessionStage.videoReady,
-          _ => null,
-        };
-        if (stage != null) _onSessionStageReached(stage, viaHandler: true);
-      },
-    );
-  }
+  // Session progress is observed by the native one-second probe. Do not expose
+  // a page-controlled handler that can advance readiness or replace node IDs.
 
   Future<LoginProbe?> _probeLogin() async {
     final web = _web;
@@ -2133,6 +2135,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       rememberPasswordChecked: _settings?.rememberPassword ?? false,
       rememberDeviceChecked: _settings?.rememberDevice ?? false,
       fillSaved: fillSaved,
+      bridgeCapability: _bridgeCapability,
       // A4：注入按钮底色跟随当前偏好主题。
       isDark: _themeMode == QfThemeMode.dark,
     );
@@ -2979,7 +2982,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // ---------------- 会话阶段机（2.4.5 A1/A2/A3/A5/A8/A9/B1/B9） ----------------
   // 结构性前提：Android 没有原生远程会话实现——远程控制全程是设备槽
   // WebView 打开控制台、复用网页 SPA 的会话 iframe。Dart 侧的阶段机
-  // 由两路驱动：网页侧 qfSessionStage handler 打点（优先）＋ 1 秒
+  // 会话阶段由原生侧 1 秒
   // 探针读 Sess/#deskstatus/#Desk 兜底（handler 未就绪时）。
 
   int _stageIndex(SessionStage s) => SessionStage.values.indexOf(s);
@@ -3810,7 +3813,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           builtInZoomControls: !sessionActive,
           displayZoomControls: false,
           useShouldOverrideUrlLoading: true,
-          mediaPlaybackRequiresUserGesture: false,
+          mediaPlaybackRequiresUserGesture: true,
           allowsInlineMediaPlayback: true,
           iframeAllow: 'fullscreen',
           applicationNameForUserAgent: 'QFRemote',
@@ -3969,7 +3972,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 不默认“会话已好”。
   void _onRendererResponsive(AppSlot slot, WebUri? url) {
     debugPrint('QFRenderer responsive slot=${slot.name} url=${url.toString()}');
-    if (slot == AppSlot.devices) unawaited(_watchdog?.tickNow() ?? Future<void>.value());
+    if (slot == AppSlot.devices)
+      unawaited(_watchdog?.tickNow() ?? Future<void>.value());
   }
 
   /// 给槽位换控制器（重建时置 null，onWebViewCreated 时回填新实例）。
@@ -4865,8 +4869,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             initialUrlRequest: URLRequest(
                               url: WebUri('about:blank'),
                             ),
-                            initialSettings:
-                                _slotWebViewSettings(AppSlot.home),
+                            initialSettings: _slotWebViewSettings(AppSlot.home),
                             onWebViewCreated: (controller) {
                               _homeWeb = controller;
                               _rendererRecovery.noteRecreated(AppSlot.home);
@@ -4907,8 +4910,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             initialUrlRequest: URLRequest(
                               url: WebUri('about:blank'),
                             ),
-                            initialSettings:
-                                _slotWebViewSettings(AppSlot.files),
+                            initialSettings: _slotWebViewSettings(
+                              AppSlot.files,
+                            ),
                             onWebViewCreated: (controller) {
                               _filesWeb = controller;
                               _rendererRecovery.noteRecreated(AppSlot.files);
@@ -4960,17 +4964,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       databaseEnabled: true,
                                       cacheEnabled: true,
                                       thirdPartyCookiesEnabled:
-                                          WebViewCookiePolicy
-                                              .thirdPartyCookiesEnabled(
-                                                AppSlot.devices,
-                                              ),
+                                          WebViewCookiePolicy.thirdPartyCookiesEnabled(
+                                            AppSlot.devices,
+                                          ),
                                       // S-027/R-01：显式订阅渲染进程死亡事件。
                                       useOnRenderProcessGone: true,
                                       supportZoom: true,
                                       builtInZoomControls: true,
                                       displayZoomControls: false,
                                       useShouldOverrideUrlLoading: true,
-                                      mediaPlaybackRequiresUserGesture: false,
+                                      mediaPlaybackRequiresUserGesture: true,
                                       allowsInlineMediaPlayback: true,
                                       iframeAllow: 'fullscreen',
                                       applicationNameForUserAgent: 'QFRemote',
@@ -4985,7 +4988,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         AppSlot.devices,
                                       );
                                       _registerLoginHandlers(controller);
-                                      _registerSessionStageHandler(controller);
                                       _startWatchdog();
                                       _startLoginLoop();
                                       // B1：首次加载启动 15 秒冷启动看门狗。
@@ -4998,12 +5000,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         ),
                                     onRenderProcessResponsive:
                                         (controller, url) async {
-                                      _onRendererResponsive(
-                                        AppSlot.devices,
-                                        url,
-                                      );
-                                      return null;
-                                    },
+                                          _onRendererResponsive(
+                                            AppSlot.devices,
+                                            url,
+                                          );
+                                          return null;
+                                        },
                                     shouldOverrideUrlLoading:
                                         (controller, action) async {
                                           final url = action.request.url;
@@ -5039,6 +5041,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                           return NavigationActionPolicy.CANCEL;
                                         },
                                     onLoadStart: (controller, url) {
+                                      _bridgeCapability =
+                                          _newBridgeCapability();
                                       _mainFrameFailed = false;
                                       _http404 = false;
                                       _startBootLoadWatchdog();
@@ -5257,8 +5261,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             initialUrlRequest: URLRequest(
                               url: WebUri('about:blank'),
                             ),
-                            initialSettings:
-                                _slotWebViewSettings(AppSlot.friends),
+                            initialSettings: _slotWebViewSettings(
+                              AppSlot.friends,
+                            ),
                             onWebViewCreated: (controller) {
                               _friendsWeb = controller;
                               _rendererRecovery.noteRecreated(AppSlot.friends);
@@ -5274,7 +5279,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             shouldOverrideUrlLoading: _slotUrlPolicy,
                             onCreateWindow: _onCreateWindowInPlace,
                             onLoadStop: (controller, url) {
-                              _rendererRecovery.noteLoadStopped(AppSlot.friends);
+                              _rendererRecovery.noteLoadStopped(
+                                AppSlot.friends,
+                              );
                               unawaited(_injectShellChrome(controller, url));
                             },
                             onUpdateVisitedHistory:
@@ -5300,8 +5307,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             initialUrlRequest: URLRequest(
                               url: WebUri('about:blank'),
                             ),
-                            initialSettings:
-                                _slotWebViewSettings(AppSlot.forum),
+                            initialSettings: _slotWebViewSettings(
+                              AppSlot.forum,
+                            ),
                             onWebViewCreated: (controller) {
                               _forumWeb = controller;
                               _rendererRecovery.noteRecreated(AppSlot.forum);

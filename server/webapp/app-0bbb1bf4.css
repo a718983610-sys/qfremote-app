@@ -586,11 +586,8 @@ th .sort-chev{width:8px;height:8px;vertical-align:2px}
 .dot6.off{background:var(--err)}
 .dot6.warn{background:var(--warn)}
 .sv-mask-meta{font-size:12px;line-height:18px;color:var(--text-3);font-variant-numeric:tabular-nums;margin-top:12px;text-align:left;word-break:break-all}
-/* --- 顶栏 sticky 材质 A §5：78% 底＋blur 20＋1px 分割（纯色 fallback 为 --card） --- */
+/* Solid chrome follows the page theme; scrolling content never changes its contrast. */
 .top{background:var(--chrome-bg)}
-@supports ((-webkit-backdrop-filter:blur(20px)) or (backdrop-filter:blur(20px))){
-  .top{background:color-mix(in srgb,var(--card) 78%,transparent);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
-}
 /* --- 设置行 A §3.1：二级导航 200；设置行 56；label 14/22/500，desc 12/18；控件右对齐 32 高 --- */
 .setrow{min-height:56px}
 .setrow .lbl{font-size:14px;line-height:22px;font-weight:500}
@@ -788,3 +785,38 @@ body .viewer .sv-input{gap:24px;bottom:calc(var(--float-y) + var(--tools-h) + va
 [data-theme="dark"] .top{background:var(--chrome-bg)}
 [data-theme="dark"] .bnav{background:var(--bnav-bg)}
 [data-theme="dark"] .bnav button.on{color:var(--text-1)}
+
+/* Interaction finish: stable geometry, visible keyboard navigation, and local feedback. */
+html{scrollbar-gutter:stable;scroll-padding-top:88px}
+.skip-link{position:fixed;top:12px;left:16px;z-index:var(--z-toast);transform:translateY(-180%);padding:10px 16px;border:1px solid var(--brand);border-radius:var(--radius-1);background:var(--brand);color:var(--on-brand);font:inherit;font-weight:600}
+.skip-link:focus{transform:none}
+#view:focus-visible{outline-offset:4px}
+.nav,.iconbtn,.burger,.uchip,.tabs button,.acctmenu a,.kfrow{transition:background-color var(--d2) var(--e-c),border-color var(--d2) var(--e-c),color var(--d2) var(--e-c)}
+.iconbtn:hover,.burger:hover,.uchip:hover,.kfrow:hover{background:var(--state-hover)}
+.iconbtn:active,.burger:active,.uchip:active,.kfrow:active{background:var(--state-pressed)}
+.auth h1,h1.pt,.card h3{overflow-wrap:break-word;text-wrap:balance}
+.auth .psub{max-width:36ch;margin-left:auto;margin-right:auto;text-wrap:pretty}
+.auth{box-shadow:var(--card-shadow)}
+.cht-msgs,.tblwrap,.drawer,#modalRoot .modal{overscroll-behavior:contain}
+.cht-comp textarea{min-width:0}
+.cht-comp:focus-within{border-top-color:var(--border-strong)}
+.field input,.field select,.field textarea,.cht-comp textarea{transition:border-color var(--d1) var(--e-c),box-shadow var(--d1) var(--e-c)}
+input[aria-invalid="true"],textarea[aria-invalid="true"]{border-color:var(--err)}
+.btn:disabled,.btn[aria-disabled="true"]{transform:none;filter:none}
+@media(max-width:760px){
+  .main{padding-left:16px;padding-right:16px}
+  .top{margin-left:-16px;margin-right:-16px;padding-left:16px;padding-right:16px}
+  #modalRoot .modal{padding:20px}
+  #modalRoot .mops{flex-wrap:wrap}
+  #modalRoot .mops .btn{flex:1;min-width:96px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-delay:0ms!important;animation-delay:0ms!important}
+}
+
+.btn-loader{display:inline-block;width:14px;height:14px;flex:none;border:1.5px solid currentColor;border-right-color:transparent;border-radius:var(--r-round);animation:button-spin .8s linear infinite;vertical-align:-2px;margin-right:8px}
+@keyframes button-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.btn-loader{animation:none}}
+
+:root{color-scheme:light}
+[data-theme="dark"]{color-scheme:dark}

@@ -131,63 +131,15 @@ int lea_handshake_check_params(const char *fp, const char *params_fp, long long 
     return strcmp(fp, params_fp) == 0;
 }
 
-/* ---------------- JSON 取值（平铺字段；只认 \" 与 \\ 转义） ---------------- */
+/* All public field readers use the same strict top-level parser. Signed
+ * params cannot be interpreted differently by an executor (M-070/M-071). */
 int lea_json_string(const char *text, const char *key, char *out, size_t out_size) {
-    if (!text || !key || !out || out_size < 2) return 0;
-    char pat[80];
-    size_t klen = strlen(key);
-    if (klen + 4 >= sizeof(pat)) return 0;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '"';
-    pat[klen + 4] = '\0';
-    const char *p = strstr(text, pat);
-    if (!p) return 0;
-    p += klen + 4;
-    size_t n = 0;
-    while (*p) {
-        if (*p == '"') {
-            out[n] = '\0';
-            return 1;
-        }
-        if (*p == '\\') {
-            p++;
-            if (*p != '\\' && *p != '"') return 0;
-            if (n + 1 >= out_size) return 0;
-            out[n++] = *p++;
-            continue;
-        }
-        if ((unsigned char)*p < 0x20) return 0;
-        if (n + 1 >= out_size) return 0;
-        out[n++] = *p++;
-    }
-    return 0;
+    if (out && out_size) out[0] = '\0';
+    return lea_json_top_level_string(text, key, out, out_size);
 }
 
 int lea_json_long(const char *text, const char *key, long long *out) {
-    if (!text || !key || !out) return 0;
-    char pat[80];
-    size_t klen = strlen(key);
-    if (klen + 3 >= sizeof(pat)) return 0;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(text, pat);
-    if (!p) return 0;
-    p += klen + 3;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '"') return 0; /* 数字字段不接受引号包裹 */
-    char *end = NULL;
-    errno = 0;
-    long long v = strtoll(p, &end, 10);
-    if (end == p) return 0;
-    if (errno == ERANGE) return 0; /* 溢出即拒绝，不得静默钳制 */
-    *out = v;
-    return 1;
+    return lea_json_top_level_long(text, key, out) == 1;
 }
 
 /* 只认顶层对象成员的裸整数值（#1 世代字段 generation 用）：复用
@@ -221,21 +173,11 @@ int lea_json_top_level_long(const char *text, const char *key, long long *out) {
 }
 
 int lea_json_bool(const char *text, const char *key, int *out) {
-    if (!text || !key || !out) return 0;
-    char pat[80];
-    size_t klen = strlen(key);
-    if (klen + 3 >= sizeof(pat)) return 0;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(text, pat);
-    if (!p) return 0;
-    p += klen + 3;
-    while (*p == ' ' || *p == '\t') p++;
-    if (strncmp(p, "true", 4) == 0) { *out = 1; return 1; }
-    if (strncmp(p, "false", 5) == 0) { *out = 0; return 1; }
+    const char *val = NULL;
+    size_t len = 0;
+    if (!text || !key || !out || json_find_member(text, key, &val, &len) != 1) return 0;
+    if (len == 4 && memcmp(val, "true", 4) == 0) { *out = 1; return 1; }
+    if (len == 5 && memcmp(val, "false", 5) == 0) { *out = 0; return 1; }
     return 0;
 }
 
@@ -273,7 +215,7 @@ int lea_json_top_level_string(const char *text, const char *key, char *out, size
 
 /* 只认顶层对象成员的字符串数组值（#17 keys.sync-revoked 用）。 */
 int lea_json_top_level_string_array(const char *text, const char *key,
-                                    char out[][128], int max_items) {
+                                    char out[][129], int max_items) {
     if (!text || !key || !out || max_items <= 0) return -1;
     const char *val = NULL;
     size_t vlen = 0;
@@ -291,7 +233,7 @@ int lea_json_top_level_string_array(const char *text, const char *key,
         p = json_skip_ws(p);
         if (*p != '"') return -1;
         if (count >= max_items) return -1;
-        const char *after = json_decode_string(p, out[count], 128, NULL);
+        const char *after = json_decode_string(p, out[count], 129, NULL);
         if (!after) return -1;
         count++;
         p = json_skip_ws(after);
@@ -304,98 +246,37 @@ int lea_json_top_level_string_array(const char *text, const char *key,
     }
 }
 
-/* 取 params 对象原文（含花括号），做花括号配对。 */
+/* Copy the exact signed top-level object bytes, preserving canonical input. */
 int lea_json_object_raw(const char *text, const char *key, char *out, size_t out_size) {
-    if (!text || !key || !out || out_size < 3) return 0;
-    char pat[80];
-    size_t klen = strlen(key);
-    if (klen + 3 >= sizeof(pat)) return 0;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(text, pat);
-    if (!p) return 0;
-    p += klen + 3;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '{') return 0;
-    int depth = 0, in_str = 0;
-    const char *q = p;
-    while (*q) {
-        char c = *q;
-        if (in_str) {
-            if (c == '\\') { q += 2; continue; }
-            if (c == '"') in_str = 0;
-        } else {
-            if (c == '"') in_str = 1;
-            else if (c == '{') depth++;
-            else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    size_t n = (size_t)(q - p) + 1;
-                    if (n + 1 > out_size) return 0;
-                    memcpy(out, p, n);
-                    out[n] = '\0';
-                    return 1;
-                }
-            }
-        }
-        q++;
-    }
-    return 0;
+    const char *val = NULL;
+    size_t len = 0;
+    if (!text || !key || !out || !out_size) return 0;
+    out[0] = '\0';
+    if (json_find_member(text, key, &val, &len) != 1 || !len || val[0] != '{' || len >= out_size) return 0;
+    memcpy(out, val, len);
+    out[len] = '\0';
+    return 1;
 }
 
-/* params 内字符串数组，如 "args":["a","b"]。 */
-int lea_params_string_array(const char *params_raw, const char *key,
+int lea_params_string_array(const char *text, const char *key,
                             char out[][512], int max_items) {
-    if (!params_raw || !key || !out || max_items <= 0) return -1;
-    char pat[80];
-    size_t klen = strlen(key);
-    if (klen + 3 >= sizeof(pat)) return -1;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(params_raw, pat);
-    if (!p) return -1;
-    p += klen + 3;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '[') return -1;
-    p++;
+    const char *val = NULL;
+    size_t len = 0;
+    if (!text || !key || !out || max_items <= 0 ||
+        json_find_member(text, key, &val, &len) != 1 || !len || *val != '[') return -1;
+    const char *p = json_skip_ws(val + 1);
     int count = 0;
-    while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == ',') p++;
-        if (*p == ']') return count;
-        if (*p != '"') return -1;
-        p++;
-        size_t n = 0;
-        int closed = 0;
-        while (*p) {
-            if (*p == '"') { closed = 1; p++; break; }
-            if (*p == '\\') {
-                p++;
-                if (*p != '\\' && *p != '"') return -1;
-                if (n + 1 >= 512) return -1;
-                out[count][n++] = *p++;
-                continue;
-            }
-            if ((unsigned char)*p < 0x20) return -1;
-            if (n + 1 >= 512) return -1;
-            out[count][n++] = *p++;
-        }
-        if (!closed) return -1;
-        out[count][n] = '\0';
+    if (*p == ']') return 0;
+    for (;;) {
+        if (count >= max_items || *p != '"') return -1;
+        const char *end = json_decode_string(p, out[count], 512, NULL);
+        if (!end) return -1;
         count++;
-        if (count >= max_items) {
-            /* 还有更多元素则溢出 */
-            while (*p == ' ' || *p == '\t' || *p == ',') p++;
-            if (*p != ']') return -1;
-            return count;
-        }
+        p = json_skip_ws(end);
+        if (*p == ']') return p + 1 == val + len ? count : -1;
+        if (*p != ',') return -1;
+        p = json_skip_ws(p + 1);
     }
-    return -1;
 }
 
 /* ---------------- token 校验 ---------------- */
@@ -541,6 +422,20 @@ static const char *json_skip_ws(const char *p);
 static const char *json_parse_string(const char *p);
 static const char *json_parse_value(const char *p, int depth);
 
+/* M-072: one UTF-8 validation path for both syntax and field decoding. */
+static size_t json_utf8_sequence(const unsigned char *p) {
+    size_t n;
+    unsigned char c = p[0];
+    if (c >= 0xC2 && c <= 0xDF) n = 2;
+    else if (c >= 0xE0 && c <= 0xEF) n = 3;
+    else if (c >= 0xF0 && c <= 0xF4) n = 4;
+    else return 0;
+    for (size_t i = 1; i < n; i++) if (p[i] < 0x80 || p[i] > 0xBF) return 0;
+    if ((c == 0xE0 && p[1] < 0xA0) || (c == 0xED && p[1] >= 0xA0) ||
+        (c == 0xF0 && p[1] < 0x90) || (c == 0xF4 && p[1] >= 0x90)) return 0;
+    return n;
+}
+
 /* 解码一个 JSON 字符串值（p 指向开引号）：按 JSON 转义解码写入 out
  *（UTF-8 字节，含 \uXXXX 与代理对），成功返回尾后指针，否则 NULL。
  * 服务端 JSON.stringify 不产生 \u 转义，但攻击者可构造；正确解码才能
@@ -635,6 +530,14 @@ static const char *json_decode_string(const char *p, char *out, size_t out_size,
             if (n + 2 > out_size) return NULL;
             out[n++] = rep;
             p++;
+            continue;
+        }
+        if (c >= 0x80) {
+            size_t width = json_utf8_sequence((const unsigned char *)p);
+            if (!width || n + width + 1 > out_size) return NULL;
+            memcpy(out + n, p, width);
+            n += width;
+            p += width;
             continue;
         }
         if (n + 2 > out_size) return NULL;
@@ -829,12 +732,23 @@ static const char *json_parse_string(const char *p) {
                 e == 'n' || e == 'r' || e == 't') { p++; continue; }
             if (e == 'u') {
                 if (!json_is_hex4(p + 1)) return NULL;
+                unsigned long cp = strtoul((char[]){p[1],p[2],p[3],p[4],0}, NULL, 16);
                 p += 5;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (p[0] != '\\' || p[1] != 'u' || !json_is_hex4(p + 2)) return NULL;
+                    unsigned long lo = strtoul((char[]){p[2],p[3],p[4],p[5],0}, NULL, 16);
+                    if (lo < 0xDC00 || lo > 0xDFFF) return NULL;
+                    p += 6;
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) return NULL;
                 continue;
             }
             return NULL;
         }
-        p++;
+        if (c >= 0x80) {
+            size_t width = json_utf8_sequence((const unsigned char *)p);
+            if (!width) return NULL;
+            p += width;
+        } else p++;
     }
     return NULL;
 }
@@ -1453,7 +1367,11 @@ int lea_json_insert_string_field(const char *line, const char *key, const char *
     while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t' ||
                        line[len - 1] == '\n' || line[len - 1] == '\r'))
         len--;
-    if (len < 2 || line[0] != '{' || line[len - 1] != '}') return 0;
+    if (len < 2 || line[0] != '{' || line[len - 1] != '}' || !lea_json_is_valid(line)) return 0;
+    const char *existing = NULL;
+    size_t existing_len = 0;
+    if (json_find_member(line, key, &existing, &existing_len) != 0) return 0;
+    int empty = *json_skip_ws(line + 1) == '}';
     /* 先算转义后长度：key 与 value 都须完整放下。 */
     char esc_key[256], esc_val[4096];
     size_t ko = 0, vo = 0;
@@ -1466,7 +1384,7 @@ int lea_json_insert_string_field(const char *line, const char *key, const char *
     size_t off = len - 1;
     /* DS 第三轮 #2：snprintf 返回值防御性校验——need 预留已排除截断
      * （需 ko+vo+7，留了 8），此处只是多一道防线，永不触发也须正确。 */
-    int w = snprintf(out + off, out_size - off, ",\"%s\":\"%s\"}", esc_key, esc_val);
+    int w = snprintf(out + off, out_size - off, "%s\"%s\":\"%s\"}", empty ? "" : ",", esc_key, esc_val);
     if (w < 0 || (size_t)w >= out_size - off) return 0;
     off += (size_t)w;
     out[off] = '\0';

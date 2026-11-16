@@ -127,8 +127,9 @@ function createLockBridge(getSession, opts) {
     } catch (e) { return ''; }
   }
 
-  function request(method, route, body) {
-    return new Promise(async (resolve, reject) => {
+  async function request(method, route, body) {
+    const cookie = await cookieHeader();
+    return new Promise((resolve, reject) => {
       let u;
       try { u = new URL(base + route); } catch (e) { reject(lockError('隐私锁服务地址不正确。')); return; }
       // 只许自家 origin（测试覆盖 base 时放行本地回环）；端口按有效端口
@@ -146,7 +147,6 @@ function createLockBridge(getSession, opts) {
         headers['Content-Type'] = 'application/json';
         headers['Content-Length'] = Buffer.byteLength(payload);
       }
-      const cookie = await cookieHeader();
       if (cookie) headers['Cookie'] = cookie;
       // W-29：按协议分流（http 回环假服务走 http.request，不再对 http
       // 地址发 TLS）；端口用算出的有效端口，不再写死 443 回退。

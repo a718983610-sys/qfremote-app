@@ -25,6 +25,7 @@
 #include "../lea_crypto.h"
 #include "../lea_state.h"
 #include "../lea_audit.h"
+#include "../lea_commandline.h"
 #include "../lea_install.h" /* A1：首装服务子命令纯函数（版本比较／清单解析） */
 #include "../whitelist.h" /* H16：app.open 白名单 hash（W_USH_EXE_SHA256）须与发版 USH 一致 */
 
@@ -2072,7 +2073,7 @@ int main(void) {
 
     /* ---------- #17 吊销写入方＋顶层字符串数组 ---------- */
     {
-        char ids[8][128];
+        char ids[8][129];
         int n = lea_json_top_level_string_array(
             "{\"cmd\":\"keys.sync-revoked\",\"key_ids\":[\"k_abc1234567\",\"k_xyz1234567\"]}",
             "key_ids", ids, 8);
@@ -3414,6 +3415,76 @@ int main(void) {
               ej3->command[0] == '\0', "s022-old-line-fields-empty");
         CHECK(lea_idem_lookup_by_job(&tj3, "job-1") == NULL,
               "s022-old-line-lookup-miss");
+    }
+
+
+    /* Completeness review: exercise rejection boundaries against real parsers,
+     * not source-shape assertions. */
+    {
+        char field[256] = {0};
+        long long number = 0;
+        int flag = 0;
+        CHECK(lea_json_string("{\"nested\":{\"path\":\"wrong\"},\"path\":\"right\"}", "path", field, sizeof(field)) &&
+              strcmp(field, "right") == 0, "m070-top-level-string-not-shadowed");
+        CHECK(!lea_json_string("{\"path\":\"a\",\"path\":\"b\"}", "path", field, sizeof(field)), "m070-duplicate-field-rejected");
+        CHECK(!lea_json_long("{\"n\":12oops}", "n", &number), "m070-invalid-number-tail-rejected");
+        CHECK(lea_json_long("{\"nested\":{\"n\":4},\"n\":12}", "n", &number) && number == 12, "m070-top-level-number-not-shadowed");
+        CHECK(!lea_json_bool("{\"nested\":{\"dangerous\":true}}", "dangerous", &flag), "m071-nested-dangerous-not-authoritative");
+        CHECK(!lea_json_bool("{\"dangerous\":trueX}", "dangerous", &flag), "m071-invalid-boolean-tail-rejected");
+        char args[2][512];
+        CHECK(lea_params_string_array("{\"nested\":{\"args\":[\"bad\"]},\"args\":[\"good\"]}", "args", args, 2) == 1 &&
+              strcmp(args[0], "good") == 0, "m071-array-not-shadowed");
+        CHECK(lea_params_string_array("{\"args\":[\"a\",]}", "args", args, 2) < 0, "m071-array-trailing-comma-rejected");
+        CHECK(!lea_json_is_valid("{\"s\":\"\xc0\xaf\"}"), "m072-overlong-utf8-rejected");
+        CHECK(!lea_json_is_valid("{\"s\":\"\xed\xa0\x80\"}"), "m072-raw-surrogate-rejected");
+        CHECK(!lea_json_is_valid("{\"s\":\"\xf4\x90\x80\x80\"}"), "m072-utf8-above-unicode-rejected");
+        CHECK(!lea_json_is_valid("{\"s\":\"\\uD800\"}"), "m072-lone-high-surrogate-rejected");
+        CHECK(!lea_json_is_valid("{\"s\":\"\\uDC00\"}"), "m072-lone-low-surrogate-rejected");
+        CHECK(lea_json_string("{\"s\":\"\\uD83D\\uDE00\"}", "s", field, sizeof(field)) &&
+              strcmp(field, "\xf0\x9f\x98\x80") == 0, "m072-surrogate-pair-decodes");
+        CHECK(lea_json_insert_string_field("{}", "token", "abc", field, sizeof(field)) &&
+              lea_json_is_valid(field) && strcmp(field, "{\"token\":\"abc\"}") == 0, "m073-empty-object-insertion-valid");
+        CHECK(!lea_json_insert_string_field("{\"token\":\"old\"}", "token", "new", field, sizeof(field)), "m073-insertion-duplicate-rejected");
+        unsigned char decoded[16];
+        CHECK(lea_b64_decode("Zg==", decoded, sizeof(decoded)) == 1 && decoded[0] == 'f', "m068-base64-canonical-accepted");
+        CHECK(lea_b64_decode("Zh==", decoded, sizeof(decoded)) < 0, "m068-base64-tail-bits-rejected");
+        CHECK(lea_b64_decode("Zm9=", decoded, sizeof(decoded)) < 0, "m068-base64-two-byte-tail-bits-rejected");
+        CHECK(lea_b64_decode("Zg===", decoded, sizeof(decoded)) < 0, "m068-base64-extra-padding-rejected");
+        char tiny[3] = {'x','x','x'};
+        lea_redact_key_prefix("synthetic-prefix", tiny, sizeof(tiny));
+        CHECK(tiny[0] == 0, "m069-short-redaction-buffer-cleared");
+        char digest[65] = "not-a-digest";
+        CHECK(!lea_sha256_file_hex("/tmp", digest) && digest[0] == 0, "m067-directory-read-error-not-valid-hash");
+        char quoted[128];
+        CHECK(lea_quote_arg("a b", quoted, sizeof(quoted)) && strcmp(quoted, "\"a b\"") == 0, "m085-quote-spaces");
+        CHECK(lea_quote_arg("a\\", quoted, sizeof(quoted)) && strcmp(quoted, "\"a\\\\\"") == 0, "m085-quote-trailing-backslash");
+        CHECK(!lea_quote_arg("too-long", tiny, sizeof(tiny)) && tiny[0] == 0, "m085-quote-overflow-rejected-cleared");
+        wchar_t command[12] = L"\"app\"";
+        CHECK(!lea_wide_arg_append(command, 12, L"\"oversized\"") && wcscmp(command, L"\"app\"") == 0,
+              "m011-command-overflow-keeps-executable");
+        CHECK(lea_wide_arg_append(command, 12, L"\"x\"") && wcscmp(command, L"\"app\" \"x\"") == 0,
+              "m011-command-checked-append");
+        char long_a[129], long_b[129];
+        memset(long_a, 'a', 128); long_a[128] = 0;
+        memcpy(long_b, long_a, sizeof(long_b)); long_b[127] = 'b';
+        static lea_replay_t lr;
+        lea_replay_init(&lr);
+        CHECK(lea_replay_check_and_add(&lr, long_a, "nonce-long-a", now), "m079-replay-long-request-first");
+        CHECK(!lea_replay_check_and_add(&lr, long_a, "nonce-long-b", now), "m079-replay-long-request-duplicate");
+        CHECK(lea_replay_check_and_add(&lr, long_b, "nonce-long-c", now), "m079-replay-distinct-long-request");
+        static lea_idem_t li;
+        lea_idem_init(&li);
+        CHECK(lea_idem_get_or_create(&li, "node-1", "alice", long_a, 0, now) != NULL &&
+              lea_idem_lookup(&li, "node-1", "alice", long_a) != NULL, "m079-idempotency-long-key-roundtrip");
+        char rev_json[256], rev_ids[1][129], rev_path[128];
+        snprintf(rev_json, sizeof(rev_json), "{\"key_ids\":[\"%s\"]}", long_a);
+        CHECK(lea_json_top_level_string_array(rev_json, "key_ids", rev_ids, 1) == 1 &&
+              strcmp(rev_ids[0], long_a) == 0, "m012-revocation-sync-128-byte-key");
+        snprintf(rev_path, sizeof(rev_path), "/tmp/lea-long-revoked-%ld", (long)getpid());
+        const char *keys[] = {long_a};
+        CHECK(lea_revoked_write(rev_path, keys, 1), "m012-revocation-long-key-write");
+        CHECK(lea_revoked_check(rev_path, long_a, 0, 0, NULL) == LEA_REVOCATION_REVOKED, "m012-revocation-long-key-enforced");
+        remove(rev_path);
     }
 
     printf("\n==== LEA core tests: %d passed, %d failed ====\n", g_pass, g_fail);

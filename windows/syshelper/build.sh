@@ -8,6 +8,7 @@ set -e
 cd "$(dirname "$0")"
 python3 gen_whitelist.py --header-only
 # -Werror：R-C3 回归门（void 函数 return 1 须编译失败）；只加已验证的两处构建命令，不全仓铺开。
-x86_64-w64-mingw32-gcc -O2 -Wall -Werror -o QFSysHelper.exe QFSysHelper.c protocol.c -lbcrypt -ladvapi32
+x86_64-w64-mingw32-gcc -O2 -Wall -Werror -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -o QFSysHelper.exe QFSysHelper.c protocol.c -lbcrypt -ladvapi32
 python3 gen_whitelist.py --json-only
 ls -l QFSysHelper.exe whitelist.h whitelist.json
+sha256sum QFSysHelper.exe

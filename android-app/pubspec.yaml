@@ -4,36 +4,35 @@ publish_to: 'none'
 version: 3.0.0+30000
 
 environment:
-  sdk: '>=3.8.0 <4.0.0'
-  flutter: '>=3.22.0'
+  sdk: '>=3.13.0 <4.0.0'
+  flutter: '>=3.47.8'
 
 dependencies:
   flutter:
     sdk: flutter
-  flutter_inappwebview: ^6.1.5
-  shared_preferences: ^2.5.3
-  package_info_plus: ^10.2.2
-  path_provider: ^2.1.5
-  crypto: ^3.0.6
-  open_filex: ^5.0.0
-  url_launcher: ^6.3.1
+  flutter_inappwebview: 6.1.5
+  shared_preferences: 2.5.3
+  package_info_plus: 10.2.2
+  path_provider: 2.1.5
+  crypto: 3.0.7
+  open_filex: 5.0.0
+  url_launcher: 6.3.3
   # A-05（3.0.0）：Drift 单一事实源＋离线发件箱；状态管理只留 ChangeNotifier，
   # 不引 provider/get/Riverpod/bloc（见 android REPORT §十一 P1-5）。
-  drift: ^2.20.0
-  # 钉死 0.5.30（不用 ^）：0.5.36+ 的 buildscript 要 AGP 8.7.3，本地镜像仓
-  # 只有 8.7.0；0.5.30 用 AGP 8.0.1（仓内有），native 库 3.49.0 已补进仓。
-  # 升级前先确认镜像仓有对应 AGP 版本，见 docs/RELEASE-GATE.md。
+  drift: 2.35.4
+  # sqlite3 native dependency stays pinned; application AGP is 8.11.1 in
+  # android/settings.gradle.kts. Mirror availability does not select AGP.
   sqlite3_flutter_libs: 0.5.30
-  path: ^1.9.0
+  path: 1.9.1
   # 记住账号密码/会话快照的加密落盘：安卓走 Android Keystore 体系
-  flutter_secure_storage: ^11.2.0
+  flutter_secure_storage: 11.2.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
-  drift_dev: ^2.20.0
-  build_runner: ^2.4.13
+  flutter_lints: 6.0.0
+  drift_dev: 2.35.3
+  build_runner: 2.17.1
 
 flutter:
   uses-material-design: true

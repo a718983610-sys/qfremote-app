@@ -8,7 +8,7 @@
  *     服务端 Ed25519 签名，AU 连上管道也做不了业务命令；内部命令
  *     另有调用方进程鉴别——只认安装目录下的 qf-lea-client.exe）。
  *   - 一行 JSON 请求 → 一行 JSON 响应。
- *   - 第二层准入（DESIGN §6.2）：Ed25519 服务端签名（占位，见
+ *   - 第二层准入（DESIGN §6.2）：Ed25519 服务端签名（真实验签，见
  *     lea_crypto.c，默认 fail-closed）＋ binding_epoch ＋ scope ＋
  *     API Key 归属（本地吊销表）＋重放表。签名规范串唯一规范源：
  *     信封 v2 见 windows/lea/CANONICAL-SIGNING-V2.md（20 行），
@@ -59,7 +59,7 @@
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600 /* GetNamedPipeClientProcessId（H01）须 ≥0x0600 */
+#define _WIN32_WINNT 0x0A00 /* Same Windows 10 API baseline as USH/client. */
 #endif
 #include <windows.h>
 #include <sddl.h>
@@ -73,12 +73,14 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include "lea_protocol.h"
 #include "lea_crypto.h"
 #include "lea_state.h"
 #include "lea_audit.h"
 #include "lea_install.h"
 #include "whitelist.h"
+#include "lea_commandline.h"
 
 #define SERVICE_NAME_W L"QFRLEA"
 #define SERVICE_DISPLAY_W L"QFRemote 本地执行代理"
@@ -179,6 +181,7 @@ static char g_logs_dir[MAX_PATH];
 static char g_work_dir[MAX_PATH];
 static char g_install_dir[MAX_PATH];   /* QFRLEA.exe 所在目录 */
 static char g_idem_path[MAX_PATH];
+static char g_replay_path[MAX_PATH];
 static char g_binding_path[MAX_PATH];
 static char g_revoked_path[MAX_PATH];
 /* F-01 吊销表状态（见 revocation_startup_init／key_revocation_check）：
@@ -203,14 +206,26 @@ static long long now_unix(void) { return (long long)time(NULL); }
 
 /* lea_rebuild_envelope 已移入 lea_protocol.c（纯协议层，可单测），声明见 lea_protocol.h。 */
 
-static void utf16_to_utf8(const WCHAR *w, char *out, size_t out_size) {
-    if (!w || !out || out_size < 1) return;
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)out_size, NULL, NULL);
+static int utf16_to_utf8(const WCHAR *w, char *out, size_t out_size) {
+    if (!out || !out_size) return 0;
+    out[0] = 0;
+    if (!w || out_size > INT_MAX || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            w, -1, out, (int)out_size, NULL, NULL)) { out[0] = 0; return 0; }
+    return 1;
 }
 
-static void utf8_to_utf16(const char *u, WCHAR *out, size_t out_size) {
-    if (!u || !out || out_size < 1) return;
-    MultiByteToWideChar(CP_UTF8, 0, u, -1, out, (int)out_size);
+static int utf8_to_utf16(const char *u, WCHAR *out, size_t out_size) {
+    if (!out || !out_size) return 0;
+    out[0] = 0;
+    if (!u || out_size > INT_MAX || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            u, -1, out, (int)out_size)) { out[0] = 0; return 0; }
+    return 1;
+}
+
+static int atomic_replace_u8(const char *tmp, const char *path) {
+    WCHAR wt[MAX_PATH], wp[MAX_PATH];
+    if (!utf8_to_utf16(tmp, wt, MAX_PATH) || !utf8_to_utf16(path, wp, MAX_PATH)) return 0;
+    return MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 }
 
 /* 本地日期 YYYY-MM-DD 与 ISO 时间戳（含本地时区偏移）。 */
@@ -248,7 +263,7 @@ static void svc_log(const char *fmt, ...) {
 
 static int mkdir_one(const char *path) {
     WCHAR w[MAX_PATH];
-    utf8_to_utf16(path, w, MAX_PATH);
+    if (!utf8_to_utf16(path, w, MAX_PATH)) return 0;
     if (CreateDirectoryW(w, NULL)) return 1;
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
@@ -282,7 +297,7 @@ static int set_sys_admin_acl(const char *path_utf8) {
         return 0;
     }
     WCHAR w[MAX_PATH];
-    utf8_to_utf16(path_utf8, w, MAX_PATH);
+    if (!utf8_to_utf16(path_utf8, w, MAX_PATH)) { LocalFree(sd); return 0; }
     DWORD rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT,
                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                           NULL, NULL, dacl, NULL);
@@ -350,6 +365,7 @@ static void ensure_dirs(void) {
     mkdir_one(g_state_dir);
     mkdir_one(g_logs_dir);
     mkdir_one(g_work_dir);
+    snprintf(g_service_log_path, sizeof(g_service_log_path), "%s\\lea-service.log", g_logs_dir);
     /* #24：目录 ACL 失败必须留 ERROR 日志（目录不能像文件那样删了重来，
      * 服务仍须跑；但失败即意味着状态文件可能继承父目录宽松 ACL）。 */
     if (!set_sys_admin_acl(g_base_dir))
@@ -361,6 +377,7 @@ static void ensure_dirs(void) {
     if (!set_sys_admin_acl(g_work_dir))
         svc_log("ERROR acl failed for work dir %s", g_work_dir);
     snprintf(g_idem_path, sizeof(g_idem_path), "%s\\idempotency.jsonl", g_state_dir);
+    snprintf(g_replay_path, sizeof(g_replay_path), "%s\\replay.jsonl", g_state_dir);
     snprintf(g_binding_path, sizeof(g_binding_path), "%s\\binding.dat", g_state_dir);
     snprintf(g_revoked_path, sizeof(g_revoked_path), "%s\\revoked_keys.txt", g_state_dir);
     snprintf(g_ushtokens_dir, sizeof(g_ushtokens_dir), "%s\\ush-tokens", g_base_dir);
@@ -421,6 +438,34 @@ static void audit_for_envelope(const lea_envelope_t *env, const char *event,
     audit_event(&ev);
 }
 
+/* M-076: persist before acknowledging freshness. A crash after committing this
+ * snapshot cannot turn an already seen signed envelope into a fresh command. */
+static int replay_check_and_persist_locked(const char *request_id, const char *nonce, long long now) {
+    if (!lea_replay_check_and_add(&g_replay, request_id, nonce, now)) return 0;
+    char tmp[MAX_PATH];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", g_replay_path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { svc_log("ERROR replay snapshot open failed"); return 0; }
+    int ok = lea_replay_save_to_file(&g_replay, f, now);
+    if (fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || !set_acl_or_remove_file(tmp) || !atomic_replace_u8(tmp, g_replay_path)) {
+        remove(tmp);
+        svc_log("ERROR replay snapshot save failed; rejecting command");
+        return 0;
+    }
+    return 1;
+}
+
+static int replay_load(void) {
+    FILE *f = fopen(g_replay_path, "r");
+    if (!f) return errno == ENOENT;
+    int ok = lea_replay_load_file(&g_replay, f, now_unix());
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) svc_log("ERROR replay snapshot unavailable; refusing service startup");
+    return ok;
+}
+
 /* ---------- 幂等持久化 ---------- */
 static void idem_persist_locked(void) {
     /* 调用方须持有 g_lock。#26：逐行流式写 tmp 文件，不再要求整表先装进
@@ -446,9 +491,8 @@ static void idem_persist_locked(void) {
         remove(tmp_path);
         return;
     }
-    /* 原子替换：先删旧文件再改名（Windows MoveFile 不覆盖已存在目标时用此法）。 */
-    remove(g_idem_path);
-    if (rename(tmp_path, g_idem_path) != 0) {
+    /* M-077: replace atomically; retain the previous snapshot on failure. */
+    if (!atomic_replace_u8(tmp_path, g_idem_path)) {
         svc_log("WARN idem rename failed, keeping previous snapshot");
         remove(tmp_path);
     }
@@ -476,7 +520,14 @@ static void idem_load(void) {
         lea_idem_load_line(&g_idem, line);
         if (g_idem.count >= LEA_IDEM_MAX) break;
     }
-    fclose(f);
+    int bad = ferror(f);
+    if (fclose(f) != 0) bad = 1;
+    if (bad) {
+        svc_log("ERROR idempotency snapshot read failed; execution disabled until service recovery");
+        g_revocation_degraded = 1;
+        /* A partial idempotency table cannot prove commands have not run. */
+        InterlockedExchange(&g_running, 0);
+    }
 }
 
 /* ---------- 绑定持久化（DPAPI LocalMachine） ---------- */
@@ -503,17 +554,21 @@ static void binding_persist_locked(void) {
         svc_log("ERROR DPAPI protect binding failed %lu", (unsigned long)GetLastError());
         return;
     }
-    FILE *f = fopen(g_binding_path, "wb");
+    char tmp[MAX_PATH];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", g_binding_path);
+    FILE *f = fopen(tmp, "wb");
     if (!f) {
         LocalFree(out.pbData);
         return;
     }
-    fwrite(out.pbData, 1, out.cbData, f);
-    fclose(f);
+    int ok = fwrite(out.pbData, 1, out.cbData, f) == out.cbData;
+    if (fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
     LocalFree(out.pbData);
-    /* #24：ACL 失败即删文件（fail-closed，不留宽松 ACL 的 binding.dat；
-     * 下次启动即 UNBOUND，须重登重建绑定）。 */
-    set_acl_or_remove_file(g_binding_path);
+    if (!ok || !set_acl_or_remove_file(tmp) || !atomic_replace_u8(tmp, g_binding_path)) {
+        svc_log("ERROR binding save failed; keeping previous encrypted snapshot");
+        remove(tmp);
+    }
 }
 
 static void binding_load(void) {
@@ -526,7 +581,9 @@ static void binding_load(void) {
     BYTE *blob = (BYTE *)malloc((size_t)sz);
     if (!blob) { fclose(f); return; }
     size_t r = fread(blob, 1, (size_t)sz, f);
+    int bad = ferror(f) || r != (size_t)sz;
     fclose(f);
+    if (bad) { free(blob); return; }
     DATA_BLOB in, out;
     in.pbData = blob;
     in.cbData = (DWORD)r;
@@ -538,6 +595,11 @@ static void binding_load(void) {
     }
     free(blob);
     char *text = (char *)out.pbData;
+    if (!out.cbData || text[out.cbData - 1] != 0 ||
+        memchr(text, 0, out.cbData - 1) || !lea_json_is_valid(text)) {
+        LocalFree(out.pbData);
+        return;
+    }
     long long epoch = 0, grant_epoch = 0, expires_at = 0, state = 0, grant = 0;
     lea_json_string(text, "account_id", g_binding.account_id, sizeof(g_binding.account_id));
     lea_json_string(text, "device_id", g_binding.device_id, sizeof(g_binding.device_id));
@@ -705,42 +767,6 @@ static lea_revocation_status_t key_revocation_check(const char *api_key_id) {
 }
 
 /* ---------- 命令行引用转义（C 版 ArgumentList 等价物） ---------- */
-/* 按 MSVC 规则引用单个参数：包在双引号内，" 前的 \ 加倍，末尾 \ 加倍。 */
-static void quote_arg(const char *arg, char *out, size_t out_size) {
-    size_t o = 0;
-    if (o + 1 >= out_size) { out[0] = '\0'; return; }
-    out[o++] = '"';
-    size_t backslashes = 0;
-    for (const char *p = arg; *p; p++) {
-        if (*p == '\\') { backslashes++; continue; }
-        if (*p == '"') {
-            for (size_t i = 0; i < backslashes * 2 + 1; i++) {
-                if (o + 1 >= out_size) goto done;
-                out[o++] = '\\';
-            }
-            if (o + 1 >= out_size) goto done;
-            out[o++] = '"';
-            backslashes = 0;
-            continue;
-        }
-        for (size_t i = 0; i < backslashes; i++) {
-            if (o + 1 >= out_size) goto done;
-            out[o++] = '\\';
-        }
-        backslashes = 0;
-        if (o + 1 >= out_size) goto done;
-        out[o++] = *p;
-    }
-    for (size_t i = 0; i < backslashes * 2; i++) {
-        if (o + 1 >= out_size) goto done;
-        out[o++] = '\\';
-    }
-done:
-    if (o + 1 >= out_size) o = out_size - 2;
-    out[o++] = '"';
-    out[o] = '\0';
-}
-
 /* ---------- 最终路径解析（#21①） ---------- */
 /* 对已打开句柄取最终路径（GetFinalPathNameByHandle 解析全部重解析点，
  * 含符号链接／目录连接／挂载点），去 \\?\ 前缀后返回 UTF-8 路径。
@@ -1179,7 +1205,7 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
      * 拼入的参数会静默丢失）。wcscat_s 返回值仍逐一检查，双保险。 */
     WCHAR cmdline[8192];
     WCHAR wscript[MAX_PATH];
-    utf8_to_utf16(script_norm, wscript, MAX_PATH);
+    if (!utf8_to_utf16(script_norm, wscript, MAX_PATH)) { CloseHandle(hOut); return -2; }
     int pre = _snwprintf(cmdline, 8192,
                L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%s\"",
                wscript);
@@ -1192,8 +1218,10 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
     if (nargs > 16) nargs = 16;
     for (int i = 0; i < nargs; i++) {
         char q[1100];
-        quote_arg(args[i], q, sizeof(q));
-        utf8_to_utf16(q, wargs[i], 1100);
+        if (!lea_quote_arg(args[i], q, sizeof(q)) || !utf8_to_utf16(q, wargs[i], 1100)) {
+            CloseHandle(hOut);
+            return -2;
+        }
         need += 1 + wcslen(wargs[i]);
     }
     if (need >= 8192) {
@@ -2049,7 +2077,7 @@ static int lea_proc_snapshot(lea_proc_entry_t *out, int max) {
     int n = 0;
     if (Process32FirstW(snap, &pe)) {
         do {
-            if (n >= max) break;
+            if (n >= max) { svc_log("WARN G2 process snapshot truncated capacity=%d", max); break; }
             HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
             ULONGLONG ct = 0;
             if (h) {
@@ -2160,11 +2188,14 @@ static void lea_g2_watchdog_scan(void) {
     /* 收集 agent PID（可能多实例）。 */
     DWORD agent_pids[16];
     int agent_n = 0;
-    for (int i = 0; i < n && agent_n < 16; i++) {
+    for (int i = 0; i < n; i++) {
         const char *base = procs[i].image;
         const char *slash = strrchr(base, '\\');
         if (slash) base = slash + 1;
-        if (_stricmp(base, LEA_G2_AGENT_EXE) == 0) agent_pids[agent_n++] = procs[i].pid;
+        if (_stricmp(base, LEA_G2_AGENT_EXE) == 0) {
+            if (agent_n >= 16) { svc_log("WARN G2 agent instance capacity exceeded capacity=16"); continue; }
+            agent_pids[agent_n++] = procs[i].pid;
+        }
     }
     if (agent_n == 0) return;
     ULONGLONG now = GetTickCount64();
@@ -2191,7 +2222,10 @@ static void lea_g2_watchdog_scan(void) {
             g_g2_roots[idx].seen = 1;
             continue;
         }
-        if (g_g2_root_count >= LEA_G2_MAX_ROOTS) continue;
+        if (g_g2_root_count >= LEA_G2_MAX_ROOTS) {
+            svc_log("WARN G2 tracked root capacity exceeded capacity=%d", LEA_G2_MAX_ROOTS);
+            continue;
+        }
         lea_g2_root_t *r = &g_g2_roots[g_g2_root_count++];
         r->pid = procs[i].pid;
         r->first_seen_tick = now;
@@ -2506,11 +2540,17 @@ static void execute_item(lea_queue_item_t *item) {
                         ok = 0; code = LEA_ERR_EXEC_FAILED;
                         snprintf(detail, sizeof(detail), "%s", "file-open-failed");
                     } else {
-                        fwrite(data, 1, (size_t)n, f);
-                        fclose(f);
+                        int wrote = fwrite(data, 1, (size_t)n, f) == (size_t)n;
+                        if (fflush(f) != 0) wrote = 0;
+                        if (fclose(f) != 0) wrote = 0;
                         free(data);
-                        snprintf(result_buf, sizeof(result_buf), "{\"size\":%ld}", n);
-                        result_json = result_buf;
+                        if (!wrote) {
+                            ok = 0; code = LEA_ERR_EXEC_FAILED;
+                            snprintf(detail, sizeof(detail), "%s", "file-write-failed");
+                        } else {
+                            snprintf(result_buf, sizeof(result_buf), "{\"size\":%ld}", n);
+                            result_json = result_buf;
+                        }
                     }
                 }
             }
@@ -2531,17 +2571,15 @@ static void execute_item(lea_queue_item_t *item) {
                 ok = 0; code = LEA_ERR_PATH_NOT_ALLOWED;
                 snprintf(detail, sizeof(detail), "%s", adetail);
             } else {
-                WCHAR wpath[MAX_PATH];
-                utf8_to_utf16(norm, wpath, MAX_PATH);
-                WCHAR cmdline[4096];
-                _snwprintf(cmdline, 4096, L"\"%s\"", wpath);
-                for (int i = 0; i < nargs; i++) {
+                WCHAR wpath[MAX_PATH] = {0}, cmdline[4096] = {0};
+                int command_ok = utf8_to_utf16(norm, wpath, MAX_PATH);
+                int pre = command_ok ? _snwprintf(cmdline, 4096, L"\"%s\"", wpath) : -1;
+                command_ok = pre > 0 && pre < 4096;
+                for (int i = 0; command_ok && i < nargs; i++) {
                     char q[1100];
-                    quote_arg(args[i], q, sizeof(q));
                     WCHAR wq[1100];
-                    utf8_to_utf16(q, wq, 1100);
-                    wcscat_s(cmdline, 4096, L" ");
-                    wcscat_s(cmdline, 4096, wq);
+                    command_ok = lea_quote_arg(args[i], q, sizeof(q)) &&
+                        utf8_to_utf16(q, wq, 1100) && lea_wide_arg_append(cmdline, 4096, wq);
                 }
                 STARTUPINFOW si;
                 PROCESS_INFORMATION pi;
@@ -2550,7 +2588,10 @@ static void execute_item(lea_queue_item_t *item) {
                 si.dwFlags = STARTF_USESHOWWINDOW;
                 si.wShowWindow = SW_SHOWNORMAL;
                 ZeroMemory(&pi, sizeof(pi));
-                if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+                if (!command_ok) {
+                    ok = 0; code = LEA_ERR_BAD_ENVELOPE;
+                    snprintf(detail, sizeof(detail), "%s", "app-command-line-too-long-or-invalid");
+                } else if (!CreateProcessW(wpath, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
                     ok = 0; code = LEA_ERR_EXEC_FAILED;
                     snprintf(detail, sizeof(detail), "create-process-failed:%lu",
                              (unsigned long)GetLastError());
@@ -2713,6 +2754,12 @@ static DWORD WINAPI worker_loop(LPVOID unused) {
     (void)unused;
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
         DWORD w = WaitForSingleObject(g_queue_event, 1000);
+        if (w == WAIT_FAILED) {
+            svc_log("ERROR queue wait failed %lu; stopping service", GetLastError());
+            InterlockedExchange(&g_running, 0);
+            if (g_stop_event) SetEvent(g_stop_event);
+            return 1;
+        }
         if (w == WAIT_TIMEOUT) {
             /* 周期任务：每小时清理一次幂等表（队列空且无在途时才做）。 */
             long long hour = now_unix() / 3600;
@@ -3086,7 +3133,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
          * 不推进本机世代；存在但非法（非裸整数／负数／溢出／重复键）
          * 即整单拒绝；存在且小于本机已接受的最大世代即陈旧快照，拒绝
          * 不写盘（detail revoked-generation-stale）。 */
-        char ids[LEA_REVOKED_MAX_IDS][128];
+        char ids[LEA_REVOKED_MAX_IDS][129];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
@@ -3141,7 +3188,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
          * 后两步——服务端 H21 推送已是主同步路径）；② 清该 Key 的排队
          * 命令（回 KEY_REVOKED，不可重试）；③ 强杀该 Key 的活动 job
          * （worker 收尾改判 KEY_REVOKED）。 */
-        char ids[LEA_REVOKED_MAX_IDS][128];
+        char ids[LEA_REVOKED_MAX_IDS][129];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
@@ -3601,7 +3648,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
              * 服务端重试一律用全新信封（新 request_id／nonce，复用幂等
              * 键），不受影响。 */
             EnterCriticalSection(&g_lock);
-            lea_replay_check_and_add(&g_replay, env.request_id, env.nonce, t0);
+            replay_check_and_persist_locked(env.request_id, env.nonce, t0);
             LeaveCriticalSection(&g_lock);
             build_resp(resp, resp_size, 0, LEA_ERR_HANDSHAKE_REQUIRED, env.request_id, 0,
                                "handshake-required", NULL);
@@ -3644,7 +3691,7 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
     }
     /* 3. 重放表。 */
     EnterCriticalSection(&g_lock);
-    int fresh = lea_replay_check_and_add(&g_replay, env.request_id, env.nonce, t0);
+    int fresh = replay_check_and_persist_locked(env.request_id, env.nonce, t0);
     LeaveCriticalSection(&g_lock);
     if (!fresh) {
         build_resp(resp, resp_size, 0, LEA_ERR_REPLAY, env.request_id, 0,
@@ -3756,6 +3803,15 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
         return;
     }
     ctx->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ctx->done) {
+        free(item); free(ctx);
+        lea_batch_seq_rollback(&g_batch_seq, env.device_id, env.account_id, env.batch_id, env.seq, batch_prev_seq);
+        lea_idem_set_status(&g_idem, idem, LEA_IDEM_UNKNOWN, NULL, t0);
+        idem_persist_locked();
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0, "completion-event-failed", NULL);
+        return;
+    }
     ctx->refs = 2; /* 管道线程 1 份＋worker 1 份 */
     item->env = env;
     item->dangerous = dangerous;
@@ -3825,7 +3881,10 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
         lea_ctx_release(ctx);
         return;
     }
-    snprintf(resp, resp_size, "%s", ctx->result_json);
+    if (w != WAIT_OBJECT_0) {
+        svc_log("ERROR execution wait failed %lu; result is unknown", GetLastError());
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env.request_id, 0, "execution-wait-failed-result-unknown", NULL);
+    } else snprintf(resp, resp_size, "%s", ctx->result_json);
     lea_ctx_release(ctx);
 }
 
@@ -4062,7 +4121,9 @@ static int lea_service_init(void) {
     lea_handshake_init(&g_handshake); /* RC-01：握手态初始为未完成 */
     lea_batch_seq_init(&g_batch_seq);
     g_queue_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!g_queue_event) return 0;
     ensure_dirs();
+    if (!replay_load()) return 0;
     binding_load();
     revocation_startup_init(); /* F-01：吊销表启动初始化（条件式，见上） */
     idem_load();
@@ -4090,7 +4151,10 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
         report_status(SERVICE_STOPPED, 0);
         return;
     }
-    lea_service_init();
+    if (!lea_service_init() || InterlockedCompareExchange(&g_running, 1, 1) != 1) {
+        report_status(SERVICE_STOPPED, 0);
+        return;
+    }
     svc_log("SERVICE started");
     report_status(SERVICE_RUNNING, 0);
     HANDLE worker = CreateThread(NULL, 0, worker_loop, NULL, 0, NULL);

@@ -9,6 +9,8 @@
 #include <string.h>
 #include "ush_snapshot.h"
 
+static volatile LONG g_snapshot_sequence = 0;
+
 #define USH_INLINE_MAX_BYTES (6 * 1024 * 1024) /* 内联 PNG 上限 6MB */
 /* H24：截图落盘上限——目录内最多保留 50 个文件、超过 7 天的删。 */
 #define USH_SNAPSHOT_MAX_FILES 50
@@ -114,10 +116,8 @@ static void capture_free(capture_t *c) {
  * （r8 裸形手动派发 ui.snapshot 47ms 即败，抓屏本身已成功）。
  * 修法：本函数内按需 CoInitializeEx(COINIT_MULTITHREADED)；只有当
  * 本次调用真的由我们初始化时才在返回前 CoUninitialize，保证进出
- * 平衡。绝不在 pipe_loop 入口统一初始化 COM：UIA 对象建在主线程
- * STA，管道线程一旦进 STA/MTA 就会走跨套间封送，而主线程阻塞在
- * WaitForSingleObject 上不泵消息，会把现已能跑的 click/tree/input
- * 全部挂死。MTA 内创建 WIC 工厂是支持的（WIC 组件 apartment-neutral）。
+ * 平衡。M010 已将 UIA 的创建、调用和释放全部移到同一个 MTA 管道线程，
+ * 不再跨套间直接复用主线程的 STA 对象；此处仍可单独在未初始化线程调用。
  * RPC_E_CHANGED_MODE（线程已被别处以另一模式初始化）时不反初始化、
  * 直接往下走。
  * r9-diag（真机仍败，file/inline 均 31ms）：本函数与两处调用点现把失败步骤＋
@@ -256,7 +256,7 @@ int ush_snapshot_harden_dir(const WCHAR *dir_w) {
     memset(ea, 0, sizeof(ea));
     ea[0].grfAccessPermissions = GENERIC_ALL;
     ea[0].grfAccessMode = SET_ACCESS;
-    ea[0].grfInheritance = NO_INHERITANCE;
+    ea[0].grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea[0].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea[0].Trustee.ptstrName = (LPWSTR)sys_sid;
@@ -267,6 +267,13 @@ int ush_snapshot_harden_dir(const WCHAR *dir_w) {
     ea[2].Trustee.ptstrName = (LPWSTR)user_sid;
     rc = SetEntriesInAclW(3, ea, NULL, &acl);
     if (rc != ERROR_SUCCESS || !acl) goto done;
+    /* M104: create with the final protected DACL, never a permissive window. */
+    SECURITY_DESCRIPTOR descriptor;
+    SECURITY_ATTRIBUTES attrs = { sizeof(attrs), &descriptor, FALSE };
+    if (!InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) ||
+        !SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) goto done;
+    if (!CreateDirectoryW(dir_w, &attrs) && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
     /* PROTECTED_DACL：不继承父目录 ACL，目录只认上面三条 ACE。 */
     rc = SetNamedSecurityInfoW((LPWSTR)dir_w, SE_FILE_OBJECT,
                                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
@@ -370,22 +377,18 @@ int ush_snapshot_prune_dir(const char *dir_utf8, int max_files, int max_age_days
     return removed;
 }
 
-static void snapshot_dir(char *out, size_t out_size) {
-    WCHAR dir[MAX_PATH];
+static int snapshot_dir(char *out, size_t out_size) {
+    WCHAR dir[MAX_PATH] = { 0 }, p[MAX_PATH] = { 0 };
     DWORD n = GetEnvironmentVariableW(L"ProgramData", dir, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L"C:\\ProgramData");
-    WCHAR p[MAX_PATH];
-    wcscpy_s(p, MAX_PATH, dir);
-    wcscat_s(p, MAX_PATH, L"\\QFR");
-    CreateDirectoryW(p, NULL);
-    wcscat_s(p, MAX_PATH, L"\\LEA");
-    CreateDirectoryW(p, NULL);
-    wcscat_s(p, MAX_PATH, L"\\snapshots");
-    CreateDirectoryW(p, NULL);
-    /* H24：每次落盘前都加固（旧的宽松 ACL 也被重设）＋剪枝（50 个／7 天）。 */
-    ush_snapshot_harden_dir(p);
-    WideCharToMultiByte(CP_UTF8, 0, p, -1, out, (int)out_size, NULL, NULL);
+    if (wcscpy_s(p, MAX_PATH, dir) || wcscat_s(p, MAX_PATH, L"\\QFR")) return 0;
+    if (!CreateDirectoryW(p, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    if (wcscat_s(p, MAX_PATH, L"\\LEA")) return 0;
+    if (!CreateDirectoryW(p, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    if (wcscat_s(p, MAX_PATH, L"\\snapshots") || !ush_snapshot_harden_dir(p)) return 0;
+    if (!WideCharToMultiByte(CP_UTF8, 0, p, -1, out, (int)out_size, NULL, NULL)) return 0;
     ush_snapshot_prune_dir(out, USH_SNAPSHOT_MAX_FILES, USH_SNAPSHOT_MAX_AGE_DAYS);
+    return 1;
 }
 
 /* ---------- file 模式：WIC 工厂＋文件流 ---------- */
@@ -396,9 +399,8 @@ static void snapshot_dir(char *out, size_t out_size) {
  * 口即按需 CoInitializeEx（MTA，与 encode 内同款）；只有本次调用真
  * 由我们初始化时才置 *com_init_out=1，调用方在 encode 完成后凭此配
  * 对 CoUninitialize（本函数自身绝不反初始化——流与编码器须在初始化
- * 的线程上用完再反初始化）。不做 pipe_loop 入口常驻初始化（UIA 对
- * 象建在主线程 STA，常驻初始化会走跨套间封送、主线程不泵消息会挂死
- * click/tree/input，见 encode 注释）。RPC_E_CHANGED_MODE 等失败时
+ * 的线程上用完再反初始化）。UIA 现已归同一个 MTA 管道线程所有；
+ * 此 helper 仍支持未初始化的独立线程测试。RPC_E_CHANGED_MODE 等失败时
  * 不置位，照常往下尝试创建（线程已被别处以另一模式初始化时工厂
  * 创建仍可成功）。
  * 成功返回 1（factory／wstream／istream 均已建出，调用方释放）；
@@ -439,7 +441,11 @@ static int snapshot_open_file_stream(const char *path_utf8,
         return 0;
     }
     WCHAR wpath[MAX_PATH + 64];
-    MultiByteToWideChar(CP_UTF8, 0, path_utf8, -1, wpath, MAX_PATH + 64);
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path_utf8, -1, wpath, MAX_PATH + 64)) {
+        wstream->lpVtbl->Release(wstream); factory->lpVtbl->Release(factory);
+        if (step_out) *step_out = "handler/path-utf8";
+        return 0;
+    }
     hr2 = wstream->lpVtbl->InitializeFromFilename(wstream, wpath, GENERIC_WRITE);
     if (FAILED(hr2)) {
         if (hr_out) *hr_out = hr2;
@@ -485,6 +491,11 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
             snprintf(err_text, err_text_size, "snapshot window not found");
             return 0;
         }
+        if (IsIconic(hwnd)) {
+            strncpy(err_code, USH_ERR_NOT_SUPPORTED, err_code_size - 1);
+            snprintf(err_text, err_text_size, "minimized window cannot be captured reliably");
+            return 0;
+        }
         if (!GetWindowRect(hwnd, &rc)) {
             strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
             snprintf(err_text, err_text_size, "GetWindowRect failed");
@@ -508,13 +519,20 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
     int ok = 0;
     if (!inline_mode) {
         char dir[MAX_PATH];
-        snapshot_dir(dir, sizeof(dir));
+        if (!snapshot_dir(dir, sizeof(dir))) {
+            capture_free(&cap);
+            strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
+            snprintf(err_text, err_text_size, "snapshot directory security could not be established");
+            return 0;
+        }
         SYSTEMTIME st;
         GetLocalTime(&st);
         char path[MAX_PATH + 64];
-        snprintf(path, sizeof(path), "%s\\ush-%04d%02d%02d-%02d%02d%02d-%03d-%lu.png",
+        snprintf(path, sizeof(path), "%s\\ush-%04d%02d%02d-%02d%02d%02d-%03d-%lu-%llu-%lu.png",
             dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-            st.wMilliseconds, (unsigned long)GetCurrentProcessId());
+            st.wMilliseconds, (unsigned long)GetCurrentProcessId(),
+            (unsigned long long)GetTickCount64(),
+            (unsigned long)InterlockedIncrement(&g_snapshot_sequence));
         /* WIC 直接写文件：用 IWICStream::InitializeFromFilename。
          * r9-diag：handler 自身的工厂创建与流搭建失败时同样带回步骤＋HRESULT；
          * 默认先记 handler/stream-setup，encode 被调到后由其覆写为真实步骤。
@@ -539,22 +557,24 @@ int ush_ui_snapshot(const ush_request_t *req, char *data_json, size_t data_size,
             factory->lpVtbl->Release(factory);
         }
         if (ok) {
-            /* 文件大小 */
-            HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                                   OPEN_EXISTING, 0, NULL);
-            DWORD fsize = 0;
-            if (h != INVALID_HANDLE_VALUE) {
-                fsize = GetFileSize(h, NULL);
-                CloseHandle(h);
-            }
+            HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            LARGE_INTEGER size = { 0 };
+            ok = h != INVALID_HANDLE_VALUE && GetFileSizeEx(h, &size) && size.QuadPart > 0;
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
             char pesc[4096];
-            ush_json_escape(path, pesc, sizeof(pesc));
-            snprintf(data_json, data_size,
-                "{\"mode\":\"file\",\"path\":\"%s\",\"width\":%d,\"height\":%d,\"bytes\":%lu}",
-                pesc, cap.width, cap.height, (unsigned long)fsize);
-        } else {
+            if (ok) ok = ush_json_escape(path, pesc, sizeof(pesc));
+            if (ok) {
+                int n = snprintf(data_json, data_size,
+                    "{\"mode\":\"file\",\"path\":\"%s\",\"width\":%d,\"height\":%d,\"bytes\":%llu}",
+                    pesc, cap.width, cap.height, (unsigned long long)size.QuadPart);
+                ok = n > 0 && (size_t)n < data_size;
+            }
+            if (!ok) diag_step = "handler/file-metadata";
+        }
+        if (!ok) {
+            DeleteFileA(path);
             strncpy(err_code, USH_ERR_FAILED, err_code_size - 1);
-            snprintf(err_text, err_text_size, "PNG encode failed at %s hr=0x%08lX init=0x%08lX cap=%dx%d stride=%d",
+            snprintf(err_text, err_text_size, "PNG encode/metadata failed at %s hr=0x%08lX init=0x%08lX cap=%dx%d stride=%d",
                      diag_step, (unsigned long)diag_hr, (unsigned long)diag_init,
                      cap.width, cap.height, cap.stride);
         }

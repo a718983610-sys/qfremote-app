@@ -19,19 +19,15 @@ const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript
 const GALLERY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'test-results', 'gallery');
 
 const STORIES = [
-  { component: 'button', name: 'Primary', args: buttonStories.Primary.args },
-  { component: 'button', name: 'Grey', args: buttonStories.Grey.args },
-  { component: 'button', name: 'GhostSmall', args: buttonStories.GhostSmall.args },
-  { component: 'button', name: 'Danger', args: buttonStories.Danger.args },
-  { component: 'button', name: 'WithIcon', args: buttonStories.WithIcon.args },
-  { component: 'empty-state', name: 'NoDevices', args: emptyStories.NoDevices.args },
-  { component: 'empty-state', name: 'NoShared', args: emptyStories.NoShared.args },
-  { component: 'stat-card', name: 'Online', args: statStories.Online.args },
-  { component: 'stat-card', name: 'Offline', args: statStories.Offline.args },
-  { component: 'reconnect-strip', name: 'Attempt2Of5', args: stripStories.Attempt2Of5.args },
-  { component: 'reconnect-strip', name: 'Cancelled', args: stripStories.Cancelled.args },
-  { component: 'app-shell', name: 'Shell', args: shellStories.Shell.args },
-];
+  ['button', buttonStories],
+  ['empty-state', emptyStories],
+  ['stat-card', statStories],
+  ['reconnect-strip', stripStories],
+  ['app-shell', shellStories],
+].flatMap(([component, module]) => Object.entries(module)
+  .filter(([name, story]) => name !== 'default' && story && story.args)
+  .map(([name, story]) => ({ component, name, args: story.args })));
+
 
 let server;
 let baseURL;
@@ -108,4 +104,23 @@ test('画廊 button/Primary：四视口（390/820/1440/1920）×双主题', asyn
     }
   }
   expect(errors).toEqual([]);
+});
+
+// M-029: accessible names and sanitized attrs must survive rendering into the DOM.
+test('button stories: icon-only name, disabled, loading and attrs are usable', async ({ page }) => {
+  await openGallery(page);
+  await renderStory(page, 'button', buttonStories.IconOnly.args, 'light', 1440);
+  await expect(page.locator('#__gallery button')).toHaveAccessibleName('连接远程桌面');
+  await page.locator('#__gallery button').focus();
+  await expect(page.locator('#__gallery button')).toBeFocused();
+  await renderStory(page, 'button', buttonStories.Disabled.args, 'light', 1440);
+  await expect(page.locator('#__gallery button')).toBeDisabled();
+  await renderStory(page, 'button', buttonStories.Loading.args, 'dark', 390);
+  await expect(page.locator('#__gallery button')).toBeDisabled();
+  await expect(page.locator('#__gallery button')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('#__gallery .btn-loader')).toBeVisible();
+  await renderStory(page, 'button', buttonStories.Attributes.args, 'light', 1440);
+  await expect(page.locator('#__gallery button')).toHaveAttribute('data-go', 'devices');
+  await expect(page.locator('#__gallery button')).toHaveAttribute('type', 'button');
+  await expect(page.locator('#__gallery button')).toHaveAccessibleName('重新加载设备列表');
 });

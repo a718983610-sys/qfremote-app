@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'session_response.dart';
+import 'session_history.dart';
 import '../../core/constants.dart';
 import '../../services/points.dart' show ConsoleCookieProvider;
 import '../../services/probe.dart' show trustedHttpClient;
@@ -28,6 +30,8 @@ class RecordingConstants {
 ///    续不上）。客户端收到 NOT_FOUND 后不得静默丢事件——提示
 ///    “录制已中断（服务端重启），本次录像不完整”，并重新 start
 ///    一个新录制（新 sessionId）。
+/// 3. 下载大小受 [RecordingConstants.defaultMaxDownloadBytes] 限制。
+/// 4. 录制 ID 只使用 start 响应，不复用桌面会话 ID。
 /// 5. 事件实际捕获埋点（mcrec.js 钩子）未实现——客户端按本规范发
 ///    事件即进入“协议就绪、捕获待落地”状态，**不得宣称已实现
 ///    真机录像**。真机录像体积比（沙箱 43.2x）是模拟值，不是真机值。
@@ -72,49 +76,49 @@ class RecEvent {
     this.x = 0,
     this.y = 0,
     this.key,
-  })  : type = RecEventType.input,
-        bytes = null,
-        frameId = null,
-        isKeyframe = null,
-        from = null,
-        to = null;
+  }) : type = RecEventType.input,
+       bytes = null,
+       frameId = null,
+       isKeyframe = null,
+       from = null,
+       to = null;
 
   const RecEvent.clipboard({required this.at, required this.bytes})
-      : type = RecEventType.clipboard,
-        kind = null,
-        x = null,
-        y = null,
-        key = null,
-        frameId = null,
-        isKeyframe = null,
-        from = null,
-        to = null;
+    : type = RecEventType.clipboard,
+      kind = null,
+      x = null,
+      y = null,
+      key = null,
+      frameId = null,
+      isKeyframe = null,
+      from = null,
+      to = null;
 
   const RecEvent.frameMarker({
     required this.at,
     required this.frameId,
     required this.isKeyframe,
-  })  : type = RecEventType.frameMarker,
-        kind = null,
-        x = null,
-        y = null,
-        key = null,
-        bytes = null,
-        from = null,
-        to = null;
+  }) : type = RecEventType.frameMarker,
+       kind = null,
+       x = null,
+       y = null,
+       key = null,
+       bytes = null,
+       from = null,
+       to = null;
 
   const RecEvent.qualityChange({
     required this.at,
     required this.from,
     required this.to,
-  })  : type = RecEventType.qualityChange,
-        kind = null,
-        x = null,
-        y = null,
-        key = null,
-        bytes = null,
-        frameId = null,
-        isKeyframe = null;
+  }) : type = RecEventType.qualityChange,
+       kind = null,
+       x = null,
+       y = null,
+       key = null,
+       bytes = null,
+       frameId = null,
+       isKeyframe = null;
 
   final RecEventType type;
 
@@ -171,11 +175,10 @@ class RecSeekAnchor {
   final int t;
   final int byteOffset;
 
-  factory RecSeekAnchor.fromJson(Map<String, Object?> json) =>
-      RecSeekAnchor(
-        t: json['t'] as int? ?? 0,
-        byteOffset: json['byteOffset'] as int? ?? 0,
-      );
+  factory RecSeekAnchor.fromJson(Map<String, Object?> json) => RecSeekAnchor(
+    t: json['t'] as int? ?? 0,
+    byteOffset: json['byteOffset'] as int? ?? 0,
+  );
 }
 
 /// seek：取 `t ≤ T` 的最后一个锚点，从该偏移处开始往后读事件、
@@ -211,20 +214,17 @@ class RecordingEntry {
   final int bytes;
 
   /// 保留期默认 30 天（retentionDays）；到期时刻。
-  int get expiresAtMs =>
-      startedAtMs + 30 * 24 * 60 * 60 * 1000;
+  int get expiresAtMs => startedAtMs + 30 * 24 * 60 * 60 * 1000;
 
-  bool get isExpired =>
-      DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
+  bool get isExpired => DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
 
-  factory RecordingEntry.fromJson(Map<String, Object?> json) =>
-      RecordingEntry(
-        sessionId: json['sessionId'] as String? ?? '',
-        deviceId: json['deviceId'] as String? ?? '',
-        tier: json['tier'] as String? ?? 'balanced',
-        startedAtMs: json['startedAt'] as int? ?? 0,
-        bytes: json['bytes'] as int? ?? 0,
-      );
+  factory RecordingEntry.fromJson(Map<String, Object?> json) => RecordingEntry(
+    sessionId: json['sessionId'] as String? ?? '',
+    deviceId: json['deviceId'] as String? ?? '',
+    tier: json['tier'] as String? ?? 'balanced',
+    startedAtMs: json['startedAt'] as int? ?? 0,
+    bytes: json['bytes'] as int? ?? 0,
+  );
 }
 
 /// 录制策略判定（§3.1，服务端在 start 时判定；客户端只做本地预判，
@@ -260,13 +260,11 @@ bool shouldRecordLocally({
 bool canAccessRecording({
   required String ownerUsername,
   required String requesterUsername,
-}) =>
-    ownerUsername.isNotEmpty && ownerUsername == requesterUsername;
+}) => ownerUsername.isNotEmpty && ownerUsername == requesterUsername;
 
 const String recordingNotFoundMessage = '录像不存在或无权限查看';
 
-const String recordingInterruptedMessage =
-    '录制已中断（服务端重启），本次录像不完整';
+const String recordingInterruptedMessage = '录制已中断（服务端重启），本次录像不完整';
 
 /// 录像传输接口（测试用假实现；生产实现见 [HttpRecordingTransport]）。
 abstract class RecordingTransport {
@@ -286,7 +284,7 @@ abstract class RecordingTransport {
   });
 
   Future<({int? events, int? bytes, List<RecSeekAnchor>? index, String? code})>
-      end({required String sessionId});
+  end({required String sessionId});
 
   Future<List<RecordingEntry>> list();
 
@@ -311,10 +309,10 @@ class HttpRecordingTransport implements RecordingTransport {
     String? baseUrl,
     ConsoleCookieProvider? cookieProvider,
     int? maxDownloadBytes,
-  })  : _baseUrl = baseUrl ?? kServerOrigin,
-        _cookieProvider = cookieProvider,
-        _maxDownloadBytes =
-            maxDownloadBytes ?? RecordingConstants.defaultMaxDownloadBytes;
+  }) : _baseUrl = baseUrl ?? kServerOrigin,
+       _cookieProvider = cookieProvider,
+       _maxDownloadBytes =
+           maxDownloadBytes ?? RecordingConstants.defaultMaxDownloadBytes;
 
   final String _baseUrl;
   static const _timeout = Duration(seconds: 15);
@@ -347,17 +345,19 @@ class HttpRecordingTransport implements RecordingTransport {
       req.write(jsonEncode(body));
       final res = await req.close().timeout(_timeout);
       final text = await res.transform(utf8.decoder).join().timeout(_timeout);
-      if (res.statusCode == 401 || res.statusCode == 403) {
-        throw const RecordingApiException('UNAUTHORIZED');
-      }
-      if (res.statusCode == 503) {
-        throw const RecordingApiException('L5_UNAVAILABLE');
-      }
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, Object?>) {
-        throw const FormatException('recording 响应不是 JSON 对象');
-      }
-      return decoded;
+      return decodeSessionResponse(
+        res.statusCode,
+        text,
+        (code, message) => RecordingApiException(code, message),
+      );
+    } on FormatException {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const RecordingApiException('TIMEOUT');
+    } on IOException {
+      throw const RecordingApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -374,11 +374,21 @@ class HttpRecordingTransport implements RecordingTransport {
       if (res.statusCode == 401 || res.statusCode == 403) {
         throw const RecordingApiException('UNAUTHORIZED');
       }
-      final decoded = text.isEmpty ? <String, Object?>{} : jsonDecode(text);
-      return (
-        decoded is Map<String, Object?> ? decoded : <String, Object?>{},
+      if (res.statusCode == 404) return (<String, Object?>{}, 404);
+      final decoded = decodeSessionResponse(
         res.statusCode,
+        text,
+        (code, message) => RecordingApiException(code, message),
       );
+      return (decoded, res.statusCode);
+    } on FormatException {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const RecordingApiException('TIMEOUT');
+    } on IOException {
+      throw const RecordingApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -391,11 +401,8 @@ class HttpRecordingTransport implements RecordingTransport {
     required String groupId,
     required String tier,
   }) async {
-    // sessionId 由客户端传入桌面会话 id 以便关联（规范示例）；
-    // 关联 id 与服务端生成的录制 id 语义不同时，调用方须用返回的
-    // sessionId 继续走 event/end——此处按规范示例原样传入。
+    // 录制 ID 由服务端随机生成；桌面会话 ID 不用作可猜的存储标识。
     final json = await _postJson('/license/api/recordings/start', {
-      'sessionId': sessionIdForDesktop,
       'deviceId': deviceId,
       'groupId': groupId,
       'tier': tier,
@@ -419,10 +426,9 @@ class HttpRecordingTransport implements RecordingTransport {
     required String sessionId,
     required RecEvent event,
   }) async {
-    final json = await _postJson(
-      '/license/api/recordings/$sessionId/event',
-      {'event': event.toJson()},
-    );
+    final json = await _postJson('/license/api/recordings/$sessionId/event', {
+      'event': event.toJson(),
+    });
     if (json['ok'] == true) {
       return (events: json['events'] as int?, code: null);
     }
@@ -431,18 +437,15 @@ class HttpRecordingTransport implements RecordingTransport {
 
   @override
   Future<({int? events, int? bytes, List<RecSeekAnchor>? index, String? code})>
-      end({required String sessionId}) async {
-    final json = await _postJson(
-      '/license/api/recordings/$sessionId/end',
-      {},
-    );
+  end({required String sessionId}) async {
+    final json = await _postJson('/license/api/recordings/$sessionId/end', {});
     if (json['ok'] == true) {
       final raw = json['index'];
       final index = raw is List
           ? raw
-              .whereType<Map<String, Object?>>()
-              .map(RecSeekAnchor.fromJson)
-              .toList()
+                .whereType<Map<String, Object?>>()
+                .map(RecSeekAnchor.fromJson)
+                .toList()
           : null;
       return (
         events: json['events'] as int?,
@@ -474,8 +477,9 @@ class HttpRecordingTransport implements RecordingTransport {
   Future<({List<RecSeekAnchor>? index, bool rebuilt, String? code})> readIndex({
     required String sessionId,
   }) async {
-    final (json, status) =
-        await _getRaw('/license/api/recordings/$sessionId/index');
+    final (json, status) = await _getRaw(
+      '/license/api/recordings/$sessionId/index',
+    );
     if (status == 404) {
       return (index: null, rebuilt: false, code: 'NOT_FOUND');
     }
@@ -486,9 +490,9 @@ class HttpRecordingTransport implements RecordingTransport {
     final raw = inner['index'];
     final index = raw is List
         ? raw
-            .whereType<Map<String, Object?>>()
-            .map(RecSeekAnchor.fromJson)
-            .toList()
+              .whereType<Map<String, Object?>>()
+              .map(RecSeekAnchor.fromJson)
+              .toList()
         : null;
     return (
       index: index,
@@ -501,9 +505,8 @@ class HttpRecordingTransport implements RecordingTransport {
   Future<Uint8List?> download({required String sessionId}) async {
     final client = trustedHttpClient(connectionTimeout: _timeout);
     try {
-      final uri = Uri.parse(_baseUrl).resolve(
-        '/license/api/recordings/$sessionId/download',
-      );
+      final uri = Uri.parse(_baseUrl)
+          .resolve('/license/api/recordings/$sessionId/download');
       final req = await client.getUrl(uri).timeout(_timeout);
       await _attachCookie(req);
       final res = await req.close().timeout(_timeout);
@@ -520,6 +523,14 @@ class HttpRecordingTransport implements RecordingTransport {
         throw RecordingApiException('HTTP_${res.statusCode}');
       }
       return await _readCappedBody(res);
+    } on FormatException {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TypeError {
+      throw const RecordingApiException('INVALID_RESPONSE');
+    } on TimeoutException {
+      throw const RecordingApiException('TIMEOUT');
+    } on IOException {
+      throw const RecordingApiException('NETWORK');
     } finally {
       client.close(force: true);
     }
@@ -557,7 +568,7 @@ class HttpRecordingTransport implements RecordingTransport {
 ///   一个新录制（新 sessionId），见 [handleNotFound]。
 class RecordingSessionClient {
   RecordingSessionClient({required RecordingTransport transport})
-      : _transport = transport;
+    : _transport = transport;
 
   final RecordingTransport _transport;
 
@@ -584,7 +595,8 @@ class RecordingSessionClient {
       tier: tier,
     );
     if (result.sessionId == null) {
-      diagnosticLog.add(
+      appendSessionHistory(
+        diagnosticLog,
         'recording-start-rejected: ${result.code ?? 'UNKNOWN'}',
       );
       return false;
@@ -605,7 +617,8 @@ class RecordingSessionClient {
     final id = sessionId;
     if (id == null || _paused) return false;
     if (_lastAtMs != null && event.at < _lastAtMs!) {
-      diagnosticLog.add(
+      appendSessionHistory(
+        diagnosticLog,
         'recording-event-out-of-order-dropped: at=${event.at}',
       );
       return false;
@@ -616,7 +629,10 @@ class RecordingSessionClient {
       return false;
     }
     if (result.code != null) {
-      diagnosticLog.add('recording-event-rejected: ${result.code}');
+      appendSessionHistory(
+        diagnosticLog,
+        'recording-event-rejected: ${result.code}',
+      );
       return false;
     }
     _lastAtMs = event.at;
@@ -657,14 +673,13 @@ class RecordingSessionClient {
   Future<({int? events, int? bytes, List<RecSeekAnchor>? index})?> end() async {
     final id = sessionId;
     if (id == null) return null;
+    // Stop sending immediately; an ambiguous end result must not leave a live
+    // local recording that continues to post to a possibly closed server ID.
+    sessionId = null;
+    _paused = true;
     final result = await _transport.end(sessionId: id);
     if (result.code != null) return null;
-    sessionId = null;
-    return (
-      events: result.events,
-      bytes: result.bytes,
-      index: result.index,
-    );
+    return (events: result.events, bytes: result.bytes, index: result.index);
   }
 }
 
@@ -717,9 +732,7 @@ class RecPlayback {
     final startOffset = anchor?.byteOffset ?? 0;
     if (startOffset >= fileBytes.length) return const [];
     final slice = fileBytes.sublist(startOffset);
-    final events = parseCompleteLines(
-      Uint8List.fromList([...slice, 10]),
-    );
+    final events = parseCompleteLines(Uint8List.fromList([...slice, 10]));
     return events.where((e) {
       final at = e['at'];
       return at is int && at <= targetMs;

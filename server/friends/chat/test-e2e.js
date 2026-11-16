@@ -95,7 +95,8 @@ class Client {
 (async () => {
   await C.ready();
   fs.rmSync(TESTDIR, { recursive: true, force: true });
-  fs.mkdirSync(TESTDIR + '/data', { recursive: true });
+  fs.mkdirSync(TESTDIR + '/data/provider-mirror/license', { recursive: true });
+  fs.writeFileSync(TESTDIR + '/data/provider-mirror/license/status.json', '{}');
   fs.writeFileSync(TESTDIR + '/data/friends.json', JSON.stringify({ pairs: [[ALICE, BOB]] }));
   const cfg = {
     port: 18446, bind: '127.0.0.1', mcUrl: 'wss://127.0.0.1:18443/control.ashx',

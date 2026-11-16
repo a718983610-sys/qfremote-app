@@ -28,7 +28,8 @@ function tmpdir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'qfchat-c4-'));
 
 function seed(dir, opts) {
   const o = opts || {};
-  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'data', 'provider-mirror', 'license'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'provider-mirror', 'license', 'status.json'), '{}');
   fs.writeFileSync(path.join(dir, 'friends.json'), JSON.stringify({ pairs: [['alice', 'bob']] }));
   const data = {
     keys: { alice: { pub: 'alice-pub' }, bob: { pub: 'bob-pub' } },

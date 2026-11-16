@@ -1,6 +1,6 @@
 'use strict';
 /*
- * QFRemote 友聊服务（二期：端到端加密聊天＋记录同步，A 案）
+ * QFRemote 友聊服务（二期：加密聊天＋记录同步，A 案）
  * ================================================================
  * 定位：好友服务的聊天模块。与一期好友服务（348653b7 线）的合并契约：
  *  - 本文件只通过 friends-gate.js 的接口查好友关系（areFriends/listFriends），
@@ -53,7 +53,7 @@ const CONFIG_PATH = process.env.QFCHAT_CONFIG || path.join(__dirname, 'config.js
 let _WebSocket = null;
 function loadWebSocket() {
   if (_WebSocket) return _WebSocket;
-  const candidates = ['ws', '/opt/meshcentral/node_modules/ws'];
+  const candidates = ['ws'];
   for (const c of candidates) { try { _WebSocket = require(c); return _WebSocket; } catch (e) { /* next */ } }
   throw new Error('ws module not found');
 }
@@ -132,6 +132,14 @@ const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex'
 //  认证成功 → 服务器在控制连接上主动下发 {action:'userinfo', userinfo:{...}}；
 //  密码错误/账号不存在 → WS 升级被拒，只有 error/close，永远等不到 userinfo。
 //  据此判定：收到 userinfo = 验真成功；error/close/超时 = 失败。
+// M-048: private loopback uses the local MeshCentral certificate; public hosts
+// must validate TLS. Do not silently extend the loopback exception to LAN/public.
+function meshTlsOptions(mcUrl) {
+  const u = new URL(mcUrl);
+  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(u.hostname.toLowerCase());
+  if (!loopback && u.protocol !== 'wss:') throw new Error('meshcentral-requires-tls');
+  return { rejectUnauthorized: !loopback };
+}
 function verifyMeshCentralPassword(mcUrl, username, password) {
   return new Promise((resolve) => {
     let done = false;
@@ -139,7 +147,7 @@ function verifyMeshCentralPassword(mcUrl, username, password) {
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); try { ws && ws.close(); } catch (e) {} resolve(r); } };
     const WebSocket = loadWebSocket();
     const auth = Buffer.from(username).toString('base64') + ',' + Buffer.from(password).toString('base64');
-    try { ws = new WebSocket(mcUrl, { rejectUnauthorized: false, headers: { 'x-meshauth': auth } }); }
+    try { ws = new WebSocket(mcUrl, { ...meshTlsOptions(mcUrl), headers: { 'x-meshauth': auth } }); }
     catch (e) { return resolve({ ok: false, why: 'conn-error' }); }
     const timer = setTimeout(() => finish({ ok: false, why: 'timeout' }), 6000);
     ws.on('message', (data) => {
@@ -182,7 +190,7 @@ function verifyMeshCentralSessionOnce(mcUrl, cookieHeader, fwdIp) {
     const WebSocket = loadWebSocket();
     const headers = { Cookie: cookieHeader, Origin: 'https://127.0.0.1:8443' };
     if (fwdIp) headers['X-Forwarded-For'] = fwdIp;
-    try { ws = new WebSocket(mcUrl, { rejectUnauthorized: false, headers }); }
+    try { ws = new WebSocket(mcUrl, { ...meshTlsOptions(mcUrl), headers }); }
     catch (e) { return resolve({ ok: false, why: 'conn-error' }); }
     const timer = setTimeout(() => finish({ ok: false, why: 'timeout' }), 6000);
     ws.on('message', (data) => {
@@ -219,10 +227,11 @@ async function verifyMeshCentralSession(mcUrl, cookieHeader, clientIpHint) {
 }
 // 请求来源 IP（与好友服务 clientIp 同口径：本机回环来的才认 X-Forwarded-For）
 function clientIpOf(req) {
-  const remote = (req.socket && req.socket.remoteAddress) || '';
-  if ((remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') && req.headers['x-forwarded-for']) {
-    return String(req.headers['x-forwarded-for']).split(',')[0].trim();
-  }
+  const remote = String((req.socket && req.socket.remoteAddress) || '');
+  const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  const forwarded = String((req.headers && req.headers['cf-connecting-ip']) || '').trim();
+  // M-026: only our loopback proxy may supply this validated single-IP header.
+  if (loopback && require('net').isIP(forwarded)) return forwarded;
   return remote.replace(/^::ffff:/, '');
 }
 
@@ -244,12 +253,16 @@ function createChatHandler(configOverrides) {
       if (st.mtimeMs !== _banMirrorCache.mtimeMs || _banMirrorCache.size !== st.size || !_banMirrorCache.data) { // DEV-18/G-11：缓存键加 size
         _banMirrorCache = { mtimeMs: st.mtimeMs, size: st.size, data: JSON.parse(fs.readFileSync(BAN_MIRROR_FILE, 'utf8')) };
       }
-      const _m = _banMirrorCache.data; let rec = _m ? _m[u] : undefined; // DEV-18/G-08：扁平优先、包裹兜底
+      const _m = _banMirrorCache.data;
+      if (!_m || typeof _m !== 'object' || Array.isArray(_m)) throw new Error('invalid-ban-status');
+      let rec = _m ? _m[u] : undefined; // DEV-18/G-08：扁平优先、包裹兜底
       if (!rec && _m && _m.accounts && typeof _m.accounts === 'object' && !Array.isArray(_m.accounts)) rec = _m.accounts[u];
       return !!(rec && rec.banLink === true);
     } catch (e) { // DEV-18/G-04：失败可见（60 秒节流）
       const t = Date.now(); if (t - _banMirrorErrLogAt > 60000) { _banMirrorErrLogAt = t; try { log({ ev: 'ban-mirror-read-failed', svc: 'chat', err: String(e && e.message) }); } catch (e2) {} }
-      return false; }
+      const unavailable = new Error('ban-status-unavailable');
+      unavailable.code = 'BAN_STATUS_UNAVAILABLE';
+      throw unavailable; }
   }
   const gate = new FriendsGate(cfg.friendsFile);
 
@@ -415,7 +428,32 @@ function createChatHandler(configOverrides) {
     return !!sc && typeof sc === 'object' && validRawKeyMaterial(sc.priv) && validRawKeyMaterial(sc.vault);
   }
   try { loadMasterKey(); } catch (e) { /* 生成失败不拦服务启动，首次托管操作时再试 */ }
-  const sendWindows = {}; // user -> [timestamps]，发送限频 60/分钟（照 QFClash 聊天限频）
+  // M-041: retain the current send window across restarts; only timestamps, no content.
+  const sendWindows = store.data.sendWindows = (store.data.sendWindows && typeof store.data.sendWindows === 'object' && !Array.isArray(store.data.sendWindows)) ? store.data.sendWindows : {};
+  let lastCleanupAt = 0;
+  function cleanupExpired(now) {
+    if (lastCleanupAt && now - lastCleanupAt < 60000) return;
+    lastCleanupAt = now;
+    let changed = false;
+    for (const [id, rec] of Object.entries(store.data.sessions)) {
+      if (!rec || !Number.isFinite(rec.exp) || rec.exp <= now) { delete store.data.sessions[id]; changed = true; }
+    }
+    const cutoff = now - 90 * 24 * 3600 * 1000;
+    for (const [id, rec] of Object.entries(store.data.graveyard)) {
+      if (rec && (rec.deletedAt || rec.at || 0) < cutoff) { delete store.data.graveyard[id]; changed = true; }
+    }
+    for (const [cv, traces] of Object.entries(store.data.traces)) {
+      if (!Array.isArray(traces)) { delete store.data.traces[cv]; changed = true; continue; }
+      const kept = traces.filter(t => t && t.at >= cutoff);
+      if (kept.length !== traces.length) { if (kept.length) store.data.traces[cv] = kept; else delete store.data.traces[cv]; changed = true; }
+    }
+    for (const [user, times] of Object.entries(sendWindows)) {
+      const kept = Array.isArray(times) ? times.filter(t => Number.isFinite(t) && t > now - 60000 && t <= now) : [];
+      if (kept.length) sendWindows[user] = kept; else { delete sendWindows[user]; changed = true; }
+    }
+    if (changed) store.save();
+  }
+  cleanupExpired(Date.now());
   const typingMap = new Map(); // S-085：`${from}\n${to}` -> {from, to, typing, at}，6 秒过期，内存型，不持久化
   const presenceMap = new Map(); // S-085：user -> {status, at}，90 秒无心跳判 offline；与设备探活分开建模（无设备字段、无设备端点）
   const PAGE = fs.readFileSync(path.join(__dirname, 'chat.html'), 'utf8');
@@ -607,6 +645,7 @@ function createChatHandler(configOverrides) {
   }
 
   async function handle(req, res) {
+    cleanupExpired(Date.now());
     const u = new URL(req.url, 'http://localhost');
     const p = u.pathname;
     // ---------- 静态页（同一套页面：网页/双壳共用） ----------
@@ -641,7 +680,7 @@ function createChatHandler(configOverrides) {
         return sendJson(res, 403, { ok: false, code: 'ACCOUNT_BANNED', msg: '该账号已被封禁，请联系站长申诉。' });
       }
       const token = crypto.randomBytes(32).toString('hex');
-      store.data.sessions[sha256(token)] = { user: canonicalUser, exp: Date.now() + (body.remember === true ? 30 * 24 * 3600 * 1000 : 12 * 3600 * 1000) }; // 「记住此设备」：30 天
+      store.data.sessions[sha256(token)] = { user: canonicalUser, remembered: body.remember === true, issuedAt: Date.now(), exp: Date.now() + (body.remember === true ? 7 * 24 * 3600 * 1000 : 12 * 3600 * 1000) }; // M-005: remembered chat sessions expire after 7 days
       store.save();
       clearOutCookie(res); // 重新输账号密码登录：清掉手动退出标记
       log({ ev: 'login-ok', user: canonicalUser });
@@ -688,6 +727,18 @@ function createChatHandler(configOverrides) {
     const me = authUser(req);
     if (!me) return sendJson(res, 401, { ok: false, msg: '登录已过期，请重新登录。' });
     const d = store.data;
+
+    // M-005: local device loss can be addressed without changing this session.
+    if (req.method === 'POST' && p === '/chat/api/sessions/revoke-others') {
+      const current = sha256(String(req.headers['x-qfchat-token'] || ''));
+      let count = 0;
+      for (const [hash, rec] of Object.entries(d.sessions)) {
+        if (hash !== current && rec && rec.user === me) { delete d.sessions[hash]; count++; }
+      }
+      store.save();
+      log({ ev: 'sessions-revoke-others', user: me, count });
+      return sendJson(res, 200, { ok: true, count });
+    }
 
     if (req.method === 'GET' && p === '/chat/api/friends') {
       // friends：纯名字清单（含系统联系人，恒在首位）；peers：同序带类型，客户端打标用；
@@ -775,7 +826,9 @@ function createChatHandler(configOverrides) {
     }
     if (req.method === 'POST' && p === '/chat/api/keys/setup') {
       const body = await readBody(req);
-      if (d.keys[me] && !body.force) return sendJson(res, 409, { ok: false, msg: '该账号已完成聊天加密设置。' });
+      // M-002: setup is create-only. No shipped client resets identity here;
+      // a stale/stolen session must never destroy existing history via force:true.
+      if (d.keys[me]) return sendJson(res, 409, { ok: false, code: 'KEYS_ALREADY_CONFIGURED', msg: '该账号已完成聊天加密设置，不能通过此入口重建钥匙。' });
       // 密码包裹与登录状态托管副本至少有其一：经登录密码建钥匙时同批带
       // 密码包裹＋托管副本；凭单点登录静默建钥匙时可只有托管副本（密码
       // 包裹为 null，其后任一次密码可得时刻由客户端补写/重包）。
@@ -1019,7 +1072,7 @@ function createChatHandler(configOverrides) {
       // 命中已删消息）；S-084：表态随消息一起清。
       if (msg.clientMessageId && d.clientMsgIndex) delete d.clientMsgIndex[msg.from + '\n' + msg.clientMessageId];
       if (d.reactions) delete d.reactions[msg.id];
-      d.graveyard[msg.id] = { id: msg.id, from: msg.from, to: msg.to, conv: msg.conv, at: msg.at };
+      d.graveyard[msg.id] = { id: msg.id, from: msg.from, to: msg.to, conv: msg.conv, at: msg.at, deletedAt: Date.now() };
       [msg.from, msg.to].forEach(u2 => {
         if (d.vault[u2]) d.vault[u2] = d.vault[u2].filter(e => e.msgId !== msg.id);
       });
@@ -1061,7 +1114,12 @@ function createChatHandler(configOverrides) {
       const body = await readBody(req);
       const cv = convOf(me, norm(body.with));
       const ids = [];
-      Object.values(d.messages).filter(m => m.conv === cv).forEach(m => { ids.push(m.id); deleteMessage(m); });
+      // M-035: one conversation deletion produces one event, not thousands.
+      Object.values(d.messages).filter(m => m.conv === cv).forEach(m => { ids.push(m.id); purgeMessage(m); });
+      if (ids.length) {
+        const ev = emitEvent({ type: 'tomb', conv: cv, parties: [me, norm(body.with)], msgIds: ids, by: me, at: Date.now() });
+        for (const id of ids) d.graveyard[id].seq = ev.seq;
+      }
       if (d.traces) delete d.traces[cv];
       store.save();
       log({ ev: 'delete-conversation', user: me, with: norm(body.with), count: ids.length });
@@ -1180,7 +1238,12 @@ function createChatHandler(configOverrides) {
     return sendJson(res, 404, { ok: false, msg: 'not found' });
   }
 
-  const handler = (req, res) => { handle(req, res).catch(() => { try { sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' }); } catch (e) {} }); };
+  const handler = (req, res) => { handle(req, res).catch((err) => {
+    try {
+      if (err && err.code === 'BAN_STATUS_UNAVAILABLE') return sendJson(res, 503, { ok: false, code: 'ACCOUNT_STATUS_UNAVAILABLE', msg: '账号状态暂时无法核实，请稍后重试。' });
+      sendJson(res, 500, { ok: false, msg: '服务器暂时出现问题，请稍后再试。' });
+    } catch (e) {}
+  }); };
   // 按用户清聊天令牌（ext ban-purge 联动调用；DS 稿 §5.5）
   function purgeUserSessions(username) {
     const target = String(username || '').trim().toLowerCase();
@@ -1236,4 +1299,4 @@ if (require.main === module) main();
  *    的固定客服文案）。keys/session-copy 是唯一的钥匙原件端点：仅凭本人
  *    有效会话取回本人钥匙，口径见其上方注释。
  */
-module.exports = { verifyMeshCentralPassword, verifyMeshCentralSession, sessionIpFromCookie, convOf, createChatHandler, loadConfig };
+module.exports = { verifyMeshCentralPassword, verifyMeshCentralSession, sessionIpFromCookie, meshTlsOptions, convOf, createChatHandler, loadConfig };

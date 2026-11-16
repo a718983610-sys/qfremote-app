@@ -124,8 +124,8 @@ int lea_admit(const lea_envelope_t *env, const lea_binding_t *bind,
 /* ---------------- 重放表 ---------------- */
 #define LEA_REPLAY_MAX 4096
 typedef struct {
-    char request_id[64];
-    char nonce[128];
+    char request_id[129];
+    char nonce[129];
     long long expires_at; /* 保留到此时（issued+600s） */
     int used;
 } lea_replay_entry_t;
@@ -140,6 +140,10 @@ void lea_replay_init(lea_replay_t *r);
 int lea_replay_check_and_add(lea_replay_t *r, const char *request_id,
                              const char *nonce, long long now_unix);
 void lea_replay_prune(lea_replay_t *r, long long now_unix);
+/* M-076: durable replay snapshot; caller atomically replaces its protected file.
+ * Loading is all-or-nothing: malformed/truncated snapshots fail closed. */
+int lea_replay_save_to_file(const lea_replay_t *r, FILE *f, long long now_unix);
+int lea_replay_load_file(lea_replay_t *r, FILE *f, long long now_unix);
 
 /* ---------------- 幂等表 ---------------- */
 /* S-022 取消状态机：取消只对“排队未执行”的 job 生效，终态为 CANCELLED；
@@ -177,7 +181,7 @@ int lea_idem_transition_ok(lea_idem_status_t from, lea_idem_status_t to);
 typedef struct {
     char device_id[128];
     char account_id[128];
-    char key[128]; /* idempotency_key */
+    char key[129]; /* idempotency_key */
     lea_idem_status_t status;
     int dangerous;
     long long created_at;
@@ -185,8 +189,8 @@ typedef struct {
     char result[LEA_IDEM_RESULT_MAX]; /* 缓存的响应 JSON（成功/失败终态） */
     /* S-022：job 查询用（job_id 缺省等同 request_id；旧文件无此二字段时
      * 加载为空串，job 查询对旧条目回 not-found，不破坏旧文件加载）。 */
-    char request_id[64];
-    char job_id[64];
+    char request_id[129];
+    char job_id[129];
     char command[32];
 } lea_idem_entry_t;
 
@@ -379,7 +383,7 @@ typedef struct {
 typedef struct {
     char device_id[128];
     char account_id[128];
-    char batch_id[64];
+    char batch_id[129];
     long long last_seq;
     long long updated_at;
 } lea_batch_seq_entry_t;

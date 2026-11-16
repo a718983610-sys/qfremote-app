@@ -45,6 +45,11 @@ const pkg = JSON.parse(read('windows/package.json'));
 if (pkg.version === ver.version) ok('windows/package.json', pkg.version);
 else bad('windows/package.json', '为 ' + pkg.version + '，期望 ' + ver.version);
 
+// M-168: the extension service follows the same development release source.
+const extPkg = JSON.parse(read('server/ext/package.json'));
+if (extPkg.version === ver.version) ok('server/ext/package.json', extPkg.version);
+else bad('server/ext/package.json', '为 ' + extPkg.version + '，期望 ' + ver.version);
+
 // 2. android-app/pubspec.yaml
 const pubspec = read('android-app/pubspec.yaml');
 const pm = pubspec.match(/^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$/m);

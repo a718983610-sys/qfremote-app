@@ -4,22 +4,126 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <errno.h>
+#include <limits.h>
 
-/* 在 json 文本里找平铺键 "key": ，返回冒号后第一个非空白字符的位置。 */
-static const char *find_key_value(const char *json, const char *key) {
-    char pat[80];
-    size_t klen = strlen(key);
-    if (!json || !key || klen == 0 || klen + 4 >= sizeof(pat)) return NULL;
-    pat[0] = '"';
-    memcpy(pat + 1, key, klen);
-    pat[klen + 1] = '"';
-    pat[klen + 2] = ':';
-    pat[klen + 3] = '\0';
-    const char *p = strstr(json, pat);
-    if (!p) return NULL;
-    p += klen + 3;
+/* Walk complete JSON values, so nested keys, escaped text and malformed
+ * numeric suffixes cannot be mistaken for top-level request fields. */
+static const char *json_ws(const char *p) {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     return p;
+}
+static int json_delimiter(char c) {
+    return !c || c == ',' || c == '}' || c == ']' || c == ' ' ||
+           c == '\t' || c == '\r' || c == '\n';
+}
+static const char *json_number_end(const char *p, int integral) {
+    if (*p == '-') p++;
+    if (*p == '0') p++;
+    else if (*p >= '1' && *p <= '9') { do { p++; } while (*p >= '0' && *p <= '9'); }
+    else return NULL;
+    if (!integral && *p == '.') {
+        p++;
+        if (*p < '0' || *p > '9') return NULL;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    if (!integral && (*p == 'e' || *p == 'E')) {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        if (*p < '0' || *p > '9') return NULL;
+        do { p++; } while (*p >= '0' && *p <= '9');
+    }
+    return json_delimiter(*p) ? p : NULL;
+}
+static const char *json_string_end(const char *p) {
+    if (*p++ != '"') return NULL;
+    while (*p) {
+        if (*p == '"') return p + 1;
+        if ((unsigned char)*p < 0x20) return NULL;
+        if (*p == '\\') {
+            p++;
+            if (*p == 'u') {
+                for (int i = 0; i < 4; i++) {
+                    char c = *++p;
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                          (c >= 'A' && c <= 'F'))) return NULL;
+                }
+            } else if (!*p || !strchr("\"\\/bfnrt", *p)) return NULL;
+        }
+        p++;
+    }
+    return NULL;
+}
+static const char *json_value_end(const char *p, int depth) {
+    if (depth > 64) return NULL;
+    p = json_ws(p);
+    if (*p == '"') return json_string_end(p);
+    if (*p == '{' || *p == '[') {
+        int object = *p == '{';
+        char close = object ? '}' : ']';
+        p = json_ws(p + 1);
+        if (*p == close) return p + 1;
+        for (;;) {
+            if (object) {
+                p = json_string_end(p);
+                if (!p || *(p = json_ws(p)) != ':') return NULL;
+                p = json_ws(p + 1);
+            }
+            p = json_value_end(p, depth + 1);
+            if (!p) return NULL;
+            p = json_ws(p);
+            if (*p == close) return p + 1;
+            if (*p != ',') return NULL;
+            p = json_ws(p + 1);
+        }
+    }
+    if (strncmp(p, "true", 4) == 0 && json_delimiter(p[4])) return p + 4;
+    if (strncmp(p, "false", 5) == 0 && json_delimiter(p[5])) return p + 5;
+    if (strncmp(p, "null", 4) == 0 && json_delimiter(p[4])) return p + 4;
+    return json_number_end(p, 0);
+}
+static int json_key_equals(const char *start, const char *end, const char *key) {
+    start++;
+    while (start < end - 1 && *key) {
+        unsigned c = (unsigned char)*start++;
+        if (c == '\\') {
+            c = (unsigned char)*start++;
+            if (c == 'u') {
+                c = 0;
+                for (int i = 0; i < 4; i++) {
+                    unsigned h = (unsigned char)*start++;
+                    c = (c << 4) | (h <= '9' ? h - '0' : (h | 32) - 'a' + 10);
+                }
+            } else {
+                const char *escapes = "\"\\/bfnrt";
+                const char *esc = strchr(escapes, (int)c);
+                c = (unsigned char)"\"\\/\b\f\n\r\t"[esc - escapes];
+            }
+        }
+        if (c != (unsigned char)*key++) return 0;
+    }
+    return start == end - 1 && !*key;
+}
+static const char *find_key_value(const char *json, const char *key) {
+    if (!json || !key || !*key) return NULL;
+    const char *p = json_ws(json);
+    const char *document_end = json_value_end(p, 0);
+    if (*p != '{' || !document_end || *json_ws(document_end)) return NULL;
+    const char *found = NULL;
+    p = json_ws(p + 1);
+    while (*p != '}') {
+        const char *start = p, *end = json_string_end(p);
+        if (!end) return NULL;
+        p = json_ws(json_ws(end) + 1);
+        if (json_key_equals(start, end, key)) {
+            if (found) return NULL; /* ambiguous duplicate field */
+            found = p;
+        }
+        p = json_ws(json_value_end(p, 1));
+        if (*p == '}') break;
+        p = json_ws(p + 1);
+    }
+    return found;
 }
 
 /* \uXXXX 解码：读 4 位 hex；返回码点，失败返回 -1。 */
@@ -27,6 +131,7 @@ static int hex4(const char *p, unsigned *out) {
     unsigned v = 0;
     for (int i = 0; i < 4; i++) {
         char c = p[i];
+        if (!c) return -1;
         v <<= 4;
         if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
         else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
@@ -58,7 +163,7 @@ static int utf8_encode(unsigned cp, char *out) {
     return 4;
 }
 
-int ush_json_get_string(const char *json, const char *key, char *out, size_t out_size) {
+static int json_get_string_impl(const char *json, const char *key, char *out, size_t out_size) {
     if (!out || out_size == 0) return 0;
     out[0] = '\0';
     const char *p = find_key_value(json, key);
@@ -85,7 +190,7 @@ int ush_json_get_string(const char *json, const char *key, char *out, size_t out
             else if (e == 't') { if (n + 1 >= out_size) return 0; out[n++] = '\t'; p++; }
             else if (e == 'u') {
                 unsigned cp;
-                if (hex4(p + 1, &cp) != 0) return 0;
+                if (hex4(p + 1, &cp) != 0 || cp == 0) return 0;
                 p += 5;
                 if (cp >= 0xD800 && cp <= 0xDBFF) {
                     /* 高代理：后须跟 \uDC00-\uDFFF 低代理 */
@@ -114,52 +219,48 @@ int ush_json_get_string(const char *json, const char *key, char *out, size_t out
     return 0; /* 未闭合 */
 }
 
+int ush_json_get_string(const char *json, const char *key, char *out, size_t out_size) {
+    int ok = json_get_string_impl(json, key, out, out_size);
+    if (!ok && out && out_size) out[0] = '\0';
+    return ok;
+}
 int ush_json_get_long(const char *json, const char *key, long *out) {
     const char *p = find_key_value(json, key);
-    if (!p) return 0;
-    if (!((*p >= '0' && *p <= '9') || *p == '-')) return 0;
+    if (!p || !out || !json_number_end(p, 1)) return 0;
     char *end = NULL;
+    errno = 0;
     long v = strtol(p, &end, 10);
-    if (end == p) return 0;
+    if (errno == ERANGE || end != json_number_end(p, 1)) return 0;
     *out = v;
     return 1;
 }
-
 int ush_json_get_llong(const char *json, const char *key, long long *out) {
     const char *p = find_key_value(json, key);
-    if (!p) return 0;
-    if (!((*p >= '0' && *p <= '9') || *p == '-')) return 0;
+    if (!p || !out || !json_number_end(p, 1)) return 0;
     char *end = NULL;
+    errno = 0;
     long long v = strtoll(p, &end, 10);
-    if (end == p) return 0;
+    if (errno == ERANGE || end != json_number_end(p, 1)) return 0;
     *out = v;
     return 1;
 }
 
 int ush_json_get_bool(const char *json, const char *key, int *out) {
     const char *p = find_key_value(json, key);
-    if (!p) return 0;
+    if (!p || !out) return 0;
     if (strncmp(p, "true", 4) == 0) { *out = 1; return 1; }
     if (strncmp(p, "false", 5) == 0) { *out = 0; return 1; }
     return 0;
 }
 
-/* #11：JSON 数字（0.5 / -1.25 / 1e-1）。strtod 会吃掉 "inf"/"nan" 与
- * 16 进制浮点，首字符白名单（数字/正负号/小数点）先挡掉前者；值后须为
- * 分隔符，挡掉后者（"0x1p4" 会在 'x' 处被拒）与 "0.5x" 非法尾巴。 */
+/* Strict JSON number grammar, including fractional/exponent digits. */
 int ush_json_get_double(const char *json, const char *key, double *out) {
     const char *p = find_key_value(json, key);
-    if (!p || !out) return 0;
-    /* JSON 数字无前导 '+'（DS 复查观察 1：旧实现放行 +0.5，略宽松），
-     * 此处不认 '+'。 */
-    if (!((*p >= '0' && *p <= '9') || *p == '-' || *p == '.')) return 0;
+    if (!p || !out || !json_number_end(p, 0)) return 0;
     char *end = NULL;
+    errno = 0;
     double v = strtod(p, &end);
-    if (end == p) return 0;
-    if (*end != '\0' && *end != ',' && *end != '}' && *end != ' ' &&
-        *end != '\t' && *end != '\r' && *end != '\n')
-        return 0;
-    if (!isfinite(v)) return 0;
+    if (errno == ERANGE || end != json_number_end(p, 0) || !isfinite(v)) return 0;
     *out = v;
     return 1;
 }
@@ -188,7 +289,7 @@ int ush_json_get_object(const char *json, const char *key, char *out, size_t out
     return 0; /* 花括号未闭合 */
 }
 
-int ush_json_escape(const char *in, char *out, size_t out_size) {
+static int json_escape_impl(const char *in, char *out, size_t out_size) {
     static const char hexd[] = "0123456789abcdef";
     if (!in || !out || out_size == 0) return 0;
     size_t n = 0;
@@ -223,6 +324,12 @@ int ush_json_escape(const char *in, char *out, size_t out_size) {
     return 1;
 }
 
+int ush_json_escape(const char *in, char *out, size_t out_size) {
+    int ok = json_escape_impl(in, out, out_size);
+    if (!ok && out && out_size) out[0] = '\0';
+    return ok;
+}
+
 int ush_parse_request(const char *text, ush_request_t *out) {
     memset(out, 0, sizeof(*out));
     out->timeout_ms = USH_DEFAULT_TIMEOUT_MS;
@@ -245,8 +352,8 @@ int ush_parse_request(const char *text, ush_request_t *out) {
     ush_json_get_string(text, "ush_token", out->ush_token, sizeof(out->ush_token));
     long be = 0;
     if (ush_json_get_long(text, "binding_epoch", &be)) out->binding_epoch = be;
-    long seq = 0;
-    if (ush_json_get_long(text, "seq", &seq)) out->seq = (int)seq;
+    long long seq = 0;
+    if (ush_json_get_llong(text, "seq", &seq)) out->seq = seq;
     long to = 0;
     if (ush_json_get_long(text, "timeout_ms", &to)) {
         if (to < 1) to = 1;
@@ -332,12 +439,13 @@ int ush_base64_encode(const unsigned char *in, size_t len, char *out, size_t out
 }
 
 int ush_base64_decode(const char *in, unsigned char *out, size_t out_size, size_t *out_len) {
+    if (out_len) *out_len = 0;
     if (!in || !out || !out_len) return 0;
     size_t ilen = strlen(in);
-    if (ilen % 4 != 0) return 0;
+    if (ilen % 4) return 0;
     size_t need = (ilen / 4) * 3;
-    if (ilen >= 4 && in[ilen - 1] == '=') need--;
-    if (ilen >= 4 && in[ilen - 2] == '=') need--;
+    if (ilen && in[ilen - 1] == '=') need--;
+    if (ilen > 1 && in[ilen - 2] == '=') need--;
     if (out_size < need) return 0;
     size_t o = 0;
     for (size_t i = 0; i < ilen; i += 4) {
@@ -346,18 +454,25 @@ int ush_base64_decode(const char *in, unsigned char *out, size_t out_size, size_
         for (int j = 0; j < 4; j++) {
             char c = in[i + j];
             unsigned d;
-            if (c >= 'A' && c <= 'Z') d = (unsigned)(c - 'A');
-            else if (c >= 'a' && c <= 'z') d = (unsigned)(c - 'a' + 26);
-            else if (c >= '0' && c <= '9') d = (unsigned)(c - '0' + 52);
-            else if (c == '+') d = 62;
-            else if (c == '/') d = 63;
-            else if (c == '=') { d = 0; pad++; }
-            else return 0;
+            if (c == '=') {
+                if (i + 4 != ilen || j < 2) return 0;
+                d = 0;
+                pad++;
+            } else {
+                if (pad) return 0;
+                if (c >= 'A' && c <= 'Z') d = (unsigned)(c - 'A');
+                else if (c >= 'a' && c <= 'z') d = (unsigned)(c - 'a' + 26);
+                else if (c >= '0' && c <= '9') d = (unsigned)(c - '0' + 52);
+                else if (c == '+') d = 62;
+                else if (c == '/') d = 63;
+                else return 0;
+            }
             v = (v << 6) | d;
         }
-        out[o++] = (unsigned char)((v >> 16) & 0xFF);
-        if (pad < 2) out[o++] = (unsigned char)((v >> 8) & 0xFF);
-        if (pad < 1) out[o++] = (unsigned char)(v & 0xFF);
+        if ((pad == 2 && (v & 0xffffu)) || (pad == 1 && (v & 0xffu))) return 0;
+        out[o++] = (unsigned char)(v >> 16);
+        if (pad < 2) out[o++] = (unsigned char)(v >> 8);
+        if (pad < 1) out[o++] = (unsigned char)v;
     }
     *out_len = o;
     return 1;

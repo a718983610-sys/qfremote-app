@@ -60,6 +60,9 @@ cp -f "$APP7Z" "$STAGING/app.7z"
 echo "build-installer: staging=$STAGING version=$VERSION"
 
 cd "$WIN"
+node tools/native-build-receipt.js
+HEAL_SHA=$(sha256sum qf-agent-heal.ps1 | cut -d ' ' -f1)
+[ "${#HEAL_SHA}" -eq 64 ] || { echo "build-installer: cannot hash heal script" >&2; exit 1; }
 # 传给 makensis 的目录：默认用相对约定；覆盖时用绝对路径（makensis 相对
 # 路径按 CWD 解析，绝对路径最稳）。
 if [ -n "$STAGING_OVERRIDE" ] || [ -n "$OUTDIR_OVERRIDE" ]; then
@@ -70,7 +73,7 @@ else
   NSIS_OUT="dist"
 fi
 echo "== inner: installer.nsi =="
-makensis -X"Target amd64-unicode" "-DBUILD_VERSION=$VERSION" "-DSTAGING_DIR=$NSIS_STAGING" "-DOUT_DIR=$NSIS_OUT" installer.nsi
+makensis -X"Target amd64-unicode" "-DBUILD_VERSION=$VERSION" "-DHEAL_SCRIPT_SHA256=$HEAL_SHA" "-DSTAGING_DIR=$NSIS_STAGING" "-DOUT_DIR=$NSIS_OUT" installer.nsi
 [ -f "$OUTDIR/QFRSetupAdmin.exe" ] || { echo "build-installer: 内层产物缺失" >&2; exit 1; }
 # 外层只从 staging 取 QFRSetupAdmin.exe：默认 dist/ 时拷回 staging；输出被
 # 覆盖到 tmpfs 时不往磁盘 staging 拷 146MB（沙箱磁盘配额会失败），外层

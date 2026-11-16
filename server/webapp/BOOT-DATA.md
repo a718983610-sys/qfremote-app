@@ -115,3 +115,9 @@ const handler = createBootDataHandler({ getSnapshot, webappDir: '/opt/qfremote-w
 - E2E：`server/webapp/tests/boot-data.spec.mjs`（Playwright 真浏览器＋
   `createBootServer`：登录态一次下发、字段齐全、敏感值不在其中、匿名不注入、
   各页读 store）。
+
+## M-031 接线更新（2026-11-15）
+
+`server/ext/webapp-boot.js` 现已把本处理器接到真实 ext 服务的 `GET/HEAD /` 与 `/index.html`，复用 `resolveAuth → buildHomeStats → buildStatusView`。`QFR_WEBAPP_DIR` 指定同一版本的模板和 `boot-data.mjs`，未配置时使用已安装的 `/opt/qfremote-webapp`，本地开发使用仓库目录。匿名页面不查询账号快照，失败仍退回静态模板；注入响应 `no-store` 且 `Vary: Cookie`。
+
+源代码接线已有 `server/ext/test-webapp-boot.js` 回归。线上仍为 2.4.4，本次没有部署；现有 SPA 上游 8082 与六个外置 map（M-159）必须在部署窗口核对，只有明确把 SPA HTML 流量指向这个处理器后才算生产端到端闭合，不得把本地测试写成线上验证。

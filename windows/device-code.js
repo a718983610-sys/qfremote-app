@@ -101,8 +101,19 @@ function createDeviceCodeStore(opts) {
   function has() { return load() !== null; }
 
   function clear() {
-    try { fs.unlinkSync(file); } catch (e) { /* ignore */ }
-    try { fs.unlinkSync(plainFile); } catch (e) { /* ignore */ }
+    let cleared = true;
+    for (const target of [file, plainFile]) {
+      try { fs.unlinkSync(target); }
+      catch (e) {
+        if (e.code !== 'ENOENT') {
+          cleared = false;
+          // Do not log the identifier or encrypted contents.
+          const log = typeof o.log === 'function' ? o.log : console.warn;
+          log('device-code-clear-failed: ' + (e.code || 'IO_ERROR'));
+        }
+      }
+    }
+    return cleared;
   }
 
   return { encryptionAvailable, ensure, load, has, clear, file, plainFile };

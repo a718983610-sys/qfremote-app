@@ -2,6 +2,9 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>我的设备 · QFRemote</title>
 <link rel="stylesheet" href="shared.css">
 <style>
   body {
@@ -102,6 +105,17 @@
   .skel .sk { height:56px; border-radius:6px; background:var(--bg2); margin-bottom:8px; animation: skel-pulse 1200ms ease-in-out infinite alternate; }
   /* F-Win4（B §7 离屏停播）：页面不可见时骨架停播（JS 加 html.paused） */
   html.paused .skel .sk { animation-play-state: paused; }
+  .metrics .v { user-select:text; }
+  @media(max-width:760px){
+    body{padding:20px 16px}
+    .head{flex-wrap:wrap;gap:8px 12px}
+    .layout{flex-direction:column;gap:20px}
+    .list{width:100%}
+    .detail{padding:20px;width:100%;box-sizing:border-box}
+    .detail .dnm{white-space:normal;overflow-wrap:anywhere}
+    .metrics{gap:16px}
+  }
+  @media(pointer:coarse){button{min-height:44px}.row{min-height:56px}}
 </style>
 </head>
 <body>
@@ -118,7 +132,7 @@
       <div id="groups"></div>
     </div>
 
-    <div class="detail elev-1" id="detail">
+    <section class="detail elev-1" id="detail" aria-labelledby="dName">
       <div class="dnm" id="dName"></div>
       <div class="dmeta" id="dMeta"></div>
       <div class="metrics" id="metrics"></div>
@@ -130,11 +144,11 @@
       <div class="offnote" id="offNote">这台设备当前不在线，上线后即可连接。</div>
       <!-- 缺数据说明（C §4：无数据源的字段显示 —，不编假数字）：页面探针耗时 / 码率 / 编码 /
            分辨率 / WebView 渲染估算 / 最后在线 / 系统版本均不在设备清单接口字段里，见重做报告缺数据清单。 -->
-      <div class="missing">页面探针耗时、码率、编码、分辨率、WebView 渲染估算、最后在线未接入本页数据源，显示为 —。</div>
-    </div>
+      <div class="missing">尚未获取的信息显示为 —。</div>
+    </section>
   </div>
 
-  <div class="statebox" id="stateBox">
+  <div class="statebox" id="stateBox" role="status" aria-live="polite" aria-atomic="true">
     <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin:0 auto 12px; display:block; stroke:var(--text-2);" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
     <div class="t" id="stateTitle">正在读取设备列表…</div>
     <div class="d" id="stateDesc"></div>
@@ -245,6 +259,8 @@
   }
 
   function render() {
+    // Rebuilding rows must not throw keyboard users back to the start of the page.
+    const focusedNodeId = document.activeElement && document.activeElement.dataset.nodeId;
     els.groups.innerHTML = '';
     if (renderedOnce) els.groups.parentElement.classList.add('done'); // .list.done 才命中 CSS 停播规则
     renderedOnce = true;
@@ -267,6 +283,7 @@
         row.dataset.nodeId = d.id;
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
+        row.setAttribute('aria-pressed', String(d.id === selectedId));
         // B §0.3：stagger 22ms/项，最多前 7 项；第 8 项起 0 延迟
         if (rowIndex < 7) row.style.animationDelay = (rowIndex * 22) + 'ms';
         rowIndex++;
@@ -279,11 +296,17 @@
         txt.appendChild(nm); txt.appendChild(meta);
         const st = document.createElement('span'); st.className = 'st'; st.textContent = statusText(d);
         row.appendChild(dot); row.appendChild(txt); row.appendChild(st);
+        row.setAttribute('aria-label', (d.name || d.id) + '，' + statusText(d));
         const select = () => { selectedId = d.id; render(); };
         row.addEventListener('click', select);
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); } });
         els.groups.appendChild(row);
       }
+    }
+    if (focusedNodeId) {
+      const replacement = Array.from(els.groups.querySelectorAll('[data-node-id]'))
+        .find((row) => row.dataset.nodeId === focusedNodeId);
+      if (replacement) replacement.focus({ preventScroll: true });
     }
     const sel = findDevice(selectedId);
     const grp = sel ? findGroup(selectedId) : null;

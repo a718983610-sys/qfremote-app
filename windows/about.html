@@ -2,6 +2,9 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>关于 QFRemote</title>
 <link rel="stylesheet" href="shared.css">
 <style>
   html, body { height:100%; overflow:hidden; }
@@ -132,7 +135,7 @@
       <div class="nm">QFRemote</div>
       <div class="ds">远程控制 · 电脑控制端</div>
     </div>
-    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <button class="x" id="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
 
   <div class="card">
@@ -145,7 +148,7 @@
   </div>
 
   <div class="chk"><button class="btn" id="check">检查服务器状态</button></div>
-  <div class="res" id="res"></div>
+  <div class="res" id="res" role="status" aria-live="polite" aria-atomic="true"></div>
   <div class="chk"><button class="btn ghost" id="autolaunchBtn" style="display:none;">关闭开机自启</button></div>
   <div class="chk"><button class="btn ghost" id="healRetryBtn">重新尝试修复本机远程服务</button></div>
   <div class="res" id="healRes"></div>

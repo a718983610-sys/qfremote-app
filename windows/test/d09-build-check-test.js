@@ -30,7 +30,7 @@ const ROOT = path.join(__dirname, '..');
   const env = { SystemRoot: 'C:\\Windows' };
   ok('A1_sc_absolute', sysPrograms.scPath(env) === 'C:\\Windows\\System32\\sc.exe');
   ok('A2_reg_absolute', sysPrograms.regPath(env) === 'C:\\Windows\\System32\\reg.exe');
-  ok('A3_ps_absolute', sysPrograms.powershellPath(env) === 'C:\\Windows\\System32\\powershell.exe');
+  ok('A3_ps_absolute', sysPrograms.powershellPath(env) === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
   ok('A4_cmd_absolute', sysPrograms.cmdPath(env) === 'C:\\Windows\\System32\\cmd.exe');
   ok('A5_unknown_null', sysPrograms.resolveSystemProgram('evil.exe', env) === null);
   ok('A6_safe_cwd', sysPrograms.safeCwd(env) === 'C:\\Windows\\System32');

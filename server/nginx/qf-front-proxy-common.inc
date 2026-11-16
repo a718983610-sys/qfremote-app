@@ -12,11 +12,11 @@
 # 两处各管各的，避免 nginx add_header 继承覆盖互相吞掉。
 proxy_http_version 1.1;
 proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Real-IP $qf_client_ip;
+proxy_set_header X-Forwarded-For $qf_client_ip;
 # 公网唯一入口是 Cloudflare HTTPS 隧道，X-Forwarded-Proto 恒为 https；
 # 不取 $scheme（nginx 与 cloudflared 之间是明文 http，取它会谎报 http）。
 proxy_set_header X-Forwarded-Proto https;
 # S-091：Cloudflare 边缘注入的真实客户端 IP，原样透传给后端
 # （边缘会覆写该头，客户端自带值到不了这里；后端只认回环来源的该头）。
-proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+proxy_set_header CF-Connecting-IP $qf_client_ip;

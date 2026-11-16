@@ -20,9 +20,9 @@
   如需 CSP 须先做 nonce 改造，另立项。论坛 server.js 的 frame-ancestors
   单指令是全仓唯一 CSP，不动。
 - 请求头公共部分统一走 `qf-front-proxy-common.inc`：
-  `Host $host`、`X-Real-IP $remote_addr`、`X-Forwarded-For $proxy_add_x_forwarded_for`、
+  `Host $host`、`X-Real-IP $qf_client_ip`、`X-Forwarded-For $qf_client_ip`、
   `X-Forwarded-Proto https`（恒 https——nginx 与 cloudflared 之间是明文 http，
-  取 `$scheme` 会谎报 http）、`CF-Connecting-IP $http_cf_connecting_ip`
+  取 `$scheme` 会谎报 http）、`CF-Connecting-IP $qf_client_ip`
   （Cloudflare 边缘覆写注入，原样透传；后端 S-091 只认回环来源的该头）。
 - WebSocket 位置（`.ashx`、`/console-engine/`）各自显式设
   `Upgrade $http_upgrade`／`Connection "upgrade"`，common.inc 里不放升级头。
@@ -75,7 +75,7 @@
 - 仅三个路径放宽（§1 表）：`files/send` 与 `stream chunk` 300m、
   `pay submit/recognize` 25m——数值按后端上限（288MB／17MB）加头定死，
   新增上传路径须先改后端上限、再改本文件、再改本契约，不得只改一边。
-- 并发：`limit_conn_zone $binary_remote_addr zone=qf_upload:10m`（http 层），
+- 并发：`limit_conn_zone $qf_client_ip zone=qf_upload:10m`（http 层），
   三个大体量 location 各 `limit_conn qf_upload 2`（每 IP 同时 2 路）。
 - 磁盘：`client_body` 走默认临时目录（`/var/lib/nginx/tmp/client_body`）；
   300m 体量×每 IP 2 路，最坏单 IP 占盘 600MB；部署前确认该盘余量，
@@ -96,3 +96,7 @@
    （在沙箱搭临时配置跑 `nginx -T` 做同一组断言）。
 5. `nginx -t` 通过后 `nginx -s reload`；线上实际上传核验（200MB 文件发送、
    12MB 付款截图提交）随部署窗口做，不在仓库内谎称已验。
+
+## M-026 / M-158 修复说明
+
+所有反代位置（含 `/assistant-api/` 与内部 whoami）显式传递 Cloudflare 边缘地址，XFF 被覆写而非追加客户端输入；后端仅从回环 socket 接受合法的 CF-Connecting-IP，无该头则使用 socket 地址。此信任建立在 cloudflared 是回环监听器唯一公网入口的部署前提上。上传并发也按边缘 IP 分桶。`proxy_ssl_verify off` 只适用于已注明的本机自签 HTTPS 上游，六个外置 map 的真实值仍须部署窗口核对（M-159 未闭合）。

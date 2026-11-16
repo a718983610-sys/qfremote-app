@@ -69,7 +69,7 @@ jobs:
 
       - name: 全值比对 release.json 与实际产物（含签名验签）
         run: |
-          ARGS="--check server/meshcentral/public/release.json --require-signature --expect-key-id release-1"
+          ARGS="--check server/meshcentral/public/release.json --require-signature --expect-key-id release-1 --expect-version $APP_VERSION"
           if [ "${{ inputs.allow_min_usable_below_version }}" = "true" ]; then
             ARGS="$ARGS --allow-min-usable"
           fi

@@ -37,7 +37,7 @@ typedef struct {
 void ush_parse_target(const char *params_json, ush_target_t *out);
 
 /* 初始化 UIA（CoInitialize + CoCreateInstance CUIAutomation）。
- * 须在主线程调用一次；失败返回 0。 */
+ * 须在执行 UIA 命令的同一工作线程调用和释放（MTA）；失败返回 0。 */
 int ush_uia_init(void);
 void ush_uia_shutdown(void);
 

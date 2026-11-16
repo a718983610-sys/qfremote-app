@@ -1,4 +1,5 @@
 'use strict';
+const { trustedClientIp: edgeClientIp } = require('../request-context');
 /*
  * LEA 服务端 HTTP 路由 · Stage 1 MVP（DESIGN §8.1）
  * ============================================================
@@ -82,46 +83,9 @@ function createLeaRoutes(core, channel, deps) {
     const h = req.headers && (req.headers['x-qfr-request-id'] || req.headers['X-QFR-Request-Id']);
     return (typeof h === 'string' && h) ? h : 'req_' + crypto.randomBytes(8).toString('hex');
   }
-  // S-091：可信反代层注入的真实 IP（崩溃端点 N-02 修法；与 server.js
-  // clientIpFromReq 同口径：socket 须为回环才信任何代理头）。
-  // 信任链：ext 服务只听回环，唯一入口是本机 nginx；nginx 经
-  // $proxy_add_x_forwarded_for 追加直连方 IP，Cloudflare 边缘追加真实
-  // 客户端 IP 并以 CF-Connecting-IP 透传（边缘会覆写该头，客户端自带
-  // 的伪造值到边缘即被替换，到不了这里）。
-  // 取值顺序：
-  //   ① CF-Connecting-IP（合法 IP 才认）；② XFF 自末段起第一个非回环
-  //   段——nginx 追加的是 127.0.0.1，倒数第二个非回环段即边缘所见的
-  //   真实 IP，攻击者自带的首段伪造值天然被跳过；③ socket IP。
-  // 非回环直连（无可信反代在路径上）一律用 socket IP，XFF 全忽略。
-  function isLoopbackIp(ip) {
-    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-  }
-  function normalizeIp(ip) {
-    if (typeof ip !== 'string') return null;
-    const v = ip.trim().replace(/^::ffff:/, '');
-    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(v) && v.split('.').every((n) => Number(n) <= 255)) return v;
-    if (/^[0-9a-fA-F:]+$/.test(v) && v.includes(':')) return v.toLowerCase();
-    return null;
-  }
-  function trustedClientIp(req) {
-    const headers = req.headers || {};
-    const remoteRaw = (req.socket && req.socket.remoteAddress) || '';
-    const remote = normalizeIp(remoteRaw);
-    if (!isLoopbackIp(remoteRaw) && !isLoopbackIp(remote || '')) {
-      // 直连（无可信反代）：只信 socket，不认任何代理头。
-      return remote || null;
-    }
-    const cf = normalizeIp(headers['cf-connecting-ip'] || headers['CF-Connecting-IP']);
-    if (cf && !isLoopbackIp(cf)) return cf;
-    const xff = headers['x-forwarded-for'];
-    if (typeof xff === 'string' && xff) {
-      const segs = xff.split(',').map((s) => normalizeIp(s)).filter(Boolean);
-      for (let i = segs.length - 1; i >= 0; i--) {
-        if (!isLoopbackIp(segs[i])) return segs[i];
-      }
-    }
-    return remote || null;
-  }
+  // M-026 / S-091: accept CF-Connecting-IP only from the loopback proxy.
+  // Raw X-Forwarded-For is never an identity or rate-limit source.
+  const trustedClientIp = edgeClientIp;
   function clientIp(req) { return trustedClientIp(req); }
   function auditCall(fields) { try { core.audit('lea-call', fields); } catch (e) {} }
 

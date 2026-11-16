@@ -10,7 +10,11 @@ log_format qfcookie '$time_iso8601 "$uri" $status bytes=$bytes_sent has_xid=$qf_
 
 # S-077 上传并发保护：每 IP 同一时刻最多 2 路大体量上传（见下方三个
 # 大体量 location 的 limit_conn）；zone 10m 约可记 16 万个 IP。
-limit_conn_zone $binary_remote_addr zone=qf_upload:10m;
+map $http_cf_connecting_ip $qf_client_ip {
+    default $http_cf_connecting_ip;
+    "" $remote_addr;
+}
+limit_conn_zone $qf_client_ip zone=qf_upload:10m;
 
 # QFRemote 临时通道本机反代：只听回环，cloudflared 快速隧道只对它开口。
 # / 及全部路径 -> MeshCentral 控制台(8443)；/register 与 /api/register -> 注册服务(8444)。
@@ -36,14 +40,18 @@ server {
     location = /register {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass https://127.0.0.1:8444;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /api/register {
         proxy_pass https://127.0.0.1:8444;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
-        proxy_ssl_verify off;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -52,14 +60,18 @@ server {
     location = /friends {
         if ($http_sec_fetch_dest = "document") { return 302 /#friends; }
         proxy_pass https://127.0.0.1:8445;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /api/friends {
         proxy_pass https://127.0.0.1:8445;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
-        proxy_ssl_verify off;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -67,21 +79,27 @@ server {
     location = /chat {
         if ($request_method = GET) { return 302 /#chat; }
         proxy_pass https://127.0.0.1:8445;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /chat/ {
         proxy_pass https://127.0.0.1:8445;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
-        proxy_ssl_verify off;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 安装包直下：/dl/<文件名.exe|.apk> -> 更新源官方覆盖目录里的同名文件
     location ~* ^/dl/([^/]+\.(exe|apk|zip|txt))$ {
         proxy_pass https://127.0.0.1:8443/$1;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         proxy_http_version 1.1;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
@@ -94,6 +112,8 @@ server {
     # 官网留言自家通道：POST /api/feedback -> 论坛服务进程内的留言模块(8446)
     location = /api/feedback {
         proxy_pass http://127.0.0.1:8446;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -102,11 +122,15 @@ server {
     location = /forum {
         if ($http_sec_fetch_dest = "document") { return 302 /#forum; }
         proxy_pass http://127.0.0.1:8446;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /api/forum {
         proxy_pass http://127.0.0.1:8446;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -115,11 +139,15 @@ server {
     location = /appeal {
         if ($request_method = GET) { return 302 /#appeal; }
         proxy_pass http://127.0.0.1:8450;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /appeal/ {
         proxy_pass http://127.0.0.1:8450;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -127,6 +155,8 @@ server {
     # 记住此设备：勾选「记住此设备」后的登录提交走自家登录垫片(8450)，其余登录原样
     location = /qf-login {
         proxy_pass http://127.0.0.1:8450;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -134,12 +164,16 @@ server {
     # 扩展服务（2.2.0）：站长管理 /admin + 积分 /points -> qfremote-ext(8448, 本机明文)
     location = /admin {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /admin/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -149,24 +183,32 @@ server {
     location = /home {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /home/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /purchase {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
     location = /license/status {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -174,6 +216,8 @@ server {
     # 站长 API（助手事件接口，#22/#31；高频只读轮询，不挂限流）
     location /assistant-api/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -181,6 +225,8 @@ server {
     location = /license/rebind {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -223,6 +269,8 @@ server {
 
     location /license/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：license 其余 JSON 接口收紧；
         # 大体量三处（files/send、stream chunk、pay submit/recognize）
         # 在本 location 之前由精确／正则 location 单独放宽。
@@ -231,12 +279,16 @@ server {
     location = /points {
         if ($http_sec_fetch_dest = "document") { return 302 /#points; }
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /points/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -245,32 +297,42 @@ server {
     location = /support {
         if ($http_sec_fetch_dest = "document") { return 302 /#support; }
         proxy_pass https://127.0.0.1:8445;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /support/ {
         proxy_pass https://127.0.0.1:8445;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /support/api/ {
         proxy_pass https://127.0.0.1:8445;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
-        proxy_ssl_verify off;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 统一档案（2.4.0 组装补）：/profile/* -> 扩展服务(8448)档案面；proxy_pass 不带 URI 段保留全路径
     location = /profile {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /profile/ {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -278,15 +340,19 @@ server {
     # 更新清单（2.4.0 组装补）：/release.json 现由兜底透传 8443，翻牌删兜底后须显式成路
     location = /release.json {
         proxy_pass https://127.0.0.1:8443;
-        proxy_ssl_verify off;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 隐私锁面板（2.3.2）：/lock/* -> 好友服务(8445)内的锁桥；proxy_pass 不带 URI 段以保留 /lock/ 前缀
     location /lock/ {
         proxy_pass https://127.0.0.1:8445;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
-        proxy_ssl_verify off;
+        proxy_ssl_verify off; # Loopback-only HTTPS upstream; never use for a remote upstream.
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -326,8 +392,9 @@ server {
     # 落 SPA 非 5xx（站长例外在故障期失效、可用性优先，与定案口径一致）。
     location @qf_spa_failsafe {
         proxy_pass http://qf_spa_upstream;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -336,10 +403,11 @@ server {
     location = /_qf_whoami {
         internal;
         proxy_pass http://127.0.0.1:8450;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header Cookie $http_cookie;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         proxy_connect_timeout 1s;
         proxy_send_timeout 1s;
         proxy_read_timeout 1s;
@@ -396,6 +464,8 @@ server {
     # 步3验收修复2：设备解析兜底 ext 路由（仓内 ext 有此端点、翻牌前亦未挂载，今补齐）
     location = /api/device/resolve {
         proxy_pass http://127.0.0.1:8448;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         proxy_http_version 1.1;
         client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
@@ -434,11 +504,12 @@ server {
     location ~* ^/console-engine/(.+\.ashx)$ {
         rewrite ^/console-engine/(.+)$ /$1 break;
         proxy_pass $qf_engine_upstream;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
@@ -449,11 +520,12 @@ server {
     # 会话数据面 *.ashx 通则（control/meshrelay/serverpic 等全集；条 16 长超时 86400s 不得压短）
     location ~* \.ashx$ {
         proxy_pass $qf_engine_upstream;
+        proxy_set_header CF-Connecting-IP $qf_client_ip;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $qf_client_ip;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;

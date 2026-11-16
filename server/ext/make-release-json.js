@@ -127,7 +127,7 @@ function sha256File(p) {
 }
 
 function parseArgs(argv) {
-  const a = { exe: null, apk: null, zip: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, files: [], signKey: null, keyId: RELEASE_SIGN_KEY_ID, verifyKey: null, requireSignature: false, expectKeyId: RELEASE_SIGN_KEY_ID };
+  const a = { exe: null, apk: null, zip: null, version: null, minUsable: null, notes: '', notesAndroid: '', out: null, check: null, allowMinUsable: false, allowUnsigned: false, interopWindow: 2, expectVersion: null, files: [], signKey: null, keyId: RELEASE_SIGN_KEY_ID, verifyKey: null, requireSignature: false, expectKeyId: RELEASE_SIGN_KEY_ID };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     const next = () => { if (i + 1 >= argv.length) fail('参数 ' + t + ' 缺少值'); return argv[++i]; };
@@ -137,6 +137,13 @@ function parseArgs(argv) {
     else if (t === '--version') a.version = next();
     else if (t === '--min-usable') a.minUsable = next();
     else if (t === '--allow-min-usable') a.allowMinUsable = true;
+    else if (t === '--allow-unsigned') a.allowUnsigned = true;
+    else if (t === '--expect-version') a.expectVersion = next();
+    else if (t === '--interop-window') {
+      const value = next();
+      if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) fail('--interop-window 须为正整数');
+      a.interopWindow = Number(value);
+    }
     else if (t === '--notes') a.notes = next();
     else if (t === '--notes-android') a.notesAndroid = next();
     else if (t === '--out') a.out = next();
@@ -151,11 +158,45 @@ function parseArgs(argv) {
     else if (t === '--verify-key') a.verifyKey = next();
     else if (t === '--expect-key-id') a.expectKeyId = next();
     else if (t === '--require-signature') a.requireSignature = true;
-    else if (t === '--help' || t === '-h') { console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(1, 31).join('\n')); process.exit(0); }
+    else if (t === '--help' || t === '-h') {
+      console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0].replace(/^#![^\n]*\n\/\*/, '').trim());
+      console.log('\n附加选项：\n  --allow-unsigned       显式允许写本地未签名草稿；不得用于正式发布\n  --expect-version X.Y.Z 校验清单和全部文件名均为指定版本\n  --interop-window N     兼容窗口正整数（默认 2）\n  --verify-key BASE64    覆盖验签信任根；会输出公钥指纹警告');
+      process.exit(0);
+    }
     else if (t.startsWith('-')) fail('未知参数：' + t);
     else a.files.push(t);
   }
+  if (a.expectVersion && !/^\d+\.\d+\.\d+$/.test(a.expectVersion)) fail('--expect-version 须为 x.y.z');
+  if (a.verifyKey) {
+    let key;
+    try { key = loadVerifyKey(a.verifyKey); } catch (_) { fail('--verify-key 无法加载公钥'); }
+    const fingerprint = crypto.createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex');
+    console.error('警告：--verify-key 覆盖了正式验签信任根；仅用于明确的轮换验证或隔离测试。公钥 SHA256=' + fingerprint);
+  }
   return a;
+}
+
+function checkArtifactVersion(file, version) {
+  const name = path.basename(file);
+  const match = /(?:^|[-_])v?(\d+\.\d+\.\d+)(?=[-_.]|$)/i.exec(name);
+  if (!match || match[1] !== version) fail('产物文件名版本与清单 version 不符：' + name + '（期望 ' + version + '）');
+}
+
+function writeAtomic(file, text) {
+  const target = path.resolve(file);
+  const tmp = path.join(path.dirname(target), '.' + path.basename(target) + '.' + crypto.randomBytes(12).toString('hex') + '.tmp');
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, text, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, target);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
 }
 
 function buildDoc(a) {
@@ -167,6 +208,7 @@ function buildDoc(a) {
   const minUsable = a.minUsable;
   if (!/^\d+\.\d+\.\d+$/.test(minUsable)) fail('minUsable 须为 x.y.z 形，实测：' + minUsable);
   if (!a.exe || !a.apk) fail('生成模式须同时传 --exe 与 --apk');
+  for (const file of [a.exe, a.apk, a.zip].filter(Boolean)) checkArtifactVersion(file, a.version);
   const exeName = path.basename(a.exe), apkName = path.basename(a.apk);
   const exeStat = fs.statSync(a.exe);
   const apkStat = fs.statSync(a.apk);
@@ -187,7 +229,7 @@ function buildDoc(a) {
       size: apkStat.size,
       minUsable
     },
-    interop: { window: 2, minVersion: a.version }
+    interop: { window: a.interopWindow, minVersion: a.version }
   };
   // D-04：--zip 给便携 ZIP 时加 portable 段（url/sha256/size），供便携版
   // 客户端下载 ZIP；不给则无此段（老版本无便携版）。
@@ -246,9 +288,14 @@ function checkMode(a) {
   }
   if (a.files.length !== 2 && a.files.length !== 3) fail('--check 模式须再给 exe 与 apk 两个文件路径（顺序：exe apk，便携版校验时再加 zip：exe apk zip）');
   const doc = JSON.parse(fs.readFileSync(a.check, 'utf8'));
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) fail('release.json 须为 JSON 对象');
   const [exeP, apkP, zipP] = a.files;
+  if (!/^\d+\.\d+\.\d+$/.test(doc.version || '')) fail('清单 version 须为 x.y.z');
+  if (a.expectVersion && doc.version !== a.expectVersion) fail('version 与 --expect-version 不符：' + doc.version + '（期望 ' + a.expectVersion + '）');
+  for (const file of [exeP, apkP, zipP].filter(Boolean)) checkArtifactVersion(file, a.expectVersion || doc.version);
   const problems = [];
   const expect = (label, got, want) => { if (got !== want) problems.push(label + '：文档 ' + JSON.stringify(got) + ' vs 实测 ' + JSON.stringify(want)); };
+  if (doc.interop && (!Number.isSafeInteger(doc.interop.window) || doc.interop.window < 1)) problems.push('interop window 须为正整数');
   expect('exe size', doc.size, fs.statSync(exeP).size);
   expect('exe sha256', doc.sha256, sha256File(exeP));
   expect('apk size', doc.android && doc.android.size, fs.statSync(apkP).size);
@@ -341,16 +388,20 @@ function checkMode(a) {
 function main() {
   const a = parseArgs(process.argv.slice(2));
   if (a.check) return checkMode(a);
+  if (a.out && !a.signKey && !a.allowUnsigned) fail('写入清单必须传 --sign-key；本地草稿须显式传 --allow-unsigned，禁止作为正式清单发布');
   const doc = signDoc(buildDoc(a), a);
   const problems = verifySelf(doc, a);
   if (problems.length) { problems.forEach(p => console.error('自校验失败：' + p)); process.exit(1); }
   const text = JSON.stringify(doc, null, 2) + '\n';
   if (a.out) {
-    fs.writeFileSync(a.out, text);
+    writeAtomic(a.out, text);
     console.log('已写入 ' + a.out + '（version ' + doc.version + '，minUsable ' + doc.minUsable + '，exe ' + doc.size + ' B，apk ' + doc.android.size + ' B' + (doc.portable ? '，便携 zip ' + doc.portable.size + ' B' : '') + '，自校验通过' + (doc.signature ? '，已签名 key_id=' + doc.signature.key_id : '，未签名') + '）。');
   } else {
     process.stdout.write(text);
     console.error('（未写文件：未传 --out。发版时显式传 --out 指向 server/meshcentral/public/release.json。）');
   }
 }
-main();
+try { main(); } catch (e) {
+  // CLI 输入错误只报告可读诊断，不输出堆栈或密钥文件内容。
+  fail('操作失败：' + (e && e.message ? e.message : '未知错误'));
+}

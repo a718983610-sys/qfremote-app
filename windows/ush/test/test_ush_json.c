@@ -114,7 +114,7 @@ static void test_json_double(void) {
     CHECK(ush_json_get_double("{\"rel_x\":0.5}", "rel_x", &d) == 1 && d == 0.5, "dbl: 0.5");
     CHECK(ush_json_get_double("{\"rel_x\":-1.25,\"rel_y\":2}", "rel_x", &d) == 1 && d == -1.25, "dbl: negative");
     CHECK(ush_json_get_double("{\"rel_x\":1e-1}", "rel_x", &d) == 1 && d > 0.099 && d < 0.101, "dbl: exponent");
-    CHECK(ush_json_get_double("{\"rel_x\":.5}", "rel_x", &d) == 1 && d == 0.5, "dbl: leading dot");
+    CHECK(ush_json_get_double("{\"rel_x\":.5}", "rel_x", &d) == 0, "dbl: leading dot rejected");
     CHECK(ush_json_get_double("{\"rel_x\":0}", "rel_x", &d) == 1 && d == 0, "dbl: zero");
     CHECK(ush_json_get_double("{\"rel_x\":\"0.5\"}", "rel_x", &d) == 0, "dbl: string rejected");
     CHECK(ush_json_get_double("{\"rel_x\":0.5x}", "rel_x", &d) == 0, "dbl: trailing garbage rejected");
@@ -239,7 +239,45 @@ static void test_parse_selfbind(void) {
         "C1 llong: non-number rejects");
 }
 
+
+static void test_completeness_regressions(void) {
+    char out[16];
+    long n = 17;
+    long long wide = 0;
+    double d = 0;
+    unsigned char decoded[16];
+    size_t count = 99;
+    CHECK(!ush_json_get_long("{\"n\":12garbage}", "n", &n) && n == 17, "M098: integer suffix rejected without mutation");
+    CHECK(!ush_json_get_long("{\"n\":1.5}", "n", &n), "M098: fractional integer rejected");
+    CHECK(!ush_json_get_llong("{\"n\":9223372036854775808}", "n", &wide), "M098: integer overflow rejected");
+    CHECK(!ush_json_get_double("{\"n\":01}", "n", &d), "M099: leading zero rejected");
+    CHECK(!ush_json_get_double("{\"n\":1.}", "n", &d), "M099: fraction requires digits");
+    CHECK(!ush_json_get_double("{\"n\":1e+}", "n", &d), "M099: exponent requires digits");
+    memset(out, 'x', sizeof(out));
+    CHECK(!ush_json_get_string("{\"x\":\"abcdefghijklmnopq\"}", "x", out, sizeof(out)) && out[0] == 0, "M097: failed string is empty and terminated");
+    memset(out, 'x', sizeof(out));
+    CHECK(!ush_json_escape("\"\"\"\"\"\"\"\"\"\"", out, sizeof(out)) && out[0] == 0, "M112: failed escaping never exposes stack bytes");
+    CHECK(!ush_base64_decode("=AAA", decoded, sizeof(decoded), &count) && count == 0, "M100: leading padding rejected");
+    CHECK(!ush_base64_decode("AA=A", decoded, sizeof(decoded), &count), "M100: padding cannot precede data");
+    CHECK(!ush_base64_decode("AA==AAAA", decoded, sizeof(decoded), &count), "M100: padding only in final quartet");
+    CHECK(!ush_base64_decode("AB==", decoded, sizeof(decoded), &count), "M100: noncanonical tail bits rejected");
+    CHECK(ush_base64_decode("AA==", decoded, sizeof(decoded), &count) && count == 1 && decoded[0] == 0, "M100: canonical one-byte encoding accepted");
+    ush_request_t r;
+    CHECK(ush_parse_request("{\"params\":{\"command\":\"ui.input\"}, \"command\" : \"ui.ping\", \"seq\":4294967296}", &r) && r.cmd == USH_CMD_PING && r.seq == 4294967296LL, "M098: wide seq preserved and nested command cannot shadow request");
+    CHECK(!ush_parse_request("{\"command\":\"ui.ping\",\"command\":\"ui.click\"}", &r), "protocol: duplicate command rejected");
+    CHECK(!ush_parse_request("{\"command\":\"ui.ping\",\"comm\\u0061nd\":\"ui.click\"}", &r), "protocol: escaped duplicate command rejected");
+    CHECK(!ush_parse_request("{\"command\":\"ui.ping\"}garbage", &r), "protocol: document trailing data rejected");
+    CHECK(ush_json_get_string("{\"x\" : \"ok\"}", "x", out, sizeof(out)) && !strcmp(out,"ok"), "protocol: whitespace before colon accepted");
+    const char *sample = "{\"x\":\"\\uD800\\uDC00\",\"n\":[1,{\"a\":true}]}";
+    char prefix[128];
+    for (size_t i = 0; i < strlen(sample); i++) {
+        memcpy(prefix, sample, i); prefix[i] = 0;
+        CHECK(!ush_json_get_string(prefix, "x", out, sizeof(out)), "protocol: truncated document rejected");
+    }
+}
+
 int main(void) {
+    test_completeness_regressions();
     test_parse_click();
     test_parse_variants();
     test_json_strings();

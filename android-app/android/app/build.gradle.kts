@@ -9,11 +9,30 @@ plugins {
 }
 
 // QFRemote 专属签名：key.properties 存在时用发布签名（CI 从仓库 Secret 写入），
-// 不存在时回退 debug 签名（本地调试用，绝不作为正式包分发）。
+// Release builds require a complete signing configuration. Explicit development
+// builds may opt into a debug signer; that artifact must stay in the dev channel.
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
+
+val allowDebugReleaseSigning = providers.environmentVariable("QFR_ALLOW_DEBUG_RELEASE_SIGNING")
+    .map { it == "1" }.getOrElse(false)
+val releaseSigningComplete = keystorePropertiesFile.exists() &&
+    listOf("keyAlias", "keyPassword", "storeFile", "storePassword").all {
+        !keystoreProperties.getProperty(it).isNullOrBlank()
+    } && rootProject.file("app").resolve(keystoreProperties.getProperty("storeFile", "")).isFile
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.project == project && it.name.contains("Release") }) {
+        if (!releaseSigningComplete && !allowDebugReleaseSigning) {
+            throw GradleException("Release signing is missing or incomplete; refusing a debug-signed release artifact.")
+        }
+        if (!releaseSigningComplete) {
+            logger.warn("QFREMOTE DEV ONLY: explicit debug signing override; this APK MUST NOT be published as production.")
+        }
+    }
 }
 
 android {
@@ -51,7 +70,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig = if (keystorePropertiesFile.exists()) {
+            signingConfig = if (releaseSigningComplete) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

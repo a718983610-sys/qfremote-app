@@ -9,23 +9,23 @@
 
 | 文件 | 说明 |
 |---|---|
-| `server.js` | 服务本体（Node 内置模块＋MeshCentral 自带 ws 模块，无额外依赖） |
-| `register.html` | 注册页（亮蓝家族风、移动端优先） |
-| `qfremote-register.service` | systemd 单元（专用用户 qfreg、开机自启、崩溃自拉） |
+| `server.js` | 服务本体（Node 内置模块＋本服务 package.json 锁定的 ws 依赖） |
+| `register.html` | 注册页（移动端优先） |
+| `package.json` / `package-lock.json` | 服务独立依赖；部署前运行 `npm ci --omit=dev` |
 | `test-logic.js` | 纯逻辑自测（时间/封禁状态机/账号与密码规则，20 项） |
 
 服务器落位：`/opt/qfremote-register/`，配置 `config.json`（600、qfreg 属主），
 数据 `data/state.json`，日志 `logs/register.log`，成功登记 `data/accounts.jsonl`。
 
-## 对外入口（端口方案）
+## 对外入口（现行同源代理）
 
-- 监听 **TCP 8444（HTTPS，自签证书，SAN=服务器 IP）**，注册页网址：
-  `https://app.qfremote.top/register`
-- 为什么不挂在 8443 同源下：MeshCentral 的官方覆盖目录只能放静态文件，
-  动态校验端点挂不进去；自签小服务独立端口是最小改动。**Lightsail 防火墙
-  需要放行 TCP 8444 才能从公网打开**（部署时只做了本机/隧道验证，放行由站长决定）。
-- 管理面零暴露：服务只有页面、`/health`、`/api/register` 三个路由；
-  没有任何管理接口；服务账号凭据只在服务器本机 config 里。
+公开入口为 `https://app.qfremote.top/register`，由仓库 `server/nginx/qfremote-proxy`
+将 `/register` 与 `/api/register` 转发至回环 `127.0.0.1:8444`。8444 是上游服务端口，
+无需为注册服务单独开放公网端口。TLS 配置与监听方式以部署配置为准；反代展开与
+线上行为仍须在部署窗口核验。
+
+服务仅提供注册页、健康检查与注册 API，无管理接口。专用服务账号凭据只存在于
+服务器配置文件中。systemd 单元由部署配置管理，本目录不声称包含未入库的单元文件。
 
 ## 建号通道与服务账号
 

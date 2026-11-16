@@ -16,8 +16,7 @@ abstract class QfTransferStream {
   TransferState get state;
   int get transferredBytes;
   int get totalBytes;
-  double get progress =>
-      totalBytes <= 0 ? 0 : transferredBytes / totalBytes;
+  double get progress => totalBytes <= 0 ? 0 : transferredBytes / totalBytes;
 
   /// 取消：已传分片保留偏移，供断点续传用。
   Future<void> cancel();
@@ -37,13 +36,18 @@ class Chunker {
   final int totalBytes;
   final int chunkSize;
 
-  const Chunker(this.totalBytes, {this.chunkSize = defaultChunkSize});
+  const Chunker(this.totalBytes, {this.chunkSize = defaultChunkSize})
+    : assert(totalBytes >= 0),
+      assert(chunkSize > 0);
 
   int get chunkCount =>
       totalBytes <= 0 ? 0 : (totalBytes + chunkSize - 1) ~/ chunkSize;
 
   /// 第 [index] 片的字节范围（左闭右开）。
   (int, int) chunkRange(int index) {
+    if (index < 0 || index >= chunkCount) {
+      throw RangeError.range(index, 0, chunkCount - 1, 'index');
+    }
     final start = index * chunkSize;
     final end = math.min(start + chunkSize, totalBytes);
     return (start, end);
@@ -74,13 +78,13 @@ class TransferAudit {
   });
 
   Map<String, Object?> toJson() => {
-        'direction': direction.name,
-        'path': path,
-        'sizeBytes': sizeBytes,
-        'peer': peerName,
-        'at': at.toIso8601String(),
-        'outcome': outcome.name,
-      };
+    'direction': direction.name,
+    'path': path,
+    'sizeBytes': sizeBytes,
+    'peer': peerName,
+    'at': at.toIso8601String(),
+    'outcome': outcome.name,
+  };
 }
 
 /// 传输会话（客户端状态机，纯逻辑）：进度、取消、断点续传偏移。
@@ -116,7 +120,7 @@ class FileTransferSession extends QfTransferStream {
 
   /// 确认一片已传（服务端回执后调）：推进偏移，传完即 done。
   void ackChunk(int bytes) {
-    if (state != TransferState.running) return;
+    if (state != TransferState.running || bytes <= 0) return;
     transferredBytes = math.min(transferredBytes + bytes, totalBytes);
     if (transferredBytes >= totalBytes) state = TransferState.done;
   }
@@ -143,11 +147,11 @@ class FileTransferSession extends QfTransferStream {
   }
 
   TransferAudit audit() => TransferAudit(
-        direction: direction,
-        path: path,
-        sizeBytes: totalBytes,
-        peerName: peerName,
-        at: DateTime.now(),
-        outcome: state,
-      );
+    direction: direction,
+    path: path,
+    sizeBytes: totalBytes,
+    peerName: peerName,
+    at: DateTime.now(),
+    outcome: state,
+  );
 }

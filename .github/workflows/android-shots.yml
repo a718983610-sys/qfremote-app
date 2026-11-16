@@ -14,10 +14,15 @@ permissions:
 # S-096：Flutter 版本单一变量复用——改这里即改全部步骤，不再各处写死。
 env:
   FLUTTER_VERSION: '3.47.8'
+  BUILD_TOOLS_VERSION: '35.0.0'
+
+concurrency:
+  group: android-shots-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   shots:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       # S-101：第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
@@ -49,13 +54,16 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 安装固定 Android build-tools
+        run: sdkmanager "build-tools;$BUILD_TOOLS_VERSION"
+
       - name: 下载最新正式包产物（截图里装的就是它）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           APP_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['version'])")
           echo "期望版本（version.json 单一源）: $APP_VERSION"
-          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          BT="$BUILD_TOOLS_VERSION"
           export PATH="$ANDROID_HOME/build-tools/$BT:$PATH"
           bash .github/scripts/fetch-prod-apk.sh \
             --repo ${{ github.repository }} --workflow android.yml \
@@ -66,7 +74,7 @@ jobs:
       - name: 编译测试包（指向本机夹具服务器）
         working-directory: android-app
         run: |
-          flutter pub get
+          flutter pub get --enforce-lockfile
           flutter build apk --debug \
             --dart-define=QF_TEST_URL=http://10.0.2.2:8791/start.html \
             --dart-define=QF_RELEASE_URL=http://10.0.2.2:8791/release.json
@@ -96,4 +104,4 @@ jobs:
         with:
           name: qfremote-android-previews
           path: shots/
-          if-no-files-found: warn
+          if-no-files-found: error

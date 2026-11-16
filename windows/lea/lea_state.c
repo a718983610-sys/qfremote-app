@@ -7,6 +7,22 @@
 #include <string.h>
 #include <time.h>
 
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static int state_atomic_replace(const char *tmp, const char *path) {
+#ifdef _WIN32
+    WCHAR wtmp[32768], wpath[32768];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, tmp, -1, wtmp, 32768) ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, 32768)) return 0;
+    return MoveFileExW(wtmp, wpath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return rename(tmp, path) == 0;
+#endif
+}
+
 /* ---------------- 绑定 ---------------- */
 const char *lea_bind_state_name(lea_bind_state_t s) {
     switch (s) {
@@ -253,6 +269,48 @@ int lea_replay_check_and_add(lea_replay_t *r, const char *request_id,
     return 1;
 }
 
+int lea_replay_save_to_file(const lea_replay_t *r, FILE *f, long long now) {
+    if (!r || !f) return 0;
+    for (int i = 0; i < r->count; i++) {
+        const lea_replay_entry_t *e = &r->entries[i];
+        if (e->expires_at <= now) continue;
+        char rid[800], nonce[800];
+        size_t ro = 0, no = 0;
+        if (!lea_json_escape_into(rid, sizeof(rid), &ro, e->request_id) ||
+            !lea_json_escape_into(nonce, sizeof(nonce), &no, e->nonce)) return 0;
+        if (fprintf(f, "{\"request_id\":\"%s\",\"nonce\":\"%s\",\"expires_at\":%lld}\n",
+                    rid, nonce, e->expires_at) < 0) return 0;
+    }
+    return !ferror(f);
+}
+
+int lea_replay_load_file(lea_replay_t *r, FILE *f, long long now) {
+    if (!r || !f) return 0;
+    lea_replay_init(r);
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        lea_replay_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+        if (!len || line[len - 1] != '\n' || !lea_json_is_valid(line) ||
+            !lea_json_string(line, "request_id", entry.request_id, sizeof(entry.request_id)) ||
+            !entry.request_id[0] ||
+            !lea_json_string(line, "nonce", entry.nonce, sizeof(entry.nonce)) ||
+            !lea_validate_token(entry.nonce) ||
+            !lea_json_long(line, "expires_at", &entry.expires_at) ||
+            entry.expires_at <= 0 || entry.expires_at > now + LEA_NONCE_TTL_SEC + 30) goto failed;
+        if (entry.expires_at <= now) continue;
+        if (r->count >= LEA_REPLAY_MAX) goto failed;
+        entry.used = 1;
+        r->entries[r->count++] = entry;
+    }
+    if (ferror(f)) goto failed;
+    return 1;
+failed:
+    lea_replay_init(r);
+    return 0;
+}
+
 /* ---------------- 吊销表写入（#17） ---------------- */
 /* C 侧吊销表写入方：lea_revoked_write（全量替换 revoked_keys.txt）。
  * 任一 id 非法（非 token 字符集）即整单拒绝，不写残集；去重＋排序后
@@ -293,8 +351,7 @@ int lea_revoked_write(const char *path, const char *const *key_ids, int n_key_id
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
     if (ok) {
-        remove(path);
-        if (rename(tmp, path) != 0) ok = 0;
+        if (!state_atomic_replace(tmp, path)) ok = 0;
     }
     if (!ok) remove(tmp);
     free(tmp);
@@ -562,8 +619,7 @@ int lea_revoked_generation_write(const char *gen_path, long long generation) {
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
     if (ok) {
-        remove(gen_path);
-        if (rename(tmp, gen_path) != 0) ok = 0;
+        if (!state_atomic_replace(tmp, gen_path)) ok = 0;
     }
     if (!ok) remove(tmp);
     free(tmp);
@@ -648,8 +704,7 @@ int lea_revoked_migrated_write(const char *mpath) {
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
     if (ok) {
-        remove(mpath);
-        if (rename(tmp, mpath) != 0) ok = 0;
+        if (!state_atomic_replace(tmp, mpath)) ok = 0;
     }
     if (!ok) remove(tmp);
     free(tmp);
