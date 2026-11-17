@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/svc_urls.dart';
+import '../core/webview_cookie_policy.dart';
 import 'frame.dart';
 import 'theme.dart';
 
@@ -41,6 +43,10 @@ class _ShellWebPageState extends State<ShellWebPage> {
   bool _httpFailed = false;
   int? _httpStatus;
 
+  /// S-027：壳内页渲染进程代次（死亡即换 Key 重建新实例，不 reload 旧实例）。
+  int _rendererGeneration = 0;
+  bool _rendererGone = false;
+
   Future<void> _openExternal(Uri url) async {
     try {
       await launchUrl(url, mode: LaunchMode.externalApplication);
@@ -60,47 +66,110 @@ class _ShellWebPageState extends State<ShellWebPage> {
       backgroundColor: p.pageColor,
       body: Column(
         children: [
-          QfPageHeader(title: widget.title, onBack: () => Navigator.of(context).pop()),
+          QfPageHeader(palette: p, title: widget.title, onBack: () => Navigator.of(context).pop()),
           if (_httpFailed)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              color: const Color(0xFFFDECEA),
+              // 定夺修订：不用危险色 12% tint 当条底（浅色下危险红落
+              // tint 底只有 4.12，旧 #A61E28 是即兴深红）；改分区底
+              // surface1（浅 #F7F7F8／深 #111113），文字直接用定夺
+              // 危险色：浅 #DC2626 对分区 4.51、深 #F87171 对卡片 6.82。
+              color: p.surface1,
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
-                      _httpStatus == 404
-                          ? '页面不存在（HTTP 404），请重试。'
-                          : '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
-                      style: const TextStyle(color: Color(0xFF7A1F1A), fontSize: 13),
+                      _rendererGone
+                          ? '页面进程已退出，请重试。'
+                          : _httpStatus == 404
+                              ? '页面不存在（HTTP 404），请重试。'
+                              : '页面加载失败${_httpStatus != null ? '（HTTP $_httpStatus）' : ''}，请重试。',
+                      // A9 修订（定夺）：条底改分区色后，危险色两端直接
+                      // 用 p.danger（浅 4.51／深 5.54），不再即兴深红。
+                      style: TextStyle(
+                          color: p.danger, fontSize: QfScale.fs13),
                     ),
                   ),
-                  TextButton(
+                  QfButtonTapTarget(child: TextButton(
                     onPressed: () {
-                      setState(() => _httpFailed = false);
-                      _controller?.reload();
+                      // S-027：渲染进程已死时 reload 旧实例无效，换 Key
+                      // 重建新实例（初始 URL 即当前页）；否则正常 reload。
+                      if (_rendererGone) {
+                        setState(() {
+                          _rendererGone = false;
+                          _httpFailed = false;
+                          _rendererGeneration++;
+                        });
+                      } else {
+                        setState(() => _httpFailed = false);
+                        _controller?.reload();
+                      }
                     },
+                    // A1：重试按钮补显式色 p.onCard（浅色 10.59／深色 16.81）；
+                    // 只靠 textButtonTheme 的 textSecondary，浅色同轨也只有 4.01。
+                    style: TextButton.styleFrom(
+                        foregroundColor: p.onCard),
                     child: const Text('重试'),
-                  ),
+                  )),
+                  // C §2.5：复制日志（真实错误码 HTTP 状态＋URL，
+                  // 不编造 NET-xxxx）。
+                  QfButtonTapTarget(child: TextButton(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(
+                          text:
+                              '页面加载失败（HTTP ${_httpStatus ?? '—'}）\n${widget.url}'));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('错误信息已复制。')),
+                        );
+                      }
+                    },
+                    style: TextButton.styleFrom(
+                        foregroundColor: p.onCard),
+                    child: const Text('复制日志'),
+                  )),
                 ],
               ),
             ),
           Expanded(
             child: InAppWebView(
+              key: ValueKey('shell-$_rendererGeneration'),
               initialUrlRequest: URLRequest(url: WebUri(widget.url)),
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
                 databaseEnabled: true,
                 cacheEnabled: true,
-                thirdPartyCookiesEnabled: true,
+                // S-044：壳内页同源，第三方 Cookie 关（分槽配置见
+                // WebViewCookiePolicy；两态验证见 verificationMatrix）。
+                thirdPartyCookiesEnabled:
+                    WebViewCookiePolicy.thirdPartyCookiesEnabledForShellPage,
+                // S-027：订阅渲染进程死亡事件（壳内页同款恢复）。
+                useOnRenderProcessGone: true,
                 useShouldOverrideUrlLoading: true,
                 mediaPlaybackRequiresUserGesture: false,
                 allowsInlineMediaPlayback: true,
                 applicationNameForUserAgent: 'QFRemote',
               ),
               onWebViewCreated: (controller) => _controller = controller,
+              // S-027：渲染进程死亡 → 失败条＋重试按钮（重试即换 Key 重建）。
+              onRenderProcessGone: (controller, detail) {
+                debugPrint(
+                  'QFRenderer shell gone didCrash=${detail.didCrash}',
+                );
+                if (mounted) {
+                  setState(() {
+                    _rendererGone = true;
+                    _httpFailed = true;
+                    _httpStatus = null;
+                  });
+                }
+              },
+              onRenderProcessResponsive: (controller, url) async {
+                debugPrint('QFRenderer shell responsive');
+                return null;
+              },
               shouldOverrideUrlLoading: (controller, action) async {
                 final u = action.request.url;
                 if (u == null) return NavigationActionPolicy.CANCEL;
@@ -114,8 +183,16 @@ class _ShellWebPageState extends State<ShellWebPage> {
                 }
                 return NavigationActionPolicy.ALLOW;
               },
-              onLoadStop: (controller, url) {
-                if (mounted && _httpFailed) setState(() => _httpFailed = false);
+              onLoadStart: (controller, url) {
+                // R-A4：失败标记在加载开始时复位（与 main.dart 同款 B2
+                // 逻辑对齐），不在 onLoadStop 清——onReceivedHttpError
+                // 先于 onLoadStop，旧写法会把刚立起的失败条立即清掉。
+                if (mounted && _httpFailed) {
+                  setState(() {
+                    _httpFailed = false;
+                    _httpStatus = null;
+                  });
+                }
               },
               onReceivedHttpError: (controller, request, response) {
                 // 主框 HTTP ≥500：不展示服务端错误页原文，显示原生失败条（B2）。

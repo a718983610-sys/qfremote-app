@@ -240,7 +240,11 @@ void main() {
             'qf_session_snapshot',
           ]),
           reason: '置闸存量开机必须清凭据＋会话快照（删除调用实证）');
-      expect(stored, isEmpty, reason: '清完后 secure storage 应无残留');
+      // R-A8：clearAll 另持久化“已手动退出”闸——三件存档仍须删干净，
+      // 但底层会多一个闸 key；闸只拦读凭据／会话（已是本场景要的停手
+      // 状态），下次登录成功落盘新凭据时清掉。
+      expect(stored.keys.toSet(), {'qf_manual_logout'},
+          reason: '清完后 secure storage 只剩手动退出闸，无凭据／快照残留');
       _expectLoggedOutComposition();
       await _tearDownTree(tester);
     });

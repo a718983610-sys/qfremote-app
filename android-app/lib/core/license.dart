@@ -308,12 +308,12 @@ GateCopy? gateCopyFor(LicenseDecision d) {
         hasClaimBox: true,
         hasTransferGuide: true,
       );
-    case 'G2': // L8
+    case 'G2': // L8（裁决批①同款：过期提示带到期日期；日期缺失时不留空）
       final when =
           d.trialExpiresMs != null ? formatDateZh(d.trialExpiresMs!) : '';
       return GateCopy(
         title: '试用已到期',
-        body: '您的 3 天免费试用已于 $when 到期。真实付费购买密钥后即可继续使用：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
+        body: '${when.isNotEmpty ? '您的 3 天免费试用已于 $when 到期' : '您的 3 天免费试用已到期'}。真实付费购买密钥后即可继续使用：两台电脑与一部手机可绑定同一密钥，网页版不限设备使用。',
         primary: GatePrimary.purchase,
         hasClaimBox: true,
         hasTransferGuide: true,
@@ -354,7 +354,8 @@ GateCopy? gateCopyFor(LicenseDecision d) {
       return GateCopy(
         title: '账号已被冻结',
         body: d.banCode == 'B10'
-            ? '该账户已被冻结（至 $when）。原因：检测到密钥绑定异常操作。如对处理结果有异议，可提交申诉。'
+            // R-A1：日期缺失时不留空（与 G2/G5 的 F3 守卫同口径）。
+            ? '${when.isNotEmpty ? '该账户已被冻结（至 $when）' : '该账户已被冻结'}。原因：检测到密钥绑定异常操作。如对处理结果有异议，可提交申诉。'
             : '该账号已被冻结，暂时无法登录${when.isEmpty ? '' : '（至 $when）'}。如需处理，可提交申诉查询原因。',
         primary: GatePrimary.appeal,
       );

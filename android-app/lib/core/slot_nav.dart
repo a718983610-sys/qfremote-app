@@ -59,6 +59,9 @@ class SlotLoadTracker {
 
   bool isLoaded(AppSlot slot) => _loaded.contains(slot);
 
+  /// 单槽重载失效（S-027 重建／S-032 COLD 释放后，下次切入按需重载）。
+  void invalidate(AppSlot slot) => _loaded.remove(slot);
+
   void invalidateAll() => _loaded.clear();
 }
 

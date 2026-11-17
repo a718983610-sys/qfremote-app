@@ -87,6 +87,63 @@ class ProfileInfo {
   }
 }
 
+/// LEA API 密钥行（C1：自助链接密钥在「我的」页展示用）。
+/// 只含展示字段，永不含 Key 明文（服务端列表接口本身不返回明文）。
+class LeaKeyInfo {
+  final String keyId;
+  final String? prefix;
+  final String status;
+  final bool selfBind;
+  final String? deviceName;
+  final String? platform;
+  final int? expiresAt;
+  final int? createdAt;
+  final String? deviceScope;
+
+  const LeaKeyInfo({
+    required this.keyId,
+    this.prefix,
+    required this.status,
+    required this.selfBind,
+    this.deviceName,
+    this.platform,
+    this.expiresAt,
+    this.createdAt,
+    this.deviceScope,
+  });
+
+  /// 纯解析（供自测）：key_id 缺失/非法即整行丢弃，其他字段缺失给 null。
+  static LeaKeyInfo? parse(Map<String, dynamic> m) {
+    final id = m['key_id'];
+    if (id is! String || id.isEmpty) return null;
+    int? asMs(dynamic v) => v is num ? v.toInt() : null;
+    return LeaKeyInfo(
+      keyId: id,
+      prefix: m['prefix'] is String ? m['prefix'] as String : null,
+      status: m['status'] is String ? m['status'] as String : '',
+      selfBind: m['self_bind'] == true,
+      deviceName: m['device_name'] is String ? m['device_name'] as String : null,
+      platform: m['platform'] is String ? m['platform'] as String : null,
+      expiresAt: asMs(m['expires_at']),
+      createdAt: asMs(m['created_at']),
+      deviceScope:
+          m['device_scope'] is String ? m['device_scope'] as String : null,
+    );
+  }
+
+  static List<LeaKeyInfo> parseList(String body) {
+    final d = jsonDecode(body);
+    if (d is! Map<String, dynamic>) return const [];
+    final keys = d['keys'];
+    if (keys is! List) return const [];
+    return keys
+        .whereType<Map<String, dynamic>>()
+        .map(parse)
+        .whereType<LeaKeyInfo>()
+        .toList();
+  }
+}
+
 /// 取控制台会话 cookie 的函数（由主页注入：从 WebView 的 CookieManager 取值）。
 typedef ConsoleCookieProvider = Future<String?> Function();
 
@@ -214,6 +271,32 @@ class ExtService {
       return (info: PointsInfo.parse(r.$2), authDead: false);
     } catch (_) {
       return (info: null, authDead: false);
+    }
+  }
+
+  /// C1：LEA API 密钥列表（控制台会话 cookie 鉴权；失败返回 null，
+  /// 调用方显示占位，不挡页面，与 fetchMe 同口径）。
+  Future<List<LeaKeyInfo>?> fetchLeaKeys() async {
+    final r = await _send('GET', '${urls.pointsApiBase}/api/lea/v1/keys');
+    if (r == null || r.$1 != 200) return null;
+    try {
+      return LeaKeyInfo.parseList(r.$2);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// C1：吊销一条自助链接密钥（无密码二次确认，只限 self_bind Key；
+  /// 控制台生成的 Key 调此接口会被服务端拒绝）。成功返回 true。
+  Future<bool> revokeLeaSelfBindKey(String keyId) async {
+    final r = await _send('POST',
+        '${urls.pointsApiBase}/api/lea/v1/self-bind/revoke/${Uri.encodeComponent(keyId)}');
+    if (r == null || r.$1 != 200) return false;
+    try {
+      final d = jsonDecode(r.$2);
+      return d is Map<String, dynamic> && d['ok'] == true;
+    } catch (_) {
+      return false;
     }
   }
 

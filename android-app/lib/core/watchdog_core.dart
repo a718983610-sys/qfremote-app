@@ -34,7 +34,12 @@ import 'dart:async';
 ///   - 全程不弹任何对话框，状态只经 onStatus 回调交给工具栏显示一行小字。
 
 /// 页面内状态检测脚本（与 Windows 版 DETECT_JS 原样一致）：
-/// 返回 'login' | 'disconnected' | 'partial' | 'ok'
+/// 返回 'login' | 'disconnected' | 'partial' | 'ok' |
+/// 'connected-wait-render' | 'connecting'
+/// （S-042/R-06：'connected-wait-render'＝#deskstatus 已是 Connected
+/// 但框内／顶层均无 #Desk 画布——会话握手已通、画面尚未就绪，不许再
+/// 报 ok；Dart 侧给 8–15 秒渲染宽限期，到期仍无画面报“连接已建立，
+/// 画面尚未就绪”并提供重协商／重连）。
 /// 2.4.5 B10：增加 iframe 分支（同源时读会话框 #qfFrame 的 contentDocument
 /// 里的 #deskstatus 与 #Desk 尺寸；跨域/读不到时返回 'unknown' 而非 'ok'，
 /// 不假报正常）与 'connecting' 态（顶层含「正在建立会话…」且无 #Desk 画布；
@@ -113,6 +118,9 @@ const String kDetectJs = r'''(function () {
   // 会话 iframe 分支：会话断线文本在会话框内，顶层看不到。
   var frame = document.querySelector('#qfFrame');
   var frameDoc = null, frameReadable = false;
+  // S-042/R-06：框内 Connected 文本提升到终端判定用——裸分支已删，
+  // 终端按“文本＋画布”二元判定，不许只凭文本报 ok。
+  var fDeskTextTop = '';
   if (frame) {
     try { frameDoc = frame.contentDocument; frameReadable = !!frameDoc; } catch (e) { frameReadable = false; }
   }
@@ -122,13 +130,16 @@ const String kDetectJs = r'''(function () {
     var fds = frameDoc.querySelector('#deskstatus');
     var fDesk = frameDoc.querySelector('#Desk');
     var fDeskText = fds ? (fds.textContent || '').trim() : '';
+    fDeskTextTop = fDeskText;
     var fHasCanvas = false;
     if (fDesk) { var r = fDesk.getBoundingClientRect(); fHasCanvas = r.width > 0 && r.height > 0; }
     if (statusText(fDeskText)) fs.statusHit = true;
     if (fs.statusHit && fs.btnHit) return 'disconnected';
     if (fs.statusHit || fs.btnHit) return 'partial';
     if (fDeskText === 'Connected' && fHasCanvas) return 'ok';
-    if (fDeskText === 'Connected') return 'ok';
+    // S-042/R-06：裸 `Connected` 分支已删（第二分支不查画布使第一
+    // 分支的检查无效，黑屏也报 ok）。Connected 无画布不立即回值，
+    // 落到终端按“文本＋画布”二元判定为 'connected-wait-render'。
     // 框内既无断线标记也无 Connected：可能是正在建立，交给顶层 connecting 判定
   }
   var top = scanDoc(document);
@@ -150,6 +161,10 @@ const String kDetectJs = r'''(function () {
     if (fd2) { var rr2 = fd2.getBoundingClientRect(); hasCanvas = hasCanvas || (rr2.width > 0 && rr2.height > 0); }
   }
   if (maskHit && !hasCanvas) return 'connecting';
+  // S-042/R-06 终端画布门：Connected 文本在、但顶层与框内均无画布时
+  // 不许落到无条件 `return 'ok'`（旧终端兜底与 :131 同病），回
+  // 'connected-wait-render' 走渲染宽限期通道；有画布才回 'ok'。
+  if (fDeskTextTop === 'Connected') return hasCanvas ? 'ok' : 'connected-wait-render';
   return 'ok';
 })()''';
 
@@ -222,15 +237,25 @@ const String kClickJs = r'''(function () {
 
 /// 看护需要的页面求值能力（由 WebView 控制器实现；单元测试用假实现）。
 abstract class WatchdogEvaluator {
-  /// 执行检测脚本，返回 'login'|'disconnected'|'partial'|'ok'，
-  /// 页面跳转中等异常情况抛错（看护按 'unknown' 处理、下一拍再看）。
+  /// 执行检测脚本，返回 'login'|'disconnected'|'partial'|'ok'|
+  /// 'connected-wait-render'|'connecting'，页面跳转中等异常情况抛错
+  /// （看护按 'unknown' 处理、下一拍再看）。
   Future<String> detect();
 
   /// 执行点击脚本，点到返回 true。
   Future<bool> clickReconnect();
 }
 
-enum WatchdogStatus { ok, reconnecting }
+enum WatchdogStatus {
+  /// 画布存在且有视频心跳——真正健康（video-ready，S-042）。
+  ok,
+
+  reconnecting,
+
+  /// 已连上、画面尚未就绪（S-042：Connected 文本在、无画布；
+  /// 渲染宽限期内只报此态，不报 ok，宽限期到后回调 onRenderNotReady）。
+  connectedWaitRender,
+}
 
 class WatchdogCore {
   final WatchdogEvaluator evaluator;
@@ -245,6 +270,14 @@ class WatchdogCore {
 
   /// 'connecting' 持续超标后回调（2.4.5 A1/B10）：原生层弹会话失败卡。
   final void Function() onConnectingStuck;
+
+  /// 渲染宽限期（S-042：8–15 秒，默认 12 秒）：'connected-wait-render'
+  /// 持续超此时限仍无画面，回调一次 [onRenderNotReady]（调用方提示
+  /// “连接已建立，画面尚未就绪”＋提供重协商／重连）。
+  final Duration renderGrace;
+
+  /// 'connected-wait-render' 持续超 [renderGrace] 后回调一次。
+  final void Function() onRenderNotReady;
 
   Timer? _timer;
   bool _stopped = false;
@@ -261,22 +294,30 @@ class WatchdogCore {
   DateTime? _connectingSince;
   bool _stuckReported = false;
 
+  /// connected-wait-render 持续出现时开始计时（S-042：持续超
+  /// renderGrace 仍无画面 → onRenderNotReady，只报一次）。
+  DateTime? _renderWaitSince;
+  bool _renderNotReadyReported = false;
+
   WatchdogCore({
     required this.evaluator,
     this.pollInterval = const Duration(seconds: 4),
     this.confirmScans = 2,
     this.backoffStart = const Duration(seconds: 5),
     this.backoffMax = const Duration(seconds: 30),
+    this.renderGrace = const Duration(seconds: 12),
     bool Function()? enabled,
     void Function(WatchdogStatus)? onStatus,
     void Function()? onReconnectClick,
     void Function(String)? log,
     void Function()? onConnectingStuck,
+    void Function()? onRenderNotReady,
   })  : enabled = enabled ?? (() => true),
         onStatus = onStatus ?? ((_) {}),
         onReconnectClick = onReconnectClick ?? (() {}),
         log = log ?? ((_) {}),
         onConnectingStuck = onConnectingStuck ?? (() {}),
+        onRenderNotReady = onRenderNotReady ?? (() {}),
         _backoff = backoffStart;
 
   bool get isReconnecting => _status == WatchdogStatus.reconnecting;
@@ -363,10 +404,31 @@ class WatchdogCore {
         onConnectingStuck();
       }
       _partialSince = null;
+      _renderWaitSince = null;
+      _renderNotReadyReported = false;
       return;
     }
     _connectingSince = null;
     _stuckReported = false;
+
+    // S-042：connected-wait-render（已连上、无画布）——状态拆分：
+    // 只报 connectedWaitRender，不报 ok；宽限期（默认 12 秒）内等画面，
+    // 到期仍无画面回调 onRenderNotReady 一次（调用方提示＋重协商／重连）。
+    if (state == 'connected-wait-render') {
+      _setStatus(WatchdogStatus.connectedWaitRender);
+      _renderWaitSince ??= DateTime.now();
+      if (!_renderNotReadyReported &&
+          DateTime.now().difference(_renderWaitSince!) >= renderGrace) {
+        _renderNotReadyReported = true;
+        log('render-not-ready');
+        onRenderNotReady();
+      }
+      _partialSince = null;
+      _confirmCount = 0;
+      return;
+    }
+    _renderWaitSince = null;
+    _renderNotReadyReported = false;
 
     // partial 连续 12 秒 → 升级为 disconnected，走同一确认流程。
     if (state == 'partial') {

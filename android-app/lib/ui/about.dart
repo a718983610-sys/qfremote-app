@@ -9,7 +9,9 @@ import '../core/manifest.dart';
 import '../core/update_policy.dart';
 import '../services/points.dart';
 import '../services/probe.dart';
+import 'qf_icons.dart';
 import 'theme.dart';
+import 'reduced_motion.dart';
 
 /// 关于面板需要的外部能力（由主页注入，面板本身不直接碰 WebView）。
 class AboutDeps {
@@ -43,7 +45,7 @@ class AboutDeps {
 }
 
 Future<void> showQfAboutDialog(BuildContext context, AboutDeps deps) {
-  return showDialog<void>(
+  return showQfDialog<void>(
     context: context,
     builder: (context) => _AboutDialog(deps: deps),
   );
@@ -169,11 +171,11 @@ class _AboutDialogState extends State<_AboutDialog> {
         children: [
           SizedBox(
             width: 76,
-            child: Text(label, style: TextStyle(color: p.onCardDim, fontSize: 12.5)),
+            child: Text(label, style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs13)),
           ),
           Expanded(
             child: Text(value,
-                style: TextStyle(color: p.onCard, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                style: TextStyle(color: p.onCard, fontSize: QfScale.fs14, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
@@ -185,19 +187,17 @@ class _AboutDialogState extends State<_AboutDialog> {
     final d = widget.deps;
     final p = d.palette;
     final primaryStyle = FilledButton.styleFrom(
-      backgroundColor: QfPalette.brand,
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      backgroundColor: p.brand,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusMd)),
     );
     final ghostStyle = OutlinedButton.styleFrom(
       foregroundColor: p.onCard,
       side: BorderSide(color: p.tileBorder),
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusMd)),
     );
     return Dialog(
       backgroundColor: p.cardColor,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusLg)),
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
@@ -214,11 +214,11 @@ class _AboutDialogState extends State<_AboutDialog> {
                     padding: const EdgeInsets.all(3),
                     decoration: BoxDecoration(
                       color: p.tileFill,
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(QfScale.radiusMd),
                       border: Border.all(color: p.tileBorder),
                     ),
                     child: ClipRRect(
-                      borderRadius: BorderRadius.circular(9),
+                      borderRadius: BorderRadius.circular(QfScale.radiusMd),
                       child: Image.asset('assets/icon.png', fit: BoxFit.cover),
                     ),
                   ),
@@ -228,9 +228,9 @@ class _AboutDialogState extends State<_AboutDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('QFRemote',
-                            style: TextStyle(color: p.onCard, fontSize: 18, fontWeight: FontWeight.w700)),
+                            style: TextStyle(color: p.onCard, fontSize: QfScale.fs20, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
-                        Text('关于', style: TextStyle(color: p.onCardDim, fontSize: 12)),
+                        Text('关于', style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs12)),
                       ],
                     ),
                   ),
@@ -238,14 +238,14 @@ class _AboutDialogState extends State<_AboutDialog> {
                     onPressed: () => Navigator.of(context).pop(),
                     icon: Icon(Icons.close, size: 19, color: p.onCardDim),
                     style: IconButton.styleFrom(
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(QfScale.radiusMd)),
                     ),
                     tooltip: '关闭',
                   ),
                 ],
               ),
               const SizedBox(height: 10),
-              _infoRow(p, '当前版本', 'v${d.currentVersion}'),
+              _infoRow(p, '当前版本', 'v${displayVersion(d.currentVersion)}'),
               Divider(height: 1, color: p.tileBorder),
               _infoRow(p, '构建日期', kBuildDate),
               Divider(height: 1, color: p.tileBorder),
@@ -256,18 +256,18 @@ class _AboutDialogState extends State<_AboutDialog> {
               _infoRow(p, '我的积分', _points?.points == null ? '—' : '${_points!.points} 分'),
               const SizedBox(height: 14),
               if (_probeText != null) ...[
-                Text(_probeText!, style: TextStyle(color: p.onCard, fontSize: 13)),
+                Text(_probeText!, style: TextStyle(color: p.onCard, fontSize: QfScale.fs13)),
                 const SizedBox(height: 8),
               ],
-              FilledButton.icon(
+              QfButtonTapTarget(child: FilledButton.icon(
                 onPressed: _probing ? null : _probe,
                 style: primaryStyle,
-                icon: const Icon(Icons.network_ping, size: 18),
+                icon: const QfIcon(QfIconKind.probe, size: 18),
                 label: Text(_probing ? '检查中…' : '检查服务器状态'),
-              ),
+              )),
               const SizedBox(height: 16),
               if (_updateText != null) ...[
-                Text(_updateText!, style: TextStyle(color: p.onCard, fontSize: 13)),
+                Text(_updateText!, style: TextStyle(color: p.onCard, fontSize: QfScale.fs13)),
                 const SizedBox(height: 6),
               ],
               if (_entry != null && _entry!.notes.isNotEmpty)
@@ -275,30 +275,28 @@ class _AboutDialogState extends State<_AboutDialog> {
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   decoration: BoxDecoration(
-                    color: p.isDark
-                        ? const Color(0xFF2B2F36)
-                        : const Color(0xFFEEF3FB),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: p.isDark
-                            ? Colors.white.withValues(alpha: 0.10)
-                            : const Color(0xFFDFE7F2)),
+                    color: p.iconChipColor,
+                    borderRadius: BorderRadius.circular(QfScale.radiusMd),
+                    border: Border.all(color: p.cardBorder),
                   ),
                   child: Text(_entry!.notes,
-                      style: TextStyle(color: p.onCard, fontSize: 13, height: 1.5)),
+                      style: TextStyle(color: p.onCard, fontSize: QfScale.fs13, height: 1.5)),
                 ),
               if (_downloading || _file != null) ...[
                 const SizedBox(height: 12),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
+                  child: QfLoadingBar(
                     // 总大小未知时给不确定进度，不假装冻在 0%
+                    // （reduced motion 下不定条改静止空轨，见 QfLoadingBar）。
                     value: _file != null
                         ? 1
                         : (_total != null && _total! > 0 ? _percent / 100 : null),
                     minHeight: 8,
-                    backgroundColor: p.onCardDim.withValues(alpha: 0.2),
-                    valueColor: const AlwaysStoppedAnimation<Color>(QfPalette.brand),
+                    // 6 项定夺②：轨道不用 20% 半透明次级字（会渲染出第 7 个
+                    // 灰阶），改实色卡片边框（本页已计数）。
+                    backgroundColor: p.cardBorder,
+                    color: p.brand,
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -308,61 +306,61 @@ class _AboutDialogState extends State<_AboutDialog> {
                         : (_total != null && _total! > 0
                             ? '正在下载… $_percent%'
                             : '正在下载… ${(_received / 1048576).toStringAsFixed(1)} MB'),
-                    style: TextStyle(color: p.onCardDim, fontSize: 12)),
+                    style: TextStyle(color: p.onCardDim, fontSize: QfScale.fs12)),
               ],
               if (_downloadError != null) ...[
                 const SizedBox(height: 8),
-                Text(_downloadError!, style: const TextStyle(color: QfPalette.probeBad, fontSize: 12.5)),
+                Text(_downloadError!, style: TextStyle(color: p.danger, fontSize: QfScale.fs13)),
               ],
               const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(
-                    child: OutlinedButton.icon(
+                    child: QfButtonTapTarget(child: OutlinedButton.icon(
                       onPressed: _checking ? null : _check,
                       style: ghostStyle,
-                      icon: const Icon(Icons.system_update_alt, size: 18),
+                      icon: const QfIcon(QfIconKind.download, size: 18),
                       label: Text(_checking ? '检查中…' : '检查更新'),
-                    ),
+                    )),
                   ),
                   if (_entry != null && _file == null) ...[
                     const SizedBox(width: 10),
                     Expanded(
-                      child: FilledButton.icon(
+                      child: QfButtonTapTarget(child: FilledButton.icon(
                         onPressed: _downloading ? null : _download,
                         style: primaryStyle,
-                        icon: const Icon(Icons.download, size: 18),
+                        icon: const QfIcon(QfIconKind.download, size: 18),
                         label: const Text('下载更新'),
-                      ),
+                      )),
                     ),
                   ],
                   if (_file != null) ...[
                     const SizedBox(width: 10),
                     Expanded(
-                      child: FilledButton.icon(
+                      child: QfButtonTapTarget(child: FilledButton.icon(
                         onPressed: () => d.openInstaller(_file!),
                         style: primaryStyle,
-                        icon: const Icon(Icons.install_mobile, size: 18),
+                        icon: const QfIcon(QfIconKind.installPhone, size: 18),
                         label: const Text('打开安装包'),
-                      ),
+                      )),
                     ),
                   ],
                 ],
               ),
               const SizedBox(height: 10),
-              OutlinedButton.icon(
+              QfButtonTapTarget(child: OutlinedButton.icon(
                 onPressed: _copyDiag,
                 style: ghostStyle,
                 icon: const Icon(Icons.copy_all_outlined, size: 18),
                 label: const Text('复制诊断信息'),
-              ),
+              )),
               Align(
                 alignment: Alignment.centerRight,
-                child: TextButton(
+                child: QfButtonTapTarget(child: TextButton(
                   onPressed: () => Navigator.of(context).pop(),
                   style: TextButton.styleFrom(foregroundColor: p.onCardDim),
                   child: const Text('关闭'),
-                ),
+                )),
               ),
             ],
           ),
