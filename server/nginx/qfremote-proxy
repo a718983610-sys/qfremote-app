@@ -8,6 +8,10 @@ map $http_cookie $qf_has_qfrem { default 0; "~(^|;\s*)qfrem=" 1; }
 map $http_cookie $qf_dup_xid   { default 0; "~(^|;\s*)xid=[^;]*;.*;\s*xid=" 1; }
 log_format qfcookie '$time_iso8601 "$uri" $status bytes=$bytes_sent has_xid=$qf_has_xid has_sig=$qf_has_sig has_qfrem=$qf_has_qfrem dup_xid=$qf_dup_xid ua="$http_user_agent"';
 
+# S-077 上传并发保护：每 IP 同一时刻最多 2 路大体量上传（见下方三个
+# 大体量 location 的 limit_conn）；zone 10m 约可记 16 万个 IP。
+limit_conn_zone $binary_remote_addr zone=qf_upload:10m;
+
 # QFRemote 临时通道本机反代：只听回环，cloudflared 快速隧道只对它开口。
 # / 及全部路径 -> MeshCentral 控制台(8443)；/register 与 /api/register -> 注册服务(8444)。
 # 记住此设备（控制台面）：带 qfrem=1 标记的请求改走登录垫片(8450)通用转发，
@@ -23,7 +27,10 @@ server {
     server_name _;
     access_log /var/log/nginx/qf-ws-cookie.log qfcookie;
 
-    client_max_body_size 512m;
+    # S-077（2026-11-15）：默认收紧 512m -> 10m；大体量上传只在下方
+    # 三个精确／正则 location 单独放宽（files/send 与 stream chunk 300m、
+    # pay submit/recognize 25m），其余 JSON API 各自再收 1m。
+    client_max_body_size 10m;
     absolute_redirect off; # P2-010（2026-10-26 巡查）：收口 return 302 一律相对路径，防经隧道生成 http://域名:8080 死链
 
     location = /register {
@@ -35,6 +42,7 @@ server {
 
     location = /api/register {
         proxy_pass https://127.0.0.1:8444;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -50,6 +58,7 @@ server {
 
     location /api/friends {
         proxy_pass https://127.0.0.1:8445;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -64,6 +73,7 @@ server {
 
     location /chat/ {
         proxy_pass https://127.0.0.1:8445;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -84,6 +94,7 @@ server {
     # 官网留言自家通道：POST /api/feedback -> 论坛服务进程内的留言模块(8446)
     location = /api/feedback {
         proxy_pass http://127.0.0.1:8446;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -96,6 +107,7 @@ server {
 
     location /api/forum {
         proxy_pass http://127.0.0.1:8446;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -108,23 +120,27 @@ server {
 
     location /appeal/ {
         proxy_pass http://127.0.0.1:8450;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 记住此设备：勾选「记住此设备」后的登录提交走自家登录垫片(8450)，其余登录原样
     location = /qf-login {
         proxy_pass http://127.0.0.1:8450;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 扩展服务（2.2.0）：站长管理 /admin + 积分 /points -> qfremote-ext(8448, 本机明文)
     location = /admin {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /admin/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -133,48 +149,95 @@ server {
     location = /home {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /home/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /purchase {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
     location = /license/status {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 站长 API（助手事件接口，#22/#31；高频只读轮询，不挂限流）
     location /assistant-api/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /license/rebind {
         if ($http_sec_fetch_dest = "document") { return 302 /; }
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
+    }
+
+    # S-077 大体量上传（精确／正则 location 优先于 /license/ 前缀匹配）：
+    # 200MB 单文件 base64 约 267MB + JSON 包装，后端 BODY_LIMIT_FILE=288MB，
+    # 故 nginx 放 300m；付款截图 12MB 图 base64 约 16MB，后端 BODY_LIMIT_SHOT=17MB，
+    # 故 nginx 放 25m。并发每 IP 2 路（limit_conn qf_upload），超时按体量给足。
+    # 磁盘保护：client_body 走默认临时目录，与 ext 服务端 1GB 轮转封顶共同兜底；
+    # 300m 体量下并发 2 路最坏占盘 600MB，须保证 /var/lib/nginx 所在盘留有余量。
+    location = /license/api/files/send {
+        proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 300m;
+        client_body_timeout 300s;
+        proxy_read_timeout 300s;
+        limit_conn qf_upload 2;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    location ~ ^/license/api/files/stream/[^/]+/chunk$ {
+        proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 300m;
+        client_body_timeout 300s;
+        proxy_read_timeout 300s;
+        limit_conn qf_upload 2;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    location ~ ^/license/api/pay/orders/[^/]+/(submit|recognize)$ {
+        proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 25m;
+        client_body_timeout 120s;
+        proxy_read_timeout 120s;
+        limit_conn qf_upload 2;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
     }
 
     location /license/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：license 其余 JSON 接口收紧；
+        # 大体量三处（files/send、stream chunk、pay submit/recognize）
+        # 在本 location 之前由精确／正则 location 单独放宽。
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
     location = /points {
         if ($http_sec_fetch_dest = "document") { return 302 /#points; }
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /points/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -194,6 +257,7 @@ server {
 
     location /support/api/ {
         proxy_pass https://127.0.0.1:8445;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -201,11 +265,13 @@ server {
     # 统一档案（2.4.0 组装补）：/profile/* -> 扩展服务(8448)档案面；proxy_pass 不带 URI 段保留全路径
     location = /profile {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /profile/ {
         proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
@@ -219,6 +285,7 @@ server {
     # 隐私锁面板（2.3.2）：/lock/* -> 好友服务(8445)内的锁桥；proxy_pass 不带 URI 段以保留 /lock/ 前缀
     location /lock/ {
         proxy_pass https://127.0.0.1:8445;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         proxy_ssl_verify off;
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
@@ -232,7 +299,8 @@ server {
         proxy_pass $qf_login_upstream;
         proxy_redirect off;
         error_page 500 502 503 504 = @qf_spa_failsafe;
-        include qf-front-proxy-common.inc;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
     }
 
     # 前置分流主入口（2.4.0 翻牌，BUILD-20261029/fronting 定版 B 式）：
@@ -249,7 +317,8 @@ server {
         proxy_set_header User-Agent $qf_frame_ua;
         proxy_read_timeout 600s;
         proxy_send_timeout 600s;
-        include qf-front-proxy-common.inc;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
     }
 
     # 条 17 fail-soft 落点（组装故障注入实测后补）：whoami 子请求故障（上游断/超时）
@@ -259,6 +328,7 @@ server {
         proxy_pass http://qf_spa_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # ===== 引擎面（2.4.0 翻牌，片段乙段）：会话运行时资产与数据面 =====
@@ -276,22 +346,22 @@ server {
     }
 
     # 引擎静态前缀集（条 2 实测全集；/translations/ 为组装保全项：原生登录页译文资产，非页面面）
-    location /scripts/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /styles/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /images/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /js/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /novnc/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /mstsc/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /samples/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /sounds/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /translations/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location /scripts/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /styles/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /images/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /js/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /novnc/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /mstsc/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /samples/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /sounds/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /translations/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
 
     # 引擎根文件（实测集）
-    location = /favicon.ico { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location = /robots.txt { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location = /serviceworker.js { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location = /logo.png { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location ~* ^/commander[^/]*\.htm$ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location = /favicon.ico { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location = /robots.txt { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location = /serviceworker.js { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location = /logo.png { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location ~* ^/commander[^/]*\.htm$ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
 
     # 引擎功能路径（/meshagents、/meshsettings 缺失会断新装 agent，E6 实测）
     # 步3验收修复1（2026-10-30）：出厂 SPA 会话帧基址 QF_CANON_ORIGIN=/console-engine
@@ -306,6 +376,7 @@ server {
         proxy_send_timeout 86400s;
         proxy_buffering off;
         proxy_set_header User-Agent $qf_ce_ua;
+        include /etc/nginx/qfremote-proxy-headers.conf;
         include /etc/nginx/qf-front-proxy-common.inc;
     }
 
@@ -318,6 +389,7 @@ server {
         proxy_send_timeout 86400s;
         proxy_buffering off;
         proxy_set_header User-Agent $qf_ce_ua;
+        include /etc/nginx/qfremote-proxy-headers.conf;
         include /etc/nginx/qf-front-proxy-common.inc;
     }
 
@@ -325,12 +397,35 @@ server {
     location = /api/device/resolve {
         proxy_pass http://127.0.0.1:8448;
         proxy_http_version 1.1;
+        client_max_body_size 1m; # S-077：小 JSON API 收紧
         include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
-    location /meshagents { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /meshsettings { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
-    location /downloads/ { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    # N-01（补审，2026-11-15）：LEA 服务端路由 /api/lea/*（含崩溃上报
+    # POST /api/lea/v1/crash-report）此前在 nginx 层无路由、线上会 404；
+    # 今补齐到 ext(8448)。注意：兜底透传已删，未列明路径仍一律 404。
+    location /api/lea/ {
+        proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m; # 崩溃报告体上限 200KB，1m 留头
+        client_body_timeout 30s;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    # S-080 健康探活：GET /health -> ext(8448) 已有端点（回 {ok:true}，
+    # no-store）；控制台首页灯每 60 秒 fetch 此地址，失败变红灯。
+    location = /health {
+        proxy_pass http://127.0.0.1:8448;
+        client_max_body_size 1m;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 5s;
+        include /etc/nginx/qfremote-proxy-headers.conf;
+        include /etc/nginx/qf-front-proxy-common.inc;
+    }
+
+    location /meshagents { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /meshsettings { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
+    location /downloads/ { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
 
     # 热修 2026-10-30（会话连不上定性）：框内引擎页按页目录相对路径拼出的 *.ashx
     # （meshrelay/serverpic 等）带 /console-engine 前缀到达；通则 location 不剥前缀，
@@ -348,6 +443,7 @@ server {
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 会话数据面 *.ashx 通则（control/meshrelay/serverpic 等全集；条 16 长超时 86400s 不得压短）
@@ -362,28 +458,33 @@ server {
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 登出面（引擎）
-    location = /logout { proxy_pass $qf_engine_upstream; include qf-front-proxy-common.inc; }
+    location = /logout { proxy_pass $qf_engine_upstream; include /etc/nginx/qf-front-proxy-common.inc; include /etc/nginx/qfremote-proxy-headers.conf; }
 
     location = /app.js {
         root /opt/qfremote-webapp;
         add_header Cache-Control "no-store";
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /app.css {
         root /opt/qfremote-webapp;
         add_header Cache-Control "no-store";
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location = /session.css {
         root /opt/qfremote-webapp;
         add_header Cache-Control "no-store";
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     location /assets/ {
         root /opt/qfremote-webapp;
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # X2（2.4.0 翻牌）：旧远控入口 location 已删除——框内会话改走根路径分流（见上）。回滚随主 conf 备份恢复。
@@ -414,10 +515,12 @@ server {
     location = /apple-touch-icon.png {
         alias /opt/qfremote-webapp/apple-touch-icon.png;
         add_header Cache-Control "public, max-age=86400";
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
     location = /apple-touch-icon-precomposed.png {
         alias /opt/qfremote-webapp/apple-touch-icon-precomposed.png;
         add_header Cache-Control "public, max-age=86400";
+        include /etc/nginx/qfremote-proxy-headers.conf;
     }
 
     # 兜底透传 location / 已于 2.4.0 翻牌删除：未列明路径一律 404，不再直达引擎（G6 隔离面）。

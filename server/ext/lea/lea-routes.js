@@ -33,12 +33,37 @@
  *   POST /api/lea/v1/keys/revoke-all    一键吊销全部
  *   POST /api/lea/v1/grants             站长授予/撤销 muse.execute
  *   POST /api/lea/v1/devices/{device_id}/rebind 换绑（触发旧 Key 失效）
+ *   POST /api/lea/v1/devices/{device_id}/deregister 卸载注销（设备签名；删绑定＋节点记录，Key 不动）
+ * C1 自助绑定（桌面一键链接本机助手）：
+ *   POST /api/lea/v1/self-bind/issue    签发一次性绑定票据（控制台会话）
+ *   POST /api/lea/v1/self-bind/complete USH 持票据＋设备签名换 Key（明文仅本次返回）
+ *   GET  /api/lea/v1/self-bind/status   轮询绑定状态（控制台会话，不含凭据）
+ *   POST /api/lea/v1/self-bind/renew    设备续期（Bearer Key＋设备签名）
+ *   POST /api/lea/v1/self-bind/revoke/{key_id} 吊销自助 Key（控制台会话，无密码）
+ *   POST /api/lea/v1/self-bind/revoke-all 吊销全部自助 Key（控制台会话，无密码）
+ * RC-04 断线重连票据（server/ext/lea/RC-04-RECONNECT-TICKET-SPEC.md）：
+ *   POST /api/lea/v1/reconnect/issue  签发重连票据（Bearer Key 或控制台会话；
+ *     200 直接返回票据 JSON 全文，不包 ok 壳——L3 按顶层 10 字段校验）
+ *   POST /api/lea/v1/reconnect/resume 票据恢复（body 即票据 JSON 全文，不走
+ *     Bearer；成功 200 返回 { ok, session_id, device_id, binding_epoch,
+ *     grant_epoch }；握手重建在下一次业务下发时由 ensureHandshake 做，
+ *     本端点不下发 sys.handshake，见 RC-04 (d)）
+ * 崩溃上报接收（server/ext/lea/CRASH-REPORT-SPEC.md）：
+ *   POST /api/lea/v1/crash-report 接收 Windows 端崩溃报告（匿名接收＋
+ *     强防护：形状白名单＋200KB 上限＋每 IP 限流＋落盘封顶轮转；
+ *     报告只含技术信息，无鉴权要求——上传发生在下次启动，用户未必已登录）
  */
 const crypto = require('crypto');
 const { bareNodeId, nodeMatchesId } = require('./lea-channel');
 
 const BODY_LIMIT = 1024 * 1024; // 执行请求体上限 1MB（信封 params 含文本时用）
-const MAX_BATCH_STEPS = 50;
+// S-089：批量步数上限 50→20（单批 50 步串行下发最坏占设备 400 秒，
+// 20 步≈160 秒仍宽裕；超限仍 400，见 handleBatches）。
+const MAX_BATCH_STEPS = 20;
+// S-089：批量总执行时间上限 10 分钟（步循环顶检查，超时即停、job 记
+// UNKNOWN，调用方凭幂等键重试未完成步）；截图结果累计上限 20MB。
+const BATCH_MAX_WALL_MS = 10 * 60 * 1000;
+const BATCH_SNAPSHOT_BUDGET_BYTES = 20 * 1024 * 1024;
 // H06 补：危险 scope 常量（与 lea-core.js 同值；此前 handleCreateKey 引用
 // 未定义的 DANGEROUS_SCOPE，生成 Key 的路由一律 500）。
 const DANGEROUS_SCOPE = 'muse.execute.dangerous';
@@ -57,12 +82,218 @@ function createLeaRoutes(core, channel, deps) {
     const h = req.headers && (req.headers['x-qfr-request-id'] || req.headers['X-QFR-Request-Id']);
     return (typeof h === 'string' && h) ? h : 'req_' + crypto.randomBytes(8).toString('hex');
   }
-  function clientIp(req) {
-    const xff = req.headers && req.headers['x-forwarded-for'];
-    if (typeof xff === 'string' && xff) return xff.split(',')[0].trim();
-    return (req.socket && req.socket.remoteAddress) || null;
+  // S-091：可信反代层注入的真实 IP（崩溃端点 N-02 修法；与 server.js
+  // clientIpFromReq 同口径：socket 须为回环才信任何代理头）。
+  // 信任链：ext 服务只听回环，唯一入口是本机 nginx；nginx 经
+  // $proxy_add_x_forwarded_for 追加直连方 IP，Cloudflare 边缘追加真实
+  // 客户端 IP 并以 CF-Connecting-IP 透传（边缘会覆写该头，客户端自带
+  // 的伪造值到边缘即被替换，到不了这里）。
+  // 取值顺序：
+  //   ① CF-Connecting-IP（合法 IP 才认）；② XFF 自末段起第一个非回环
+  //   段——nginx 追加的是 127.0.0.1，倒数第二个非回环段即边缘所见的
+  //   真实 IP，攻击者自带的首段伪造值天然被跳过；③ socket IP。
+  // 非回环直连（无可信反代在路径上）一律用 socket IP，XFF 全忽略。
+  function isLoopbackIp(ip) {
+    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
   }
+  function normalizeIp(ip) {
+    if (typeof ip !== 'string') return null;
+    const v = ip.trim().replace(/^::ffff:/, '');
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(v) && v.split('.').every((n) => Number(n) <= 255)) return v;
+    if (/^[0-9a-fA-F:]+$/.test(v) && v.includes(':')) return v.toLowerCase();
+    return null;
+  }
+  function trustedClientIp(req) {
+    const headers = req.headers || {};
+    const remoteRaw = (req.socket && req.socket.remoteAddress) || '';
+    const remote = normalizeIp(remoteRaw);
+    if (!isLoopbackIp(remoteRaw) && !isLoopbackIp(remote || '')) {
+      // 直连（无可信反代）：只信 socket，不认任何代理头。
+      return remote || null;
+    }
+    const cf = normalizeIp(headers['cf-connecting-ip'] || headers['CF-Connecting-IP']);
+    if (cf && !isLoopbackIp(cf)) return cf;
+    const xff = headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff) {
+      const segs = xff.split(',').map((s) => normalizeIp(s)).filter(Boolean);
+      for (let i = segs.length - 1; i >= 0; i--) {
+        if (!isLoopbackIp(segs[i])) return segs[i];
+      }
+    }
+    return remote || null;
+  }
+  function clientIp(req) { return trustedClientIp(req); }
   function auditCall(fields) { try { core.audit('lea-call', fields); } catch (e) {} }
+
+  // S-089：LEA 执行限流（按 account / key / device / command class 分别计，
+  // 固定分钟窗口，内存计数，重启清零——与崩溃限流同款语义）。
+  // command class 取 COMMANDS tier：0 系统（sys.*）、1 普通、2 危险。
+  // 额度（每分钟）：execute：account 120、key 60、device 120、IP 300；
+  // device 须 ≥ key（单 Key 本就绑单设备，device 额低于 key 额会使
+  // key 额永不可达）；危险类另设更低额度 account 10、key 5；
+  // batches：account 60、key 30（批量单次可含 20 步，30 次/分钟/Key
+  // 已是 600 步/分钟的硬顶；套件内同一 Key 短时十余次 batches 属
+  // 正常回归密度，不得误拦）。
+  // 设备并发由核心层 B1 在途名额管（每设备 8 条，超限 503 QUEUE_FULL），
+  // 路由层不再叠加第二套并发计数。
+  const LEA_RATE = {
+    EXEC_ACCOUNT_MIN: 120, EXEC_KEY_MIN: 60, EXEC_DEVICE_MIN: 120, EXEC_IP_MIN: 300,
+    EXEC_DANGEROUS_ACCOUNT_MIN: 10, EXEC_DANGEROUS_KEY_MIN: 5,
+    BATCH_ACCOUNT_MIN: 60, BATCH_KEY_MIN: 30,
+  };
+  const leaRateBuckets = new Map(); // bucketKey -> { windowStart, count }
+  function leaRateCheck(bucketKey, limit, windowMs) {
+    const nowMs = Date.now();
+    const windowStart = nowMs - (nowMs % windowMs);
+    let rec = leaRateBuckets.get(bucketKey);
+    if (!rec || rec.windowStart !== windowStart) { rec = { windowStart, count: 0 }; leaRateBuckets.set(bucketKey, rec); }
+    if (rec.count >= limit) {
+      return { ok: false, retryAfter: Math.ceil((windowStart + windowMs - nowMs) / 1000) };
+    }
+    rec.count += 1;
+    return { ok: true };
+  }
+  function leaRateCheckExecute(o) {
+    // 顺序：先查最细的 key，再 account、device、IP；任一超限即 429。
+    const checks = [
+      ['key:' + o.keyId, o.dangerous ? LEA_RATE.EXEC_DANGEROUS_KEY_MIN : LEA_RATE.EXEC_KEY_MIN],
+      ['account:' + o.accountId, o.dangerous ? LEA_RATE.EXEC_DANGEROUS_ACCOUNT_MIN : LEA_RATE.EXEC_ACCOUNT_MIN],
+      ['device:' + o.deviceId, LEA_RATE.EXEC_DEVICE_MIN],
+      ['ip:' + (o.ip || 'unknown'), LEA_RATE.EXEC_IP_MIN],
+    ];
+    for (const [bk, limit] of checks) {
+      const r = leaRateCheck('exec:' + bk, limit, 60000);
+      if (!r.ok) return r;
+    }
+    return { ok: true };
+  }
+  function leaRateCheckBatch(o) {
+    for (const [bk, limit] of [
+      ['key:' + o.keyId, LEA_RATE.BATCH_KEY_MIN],
+      ['account:' + o.accountId, LEA_RATE.BATCH_ACCOUNT_MIN],
+    ]) {
+      const r = leaRateCheck('batch:' + bk, limit, 60000);
+      if (!r.ok) return r;
+    }
+    return { ok: true };
+  }
+  function rateLimited(res, retryAfter, msg) {
+    try { if (res && typeof res.setHeader === 'function') res.setHeader('Retry-After', String(retryAfter)); } catch (e) {}
+    return fail(res, 429, 'QFR_RATE_LIMITED', msg || '请求过于频繁，请稍后再试。');
+  }
+
+  // ---- 崩溃上报限流（内存计数，单 Node 进程；重启即清零，属可接受的
+  // 限流语义——fail-closed 只作用于校验与存储，不作用于限流计数） ----
+  // 每 IP 5 份/小时、20 份/天；全局 1000 份/天。超限 429＋Retry-After。
+  // S-091：全局额度只计通过校验的请求——非法请求（400）走独立桶
+  // （每 IP 20 份/小时，不计全局），此前“先计限流、后校验”可被伪造
+  // XFF 定向耗尽他人额度、约 50 个伪造 IP 耗尽全局额度。
+  // L-05：日切时清旧条目；Map 超 10000 条时删最旧（防只增不减慢涨）。
+  const CRASH_RATE_HOUR = 5, CRASH_RATE_DAY = 20, CRASH_RATE_GLOBAL_DAY = 1000;
+  const CRASH_INVALID_RATE_HOUR = 20;
+  const crashRate = { perIp: new Map(), invalidPerIp: new Map(), globalDayStart: 0, globalDayCount: 0 };
+  function crashRateDayRollover(dayStart) {
+    if (crashRate.globalDayStart !== dayStart) {
+      crashRate.globalDayStart = dayStart; crashRate.globalDayCount = 0;
+      crashRate.perIp.clear(); crashRate.invalidPerIp.clear();
+    }
+  }
+  function crashRatePruneMap(map) {
+    if (map.size > 10000) {
+      for (const k of map.keys()) { map.delete(k); if (map.size <= 10000) break; }
+    }
+  }
+  function crashRateCheckValid(ip) {
+    const nowMs = Date.now();
+    const hourStart = nowMs - (nowMs % 3600000);
+    const dayStart = nowMs - (nowMs % 86400000);
+    crashRateDayRollover(dayStart);
+    if (crashRate.globalDayCount >= CRASH_RATE_GLOBAL_DAY) return { ok: false, retryAfter: Math.ceil((dayStart + 86400000 - nowMs) / 1000) };
+    let rec = crashRate.perIp.get(ip);
+    if (!rec || rec.dayStart !== dayStart) rec = { hourStart, hourCount: 0, dayStart, dayCount: 0 };
+    if (rec.hourStart !== hourStart) { rec.hourStart = hourStart; rec.hourCount = 0; }
+    if (rec.hourCount >= CRASH_RATE_HOUR || rec.dayCount >= CRASH_RATE_DAY) {
+      return { ok: false, retryAfter: Math.ceil((hourStart + 3600000 - nowMs) / 1000) };
+    }
+    rec.hourCount += 1; rec.dayCount += 1;
+    crashRate.perIp.set(ip, rec);
+    crashRate.globalDayCount += 1;
+    crashRatePruneMap(crashRate.perIp);
+    return { ok: true };
+  }
+  function crashInvalidCheck(ip) {
+    const nowMs = Date.now();
+    const hourStart = nowMs - (nowMs % 3600000);
+    const dayStart = nowMs - (nowMs % 86400000);
+    crashRateDayRollover(dayStart);
+    let rec = crashRate.invalidPerIp.get(ip);
+    if (!rec || rec.hourStart !== hourStart) { rec = { hourStart, hourCount: 0 }; crashRate.invalidPerIp.set(ip, rec); }
+    if (rec.hourCount >= CRASH_INVALID_RATE_HOUR) {
+      return { ok: false, retryAfter: Math.ceil((hourStart + 3600000 - nowMs) / 1000) };
+    }
+    rec.hourCount += 1;
+    crashRatePruneMap(crashRate.invalidPerIp);
+    return { ok: true };
+  }
+
+  // ---- 崩溃上报接收（匿名＋强防护，见 CRASH-REPORT-SPEC.md） ----
+  // 不要求鉴权：上传发生在下次启动，用户未必已登录；报告只含技术信息。
+  // 失败语义 fail-closed：校验失败 400、超 200KB 413、Content-Type
+  // 不对 415、限流 429、存储满／写失败 503；未落盘＋未审计前绝不回 2xx。
+  // 响应只回稳定错误码＋request_id，不回显请求体／堆栈／字段值。
+  async function handleCrashReport(req, res) {
+    const requestId = requestIdOf(req);
+    const ip = clientIp(req);
+    const headers = req.headers || {};
+    const ct = headers['content-type'] || headers['Content-Type'] || '';
+    if (typeof ct !== 'string' || !/^application\/json\s*(;|$)/i.test(ct)) {
+      return fail(res, 415, 'QFR_CRASH_UNSUPPORTED_MEDIA', 'Content-Type 须为 application/json。');
+    }
+    const body = await readJsonBody(req, core.CRASH_BODY_MAX_BYTES);
+    if (body && body.__tooLarge) return fail(res, 413, 'QFR_CRASH_TOO_LARGE', '请求体超过 200KB 上限。');
+    if (body && Buffer.byteLength(JSON.stringify(body), 'utf8') > core.CRASH_BODY_MAX_BYTES) {
+      return fail(res, 413, 'QFR_CRASH_TOO_LARGE', '请求体超过 200KB 上限。');
+    }
+    // S-091：先校验、后计有效桶——全局 1000/天只计通过校验的请求，
+    // 非法请求走独立桶（见下），不再能定向耗尽他人／全局额度。
+    const vErr = core.validateCrashReport(body);
+    if (vErr) {
+      const inv = crashInvalidCheck(ip || 'unknown');
+      if (!inv.ok) {
+        try { if (res && typeof res.setHeader === 'function') res.setHeader('Retry-After', String(inv.retryAfter)); } catch (e) {}
+        try { core.audit('lea-crash-report', { request_id: requestId, ip, result: 'rate-limited' }); } catch (e) {}
+        return fail(res, 429, 'QFR_RATE_LIMITED', '崩溃上报过于频繁，请稍后再试。');
+      }
+      try { core.audit('lea-crash-report', { request_id: requestId, ip, result: 'validation-failed' }); } catch (e) {}
+      return fail(res, 400, ERR.VALIDATION, vErr);
+    }
+    const rl = crashRateCheckValid(ip || 'unknown');
+    if (!rl.ok) {
+      try { if (res && typeof res.setHeader === 'function') res.setHeader('Retry-After', String(rl.retryAfter)); } catch (e) {}
+      try { core.audit('lea-crash-report', { request_id: requestId, ip, result: 'rate-limited' }); } catch (e) {}
+      return fail(res, 429, 'QFR_RATE_LIMITED', '崩溃上报过于频繁，请稍后再试。');
+    }
+    let out;
+    try {
+      out = core.storeCrashReport(body);
+    } catch (e) {
+      if (e && e.code === 'QFR_CRASH_STORAGE_FULL') {
+        try { core.audit('lea-crash-report', { request_id: requestId, ip, result: 'storage-full' }); } catch (e2) {}
+        return fail(res, 503, 'QFR_CRASH_STORAGE_FULL', '服务端崩溃报告存储已满，请稍后再试。');
+      }
+      try { core.audit('lea-crash-report', { request_id: requestId, ip, result: 'storage-error' }); } catch (e2) {}
+      return fail(res, 503, 'QFR_CRASH_STORAGE_ERROR', '服务端暂存崩溃报告失败。');
+    }
+    const bytes = out.duplicate ? 0 : (Buffer.byteLength(JSON.stringify(body), 'utf8'));
+    // L-08：审计先于 200 返回；审计写失败回 503（报告已落盘，客户端
+    // 重试将按去重回 200，不丢数据）。此前审计失败只记日志、仍回 200。
+    let audited = null;
+    try { audited = core.audit('lea-crash-report', { request_id: requestId, ip, report_id: body.report_id, bytes, result: out.duplicate ? 'duplicate' : 'stored' }); } catch (e) { audited = null; }
+    if (!audited) {
+      return fail(res, 503, 'QFR_CRASH_AUDIT_FAILED', '服务端审计写入失败，请稍后重试。');
+    }
+    return sendJson(res, 200, { ok: true, report_id: body.report_id, stored: !out.duplicate, duplicate: !!out.duplicate });
+  }
 
   // ---- Bearer 认证（共用） ----
   function bearerAuth(req) {
@@ -101,14 +332,42 @@ function createLeaRoutes(core, channel, deps) {
       device_id: deviceId, api_key_id: key.key_id, key_prefix: core.maskKey(key.prefix),
       binding_epoch: key.binding_epoch, command, idempotency_key: idemKey, ip: clientIp(req),
     };
+    // S-089：执行限流（account/key/device/命令类分别计；危险类更低额度），
+    // 位置在准入之前、鉴权与基本校验之后；超限 429＋Retry-After。
+    const execRl = leaRateCheckExecute({ accountId: key.account_id, keyId: key.key_id, deviceId, ip: clientIp(req), dangerous: !!spec.dangerous });
+    if (!execRl.ok) {
+      auditCall(Object.assign({}, baseAudit, { result: 'rate-limited', error_code: 'QFR_RATE_LIMITED' }));
+      return rateLimited(res, execRl.retryAfter, 'LEA 执行过于频繁，请稍后再试。');
+    }
+    // timeout_ms 显式存在但非法（null、非数字、非整数、<1、>上限）即 400，
+    // 不得 clamp 成合法值再签名（规范 §2.2）；缺失时取命令默认值。
+    // 显式存在判定用 !== undefined：null 是显式非法值，不是缺失。
+    // FIX1：校验前移到幂等检查之前——请求指纹含有效超时，须先定超时再算指纹。
+    let timeoutMs = spec.timeoutMs;
+    if (body.timeout_ms !== undefined) {
+      if (typeof body.timeout_ms !== 'number' || !Number.isInteger(body.timeout_ms) || body.timeout_ms < 1 || body.timeout_ms > spec.maxTimeoutMs) {
+        return fail(res, 400, ERR.VALIDATION, 'timeout_ms 须为 1..' + spec.maxTimeoutMs + ' 的整数。');
+      }
+      timeoutMs = body.timeout_ms;
+    }
+    // FIX1：幂等键绑定不可变请求指纹——键＋指纹共同决定复用。
+    // 请求指纹 = sha256({ command, params, timeout_ms })：任一变即另一请求。
+    const reqFp = crypto.createHash('sha256').update(JSON.stringify({ command, params, timeout_ms: timeoutMs })).digest('hex');
     // 幂等：已完成返回缓存结果不重复执行；执行中返回 DUPLICATE_IN_PROGRESS。
     const prev = core.idemLookup(key.account_id, key.key_id, idemKey, core.IDEM_NS.EXEC);
     if (prev && prev.status === 'RUNNING') return fail(res, 409, ERR.DUPLICATE, '同一幂等键的命令正在执行中。');
-    if (prev && prev.status === 'SUCCEEDED') {
-      return sendJson(res, 200, Object.assign({ ok: true, duplicate: true, request_id: requestId }, prev.result || {}));
+    if (prev && (prev.status === 'SUCCEEDED' || prev.status === 'FAILED')) {
+      // 指纹不一致（同键换命令／换 params／换超时）或旧记录无指纹（FIX1 前落盘，
+      // 无法核对）→ 拒绝复用旧结果，不执行、不回旧成功。
+      if (!prev.req_fp || prev.req_fp !== reqFp) {
+        return fail(res, 409, ERR.IDEMPOTENT_MISMATCH, '同一幂等键已绑定另一请求内容，拒绝复用旧结果；请换新幂等键重发。');
+      }
+      return sendJson(res, 200, Object.assign({ ok: prev.status === 'SUCCEEDED', duplicate: true, request_id: requestId }, prev.result || {}));
     }
-    if (prev && prev.status === 'FAILED') {
-      return sendJson(res, 200, Object.assign({ ok: false, duplicate: true, request_id: requestId }, prev.result || {}));
+    // FIX1：危险操作 UNKNOWN 不自动重试——上次结果未知时不得凭同键重发；
+    // 须先用 job_id 查询或快照确认，确认后换新幂等键重发。
+    if (prev && prev.status === 'UNKNOWN' && spec.dangerous) {
+      return fail(res, 409, ERR.UNKNOWN, '危险操作上次执行结果未知，禁止自动重试；请先用 job_id 查询或快照确认，确认后换新幂等键重发。');
     }
     // 准入七项校验（服务端先拦）
     const adm = core.admit({ key, deviceId, command, requestId, ip: clientIp(req) });
@@ -127,59 +386,88 @@ function createLeaRoutes(core, channel, deps) {
       auditCall(Object.assign({}, baseAudit, { result: 'denied', error_code: ERR.NOT_INSTALLED }));
       return fail(res, 503, ERR.NOT_INSTALLED, '下发通道暂时不可达，无法确认设备在线。');
     }
-    // timeout_ms 显式存在但非法（null、非数字、非整数、<1、>上限）即 400，
-    // 不得 clamp 成合法值再签名（规范 §2.2）；缺失时取命令默认值。
-    // 显式存在判定用 !== undefined：null 是显式非法值，不是缺失。
-    let timeoutMs = spec.timeoutMs;
-    if (body.timeout_ms !== undefined) {
-      if (typeof body.timeout_ms !== 'number' || !Number.isInteger(body.timeout_ms) || body.timeout_ms < 1 || body.timeout_ms > spec.maxTimeoutMs) {
-        return fail(res, 400, ERR.VALIDATION, 'timeout_ms 须为 1..' + spec.maxTimeoutMs + ' 的整数。');
-      }
-      timeoutMs = body.timeout_ms;
-    }
+    // （timeout_ms 校验已在幂等检查前完成，见上；此处直接用已定值 timeoutMs。）
     const job = core.createJob({
       account_id: key.account_id, device_id: deviceId, api_key_id: key.key_id,
       command, request_id: requestId, idempotency_key: idemKey, status: 'RUNNING',
     });
-    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous }, core.IDEM_NS.EXEC);
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp }, core.IDEM_NS.EXEC);
     const env = core.buildEnvelope({
       requestId, batchId: null, seq: 1, deviceId, accountId: key.account_id,
       keyId: key.key_id, bindingEpoch: adm.binding.binding_epoch,
+      grantEpoch: adm.grant.grant_epoch,
       idempotencyKey: idemKey, command, params, timeoutMs,
     });
     const t0 = Date.now();
     let disp;
     try {
-      disp = channel ? await core.dispatchEnvelope(channel, env, { timeoutMs: 5000 }) : { ok: false, error: new Error('no-channel') };
+      // B1：下发超时用核心 DISPATCH_TIMEOUT_MS（8000），不用写死的 5000
+      // （5000 会抢在客户端 8s 上限前杀进程，客户端回不了 timeout JSON）。
+      disp = channel ? await core.dispatchEnvelope(channel, env, { timeoutMs: core.DISPATCH_TIMEOUT_MS }) : { ok: false, error: new Error('no-channel') };
     } catch (e) { disp = { ok: false, error: e }; }
     const durationMs = Date.now() - t0;
     if (disp.ok) {
       core.updateJob(job.job_id, { status: 'SUCCEEDED', result: disp.result });
-      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'SUCCEEDED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, result: disp.result } }, core.IDEM_NS.EXEC);
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'SUCCEEDED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, result: disp.result } }, core.IDEM_NS.EXEC);
       auditCall(Object.assign({}, baseAudit, { result: 'ok', job_id: job.job_id, duration_ms: durationMs }));
       try { core.audit('lea-deliver', Object.assign({}, baseAudit, { job_id: job.job_id, direction: 'reply', duration_ms: durationMs })); } catch (e) {}
       return sendJson(res, 200, { ok: true, request_id: requestId, job_id: job.job_id, result: disp.result, duration_ms: durationMs });
     }
-    if (disp.timeout) {
-      // 同步等待 5s 超时 → 202 + job_id，长任务异步（结果 UNKNOWN，须查 job/快照确认）。
+    // B1：in-flight 名额满（QUEUE_FULL）→ 503，调用方可稍后重试同一幂等键
+    // （job 仍为 RUNNING，不建新 job；幂等 RUNNING 拦住重复下发）。
+    if (disp.queueFull) {
+      auditCall(Object.assign({}, baseAudit, { result: 'queue-full', job_id: job.job_id, error_code: ERR.QUEUE_FULL, duration_ms: durationMs }));
+      return fail(res, 503, ERR.QUEUE_FULL, '设备下发通道已满（在途 8 条），请稍后重试。');
+    }
+    // B1：健康探测失败（节点 DEGRADED 且 ping／reset 均未恢复）→ 503 NOT_INSTALLED。
+    if (disp.notInstalled) {
+      core.updateJob(job.job_id, { status: 'FAILED', error_code: ERR.NOT_INSTALLED });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, code: ERR.NOT_INSTALLED } }, core.IDEM_NS.EXEC);
+      auditCall(Object.assign({}, baseAudit, { result: 'not-installed', job_id: job.job_id, error_code: ERR.NOT_INSTALLED, duration_ms: durationMs }));
+      return fail(res, 503, ERR.NOT_INSTALLED, '设备通道异常（健康探测未恢复），无法下发。');
+    }
+    // B1：只有 ACK（异步已接纳／结果丢失）→ 202 + job_id。
+    // mode=async 是预期内的异步接纳，job 保持 RUNNING；mode=sync 是结果丢失，
+    // job 记 UNKNOWN（sweeper 10 秒后转 TIMED_OUT）。
+    if (disp.accepted) {
+      if (disp.asyncExpected) {
+        auditCall(Object.assign({}, baseAudit, { result: 'accepted-async', job_id: job.job_id, duration_ms: durationMs }));
+        return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'RUNNING', msg: '命令已接纳，正在异步执行，请用 job_id 查询。' });
+      }
       core.updateJob(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN });
-      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous }, core.IDEM_NS.EXEC);
-      auditCall(Object.assign({}, baseAudit, { result: 'timeout-async', job_id: job.job_id, error_code: ERR.UNKNOWN, duration_ms: durationMs }));
-      return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'UNKNOWN', code: ERR.UNKNOWN, msg: '执行超时，已转异步任务；结果未知，请用 job_id 查询或快照确认，勿直接重试危险操作。' });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp }, core.IDEM_NS.EXEC);
+      auditCall(Object.assign({}, baseAudit, { result: 'accepted-no-result', job_id: job.job_id, error_code: ERR.UNKNOWN, duration_ms: durationMs }));
+      return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'UNKNOWN', code: ERR.UNKNOWN, msg: '命令已接纳但结果未回传，已转异步任务；结果未知，请用 job_id 查询或快照确认，勿直接重试危险操作。' });
+    }
+    if (disp.timeout) {
+      // B1：通道超时（下发 8s 未回包）→ job 记 DISPATCH_TIMEOUT（新态，
+      // 区别于客户端 timeout JSON 的 TIMED_OUT）；sweeper 10 秒后转 TIMED_OUT。
+      core.updateJob(job.job_id, { status: 'DISPATCH_TIMEOUT', error_code: 'QFR_LEA_DISPATCH_TIMEOUT' });
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp }, core.IDEM_NS.EXEC);
+      auditCall(Object.assign({}, baseAudit, { result: 'timeout-async', job_id: job.job_id, error_code: 'QFR_LEA_DISPATCH_TIMEOUT', duration_ms: durationMs }));
+      return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, status: 'DISPATCH_TIMEOUT', code: 'QFR_LEA_DISPATCH_TIMEOUT', msg: '下发超时，已转异步任务；结果未知，请用 job_id 查询或快照确认，勿直接重试危险操作。' });
     }
     // r9：客户端已回包且执行失败（ok:false）时透传其真实 code（如
     // QFR_USH_FAILED），不再一律谎报 bad-client-output；job／幂等记
     // 该真实码，调用方据此排查而非重查下发通道。
+    // B1：客户端 timeout JSON（QFR_LEA_TIMEOUT）是超时终态，job 记 TIMED_OUT
+    // （不是 FAILED）；其余 QFR_* 码仍记 FAILED。
     if (disp.clientResult && typeof disp.clientResult.code === 'string' && /^QFR_[A-Z0-9_]+$/.test(disp.clientResult.code)) {
       const ccode = disp.clientResult.code;
       const cdetail = typeof disp.clientResult.detail === 'string' ? disp.clientResult.detail : '';
+      if (ccode === 'QFR_LEA_TIMEOUT') {
+        core.updateJob(job.job_id, { status: 'TIMED_OUT', error_code: ccode, result: disp.clientResult });
+        core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, code: ccode, result: disp.clientResult } }, core.IDEM_NS.EXEC);
+        auditCall(Object.assign({}, baseAudit, { result: 'client-timeout', job_id: job.job_id, error_code: ccode, duration_ms: durationMs }));
+        return fail(res, 502, ccode, '执行超时：' + ccode + (cdetail ? '（' + cdetail + '）' : ''));
+      }
       core.updateJob(job.job_id, { status: 'FAILED', error_code: ccode, result: disp.clientResult });
-      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: ccode, result: disp.clientResult } }, core.IDEM_NS.EXEC);
+      core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, code: ccode, result: disp.clientResult } }, core.IDEM_NS.EXEC);
       auditCall(Object.assign({}, baseAudit, { result: 'client-failed', job_id: job.job_id, error_code: ccode, duration_ms: durationMs }));
       return fail(res, 502, ccode, '执行失败：' + ccode + (cdetail ? '（' + cdetail + '）' : ''));
     }
     core.updateJob(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_DISPATCH_FAILED' });
-    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.EXEC);
+    core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, code: 'QFR_LEA_DISPATCH_FAILED' } }, core.IDEM_NS.EXEC);
     auditCall(Object.assign({}, baseAudit, { result: 'dispatch-failed', job_id: job.job_id, error_code: 'QFR_LEA_DISPATCH_FAILED', duration_ms: durationMs }));
     return fail(res, 502, 'QFR_LEA_DISPATCH_FAILED', '下发失败：' + String((disp.error && disp.error.message) || 'channel-error'));
   }
@@ -200,10 +488,12 @@ function createLeaRoutes(core, channel, deps) {
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(idemKey)) return fail(res, 400, ERR.VALIDATION, 'Idempotency-Key 须为 8..128 位 [A-Za-z0-9_-]。');
     // request_id 须合 token 规则，否则 buildEnvelope 抛错变 500。
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return fail(res, 400, ERR.VALIDATION, 'X-QFR-Request-Id 须为 8..128 位 [A-Za-z0-9_-]。');
-    // 步级 request_id／幂等键为基础值加 '-N' 后缀：基础值须给后缀留出长度，
+    // 步级 request_id／幂等键为基础值加后缀：基础值须给后缀留出长度，
     // 否则步级键超 128 字符、buildEnvelope 抛错变 500（如 128 字符基础键 + '-2' = 130）。
-    const batchSuffixLen = 1 + String(steps.length).length;
-    if (idemKey.length + batchSuffixLen > 128 || requestId.length + batchSuffixLen > 128) {
+    // FIX1：步级幂等键后缀改为 '-N-<12 位步指纹>'（键绑定步内容），request_id 后缀仍为 '-N'。
+    const stepSuffixLen = 1 + String(steps.length).length + 1 + 12;
+    const reqSuffixLen = 1 + String(steps.length).length;
+    if (idemKey.length + stepSuffixLen > 128 || requestId.length + reqSuffixLen > 128) {
       return fail(res, 400, ERR.VALIDATION, '批量基础 request_id／Idempotency-Key 过长，步级后缀后须 ≤128 位。');
     }
     // 各步 params 须为 JSON 对象（数组／标量不得签出）；timeout_ms 显式
@@ -220,20 +510,42 @@ function createLeaRoutes(core, channel, deps) {
       }
     }
     const key = auth.key;
+    // S-089：批量限流（account/key 分别计）；超限 429＋Retry-After。
+    const batchRl = leaRateCheckBatch({ accountId: key.account_id, keyId: key.key_id });
+    if (!batchRl.ok) {
+      return rateLimited(res, batchRl.retryAfter, 'LEA 批量执行过于频繁，请稍后再试。');
+    }
     // H13（DS 复查）：steps 指纹——UNKNOWN 重试时若 steps 内容变了，步级
     // 缓存按位置复用会误用旧结果。指纹随批量级幂等记录；重试时指纹不一致
     // 即不复用步级缓存，全部步重跑。
     const stepsFp = crypto.createHash('sha256').update(JSON.stringify(steps)).digest('hex');
+    // FIX1：步指纹与派生步级键——步级幂等键 = 基础键 + '-' + 步号 + '-' + 步指纹前 12 位。
+    // 同一基础键＋不同 steps 必然得到不同步级键：服务端不再对不同 steps 复用
+    // 同一（步级）键；LEA 端另以全指纹核对兜底（见 QFRLEA.c §5）。
+    const stepFp = (st) => crypto.createHash('sha256').update(JSON.stringify(st)).digest('hex');
+    const stepKey = (i) => idemKey + '-' + (i + 1) + '-' + stepFp(steps[i]).slice(0, 12);
     // H13：批量级幂等——重复提交去重（此前批量级键只要求不记录，步级键
     // 也不写入 idemSeen，重复提交重跑全部步骤）。UNKNOWN 不拦重放
     //（H14 推进器已把失联 RUNNING 转 UNKNOWN），继续执行并覆盖记录。
     const prevBatch = core.idemLookup(key.account_id, key.key_id, idemKey, core.IDEM_NS.BATCH);
     if (prevBatch && prevBatch.status === 'RUNNING') return fail(res, 409, ERR.DUPLICATE, '同一幂等键的批量任务正在执行中。');
-    if (prevBatch && prevBatch.status === 'SUCCEEDED') {
-      return sendJson(res, 200, Object.assign({ ok: true, duplicate: true, request_id: requestId }, prevBatch.result || {}));
+    // FIX1：批量级复用须指纹一致——同键换 steps 不得返回旧批次结果。
+    // 旧记录无 steps_fp（FIX1 前落盘）时无法核对，同样拒绝复用。
+    if (prevBatch && (prevBatch.status === 'SUCCEEDED' || prevBatch.status === 'FAILED')) {
+      if (!prevBatch.steps_fp || prevBatch.steps_fp !== stepsFp) {
+        return fail(res, 409, ERR.IDEMPOTENT_MISMATCH, '同一幂等键已绑定另一批量内容，拒绝复用旧结果；请换新幂等键重发。');
+      }
+      return sendJson(res, 200, Object.assign({ ok: prevBatch.status === 'SUCCEEDED', duplicate: true, request_id: requestId }, prevBatch.result || {}));
     }
-    if (prevBatch && prevBatch.status === 'FAILED') {
-      return sendJson(res, 200, Object.assign({ ok: false, duplicate: true, request_id: requestId }, prevBatch.result || {}));
+    // 任一步危险则按 30 天保留（下文 idemRecord 用；提前算出供 UNKNOWN 换 steps 守卫共用）。
+    const batchDangerous = steps.some((st) => {
+      const s = core.COMMANDS[String((st && st.command) || '')];
+      return !!(s && s.dangerous);
+    });
+    // FIX1：UNKNOWN 批次换 steps 重试时，若新 steps 含危险命令，禁止自动重试——
+    // 旧危险步的结果未知，新危险步一旦下发可能与旧步重复执行；须人工确认后换新键重发。
+    if (prevBatch && prevBatch.status === 'UNKNOWN' && prevBatch.steps_fp && prevBatch.steps_fp !== stepsFp && batchDangerous) {
+      return fail(res, 409, ERR.UNKNOWN, '上批危险步骤执行结果未知，换 steps 后禁止自动重试；请先用 job_id 查询或快照确认，确认后换新幂等键重发。');
     }
     // UNKNOWN 重试：只有 steps 指纹一致才复用已成功步的缓存。
     const reuseSteps = !prevBatch || !prevBatch.steps_fp || prevBatch.steps_fp === stepsFp;
@@ -256,10 +568,6 @@ function createLeaRoutes(core, channel, deps) {
       status: 'RUNNING', steps_total: steps.length, steps_done: 0, results: [],
     });
     // H13：批量级幂等键写入 idemSeen（RUNNING）；任一步危险则按 30 天保留。
-    const batchDangerous = steps.some((st) => {
-      const s = core.COMMANDS[String((st && st.command) || '')];
-      return !!(s && s.dangerous);
-    });
     core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp }, core.IDEM_NS.BATCH);
     // 后台顺序执行；同步等待 5s，超时即 202 + job_id（继续后台跑完）。
     const startedAt = Date.now();
@@ -275,10 +583,18 @@ function createLeaRoutes(core, channel, deps) {
     const run = (async () => {
       const results = [];
       let failed = false;
-      const stepKey = (i) => idemKey + '-' + (i + 1);
+      let snapshotBytes = 0; // S-089：批内截图结果累计字节（超 20MB 即停）
       for (let i = 0; i < steps.length; i++) {
         const cur = core.getJob(job.job_id);
         if (cur && cur.status === 'CANCELLED') { results.push({ seq: i + 1, cancelled: true }); break; }
+        // S-089：批量总执行时间上限 10 分钟——超时即停、job 记 UNKNOWN，
+        // 调用方凭幂等键重试未完成步（与 disp.timeout 同款终态）。
+        if (Date.now() - startedAt > BATCH_MAX_WALL_MS) {
+          results.push({ seq: i + 1, command: String((steps[i] && steps[i].command) || ''), ok: false, code: ERR.UNKNOWN });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i });
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i } }, core.IDEM_NS.BATCH);
+          return;
+        }
         const st = steps[i] || {};
         const command = String(st.command || '');
         const spec = core.COMMANDS[command];
@@ -287,28 +603,48 @@ function createLeaRoutes(core, channel, deps) {
         if (!adm.ok) { results.push({ seq: i + 1, command, ok: false, code: adm.code }); failed = true; break; }
         // H13：步级幂等——已成功的步不再重跑，复用缓存结果（仅当 steps
         // 指纹一致；UNKNOWN 重试改了 steps 时不复用，见 reuseSteps）。
+        // FIX1：步级复用另须步指纹一致（步级键已含步指纹前 12 位，此处再以
+        // 全指纹核对兜底；旧记录无 step_fp 时不复用）。
         const prevStep = core.idemLookup(key.account_id, key.key_id, stepKey(i), core.IDEM_NS.STEP);
-        if (reuseSteps && prevStep && prevStep.status === 'SUCCEEDED') {
+        if (reuseSteps && prevStep && prevStep.status === 'SUCCEEDED' && prevStep.step_fp && prevStep.step_fp === stepFp(steps[i])) {
           results.push({ seq: i + 1, command, ok: true, result: prevStep.result || null, duplicate: true });
           core.updateJob(job.job_id, { results, steps_done: i + 1 });
           continue;
         }
-        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous }, core.IDEM_NS.STEP);
+        // FIX1：危险步上次结果 UNKNOWN 时禁止自动重发（同键同 steps 重试亦然）——
+        // 须人工确认后换新幂等键重发；LEA 端对 UNKNOWN 键同样拒绝执行（双保险）。
+        if (prevStep && prevStep.status === 'UNKNOWN' && spec.dangerous) {
+          results.push({ seq: i + 1, command, ok: false, code: ERR.UNKNOWN, detail: 'dangerous-unknown-no-auto-retry' });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
+          return;
+        }
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'RUNNING', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]) }, core.IDEM_NS.STEP);
         const env = core.buildEnvelope({
           // 步级 request_id／幂等键用 '-' 连接步号：':' 不合 token 规则
           //（C 端解析层拒绝），旧 ':' 形态的批量信封到 LEA 即被拒。
           requestId: requestId + '-' + (i + 1), batchId, seq: i + 1, deviceId,
           accountId: key.account_id, keyId: key.key_id, bindingEpoch: adm.binding.binding_epoch,
-          idempotencyKey: idemKey + '-' + (i + 1), command, params: st.params || {},
+          grantEpoch: adm.grant.grant_epoch,
+          idempotencyKey: stepKey(i), command, params: st.params || {},
           timeoutMs: st.timeout_ms !== undefined ? st.timeout_ms : spec.timeoutMs,
         });
         let disp;
-        try { disp = channel ? await core.dispatchEnvelope(channel, env, { timeoutMs: 5000 }) : { ok: false, error: new Error('no-channel') }; }
+        try { disp = channel ? await core.dispatchEnvelope(channel, env, { timeoutMs: core.DISPATCH_TIMEOUT_MS }) : { ok: false, error: new Error('no-channel') }; }
         catch (e) { disp = { ok: false, error: e }; }
+        // B1：只有 ACK（结果丢失）或客户端 timeout JSON，均按“步超时／未知”
+        // 处理（与 disp.timeout 同款：步 UNKNOWN，批次终止）。
+        if (disp.accepted || (disp.clientResult && disp.clientResult.code === 'QFR_LEA_TIMEOUT')) {
+          results.push({ seq: i + 1, command, ok: false, code: ERR.UNKNOWN });
+          setJobTerminalUnlessCancelled(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]) }, core.IDEM_NS.STEP);
+          core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
+          return;
+        }
         if (disp.timeout) {
           results.push({ seq: i + 1, command, ok: false, code: ERR.UNKNOWN });
           setJobTerminalUnlessCancelled(job.job_id, { status: 'UNKNOWN', error_code: ERR.UNKNOWN, results, steps_done: i + 1 });
-          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous }, core.IDEM_NS.STEP);
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]) }, core.IDEM_NS.STEP);
           core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'UNKNOWN', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'UNKNOWN', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
           return;
         }
@@ -318,12 +654,24 @@ function createLeaRoutes(core, channel, deps) {
             ? disp.clientResult.code : 'QFR_LEA_DISPATCH_FAILED';
           results.push({ seq: i + 1, command, ok: false, code: bcode });
           setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: bcode, results, steps_done: i + 1 });
-          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: { job_id: job.job_id, code: bcode } }, core.IDEM_NS.STEP);
+          core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]), result: { job_id: job.job_id, code: bcode } }, core.IDEM_NS.STEP);
           core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
           return;
         }
         results.push({ seq: i + 1, command, ok: true, result: disp.result });
-        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, result: disp.result }, core.IDEM_NS.STEP);
+        // S-089：截图结果累计超 20MB 即停批（防一批截图把内存／带宽打满），
+        // 本步已落盘的结果保留，批次记 FAILED，调用方凭幂等键重试后续步。
+        if (command === 'ui.snapshot') {
+          try { snapshotBytes += Buffer.byteLength(JSON.stringify(disp.result), 'utf8'); } catch (e) {}
+          if (snapshotBytes > BATCH_SNAPSHOT_BUDGET_BYTES) {
+            core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]), result: disp.result }, core.IDEM_NS.STEP);
+            core.updateJob(job.job_id, { results, steps_done: i + 1 });
+            setJobTerminalUnlessCancelled(job.job_id, { status: 'FAILED', error_code: 'QFR_LEA_SNAPSHOT_BUDGET', results, steps_done: i + 1 });
+            core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'FAILED', job_id: job.job_id, batch_id: batchId, dangerous: batchDangerous, steps_fp: stepsFp, result: { job_id: job.job_id, batch_id: batchId, status: 'FAILED', results, steps_done: i + 1 } }, core.IDEM_NS.BATCH);
+            return;
+          }
+        }
+        core.idemRecord(key.account_id, key.key_id, stepKey(i), { status: 'SUCCEEDED', job_id: job.job_id, batch_id: batchId, dangerous: spec.dangerous, step_fp: stepFp(steps[i]), result: disp.result }, core.IDEM_NS.STEP);
         core.updateJob(job.job_id, { results, steps_done: i + 1 });
         // 撤销检查：批内每步开始前核 grant_epoch（§6.2）——admit 已每步重查。
       }
@@ -399,6 +747,8 @@ function createLeaRoutes(core, channel, deps) {
     const binding = core.getBinding(deviceId);
     let online = null;
     try { online = channel ? await channel.nodeOnline(deviceId) : null; } catch (e) { online = null; }
+    // C1：在线即记设备最后在线（60 秒节流，见 touchDeviceSeen）。
+    if (online === true) { try { core.touchDeviceSeen(deviceId); } catch (e) {} }
     return sendJson(res, 200, {
       ok: true, device_id: deviceId,
       bound: !!(binding && binding.state === 'ACTIVE'),
@@ -497,7 +847,9 @@ function createLeaRoutes(core, channel, deps) {
     const rec = core.findKeyById(keyId);
     if (!rec || rec.account_id !== a.user) return fail(res, 404, 'NOT_FOUND', 'Key 不存在。');
     const out = core.revokeKey(keyId, a.user, 'user-revoke');
-    return sendJson(res, 200, { ok: true, record: out.record });
+    const kick = await kickAfterRevoke(out.revoked_key_ids || [keyId],
+      out.record && out.record.device_scope ? [out.record.device_scope] : null, a.user, 'user-revoke');
+    return sendJson(res, 200, { ok: true, record: out.record, kick });
   }
   async function handleRevokeAllKeys(req, res) {
     const a = await consoleAuth(req, res);
@@ -505,7 +857,220 @@ function createLeaRoutes(core, channel, deps) {
     const body = await passwordConfirm(req, res, a.user);
     if (!body) return;
     const out = core.revokeAllKeys(a.user, a.user, 'revoke-all');
-    return sendJson(res, 200, { ok: true, revoked_count: out.revoked_count, msg: '该账号全部 Key 已吊销，Muse 再调用将返回 401 QFR_API_KEY_REVOKED。' });
+    const kick = await kickAfterRevoke(out.revoked_key_ids || [], null, a.user, 'revoke-all');
+    return sendJson(res, 200, { ok: true, revoked_count: out.revoked_count, kick, msg: '该账号全部 Key 已吊销，Muse 再调用将返回 401 QFR_API_KEY_REVOKED。' });
+  }
+
+  // ---- RC-02：吊销即踢在线会话（D7 的 push 升级版） ----
+  // 吊销本身已落盘即时生效（admit 立拦）；本 kick 在 5 秒预算内尽力做
+  // 设备端踢出（推吊销全集＋发 lea.key_revoked 内部命令）与 job 取消。
+  // 设备离线／通道不可达即按台失败记入 kick 摘要，绝不让 kick 失败反噬
+  // 吊销响应（吊销已成功）。
+  async function kickAfterRevoke(keyIds, deviceIds, accountId, reason) {
+    try {
+      if (typeof core.kickRevokedSessions !== 'function') return { ok: false, reason: 'kick-unsupported' };
+      return await core.kickRevokedSessions(channel, { keyIds, deviceIds, accountId, reason });
+    } catch (e) {
+      return { ok: false, reason: 'kick-threw', error: String(e && e.message).slice(0, 120) };
+    }
+  }
+
+  // ---- C1：自助绑定 ----
+  // issue：控制台会话签发一次性票据（5 分钟）。不返回 Key 明文。
+  async function handleSelfBindIssue(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const deviceId = String(body.device_id || '');
+    const deviceName = String(body.device_name || '');
+    const platform = String(body.platform || '');
+    const nonce = String(body.nonce || '');
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+    let out;
+    try {
+      out = core.issueSelfBindTicket(a.user, deviceId, { device_name: deviceName, platform, nonce });
+    } catch (e) {
+      if (e && e.code === 'QFR_LEA_NOT_BOUND') return fail(res, 403, e.code, '该设备尚未绑定到本账号，请先在设备上登录 QFRemote 完成绑定。');
+      if (e && e.code === 'QFR_RATE_LIMITED') return fail(res, 429, e.code, '签发过于频繁，请几秒后再试。');
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, ticket: out.ticket, challenge: out.challenge, expires_at: out.expires_at, ttl_s: out.ttl_s });
+  }
+  // complete：只许 USH 调用（票据＋设备 P-256 签名；无控制台会话要求，
+  // USH 不是浏览器，没有控制台 cookie）。明文 Key 仅本次响应返回一次。
+  async function handleSelfBindComplete(req, res) {
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    let out;
+    try {
+      out = core.completeSelfBind({
+        ticket: String(body.ticket || ''), account_id: String(body.account_id || ''),
+        device_id: String(body.device_id || ''), nonce: String(body.nonce || ''),
+        device_pubkey: String(body.device_pubkey || ''), signature: String(body.signature || ''),
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      if (e && e.code === 'QFR_TICKET_INVALID') return fail(res, 401, e.code, '绑定票据无效或已过期，请重新点击链接。');
+      if (e && e.code === 'QFR_TICKET_REUSED') return fail(res, 401, e.code, '绑定票据已被使用，请重新点击链接。');
+      if (e && e.code === 'QFR_TICKET_EXPIRED') return fail(res, 401, e.code, '绑定票据已过期，请重新点击链接。');
+      if (e && e.code === 'QFR_TICKET_MISMATCH') return fail(res, 401, e.code, '绑定票据与账号／设备／nonce 不一致。');
+      if (e && e.code === 'QFR_DEVICE_SIGNATURE_INVALID') return fail(res, 401, e.code, '设备签名无效。');
+      if (e && e.code === 'QFR_MUSE_NOT_AUTHORIZED') return fail(res, 403, e.code, '该账号未授权 Muse 操作。');
+      if (e && e.code === 'QFR_DEVICE_SCOPE_REQUIRED') return fail(res, 400, e.code, '设备绑定异常，请重新登录后再链接。');
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, key: out.key, record: out.record, binding_epoch: out.binding_epoch, msg: '已链接。请妥善保存：凭据只返回这一次。' });
+  }
+  // status：SPA 轮询（控制台会话）；只返回状态／设备名／有效期，不含凭据。
+  async function handleSelfBindStatus(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const u = new URL(req.url, 'http://localhost');
+    const deviceId = String(u.searchParams.get('device_id') || '');
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+    return sendJson(res, 200, Object.assign({ ok: true }, core.selfBindStatus(a.user, deviceId)));
+  }
+  // renew：设备续期。Bearer Key 鉴权（含时间戳／nonce 防重放）＋设备签名。
+  // 续期时间戳须与 header 时间戳一致（防 body 时间戳与签名时间戳脱钩）。
+  async function handleSelfBindRenew(req, res) {
+    const auth = bearerAuth(req);
+    if (!auth.ok) return fail(res, auth.status, auth.code, auth.msg);
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const tsHeader = Number(req.headers['x-qfr-timestamp'] || req.headers['X-QFR-Timestamp']);
+    const nonceHeader = String(req.headers['x-qfr-nonce'] || req.headers['X-QFR-Nonce'] || '');
+    if (!Number.isFinite(tsHeader) || Number(body.timestamp) !== tsHeader) {
+      return fail(res, 400, ERR.VALIDATION, 'timestamp 须与 X-QFR-Timestamp 一致。');
+    }
+    let out;
+    try {
+      out = core.renewSelfBindKey({
+        key_id: auth.key.key_id, device_id: String(body.device_id || ''),
+        nonce: nonceHeader, timestamp: tsHeader, signature: String(body.signature || ''),
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      if (e && e.code === 'QFR_SCOPE_DENIED') return fail(res, 403, e.code, e.message);
+      if (e && e.code === 'QFR_API_KEY_REVOKED') return fail(res, 401, e.code, 'Key 已吊销或已过期，请重新链接。');
+      if (e && e.code === 'QFR_REPLAY_DETECTED') return fail(res, 401, e.code, '请求时间戳超出允许窗口。');
+      if (e && e.code === 'QFR_LEA_NOT_BOUND') return fail(res, 403, e.code, '设备绑定或设备密钥缺失，请重新链接。');
+      if (e && e.code === 'QFR_GRANT_REVOKED') return fail(res, 403, e.code, '授权已被撤销，请重新链接。');
+      if (e && e.code === 'QFR_DEVICE_SIGNATURE_INVALID') return fail(res, 401, e.code, '设备签名无效。');
+      if (e && e.code === 'QFR_NOT_RENEWABLE') {
+        return sendJson(res, 409, { ok: false, code: e.code, msg: '尚未到续期窗口。', renewable_at: e.renewable_at || null });
+      }
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, record: out.record });
+  }
+  // 自助吊销（无密码二次确认，只限 self_bind Key；控制台 Key 仍走原密码路径）。
+  async function handleSelfBindRevoke(req, res, keyId) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const out = core.revokeSelfBindKey(a.user, keyId);
+    if (!out.ok) {
+      if (out.code === 'NOT_FOUND') return fail(res, 404, 'NOT_FOUND', 'Key 不存在。');
+      return fail(res, 403, out.code || 'QFR_SCOPE_DENIED', '该 Key 不支持自助吊销（仅自助链接生成的 Key 可在此吊销）。');
+    }
+    const kick = await kickAfterRevoke(out.revoked_key_ids || [keyId],
+      out.record && out.record.device_scope ? [out.record.device_scope] : null, a.user, 'self-bind-revoke');
+    return sendJson(res, 200, { ok: true, record: out.record, kick });
+  }
+  async function handleSelfBindRevokeAll(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const out = core.revokeAllSelfBindKeys(a.user);
+    const kick = await kickAfterRevoke(out.revoked_key_ids || [], null, a.user, 'self-bind-revoke-all');
+    return sendJson(res, 200, { ok: true, revoked_count: out.revoked_count, kick, msg: '该账号全部自助链接密钥已吊销。' });
+  }
+
+  // ---- RC-04：断线重连票据 ----
+  // issue：Bearer Key 优先（不强制防重放头：签发本身 5 秒限流＋签发即
+  // 作废同 session 旧票（只留最新），重放签发请求只会再得一张新票据，
+  // 不扩大授权；L3 经 extRequest 调用时不一定带 X-QFR-Timestamp／Nonce）；无 Authorization 头时接受
+  // 有效控制台会话（规范 §3.1 第 1 条）。已出示 Bearer 但无效时不回落
+  // 到控制台会话，401 fail-closed。
+  // 控制台会话路径下 Key 的确定：取该账号在该设备上最近创建的在用 Key
+  // （device_scope 一致；无在用 Key → 403；多张取最新一张——控制台
+  // 会话即账号本人，选其名下在用 Key 不扩大授权）。
+  async function handleReconnectIssue(req, res) {
+    const headers = req.headers || {};
+    const hasBearer = typeof headers.authorization === 'string' && /^Bearer\s+/i.test(headers.authorization) ||
+      typeof headers.Authorization === 'string' && /^Bearer\s+/i.test(headers.Authorization);
+    let accountId, keyId, keySelection;
+    if (hasBearer) {
+      const auth = core.authenticate(headers, { requireReplayHeaders: false });
+      if (!auth.ok) return fail(res, auth.status, auth.code, auth.msg);
+      accountId = auth.key.account_id;
+      keyId = auth.key.key_id;
+      keySelection = 'bearer';
+    } else {
+      const a = await consoleAuth(req, res);
+      if (!a) return;
+      accountId = a.user;
+      const body0 = await readJsonBody(req, BODY_LIMIT);
+      if (body0.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+      req._reconnectIssueBody = body0;
+      const did0 = bareNodeId(String(body0.device_id || ''));
+      if (!did0) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+      const cands = core.listKeys(accountId)
+        .filter((k) => k && k.status === 'active' && k.device_scope && bareNodeId(k.device_scope) === did0)
+        .sort((x, y) => (y.created_at || 0) - (x.created_at || 0));
+      if (!cands.length) return fail(res, 403, ERR.NOT_BOUND, '该设备没有在用的 LEA Key，请先链接后再申领重连票据。');
+      keyId = cands[0].key_id;
+      // R-复核 (h)：多 Key 并存时取最新一张（控制台会话即账号本人，候选
+      // Key 全属该账号该设备，且随后 admit 全量准入，不扩大授权；取哪张
+      // 记审计 key_selection，不静默）。改显式 key_id 会断 L3 控制台路径
+      // （L3 只带控制台 cookie、无 key_id 可传），故保留自动选择。
+      keySelection = 'console-auto-latest';
+    }
+    const body = req._reconnectIssueBody || await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const deviceId = String(body.device_id || '');
+    const sessionId = String(body.session_id || '');
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+    if (!sessionId) return fail(res, 400, ERR.VALIDATION, '缺少 session_id。');
+    let ticket;
+    try {
+      ticket = core.issueReconnectTicket({ accountId, deviceId, keyId, sessionId }, { keySelection });
+    } catch (e) {
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      if (e && e.code === 'QFR_RATE_LIMITED') return fail(res, 429, e.code, '签发过于频繁，请几秒后再试。');
+      if (e && e.code === 'QFR_SIGNING_NOT_REAL') return fail(res, 503, e.code, '服务端签名能力未就绪，无法签发重连票据。');
+      if (e && e.code === 'QFR_API_KEY_REVOKED') return fail(res, 401, e.code, 'Key 已吊销或已过期，请重新链接。');
+      if (e && e.code) return fail(res, (e.status && Number.isInteger(e.status)) ? e.status : 403, e.code, e.message);
+      throw e;
+    }
+    // 直接返回票据 JSON 全文（L3 validateTicket 按顶层 10 字段校验，
+    // 不包 { ok, ticket } 壳）。票据明文只在此响应出现一次。
+    return sendJson(res, 200, ticket);
+  }
+  // resume：body 即票据 JSON 全文，不走 Bearer（票据本身就是 bearer）。
+  // 成功只做票据核验＋返回 epochs；握手重建在下一次业务下发时由
+  // ensureHandshake 按核验返回的 epochs 做（RC-04 (d)），本端点不下发
+  // sys.handshake（设备可能离线，下发必失败）。失败码按规范 §3.2／§4。
+  async function handleReconnectResume(req, res) {
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    let out;
+    try {
+      out = core.verifyReconnectTicket(body);
+    } catch (e) {
+      if (e && e.code === 'QFR_TICKET_INVALID') return fail(res, 401, e.code, '重连票据无效，请重新登录。');
+      if (e && e.code === 'QFR_TICKET_REUSED') return fail(res, 401, e.code, '重连票据已被使用，请重新登录。');
+      if (e && e.code === 'QFR_TICKET_EXPIRED') return fail(res, 401, e.code, '重连票据已过期，请重新登录。');
+      if (e && e.code === 'QFR_API_KEY_REVOKED') return fail(res, 401, e.code, 'Key 已吊销或已过期，请重新链接。');
+      if (e && e.code === 'QFR_GRANT_REVOKED') return fail(res, 403, e.code, '授权已被撤销，请重新链接。');
+      if (e && e.code === 'QFR_BINDING_CHANGED') return fail(res, 409, e.code, '设备已换绑，请重新链接。');
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      throw e;
+    }
+    return sendJson(res, 200, {
+      ok: true, session_id: out.session_id, device_id: out.device_id,
+      binding_epoch: out.binding_epoch, grant_epoch: out.grant_epoch,
+    });
   }
 
   // ---- 授权授予/撤销（站长） ----
@@ -530,7 +1095,8 @@ function createLeaRoutes(core, channel, deps) {
     if (action === 'revoke') {
       const out = core.revokeGrant(target, a.user);
       if (!out.ok) return fail(res, 404, 'NOT_FOUND', '该账号没有在效授权。');
-      return sendJson(res, 200, { ok: true, account_id: target, grant_epoch: out.grant_epoch });
+      const kick = await kickAfterRevoke(out.revoked_key_ids || [], null, target, 'grant-revoked');
+      return sendJson(res, 200, { ok: true, account_id: target, grant_epoch: out.grant_epoch, kick });
     }
     return fail(res, 400, ERR.VALIDATION, 'action 须为 grant 或 revoke。');
   }
@@ -592,7 +1158,56 @@ function createLeaRoutes(core, channel, deps) {
     // 客户端须按缺失处理（只做无版本并集合并，不推进本机 generation），
     // 绝不把缺失静默当成最新——见 windows/main.js notifyLeaLogin。
     const revocations = core.getRevocations(deviceId);
-    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations, revocation_generation: revocations.generation, ticket: out.ticket });
+    // RC-02：换绑吊销了旧 Key 时即踢其会话（仅有旧 Key 被吊销时才做，
+    // 首次绑定／同账号重绑无吊销即不加延迟）。
+    const kick = (out.revoked_key_ids && out.revoked_key_ids.length)
+      ? await kickAfterRevoke(out.revoked_key_ids, [deviceId], accountId, 'rebind')
+      : { ok: true, skipped: 'no-revoked-keys' };
+    return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations, revocation_generation: revocations.generation, ticket: out.ticket, kick });
+  }
+
+  // ---- 卸载注销（2026-11-14 站长亲定；固定契约见 lea-core deregisterDevice） ----
+  // 验签（绑定须 ACTIVE、账号匹配、device_id 与路径一致）→ 删绑定＋该设备
+  // 自助票据 → 尽力删 MeshCentral 节点记录 → 审计 lea-deregistered。
+  // 红线：付费 LEA 密钥、其他设备绑定、账号、grant、审计一律不动；
+  // 节点删不掉（通道不可达／节点已不在／权限不足）时登记留着、照常返回
+  // 成功，卸载不阻断；已注销过凭墓碑验签后幂等成功。
+  async function handleDeregister(req, res, deviceIdPath) {
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const deviceId = bareNodeId(String(body.device_id || ''));
+    if (!deviceId || bareNodeId(deviceIdPath) !== deviceId) {
+      return fail(res, 400, ERR.VALIDATION, 'device_id 须与路径一致。');
+    }
+    let out;
+    try {
+      out = core.deregisterDevice({
+        account_id: String(body.account_id || ''), device_id: deviceId,
+        nonce: String(body.nonce || ''), timestamp: Number(body.timestamp),
+        signature: String(body.signature || ''),
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      if (e && e.code === 'QFR_REPLAY_DETECTED') return fail(res, 401, e.code, '请求时间戳超出允许窗口或 nonce 已使用。');
+      if (e && e.code === 'QFR_DEVICE_SIGNATURE_INVALID') return fail(res, 401, e.code, '设备签名无效。');
+      throw e;
+    }
+    // 删 MeshCentral 节点记录（best-effort）：失败只记审计，不改响应。
+    // 节点删除走 control.ashx removedevices（见 lea-channel.deleteNode）；
+    // 卸载端已先清本地状态，节点断不断开不影响本次 HTTP 响应。
+    if (channel && typeof channel.deleteNode === 'function') {
+      try {
+        const r = await channel.deleteNode(deviceId);
+        if (!r || r.ok !== true) {
+          try { core.audit('lea-deregistered-node-delete-failed', { account_id: out.account_id, device_id: deviceId, already: out.already, result: String((r && r.result) || 'unknown') }); } catch (e) {}
+        }
+      } catch (e) {
+        try { core.audit('lea-deregistered-node-delete-failed', { account_id: out.account_id, device_id: deviceId, already: out.already, result: 'channel-error:' + String((e && e.message) || e).slice(0, 120) }); } catch (e2) {}
+      }
+    } else {
+      log({ ev: 'lea-deregister-no-delete-node', device_id: deviceId });
+    }
+    return sendJson(res, 200, { ok: true, deregistered: true });
   }
 
   // ---- 查本机吊销表应有快照（H21） ----
@@ -618,16 +1233,28 @@ function createLeaRoutes(core, channel, deps) {
     const cancelM = p.match(/^\/api\/lea\/v1\/jobs\/([^/]+)\/cancel$/);
     const devM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/status$/);
     const rebindM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/rebind$/);
+    const deregM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/deregister$/);
     const revocM = p.match(/^\/api\/lea\/v1\/devices\/([^/]+)\/revocations$/);
     const revokeM = p.match(/^\/api\/lea\/v1\/keys\/([^/]+)\/revoke$/);
+    const sbRevokeM = p.match(/^\/api\/lea\/v1\/self-bind\/revoke\/([^/]+)$/);
     try {
       if (req.method === 'POST' && p === '/api/lea/v1/execute') { await handleExecute(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/batches') { await handleBatches(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/reconnect/issue') { await handleReconnectIssue(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/reconnect/resume') { await handleReconnectResume(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/crash-report') { await handleCrashReport(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/self-bind/issue') { await handleSelfBindIssue(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/self-bind/complete') { await handleSelfBindComplete(req, res); return true; }
+      if (req.method === 'GET' && p === '/api/lea/v1/self-bind/status') { await handleSelfBindStatus(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/self-bind/renew') { await handleSelfBindRenew(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/self-bind/revoke-all') { await handleSelfBindRevokeAll(req, res); return true; }
+      if (req.method === 'POST' && sbRevokeM) { await handleSelfBindRevoke(req, res, decodeURIComponent(sbRevokeM[1])); return true; }
       if (req.method === 'GET' && jobM) { await handleGetJob(req, res, decodeURIComponent(jobM[1])); return true; }
       if (req.method === 'POST' && cancelM) { await handleCancelJob(req, res, decodeURIComponent(cancelM[1])); return true; }
       if (req.method === 'GET' && devM) { await handleDeviceStatus(req, res, decodeURIComponent(devM[1])); return true; }
       if (req.method === 'GET' && revocM) { await handleRevocations(req, res, decodeURIComponent(revocM[1])); return true; }
       if (req.method === 'POST' && rebindM) { await handleRebind(req, res, decodeURIComponent(rebindM[1])); return true; }
+      if (req.method === 'POST' && deregM) { await handleDeregister(req, res, decodeURIComponent(deregM[1])); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/keys') { await handleCreateKey(req, res); return true; }
       if (req.method === 'GET' && p === '/api/lea/v1/keys') { await handleListKeys(req, res); return true; }
       if (req.method === 'POST' && revokeM) { await handleRevokeKey(req, res, decodeURIComponent(revokeM[1])); return true; }
