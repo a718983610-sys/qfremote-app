@@ -1,3 +1,7 @@
+// 【冻结注明 v6 冻结⑮】本文件在纯冻结树下跳过：
+// 它强制要求未冻结的第三批／Week 2 文件 docs/REFACTOR-LIST.md，
+// 纯冻结树下该文件不存在、测试失败。跳过期间该 lint 门不生效。
+// 第三批合入后恢复本文件。
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';

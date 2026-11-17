@@ -1,3 +1,7 @@
+// 【冻结注明 v6 冻结⑮】本文件在纯冻结树下跳过：
+// 它 import 未冻结的第二批文件 lib/core/release_signature.dart，
+// 纯冻结树下整个文件加载失败。跳过会连带失去更新全链／失败注入
+// 用例的覆盖。第二批合入后恢复本文件。
 import 'dart:convert';
 import 'dart:io';
 

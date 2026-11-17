@@ -1,3 +1,7 @@
+// 【冻结注明 v6 冻结⑮】本文件在纯冻结树下跳过：
+// 它 import lib/core/manifest.dart，而 manifest.dart:4 import 未冻结的
+// 第二批文件 lib/core/release_signature.dart，纯冻结树下整个文件加载失败。
+// 第二批合入后恢复本文件。
 import 'dart:async';
 import 'dart:io';
 
