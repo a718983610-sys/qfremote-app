@@ -2,56 +2,36 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body {
-    background: #f4f7fb;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg);
     display:flex; align-items:center; justify-content:center;
-    -webkit-user-select:none; user-select:none; color:#1f2d47;
+    -webkit-user-select:none; user-select:none; color:var(--text-1);
     position:relative;
   }
-  /* QFClash 家族母题：右上方的金色轨道环（低透明，只作氛围） */
-  .orbit {
-    position:absolute; right:-120px; top:-150px; width:340px; height:340px;
-    border:1.5px solid rgba(245,193,92,.30); border-radius:50%;
-    transform: rotate(-18deg) scaleY(.62); pointer-events:none;
-  }
-  .orbit::after {
-    content:""; position:absolute; left:26px; top:38px; width:9px; height:9px; border-radius:50%;
-    background: #ff8a1e;
-  }
-  .col { display:flex; flex-direction:column; align-items:center; animation: rise .5s ease both; }
-  @keyframes rise { from { opacity:0; transform: translateY(8px);} to { opacity:1; transform:none;} }
+  /* 重做 A §2.1：删装饰轨道环——启动页只留 Logo + 名称 + 2px 进度线。 */
+  .col { display:flex; flex-direction:column; align-items:center; animation: win-in var(--d5) var(--e-l) both; }
   .tile {
-    width:88px; height:88px; border-radius:14px; padding:5px; background:#0b2b5b;
+    width:88px; height:88px; border-radius:14px; padding:5px; background:var(--tile-bg);
     box-sizing:border-box;
   }
   .tile img { width:100%; height:100%; border-radius:10px; display:block; }
-  .name { font-size:29px; font-weight:700; letter-spacing:1.2px; margin-top:18px; }
-  .tag { font-size:13px; color:#5d6e84; margin-top:6px; letter-spacing:5px; }
-  .bar { width:192px; height:5px; border-radius:3px; background:#dfe7f2; margin-top:26px; overflow:hidden; }
-  .bar i { display:block; height:100%; width:38%; border-radius:3px;
-    background: #2470e0;
-    animation: slide 1.15s ease-in-out infinite alternate; }
-  @keyframes slide { from { transform: translateX(-55%);} to { transform: translateX(310%);} }
-  .hint { font-size:12px; color:#5d6e84; margin-top:11px; }
-  .ver { position:absolute; bottom:13px; left:0; right:0; text-align:center; font-size:11px; color:#5d6e84; letter-spacing:.6px; }
-  /* 深灰深色主题（与工具栏联动，不用纯黑） */
-  html[data-theme="dark"] body { background: #17181c; color:#eceff3; }
-  html[data-theme="dark"] .tile { background:#ffffff; }
-  html[data-theme="dark"] .tag { color:#9aa1ab; }
-  html[data-theme="dark"] .bar { background: rgba(255,255,255,.16); }
-  html[data-theme="dark"] .hint { color:#868d98; }
-  html[data-theme="dark"] .ver { color:#9aa1ab; }
+  .name { font-size:24px; font-weight:600; line-height:32px; letter-spacing:1.2px; margin-top:16px; }
+  .tag { font-size:12px; font-weight:500; line-height:18px; color:var(--text-2); margin-top:8px; letter-spacing:5px; }
+  .bar { width:160px; height:2px; border-radius:999px; background:var(--line); margin-top:24px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:40px; border-radius:999px;
+    background: var(--brand);
+    animation: load-indet 900ms linear infinite; }
+  .hint { font-size:12px; color:var(--text-2); margin-top:12px; }
+  .ver { position:absolute; bottom:12px; left:0; right:0; text-align:center; font-size:12px; color:var(--text-2); letter-spacing:.6px; }
+  /* 深色主题（与工具栏联动，黑底白字） */
+  html[data-theme="dark"] .bar { background: var(--line-strong); }
 
-  /* 排版批1（P19）：焦点环与减动效 */
-  button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
-  <div class="orbit"></div>
   <div class="col">
     <div class="tile"><img src="build/icon.png" alt="QFRemote"></div>
     <div class="name">QFRemote</div>
@@ -64,7 +44,7 @@
   var q0 = new URLSearchParams(location.search);
   if (q0.get('t') === 'dark') document.documentElement.dataset.theme = 'dark';
   const v = q0.get('v');
-  if (v) document.getElementById('ver').textContent = 'QFRemote v' + v;
+  if (v) document.getElementById('ver').textContent = 'QFRemote v' + v.replace(/\.0$/, '');
 </script>
 </body>
 </html>

@@ -157,8 +157,12 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
 // ---------- H. 登录页许可入口 ----------
 {
   const js = autologin.buildInjectScript({ username: null, password: null, rememberPassword: false, rememberDevice: false });
+  // H1（2026-11-15，陈旧断言修复）：黑白化后购买钮为 background:#000000（白字），
+  // 查询／换绑链为白字＋#52525B 下划线（autologin.js:422-424、428、433）；旧断言
+  // 要的 #111 与品牌蓝 #2470E0 在注入脚本输出里已不存在。加负向守卫：注入脚本
+  // 内无 #2470E0（品牌蓝不得回流）。
   ok('H1_inject_rows', js.includes('qfLicenseRows') && js.includes('购买密钥') && js.includes('查询密钥') &&
-    js.includes('#111') && js.includes('#2470E0') && js.includes('qfBuyKeyRow'));
+    js.includes('#000000') && js.includes('#52525B') && !js.includes('#2470E0') && js.includes('qfBuyKeyRow'));
   ok('H2_nav_target', lic.licenseNavTarget('https://app.qfremote.top/purchase', 'app.qfremote.top') === 'purchase' &&
     lic.licenseNavTarget('https://app.qfremote.top/license/status', 'app.qfremote.top') === 'status' &&
     lic.licenseNavTarget('https://app.qfremote.top/license/rebind', 'app.qfremote.top') === 'rebind' &&

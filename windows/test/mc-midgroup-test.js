@@ -44,7 +44,12 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
     // F1 回填：maybeInstallSystemServices 经 preferUnpackedPath／unpackedAppPath
     // 取脚本路径（打包形态解包路径），不抽取即 ReferenceError——与
     // update-lea-backfill-test.js 同款抽取清单。
-    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'waitInstallResult', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath']
+    // r13 回填：r12 的 0d7df83 给守门加了 leaPayloadSignature() 调用，本文件
+    // 未同步抽取，HEAD 上即 ReferenceError（与本轮改动无关，见证据）；
+    // leaPayloadSignature 经 leaPayloadPath／sha256File，三件一并抽取。
+    // （sha256File 在本沙箱内 require('crypto') 抛错即返 ''，签名退回 ''、
+    // 守门退回只比版本；本文件场景 prevVersion 恒 2.4.4，行为不受影响。）
+    const fns = ['lockComponentSourceDir', 'lockServiceInstalled', 'waitInstallResult', 'maybeInstallSystemServices', 'unpackedAppPath', 'preferUnpackedPath', 'leaPayloadPath', 'sha256File', 'leaPayloadSignature']
       .map((n) => extractFunction(MAIN_SRC, n)).join('\n');
     const constM = MAIN_SRC.match(/const INSTALL_WAIT_MS = \d+;/);
     if (!constM) throw new Error('INSTALL_WAIT_MS not found');
@@ -139,6 +144,7 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         bootLog: (tag, detail) => { bootLogs.push(tag + (detail ? ':' + detail : '')); },
         syncLockOwner: async () => ({ ok: true, changed: false, uacDispatched: false }),
         sysHelper,
+        sysPrograms: require('../sys-programs'), // D-09：抽取函数内调绝对路径
         fs: fakeFs,
         path,
         setTimeout, clearTimeout,

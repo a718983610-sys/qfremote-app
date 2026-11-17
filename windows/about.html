@@ -2,126 +2,127 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  html, body { height:100%; overflow:hidden; }
   body { overflow-y:auto; }
-  .upd { display:none; margin:14px 22px 0; padding:12px 16px; border-radius:14px;
-    background: #eef3fb;
-    border:1px solid #dfe7f2; }
+  .upd { display:none; margin:16px 24px 0; padding:16px 20px; border-radius:12px;
+    background: var(--surface-3);
+    border:1px solid var(--line); }
   .upd.show { display:block; }
-  .upd .uv { font-size:15px; font-weight:700; color:#1f2d47; }
-  .upd .un { font-size:13px; line-height:1.65; color:#1f2d47; margin-top:5px; white-space:pre-wrap; }
-  html[data-theme="dark"] .upd { background: #22262e; border-color: rgba(255,255,255,.09); }
-  html[data-theme="dark"] .upd .uv { color:#eceff3; }
-  html[data-theme="dark"] .upd .un { color:#c9cdd4; }
-  .bar { display:none; height:9px; border-radius:99px; margin-top:11px;
-    background: rgba(36,112,224,.15); overflow:hidden; }
+  .upd .uv { font-size:18px; font-weight:600; line-height:26px; color:var(--text-1); }
+  .upd .un { font-size:13px; line-height:1.6; color:var(--text-1); margin-top:4px; white-space:pre-wrap; }
+  html[data-theme="dark"] .upd { background: var(--surface-3); }
+  html[data-theme="dark"] .upd .un { color:var(--text-2); }
+  /* W5：进度条 9→8px，与强制更新页统一；浅色 track 改 var(--line)，与强制更新页统一（深色已是 var(--line)） */
+  .bar { display:none; height:8px; border-radius:99px; margin-top:11px;
+    background: var(--line); overflow:hidden; }
   .bar.show { display:block; }
   .bar i { display:block; height:100%; width:0%; border-radius:99px;
-    background: #2470e0; transition: width .2s ease; }
-  html[data-theme="dark"] .bar { background: rgba(255,255,255,.14); }
+    background: var(--brand); transition: width var(--d2) linear; }
+  html[data-theme="dark"] .bar { background: var(--line); }
   .urow { display:flex; gap:9px; }
   .urow .btn { flex:1; }
-  .btn.ghost { background: #ffffff; color:#2470e0;
-    border:1px solid #c9d6ea; box-shadow:none; }
-  .btn.ghost:hover { filter:none; background:#eef3fb; }
-  .btn.ghost:active { background:#e1ecfc; }
-  .btn.danger { background:#ffffff; color:#c92a2a; border:1px solid #f0c4c4; }
-  .btn.danger:hover { filter:none; background:#fdf1f1; }
-  .btn.danger:active { background:#fbe3e3; }
-  html[data-theme="dark"] .btn.danger { background:#2b2f36; color:#ff9c9c; border-color:#5a3535; }
-  html[data-theme="dark"] .btn.danger:hover { background:#3a3238; }
-  html[data-theme="dark"] .btn.ghost { background: #2b2f36; color:#eceff3;
-    border-color: rgba(255,255,255,.16); }
-  html[data-theme="dark"] .btn.ghost:hover { background:#32363f; }
-  html[data-theme="dark"] .btn.ghost:active { background:#3a3f49; }
-  .keys { margin:14px 22px 0; padding:4px 16px; border-radius:14px;
-    background: #ffffff;
-    border:1px solid #dfe7f2; font-size:13px; }
-  html[data-theme="dark"] .keys { background: #22262e; border-color: rgba(255,255,255,.08); }
-  .keys .kr { display:flex; justify-content:space-between; padding:8px 0;
-    border-bottom:1px solid #dfe7f2; }
-  html[data-theme="dark"] .keys .kr { border-bottom-color: rgba(255,255,255,.08); }
+  .btn.ghost { background: var(--surface-3); color:var(--brand);
+    border:1px solid var(--line); box-shadow:none; }
+  .btn.ghost:hover { filter:none; background:var(--sel-bg); }
+  .btn.ghost:active { background:var(--sel-bg); }
+  /* R-W6（F1 口径）：浅色 .btn.danger 文字改中性墨色——红字 #DC2626 于
+     --surface-3（#F0F0F2）仅 4.24:1，低于正文 4.5:1；墨色 #111113 为
+     16.57:1。危险信号仍由红色边框承担。深色 #F87171 于 #1C1C1E 为
+     6.15:1 已过线，保留不动。 */
+  .btn.danger { background:var(--surface-3); color:var(--text-1); border:1px solid rgba(var(--danger-rgb),.35); }
+  .btn.danger:hover { filter:none; background:var(--surface-3); border-color:rgba(var(--danger-rgb),.55); }
+  .btn.danger:active { background:var(--surface-3); border-color:var(--danger); }
+  html[data-theme="dark"] .btn.danger { color:var(--danger); border-color:rgba(var(--danger-rgb),.4); }
+  html[data-theme="dark"] .btn.danger:hover { background:rgba(var(--danger-rgb),.14); }
+  /* 查询密钥链接（定夺 §3.3）：主文字色＋始终下划线，hover 下划线变主文字色 */
+  #licQueryBtn { text-decoration:underline; text-decoration-color:var(--link-underline); }
+  #licQueryBtn:hover { text-decoration-color:var(--link); }
+  html[data-theme="dark"] .btn.ghost { background: var(--surface-3); color:var(--text-1);
+    border-color: var(--line); }
+  html[data-theme="dark"] .btn.ghost:hover { background:var(--sel-bg); }
+  html[data-theme="dark"] .btn.ghost:active { background:var(--line); }
+  .keys { margin:16px 24px 0; padding:4px 20px; border-radius:var(--radius-1);
+    background: var(--surface-3);
+    border:1px solid var(--line); font-size:13px; }
+  .keys .kr { display:flex; justify-content:space-between; gap:16px; padding:8px 0;
+    border-bottom:1px solid var(--line); }
   .keys .kr:last-child { border-bottom:none; }
-  .keys .kk { color:#5d6e84; } html[data-theme="dark"] .keys .kk { color:#9aa1ab; }
-  .keys .kv { font-weight:600; font-variant-numeric: tabular-nums; color:#1f2d47; }
-  html[data-theme="dark"] .keys .kv { color:#eceff3; }
+  .keys .kk { color:var(--text-2); }
+  .keys .kv { font-weight:600; font-variant-numeric: tabular-nums; color:var(--text-1); }
   body {
-    background: #f4f7fb;
-    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-    -webkit-user-select:none; user-select:none; color:#1f2d47; position:relative;
+    background: var(--bg);
+    -webkit-user-select:none; user-select:none; color:var(--text-1); position:relative;
     display:flex; flex-direction:column;
   }
-  html[data-theme="dark"] body {
-    background: #17181c; color:#eceff3;
-  }
-  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:20px 22px 0; }
+  /* 重做 A §4：撤销六项②深色合并——卡片用 BG2，与页面 BG0 靠 hairline + e1 分离。 */
+  body { animation: win-in var(--d5) var(--e-l) both; }
+  .head { -webkit-app-region: drag; display:flex; align-items:flex-start; padding:24px 24px 0; }
   .tile {
-    width:60px; height:60px; border-radius:15px; padding:4px; flex:none; background:#0b2b5b;
+    width:60px; height:60px; border-radius:14px; padding:4px; flex:none; background:var(--tile-bg);
     box-sizing:border-box;
   }
-  html[data-theme="dark"] .tile { background:#ffffff; }
-  .tile img { width:100%; height:100%; border-radius:12px; display:block; }
-  .tt { margin-left:14px; padding-top:5px; }
-  .tt .nm { font-size:20px; font-weight:600; letter-spacing:.8px; line-height:1.1; }
-  .tt .ds { font-size:12px; color:#5d6e84; margin-top:5px; }
-  html[data-theme="dark"] .tt .ds { color:#9aa1ab; }
+  .tile img { width:100%; height:100%; border-radius:10px; display:block; }
+  .tt { margin-left:16px; padding-top:4px; }
+  .tt .nm { font-size:24px; font-weight:600; letter-spacing:.8px; line-height:32px; }
+  .tt .ds { font-size:12px; color:var(--text-2); margin-top:5px; }
   .x {
     -webkit-app-region: no-drag; margin-left:auto; appearance:none; border:none; cursor:pointer;
-    background:transparent; color:#5d6e84; width:30px; height:30px; border-radius:8px;
+    background:transparent; color:var(--text-2); width:32px; height:32px; border-radius:8px;
     display:flex; align-items:center; justify-content:center;
-    transition: background .13s ease, color .13s ease;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
   }
-  .x:hover { background:#d3382c; color:#fff; }
+  .x:hover { background:var(--danger); color:var(--on-status); }
+  /* 实色 danger 底＋白字用浅色版定夺值 #DC2626（白字 4.83:1） */
+  html[data-theme="dark"] .x:hover { background:#DC2626; }
   .x svg { width:14px; height:14px; }
   .card {
-    margin:18px 22px 0; padding:6px 18px;
-    background: #ffffff;
-    border:1px solid #dfe7f2; border-radius:14px;
+    margin:16px 24px 0; padding:6px 20px;
+    background: var(--surface-3);
+    border:1px solid var(--line); border-radius:var(--radius-1);
   }
-  html[data-theme="dark"] .card { background: #22262e; border-color: rgba(255,255,255,.08); }
   .row { display:flex; justify-content:space-between; align-items:center; padding:12px 0;
-    border-bottom:1px solid #dfe7f2; font-size:14px; }
-  html[data-theme="dark"] .row { border-bottom-color: rgba(255,255,255,.08); }
+    border-bottom:1px solid var(--line); font-size:14px; }
   .row:last-child { border-bottom:none; }
-  .row .k { color:#5d6e84; }
-  html[data-theme="dark"] .row .k { color:#9aa1ab; }
-  .row .v { font-weight:600; font-variant-numeric: tabular-nums; color:#1f2d47; min-width:0; word-break:break-all; text-align:right; }
-  html[data-theme="dark"] .row .v { color:#eceff3; }
-  .chk { padding:0 22px; margin-top:18px; }
+  .row .k { color:var(--text-2); }
+  .row .v { font-weight:600; font-variant-numeric: tabular-nums; color:var(--text-1); min-width:0; word-break:break-all; text-align:right; }
+  .chk { padding:0 24px; margin-top:16px; }
   .btn {
     width:100%; border:none; cursor:pointer; font-family:inherit;
-    font-size:15px; font-weight:600; color:#fff; letter-spacing:1px;
-    padding:12px 0; border-radius:12px;
-    background: #2470e0;
-    transition: filter .15s ease, transform .05s ease, opacity .15s;
+    font-size:14px; font-weight:600; color:var(--on-brand); letter-spacing:1px;
+    padding:12px 0; border-radius:var(--radius-1);
+    background: var(--brand);
+    transition: background var(--d1) var(--e-c), transform var(--d0) var(--e-s), opacity var(--d1) var(--e-c);
   }
-  .btn:hover { filter: brightness(1.07); }
-  .btn:active { transform: translateY(1px); }
-  .btn:disabled { opacity:.55; cursor:default; transform:none; filter:none; }
-  .res { margin:13px 22px 0; font-size:13px; line-height:1.7; min-height:22px; text-align:center;
-    color:#5d6e84; font-variant-numeric: tabular-nums; }
+  .btn:hover { filter:none; background:var(--brand-press); }
+  .btn:active { transform: scale(.985); }
+  .btn:disabled { background:var(--bg3); color:var(--text-disabled); cursor:default; transform:none; filter:none; }
+  .res { margin:16px 24px 0; font-size:13px; line-height:1.6; min-height:22px; text-align:center;
+    color:var(--text-2); font-variant-numeric: tabular-nums; }
   /* 防文字被压（M2 弹窗普查修复）：body 是定高弹性列，区块默认可压缩——
      .res 的 min-height 会顶掉自动最小高，两行提示时被压成一行、溢出文字被
      下面的版本框盖住（实测下载失败/完成文案第二行被截）。各区块一律不许
      压缩，内容超高时走 body 既有的纵向滚动。 */
   .head, .card, .chk, .res, .upd, .keys, .foot { flex-shrink:0; }
-  html[data-theme="dark"] .res { color:#a7adb8; }
-  .res .ok { color:#128a43; font-weight:600; }
-  .res .bad { color:#d3382c; font-weight:600; }
-  html[data-theme="dark"] .res .ok { color:#5eeaa0; }
-  html[data-theme="dark"] .res .bad { color:#ff9d8f; }
-  .foot { margin-top:auto; padding:0 22px 16px; text-align:center;
-    font-size:12px; color:#5d6e84; }
-  html[data-theme="dark"] .foot { color:#9aa1ab; }
-  #licBindInput, #licClaimInput { background:#ffffff; color:#1f2d47; }
-  html[data-theme="dark"] #licBindInput, html[data-theme="dark"] #licClaimInput { background:#2b2f36; color:#eceff3; border-color:rgba(255,255,255,.16) !important; }
-  #licBindInput:focus-visible, #licClaimInput:focus-visible, #licQueryBtn:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  #licBuyBtn:focus-visible { outline:2px solid #2470e0; outline-offset:2px; }
-  ::-webkit-scrollbar { width:10px; }
-  ::-webkit-scrollbar-track { background:transparent; }
-  ::-webkit-scrollbar-thumb { background:#c9d6ea; border-radius:6px; border:2px solid #f4f7fb; }
-  html[data-theme="dark"] ::-webkit-scrollbar-thumb { background:#3a3f49; border-color:#17181c; }
+  /* Q1-2(a)（2026-11-15）：小字状态文一律中性墨色，状态色只做 6px 点 */
+  .res .ok { color:var(--text-1); font-weight:600; }
+  .res .ok::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--success); margin-right:6px; vertical-align:middle; }
+  .res .bad { color:var(--text-1); font-weight:600; }
+  .res .bad::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .foot { margin-top:auto; padding:0 24px 16px; text-align:center;
+    font-size:12px; color:var(--text-2); }
+  #licBindInput, #licClaimInput { background:var(--surface-3); color:var(--text-1); }
+  /* C §2.4：许可状态 chip——6px 点 + 文字，不做大面积色底 */
+  #licStatus { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid var(--line); border-radius:999px; background:var(--bg3); font-size:12px; line-height:18px; font-weight:500; }
+  #licStatus::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--success); flex:none; }
+  /* C §2.4：硬件指纹默认折叠，不默认全显 */
+  details.fp { margin:16px 24px 0; padding:12px 20px; border:1px solid var(--line); border-radius:12px; background:var(--bg2); font-size:12px; line-height:18px; color:var(--text-2); }
+  details.fp summary { cursor:pointer; font-size:13px; line-height:20px; font-weight:500; color:var(--text-1); }
+  details.fp .fpv { font-family:var(--font-mono); font-size:13px; line-height:20px; margin-top:8px; word-break:break-all; }
+  .linkbtn { appearance:none; background:none; border:none; cursor:pointer; font-family:inherit; font-size:13px; line-height:20px; color:var(--link); padding:8px 12px; min-height:36px; text-decoration:underline; text-decoration-color:var(--link-underline); }
+  .linkbtn:hover { text-decoration-color:var(--link); }
+  html[data-theme="dark"] #licBindInput, html[data-theme="dark"] #licClaimInput { border-color:var(--line) !important; }
 </style>
 </head>
 <body>
@@ -131,7 +132,7 @@
       <div class="nm">QFRemote</div>
       <div class="ds">远程控制 · 电脑控制端</div>
     </div>
-    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <button class="x" id="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
 
   <div class="card">
@@ -159,6 +160,7 @@
     <div class="row"><span class="k">账户状态</span><span class="v" id="licStatus">—</span></div>
     <div class="row"><span class="k">密钥</span><span class="v" id="licKey">—</span></div>
     <div class="row"><span class="k">剩余时长</span><span class="v" id="licRemain">—</span></div>
+    <div class="row"><span class="k">有效期</span><span class="v" id="licExpire">—</span></div>
     <div class="row"><span class="k">设备名额</span><span class="v" id="licSlots">—</span></div>
     <div class="row"><span class="k">网页版权益</span><span class="v" id="licWeb">—</span></div>
   </div>
@@ -167,15 +169,15 @@
     <div id="licBindBlock">
     <div class="kr"><span class="kk" style="line-height:1.65;">输入密钥激活：把密钥粘贴到这里，绑定到本机（两台电脑与一部手机）。</span></div>
     <div style="display:flex;gap:9px;padding:10px 0 4px;">
-      <input id="licBindInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:14px;padding:10px 12px;border-radius:10px;border:1px solid #c9d6ea;text-transform:uppercase;">
-      <button class="btn" id="licBindBtn" style="width:auto;padding:10px 18px;">绑定本机</button>
+      <input id="licBindInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:14px;height:36px;padding:8px 12px;border-radius:var(--radius-1);border:1px solid var(--line);text-transform:uppercase;">
+      <button class="btn" id="licBindBtn" style="width:auto;height:36px;padding:0 18px;">绑定本机</button>
     </div>
     <div class="res" id="licBindOut" style="margin:6px 0 4px;text-align:left;"></div>
     </div>
     <div class="kr"><span class="kk" style="line-height:1.65;">领取转赠密钥：如有人向您转赠密钥，先在登录页点「查询密钥」，凭账号和密码核验后复制完整密钥串，再粘贴到这里领取。领取成功后密钥即转入您的账号，原主人一侧同时失效。</span></div>
     <div style="display:flex;gap:9px;padding:10px 0 4px;">
-      <input id="licClaimInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:14px;padding:10px 12px;border-radius:10px;border:1px solid #c9d6ea;text-transform:uppercase;">
-      <button class="btn" id="licClaimBtn" style="width:auto;padding:10px 18px;">领取密钥</button>
+      <input id="licClaimInput" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="请输入 QFRemote 激活密钥" style="flex:1;box-sizing:border-box;font-family:inherit;font-size:14px;height:36px;padding:8px 12px;border-radius:var(--radius-1);border:1px solid var(--line);text-transform:uppercase;">
+      <button class="btn" id="licClaimBtn" style="width:auto;height:36px;padding:0 18px;">领取密钥</button>
     </div>
     <div class="res" id="licClaimOut" style="margin:6px 0 4px;text-align:left;"></div>
   </div>
@@ -183,8 +185,10 @@
     <div class="kr"><span class="kk" style="line-height:1.65;">设备换绑：请在新设备登录页点击「申诉换绑设备」，提交账号与密码核验；审核通过后将替换同类旧设备。</span></div>
     <div class="kr"><span class="kk" style="line-height:1.65;">封禁/冻结申诉：如设备被封禁或冻结，可在登录页提交申诉，经人工审核后处理。</span></div>
   </div>
-  <div class="chk"><button class="btn" id="licBuyBtn" style="background:#111111;">购买密钥</button></div>
-  <div style="text-align:center;"><button id="licQueryBtn" style="appearance:none;background:none;border:none;cursor:pointer;font-family:inherit;font-size:15px;color:#2470e0;padding:10px 12px;">查询密钥</button></div>
+  <details class="fp"><summary>硬件指纹</summary><div class="fpv">本机设备码未接入显示接口 —</div></details>
+  <div style="text-align:center;"><button class="linkbtn" id="licDiagBtn">查看排障日志（复制诊断信息）</button></div>
+  <div class="chk"><button class="btn" id="licBuyBtn">购买密钥</button></div>
+  <div style="text-align:center;"><button id="licQueryBtn" style="appearance:none;background:none;border:none;cursor:pointer;font-family:inherit;font-size:14px;color:var(--link);padding:8px 12px;">查询密钥</button></div>
 
   <div class="chk urow">
     <button class="btn" id="checkUpd">检查更新</button>
@@ -206,6 +210,9 @@
 
   <div class="keys">
     <div class="kr"><span class="kk" style="line-height:1.65;">更新规则：使用中发现新版本只提醒、不打断；下次打开软件时，先完成更新安装再进入。如打开时无法连接服务器，照常放行使用。</span></div>
+    <label class="kr" style="cursor:pointer;"><input type="checkbox" id="updAutoChk" style="margin-right:6px;">自动检查更新（关后只在点「检查更新」时检查）</label>
+    <label class="kr" style="cursor:pointer;"><input type="checkbox" id="updAskChk" style="margin-right:6px;">下载更新前先问我（点下载后须再点一次确认）</label>
+    <div class="kr"><span class="kk">安装方式</span><span class="kv" id="updMode">—</span></div>
   </div>
 
   <div class="keys">
@@ -225,7 +232,7 @@
     else delete document.documentElement.dataset.theme;
   }
   applyTheme(q.get('t') || 'blue');
-  document.getElementById('rVer').textContent = 'v' + (q.get('v') || '—');
+  document.getElementById('rVer').textContent = 'v' + (q.get('v') || '—').replace(/\.0$/, '');
   document.getElementById('rDate').textContent = q.get('d') || '—';
   document.getElementById('rUrl').textContent = (q.get('u') || '').replace(/\/$/, '');
 
@@ -269,12 +276,17 @@
     res.textContent = '正在检测服务器…';
     try {
       const p = await qfAbout.check();
+      // S-010：p.detail 来自主进程内部消息，仍不用 innerHTML 拼串，改 DOM
+      // 节点＋textContent（detail 含标记字符时也只当纯文本显示）。
+      const setCheck = (cls, head, tail) => {
+        res.textContent = '';
+        const el = document.createElement('span'); el.className = cls; el.textContent = head;
+        res.append(el, document.createTextNode(tail));
+      };
       if (p && p.ok) {
-        res.innerHTML = '<span class="ok">服务器可达</span>　' + p.detail +
-          '（' + fmtTime(p.at) + '，用时 ' + p.ms + ' 毫秒）';
+        setCheck('ok', '服务器可达', '　' + p.detail + '（' + fmtTime(p.at) + '，用时 ' + p.ms + ' 毫秒）');
       } else if (p) {
-        res.innerHTML = '<span class="bad">服务器不可达</span>　' + p.detail +
-          '（' + fmtTime(p.at) + '）';
+        setCheck('bad', '服务器不可达', '　' + p.detail + '（' + fmtTime(p.at) + '）');
       } else {
         res.textContent = '检测未返回结果，请重试。';
       }
@@ -294,6 +306,7 @@
   const dlBtn = document.getElementById('dlUpdate');
   const openBtn = document.getElementById('openInst');
   const chkUpdBtn = document.getElementById('checkUpd');
+  let dlConfirmArmed = false; // D-05：下载前先问——确认态由主进程 confirm-download 阶段置位
   function fmtSize(n) {
     if (!n && n !== 0) return '';
     if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
@@ -305,6 +318,15 @@
     if (s.phase === 'checking') { updRes.textContent = '正在检查更新…'; return; }
     if (s.phase === 'latest') { updRes.textContent = '当前已是最新版本，无需更新。'; updBox.classList.remove('show'); return; }
     if (s.phase === 'error') { updRes.textContent = '本次未能完成更新检查（网络或服务器原因），请稍后再试。'; return; }
+    // D-03/D-05：自动检查被跳过（会话中／计费连接／总开关关）——不是错误，
+    // 只说明原因；下次按退避间隔再约。
+    if (s.phase === 'skipped') { updRes.textContent = s.skipped === 'active-session' ? '远程会话进行中，已跳过本次自动检查。' : s.skipped === 'metered' ? '当前为按流量计费的连接，已暂停自动检查。' : '自动更新检查已关闭。'; return; }
+    // D-05：下载前先问——进入确认态，等用户再点一次「确认下载」。
+    if (s.phase === 'confirm-download') {
+      updRes.textContent = '请确认下载更新包' + (s.manifest && s.manifest.size ? '（约 ' + fmtSize(s.manifest.size) + '）' : '') + '。再点一次「确认下载」开始下载。';
+      dlBtn.style.display = ''; dlBtn.disabled = false; dlBtn.textContent = '确认下载';
+      openBtn.style.display = 'none'; dlConfirmArmed = true; return;
+    }
     if (s.manifest && (s.phase === 'available' || s.phase === 'downloading' || s.phase === 'downloaded' || s.phase === 'download-failed' || s.phase === 'installing')) {
       updBox.classList.add('show');
       updVer.textContent = '发现新版本 v' + s.manifest.version + (s.manifest.size ? '（' + fmtSize(s.manifest.size) + '）' : '');
@@ -320,15 +342,21 @@
         dlBtn.style.display = ''; dlBtn.disabled = false; dlBtn.textContent = '下载更新';
         openBtn.style.display = 'none'; updBar.classList.remove('show'); updFill.style.width = '0%';
       } else if (s.phase === 'downloaded') {
-        updRes.innerHTML = '<span class="ok">下载完成，完整性核对通过</span>（SHA256 一致），可进行安装。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹。';
-        dlBtn.style.display = 'none'; openBtn.style.display = ''; openBtn.disabled = false; openBtn.textContent = '安装更新并重启';
+        // D-04：便携版下的 ZIP 不安装，只打开所在文件夹自行解压覆盖。
+        // S-010：状态文用 textContent，不用 innerHTML 拼串。
+        const portable = s.download && s.download.kind === 'portable-zip';
+        updRes.textContent = portable
+          ? '下载完成，完整性核对通过（SHA256 一致）。便携版不自动安装，点「打开下载的便携包」后自行解压覆盖即可。'
+          : '下载完成，完整性核对通过（SHA256 一致），可进行安装。点「安装更新并重启」后将自动安装至当前位置，无需选择文件夹。';
+        dlBtn.style.display = 'none'; openBtn.style.display = ''; openBtn.disabled = false; openBtn.textContent = portable ? '打开下载的便携包' : '安装更新并重启';
         updFill.style.width = '100%';
       } else if (s.phase === 'installing') {
         updRes.textContent = '正在安装更新，软件即将重启；安装完成后重新打开即为新版本。';
         dlBtn.style.display = 'none'; openBtn.style.display = ''; openBtn.disabled = true; openBtn.textContent = '正在安装…';
         updBar.classList.add('show'); updFill.style.width = '100%';
       } else if (s.phase === 'download-failed') {
-        updRes.innerHTML = '<span class="bad">下载失败</span>：' + (s.error || '未知原因') + '请再次点「下载更新」重试。';
+        // S-010：s.error 不拼 innerHTML，改 textContent（当纯文本显示）。
+        updRes.textContent = '下载失败：' + (s.error || '未知原因') + '请再次点「下载更新」重试。';
         dlBtn.style.display = ''; dlBtn.disabled = false; dlBtn.textContent = '重新下载';
         openBtn.style.display = 'none';
       }
@@ -342,10 +370,12 @@
     chkUpdBtn.disabled = false;
   });
   dlBtn.addEventListener('click', () => {
+    const confirmed = dlConfirmArmed;
+    dlConfirmArmed = false;
     dlBtn.disabled = true; dlBtn.textContent = '正在下载…';
     updBar.classList.add('show'); updFill.style.width = '0%';
     updRes.textContent = '正在下载更新包…';
-    qfAbout.downloadUpdate();
+    qfAbout.downloadUpdate({ confirmed });
   });
   qfAbout.onUpdateProgress((p) => {
     if (p.percent != null) {
@@ -356,6 +386,24 @@
     }
   });
   openBtn.addEventListener('click', () => qfAbout.openInstaller());
+
+  // D-05：更新设置（总开关＋下载前先问）与安装方式。
+  async function refreshUpdateSettings() {
+    try {
+      const r = await qfAbout.getUpdateSettings();
+      if (!r) return;
+      document.getElementById('updAutoChk').checked = !!(r.settings && r.settings.enabled !== false);
+      document.getElementById('updAskChk').checked = !!(r.settings && r.settings.askBeforeDownload);
+      document.getElementById('updMode').textContent = r.installMode === 'portable' ? '便携版（只提示＋下 ZIP，不自动安装）' : '安装版';
+    } catch (e) { /* ignore */ }
+  }
+  document.getElementById('updAutoChk').addEventListener('change', async (e) => {
+    try { await qfAbout.setUpdateSettings({ enabled: e.target.checked }); } catch (err) { refreshUpdateSettings(); }
+  });
+  document.getElementById('updAskChk').addEventListener('change', async (e) => {
+    try { await qfAbout.setUpdateSettings({ askBeforeDownload: e.target.checked }); } catch (err) { refreshUpdateSettings(); }
+  });
+  refreshUpdateSettings();
 
   // ---------- 使用时长与积分（v2.2.0，取不到显示「—」不报错） ----------
   if (qfAbout.getPoints) {
@@ -382,6 +430,12 @@
       if (buyBtn) { buyBtn.style.display = ''; buyBtn.textContent = '购买密钥'; }
     }
   }
+  function fmtDT(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  document.getElementById('licDiagBtn').addEventListener('click', () => document.getElementById('copyDiag').click());
   function renderLicense(me) {
     if (!me) {
       licErr.style.display = '';
@@ -389,6 +443,7 @@
       document.getElementById('licStatus').textContent = '—';
       document.getElementById('licKey').textContent = '—';
       document.getElementById('licRemain').textContent = '—';
+      document.getElementById('licExpire').textContent = '—';
       document.getElementById('licSlots').textContent = '—';
       document.getElementById('licWeb').textContent = '—';
       document.getElementById('licTrial').style.display = 'none';
@@ -401,6 +456,8 @@
     document.getElementById('licStatus').textContent = me.displayStatus || '—';
     document.getElementById('licKey').textContent = me.maskedKey || '—';
     document.getElementById('licRemain').textContent = me.remainText || '—';
+    // 有效期：keyExpiresMs 为真实接口字段（/license/api/me），无则 —；本地时区 YYYY-MM-DD HH:mm
+    document.getElementById('licExpire').textContent = (me.keyExpiresMs != null) ? fmtDT(me.keyExpiresMs) : '—';
     document.getElementById('licSlots').textContent = '电脑 ' + (me.slotsPc || 0) + ' / ' + (me.slotsPcMax != null ? me.slotsPcMax : 2) + ' · 手机 ' + (me.slotsMobile || 0) + ' / ' + (me.slotsMobileMax != null ? me.slotsMobileMax : 1);
     document.getElementById('licWeb').textContent = me.webEnabled ? '已开通' : '未开通（真实付费购买后开通）';
     const trial = document.getElementById('licTrial');
@@ -439,7 +496,7 @@
     } catch (e) { out.textContent = '网络异常，请稍后再试。'; }
     licClaimBusy = false;
   });
-  // 16:37 定版：购买密钥黑底白字（上方按钮）、其下查询密钥蓝字无边框，均壳内打开
+  // 16:37 定版：购买密钥主按钮（上方按钮，浅色黑底白字／深色白底黑字）、其下查询密钥链接（下划线区分），均壳内打开
   document.getElementById('licBuyBtn').addEventListener('click', () => qfAbout.openLicense('purchase'));
   document.getElementById('licQueryBtn').addEventListener('click', () => qfAbout.openLicense('status'));
 

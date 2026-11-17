@@ -117,8 +117,11 @@ try {
 
   // ---- G. buildElevatedCommand ----
   const cmd = heal.buildElevatedCommand('C:\\Users\\Wayne\\AppData\\Local\\Temp\\qf-agent-heal.ps1');
-  ok('G1-command', cmd.command === 'powershell.exe' && Array.isArray(cmd.args) &&
+  const sysPrograms = require('../sys-programs');
+  ok('G1-command', cmd.command === sysPrograms.powershellPath() && Array.isArray(cmd.args) &&
     cmd.args[0] === '-NoProfile' && cmd.args[2] === 'Bypass' && cmd.args[3] === '-Command');
+  ok('G1b-command-absolute', sysPrograms.isAbsoluteProgramPath(cmd.command));
+  ok('G1c-inner-absolute', cmd.args[4].includes(sysPrograms.powershellPath()));
   ok('G2-inner-runAs', cmd.args[4].includes('Start-Process') && cmd.args[4].includes('-Verb RunAs') &&
     cmd.args[4].includes('qf-agent-heal.ps1'));
   const cmdQ = heal.buildElevatedCommand("C:\\Temp\\a'b\\qf-agent-heal.ps1");

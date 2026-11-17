@@ -32,7 +32,8 @@ ok('A1_about_logout_button', /id="logoutBtn"[^>]*>退出登录</.test(aboutHtml)
 ok('A2_about_click_uses_bridge', /getElementById\('logoutBtn'\)\.addEventListener\('click'[\s\S]{0,200}qfAbout\.requestLogout\(\)/.test(aboutHtml));
 ok('B_preload_bridge', /requestLogout:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('qf-logout-request'\)/.test(aboutPreload));
 
-const handlerAt = mainJs.indexOf("ipcMain.handle('qf-logout-request'");
+// F-08（2026-11-14）：main.js 的 IPC 注册已改走 trustedHandle 包装器，定位符同步改名；断言本身不变。
+const handlerAt = mainJs.indexOf("trustedHandle('qf-logout-request'");
 ok('C0_handler_exists', handlerAt >= 0);
 const handler = handlerAt >= 0 ? mainJs.slice(handlerAt, handlerAt + 1600) : '';
 ok('C1_confirm_copy_exact', handler.includes("message: '" + COPY + "'"));
