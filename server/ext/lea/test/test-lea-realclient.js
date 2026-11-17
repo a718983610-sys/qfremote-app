@@ -12,6 +12,8 @@
  * 的原信封 JSON，且客户端 stdout == 管道响应、dispatchEnvelope ok。
  * 覆盖：dispatch 小信封、apply 大信封、dispatch 坏 base64／缺参／
  * apply 缺文件时客户端 exit 2 且管道收不到任何东西（fail-closed）。
+ * F-04 签名：独立测试密钥正向（mode real＋验签通过＋真客户端执行）与
+ * 负向（缺失密钥／篡改／他钥／无签名均拒绝，fail-closed，不关验签）。
  *
  * 环境：需 x86_64-w64-mingw32-gcc 与 wine64（PATH 中的 wine64 或
  * /usr/lib/wine/wine64，即只有 wine64 的 64 位沙箱）。缺任一时 SKIP
@@ -91,11 +93,36 @@ async function main() {
   fs.copyFileSync(clientExe, path.join(clientWinDir, 'qf-lea-client.exe'));
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-'));
-  const core = createLeaCore({ dir: tmpDir, enableSweeps: false });
+  // F-04：建 core 用独立的固定真实测试密钥（mode='real'，与 test-lea.js 同款做法；
+  // 每次运行现生成 Ed25519 密钥对，不复用生产密钥）。未配密钥时 signing 默认
+  // disabled，buildEnvelope 会 fail-closed 抛错（见下文负向断言）。
+  const _f04kp = crypto.generateKeyPairSync('ed25519');
+  const _f04privDer = _f04kp.privateKey.export({ format: 'der', type: 'pkcs8' });
+  const _f04pubDer = _f04kp.publicKey.export({ format: 'der', type: 'spki' });
+  const _f04pubB64 = Buffer.from(_f04pubDer.subarray(-32)).toString('base64');
+  const testKeyFile = path.join(tmpDir, 'lea-test-key.b64');
+  fs.writeFileSync(testKeyFile, Buffer.concat([_f04privDer.subarray(-32), _f04pubDer.subarray(-32)]).toString('base64'));
+  const core = createLeaCore({ dir: tmpDir, enableSweeps: false, signingKeyFile: testKeyFile });
   const DEV = 'node//test-device-1';
   const USER = 'alice';
-  core.grantMuse(USER, 'owner'); // T07：建 Key 前先授权，否则盖上的 grant_epoch 为 0
+  core.grantMuse(USER, 'owner'); // H06：建 Key 须先有授权
   const gen = core.generateKey(USER, { device_scope: DEV });
+  // F-04 正向：独立测试密钥生效，mode='real'，公钥与生成密钥对应。
+  t('F-04 正向：固定测试密钥 signing 模式为 real', core.signingInfo().mode === 'real');
+  t('F-04 正向：signing 公钥与测试密钥对应', core.signingInfo().publicKeyBase64 === _f04pubB64);
+  // F-04 负向：缺失密钥必须拒绝（fail-closed，不静默无签发）。
+  const noKeyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-nokey-'));
+  const coreNoKey = createLeaCore({ dir: noKeyDir, enableSweeps: false });
+  t('F-04 负向：未配密钥 signing 模式为 disabled', coreNoKey.signingInfo().mode === 'disabled');
+  let noKeyThrew = false;
+  try {
+    coreNoKey.buildEnvelope({
+      requestId: 'req-nokey', batchId: null, seq: 1, deviceId: DEV, accountId: USER,
+      keyId: gen.record.key_id, bindingEpoch: 1, grantEpoch: 1, idempotencyKey: 'idem-nokey',
+      command: 'sys.info', params: {}, timeoutMs: 5000,
+    });
+  } catch (e) { noKeyThrew = /LEA signing disabled/.test((e && e.message) || ''); }
+  t('F-04 负向：未配密钥 buildEnvelope 抛错拒绝下发', noKeyThrew);
   let seq = 0;
 
   function splitCmd(cmd) {
@@ -137,9 +164,29 @@ async function main() {
   }
 
   const calls = [];
+  // RC-01：握手识别——从 dispatch 命令的 base64 载荷解出信封（test-lea.js 同款
+  // 做法）。握手下发由 mock 直接放行（不走真客户端／管道，管道只接一个连接，
+  // 握手占了它业务就没得用）；计数断言只计业务下发，握手下发滤掉。
+  function dispatchEnvelopeOf(cmd) {
+    if (typeof cmd !== 'string' || !cmd.includes(' dispatch ')) return null;
+    try {
+      const b64 = cmd.trim().split(/\s+/).pop();
+      return JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+    } catch (e) { return null; }
+  }
+  function businessCalls() {
+    return calls.filter((c) => {
+      const e0 = dispatchEnvelopeOf(c.cmd);
+      return !e0 || e0.command !== 'sys.handshake';
+    });
+  }
   const mockChannel = {
     async runCommand(nodeId, cmd, timeoutMs) {
       calls.push({ nodeId, cmd, timeoutMs });
+      const hsEnv = dispatchEnvelopeOf(cmd);
+      if (hsEnv && hsEnv.command === 'sys.handshake') {
+        return JSON.stringify({ ok: true, code: 'done', request_id: hsEnv.request_id });
+      }
       if (cmd.includes('WriteAllBytes')) {
         const fm = cmd.match(/inbox\\([^'\\]+\.json)/);
         const bm = cmd.match(/FromBase64String\('([^']+)'\)/);
@@ -160,10 +207,22 @@ async function main() {
   function mkEnv(requestId, command, params) {
     return core.buildEnvelope({
       requestId, batchId: null, seq: ++seq, deviceId: DEV, accountId: USER,
-      keyId: gen.record.key_id, bindingEpoch: 1, idempotencyKey: 'idem-' + requestId,
+      keyId: gen.record.key_id, bindingEpoch: 1, grantEpoch: 1, idempotencyKey: 'idem-' + requestId,
       command, params: params || {}, timeoutMs: 5000,
     });
   }
+
+  // F-04 正向＋负向：合法信封验签通过；篡改／他钥／无签名一律拒绝。
+  // 注：C 端真客户端不验签（签名校验在服务端 lea-core verifyEnvelope），
+  // 故错误签名在此处以服务端验签断言覆盖；真客户端流程本身（下文 1–5 步）
+  // 是合法信封可执行的正向证据。
+  const envSigOk = mkEnv('req-sig-ok', 'sys.info', {});
+  t('F-04 正向：合法信封验签通过', core.verifyEnvelope(envSigOk) === true);
+  t('F-04 负向：篡改命令后验签失败', core.verifyEnvelope(Object.assign({}, envSigOk, { command: 'script.run' })) === false);
+  const _wrongKp = crypto.generateKeyPairSync('ed25519');
+  const _wrongPubB64 = Buffer.from(_wrongKp.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)).toString('base64');
+  t('F-04 负向：他钥公钥验签失败', core.verifyEnvelope(envSigOk, _wrongPubB64) === false);
+  t('F-04 负向：无签名信封验签失败', core.verifyEnvelope(Object.assign({}, envSigOk, { signature: undefined })) === false);
 
   try {
     // ---------- 1) dispatch 小信封：真客户端 → 管道原文 == 原信封 ----------
@@ -175,8 +234,8 @@ async function main() {
     stopPipeServer();
     await sleep(500);
     const got1 = fs.existsSync(cap1) ? fs.readFileSync(cap1, 'utf8') : null;
-    t('dispatch：服务端只发 1 条命令', calls.length === 1);
-    t('dispatch：命令是 dispatch <base64>', calls[0].cmd.includes(' dispatch '));
+    t('dispatch：服务端只发 1 条命令', businessCalls().length === 1);
+    t('dispatch：命令是 dispatch <base64>', businessCalls()[0].cmd.includes(' dispatch '));
     t('dispatch：真客户端经管道发出的原文 == 原信封 JSON', got1 === JSON.stringify(env), got1);
     t('dispatch：客户端 stdout 回传管道响应', d1.ok === true && d1.result.code === 'done' && d1.result.request_id === 'req-real-1');
 
@@ -189,8 +248,8 @@ async function main() {
     stopPipeServer();
     await sleep(500);
     const got2 = fs.existsSync(cap2) ? fs.readFileSync(cap2, 'utf8') : null;
-    t('apply：服务端发 2 条命令（写 inbox + apply）', calls.length === 2);
-    t('apply：第二条是 apply + inbox 全路径', calls[1].cmd.includes(' apply "C:\\ProgramData\\QFR\\LEA\\inbox\\req-real-2.json"'));
+    t('apply：服务端发 2 条命令（写 inbox + apply）', businessCalls().length === 2);
+    t('apply：第二条是 apply + inbox 全路径', businessCalls()[1].cmd.includes(' apply "C:\\ProgramData\\QFR\\LEA\\inbox\\req-real-2.json"'));
     t('apply：真客户端经管道发出的原文 == 原信封 JSON', got2 === JSON.stringify(bigEnv), got2 ? got2.slice(0, 120) : got2);
     t('apply：客户端 stdout 回传管道响应', d2.ok === true && d2.result.code === 'done');
 
@@ -235,6 +294,7 @@ async function main() {
   } finally {
     try { fs.rmSync(buildDir, { recursive: true, force: true }); } catch (e) {}
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+    try { fs.rmSync(noKeyDir, { recursive: true, force: true }); } catch (e) {}
     wineKillAll();
   }
   finish();

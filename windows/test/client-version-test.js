@@ -89,7 +89,8 @@ const pkg = require('../package.json');
     const signManifest = (m) => {
       const d = Object.assign({}, m);
       const sig = crypto.sign(null, Buffer.from(updater.canonicalReleaseJson(d), 'utf8'), _signKp.privateKey);
-      d.signature = { alg: 'ed25519', key_id: 'test', sig: sig.toString('base64url') };
+      // D-02：客户端强制核对 key_id（生产值 release-1），假签名须用同一值。
+      d.signature = { alg: 'ed25519', key_id: 'release-1', sig: sig.toString('base64url') };
       return d;
     };
     const chk = await updater.checkForUpdate('1.0.0');
@@ -168,18 +169,28 @@ const pkg = require('../package.json');
 
     // ---------- E 安装器 ----------
     const nsi = src('installer.nsi');
+    // A1 两段式：对外安装包名在外层 OutFile，版本字符串与卸载注册表写在内层。
+    const nsiOuter = src('installer-outer.nsi');
     ok('E1_oninstsuccess_silent_exec', nsi.includes('Function .onInstSuccess') && nsi.includes('IfSilent') && nsi.includes('Exec "$INSTDIR\\QFRemote.exe"'));
-    ok('E2_version_strings_232', nsi.includes('QFRemote-Setup-v3.0.0.exe') && nsi.includes('VIProductVersion "3.0.0.0"') &&
-      nsi.includes('"DisplayName" "QFRemote 3.0.0"') && nsi.includes('"DisplayVersion" "3.0.0"') && !nsi.includes('2.3.1'));
-    ok('E3_finishpage_run_kept', nsi.includes('MUI_FINISHPAGE_RUN "$INSTDIR\\QFRemote.exe"') && nsi.includes('MUI_PAGE_DIRECTORY'));
+    // E2：外层包名与内层版本写均改走 ${BUILD_VERSION} 统一注入（见 G3 注释，
+    // 行为已核验：实出 QFRemote-Setup-v3.0.0.exe，真实注册表 3.0.0）；
+    // 另 pin 外层默认值仍为 3.0.0。
+    ok('E2_version_strings_232', nsiOuter.includes('QFRemote-Setup-v${BUILD_VERSION}.exe') && nsi.includes('VIProductVersion "3.0.0.0"') &&
+      nsiOuter.includes('!define BUILD_VERSION "3.0.0"') &&
+      nsi.includes('"DisplayName" "QFRemote ${BUILD_VERSION}"') && nsi.includes('"DisplayVersion" "${BUILD_VERSION}"') && !nsi.includes('2.3.1'));
+    // A1 两段式：交互完成页与目录页在外层（内层只留 INSTFILES 进度页）。
+    ok('E3_finishpage_run_kept', nsiOuter.includes('MUI_FINISHPAGE_RUN "$INSTDIR\\QFRemote.exe"') && nsiOuter.includes('MUI_PAGE_DIRECTORY'));
     // W-31：三处版本号一致（package.json / build-info.json / installer.nsi）
     const bi = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'build-info.json'), 'utf8'));
-    ok('E4_version_files_agree', bi.version === pkg.version && pkg.version === '3.0.0' && bi.buildDate === '2026-11-10', { bi, pkg: pkg.version });
+    // L7 v5（2026-11-15）：build-info.json 由 gen_build_info.js 重生成（buildDate 2026-11-15），
+    // 本 pin 跟随当前构建日期；改构建日期时须同步改这里（与 L2 的 key_id 选修同类维护）。
+    ok('E4_version_files_agree', bi.version === pkg.version && pkg.version === '3.0.0' && bi.buildDate === '2026-11-15', { bi, pkg: pkg.version });
 
     // ---------- F 强更墙守卫 ----------
     const forceHtml = src('force-update.html');
     ok('F1_release_btn_present', forceHtml.includes('id="releaseBtn"') && forceHtml.includes('先进入软件'));
-    ok('F2_force_release_handler', mainSrc.includes("ipcMain.on('qf-force-release'"));
+    // F-08（2026-11-14）：main.js 的 IPC 注册已改走 trustedOn 包装器，定位符同步改名；断言本身（强更放行入口存在）不变。
+    ok('F2_force_release_handler', mainSrc.includes("trustedOn('qf-force-release'"));
     ok('F3_two_tier_markers', mainSrc.includes('startupUpdateGate') && mainSrc.includes('runUpdateCheck'));
   } catch (e) {
     result.fatal = e.message + '\n' + (e.stack || '');
