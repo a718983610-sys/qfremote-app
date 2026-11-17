@@ -47,9 +47,15 @@ typedef struct {
     long long epoch;        /* binding_epoch */
     long long grant_epoch;
     int grant_muse_execute; /* 1=账号已授 muse.execute */
-    char scopes[256];       /* 逗号分隔，如 "muse.execute,muse.execute.dangerous" */
+    /* 低项 3（2026-11-15）：scopes／lease_id 缓冲须与票据 lea_ticket_t
+     * 同宽（lea_protocol.h:296-297：scopes[257]、lease_id[128]）。旧值
+     * scopes[256]／lease_id[64] 会把服务端签发的超长字段静默截断，
+     * 重启后 binding.dat（JSON 文本，字段级读写，改宽无迁移问题）与
+     * 内存绑定不一致、票据重验 canonical 对不上即丢绑定。
+     * 现行服务端值很短（scopes 约 35 字符），属边缘条件，改宽为防御。 */
+    char scopes[257];       /* 逗号分隔，如 "muse.execute,muse.execute.dangerous" */
     long long expires_at;   /* 绑定票据过期（unix 秒，0=不过期） */
-    char lease_id[64];
+    char lease_id[128];
     char ticket_signature[512]; /* H02：服务端票据签名原文；binding.dat 持久化
                                  * 并在加载时重验（lea_binding_verify_ticket），
                                  * 签名缺失／不通过即丢弃绑定（UNBOUND）。 */
@@ -64,8 +70,26 @@ long long lea_binding_on_login(lea_binding_t *b, const char *account_id,
 /* 服务端票据确认：epoch 须与 PENDING 态一致且未过期 → ACTIVE。
  * grant_muse_execute 收 long long：调用点已验签保证为 0/1，入参不再窄化。
  * ticket_signature 为验签通过的票据签名原文，原样存入绑定态，随
- * binding.dat 持久化（H02：加载时重验，见 lea_binding_verify_ticket）。 */
-int lea_binding_confirm(lea_binding_t *b, long long epoch, long long grant_epoch,
+ * binding.dat 持久化（H02：加载时重验，见 lea_binding_verify_ticket）。
+ * F-05（GPT 第二轮审计 F-05，P2，严格阻断项）：票据身份须与本机
+ * PENDING 绑定一致才接受——account_id 精确比对（与 lea_admit 第 5 步
+ * 同口径）；device_id 用 lea_device_id_matches 归一后比对（票据
+ * device_id 可能是全形 "node//..."，本机绑定存裸形）。一张有效签名
+ * 但属于别的账号／设备的票据（epoch 相同）此前会被接受并激活绑定，
+ * 属跨设备票据混用，本函数内同一锁（调用点持 g_lock）下比对堵住。
+ * 租约窗口：expires_at 须 > now 且 ≤ now＋LEA_BINDING_TICKET_MAX_TTL_SEC；
+ * expires_at==0／负数／已过期／超长一律拒绝——0 值永不过期的票据
+ * 不得再进入 ACTIVE 态。 */
+/* 绑定票据最大租约（秒）：服务端签发 nowSec()＋24h（lea-core.js
+ * TICKET_TTL_S = 24*3600），另加 5 分钟时钟偏差容限。取 24h＋5min
+ * 而不是只取 24h 的理由：服务端与本机时钟可能有偏差，票据从签发到
+ * 送达 confirm 还有 rebind 回包＋主程序转发的在途时间，卡死 24h 会
+ * 把时钟略快／在途略久的合法票据误拒；5 分钟容限足够覆盖合理偏差
+ * 与在途延迟，又足够小——任何声称租约超过 24h05m 的票据都不可能是
+ * 服务端签发的真票据。 */
+#define LEA_BINDING_TICKET_MAX_TTL_SEC (24 * 3600 + 300)
+int lea_binding_confirm(lea_binding_t *b, const char *account_id, const char *device_id,
+                        long long epoch, long long grant_epoch,
                         long long grant_muse_execute, const char *scopes,
                         const char *lease_id, long long expires_at,
                         const char *ticket_signature,
@@ -118,17 +142,35 @@ int lea_replay_check_and_add(lea_replay_t *r, const char *request_id,
 void lea_replay_prune(lea_replay_t *r, long long now_unix);
 
 /* ---------------- 幂等表 ---------------- */
+/* S-022 取消状态机：取消只对“排队未执行”的 job 生效，终态为 CANCELLED；
+ * 运行中 job 的取消请求只记 CANCEL_REQUESTED（job 仍跑到自然终态，
+ * 不谎报已取消——副作用是否发生必须有终态交代）。
+ * 合法迁移（lea_idem_transition_ok 强制）：
+ *   RECEIVED → RUNNING／CANCELLED／EXPIRED／UNKNOWN
+ *   RUNNING → SUCCEEDED／FAILED／UNKNOWN／CANCEL_REQUESTED／CANCELLED
+ *     （→CANCELLED 仅排队取消路径：入队时幂等已置 RUNNING，但项尚未执行）
+ *   CANCEL_REQUESTED → CANCELLING／SUCCEEDED／FAILED／UNKNOWN
+ *     （自然终态覆盖取消请求；CANCELLING 为取消执行中的中间态）
+ *   CANCELLING → CANCELLED／UNKNOWN
+ *   SUCCEEDED／FAILED／UNKNOWN／EXPIRED／CANCELLED 为终态，不再迁移。
+ * 崩溃恢复（lea_idem_mark_crashed_unknown）：RECEIVED／RUNNING／
+ * CANCEL_REQUESTED／CANCELLING → UNKNOWN（取消未完成即结果未知）。 */
 typedef enum {
     LEA_IDEM_RECEIVED = 0,
     LEA_IDEM_RUNNING = 1,
     LEA_IDEM_SUCCEEDED = 2,
     LEA_IDEM_FAILED = 3,
     LEA_IDEM_UNKNOWN = 4,
-    LEA_IDEM_EXPIRED = 5
+    LEA_IDEM_EXPIRED = 5,
+    LEA_IDEM_CANCEL_REQUESTED = 6,
+    LEA_IDEM_CANCELLING = 7,
+    LEA_IDEM_CANCELLED = 8
 } lea_idem_status_t;
 
 const char *lea_idem_status_name(lea_idem_status_t s);
 lea_idem_status_t lea_idem_status_from_name(const char *name);
+/* S-022：迁移合法性（纯函数）。 */
+int lea_idem_transition_ok(lea_idem_status_t from, lea_idem_status_t to);
 
 #define LEA_IDEM_MAX 2048
 #define LEA_IDEM_RESULT_MAX 8192
@@ -141,6 +183,15 @@ typedef struct {
     long long created_at;
     long long updated_at;
     char result[LEA_IDEM_RESULT_MAX]; /* 缓存的响应 JSON（成功/失败终态） */
+    /* S-022：job 查询用（job_id 缺省等同 request_id；旧文件无此二字段时
+     * 加载为空串，job 查询对旧条目回 not-found，不破坏旧文件加载）。 */
+    char request_id[64];
+    char job_id[64];
+    char command[32];
+    /* FIX1：请求指纹——sha256(command "\n" params_raw)，64 位 hex＋NUL。
+     * 幂等键绑定的不可变请求内容；缓存回放前须核对一致，不一致不得回旧结果。
+     * 旧文件无此字段时加载为空串（legacy，见 lea_idem_replay_check）。 */
+    char req_fp[65];
 } lea_idem_entry_t;
 
 typedef struct {
@@ -151,13 +202,34 @@ typedef struct {
 void lea_idem_init(lea_idem_t *t);
 lea_idem_entry_t *lea_idem_lookup(lea_idem_t *t, const char *device_id,
                                  const char *account_id, const char *key);
+/* S-022：按 job_id／request_id 查条目（job.query 用；job_id 优先，
+ * job_id 为空时按 request_id 比对；无匹配返回 NULL）。 */
+lea_idem_entry_t *lea_idem_lookup_by_job(lea_idem_t *t, const char *job_id);
 /* 不存在则新建 RECEIVED 并返回；表满返回 NULL。 */
 lea_idem_entry_t *lea_idem_get_or_create(lea_idem_t *t, const char *device_id,
                                          const char *account_id, const char *key,
                                          int dangerous, long long now_unix);
+/* FIX1：请求指纹与回放判定（纯函数，可单测）。
+ * lea_idem_fingerprint：out_hex[65] 接 sha256(command "\n" params_raw)
+ *   的 64 位 hex；任一入参为 NULL 时按空串计。
+ * lea_idem_replay_check：缓存回放前核对——返回 0 可回放／可继续（指纹
+ *   一致；或条目尚未缓存终态结果，指纹待填）；1 指纹错配（同键不同请求
+ *   内容，拒绝回放旧结果）；2 旧条目无指纹且已有终态缓存（无法核对，
+ *   拒绝回放，fail-closed）。fp_hex 为 NULL／空时按错配计（返回 1）。 */
+void lea_idem_fingerprint(char out_hex[65], const char *command, const char *params_raw);
+int lea_idem_replay_check(const lea_idem_entry_t *e, const char *fp_hex);
 void lea_idem_set_status(lea_idem_t *t, lea_idem_entry_t *e,
                          lea_idem_status_t status, const char *result,
                          long long now_unix);
+/* S-022：取消三步（非法迁移返回 0 且不改表；合法返回 1）。
+ * request_cancel：RUNNING→CANCEL_REQUESTED（运行中 job 记请求，不停执行）。
+ * mark_cancelling：CANCEL_REQUESTED→CANCELLING。
+ * mark_cancelled：RECEIVED／RUNNING／CANCEL_REQUESTED／CANCELLING→CANCELLED
+ *   （终态；result 可为 NULL，不传即保留原缓存）。 */
+int lea_idem_request_cancel(lea_idem_t *t, lea_idem_entry_t *e, long long now_unix);
+int lea_idem_mark_cancelling(lea_idem_t *t, lea_idem_entry_t *e, long long now_unix);
+int lea_idem_mark_cancelled(lea_idem_t *t, lea_idem_entry_t *e,
+                            const char *result, long long now_unix);
 /* 保留期清理：普通 >7 天、危险 >30 天的终态条目删除；返回删除数。 */
 int lea_idem_prune(lea_idem_t *t, long long now_unix);
 /* 启动恢复：崩溃残留的 RUNNING/RECEIVED 标记为 UNKNOWN（不自动重试）。 */
@@ -220,6 +292,66 @@ int lea_revoked_generation_advance(const char *gen_path, long long generation);
  * 可为 NULL。 */
 int lea_revoked_merge_with_generation(const char *path, const char *const *key_ids, int n_key_ids,
                                       long long generation, int *out_stale);
+/* ---------------- 吊销表读取（F-01 三态，fail-closed） ---------------- */
+/* 本机吊销表（revoked_keys.txt）读取失败时旧实现直接当“未吊销”
+ * （QFRLEA.c key_is_revoked fopen 失败 return 0），即 GPT 第二轮审计
+ * F-01（P1）。本节改为三态：REVOKED / NOT_REVOKED / ERROR，ERROR 时
+ * 两处调用点一律拒绝（见 lea_revocation_error_code）。
+ * 快照格式（与写入方 lea_revoked_write／H21 推送一致）：LF 行尾、每行
+ * 一个 token（[A-Za-z0-9_-]，8..128 字节）、末行带换行、排序去重、
+ * 总数 ≤ LEA_REVOKED_MAX_IDS；世代见同目录 revoked_keys.gen sidecar。
+ * 严格校验按“全有或全无”：任一结构性异常即整份 ERROR，不跳过异常行。 */
+typedef enum {
+    LEA_REVOCATION_NOT_REVOKED = 0,
+    LEA_REVOCATION_REVOKED = 1,
+    LEA_REVOCATION_ERROR = 2
+} lea_revocation_status_t;
+
+/* 三态 → 准入错误码（显式全映射）：仅 NOT_REVOKED 返回 NULL（放行）；
+ * REVOKED → LEA_ERR_KEY_REVOKED；ERROR 与任何未知值 →
+ * LEA_ERR_REVOCATION_UNAVAILABLE（fail-closed）。两处调用点（sys.*
+ * 内联、普通信封）都调它，禁止手写 "== REVOKED" 的布尔判定。 */
+static inline const char *lea_revocation_error_code(lea_revocation_status_t st) {
+    switch (st) {
+        case LEA_REVOCATION_NOT_REVOKED: return NULL;
+        case LEA_REVOCATION_REVOKED: return LEA_ERR_KEY_REVOKED;
+        case LEA_REVOCATION_ERROR: return LEA_ERR_REVOCATION_UNAVAILABLE;
+        default: return LEA_ERR_REVOCATION_UNAVAILABLE;
+    }
+}
+
+/* 吊销快照严格校验（全有或全无）：读世代 sidecar＋快照文件，任一结构
+ * 性异常即返回 0（调用方按 ERROR 处理），不跳过异常行继续。
+ * snapshot_gen_out 可为 NULL；非 NULL 时回填快照世代（sidecar 值；
+ * 无 sidecar 的旧版快照回填 -1）。
+ * max_accepted_generation：本机已接受的最大世代（调用方维护的高水位，
+ * 只增）；快照世代更小即陈旧 → 0。
+ * has_history：本机曾经有已接受世代或绑定历史（QFRLEA 启动时判定）；
+ * 文件缺失时 has_history 为真即 0（突然缺失，不当空表），为假即视为
+ * 合法空表（首次安装）。 */
+int lea_revoked_validate_snapshot(const char *path, long long max_accepted_generation,
+                                  int has_history, long long *snapshot_gen_out);
+/* 三态吊销判定：先严格校验快照，再在合法快照内比对 api_key_id。
+ * api_key_id 非法（NULL／空／非 token 字符集）即 ERROR——信封解析已
+ * 先验过 id 格式，此处是防御性 fail-closed。 */
+lea_revocation_status_t lea_revoked_check(const char *path, const char *api_key_id,
+                                          long long max_accepted_generation, int has_history,
+                                          long long *snapshot_gen_out);
+/* 吊销迁移标记（.gen 缺失 fail-open 窗口，DS-Q4）：revoked_keys.txt →
+ * revoked_keys.migrated，内容严格为 "1\n"（schema v1），含义“本安装的
+ * 吊销世代状态已建立（首次安装初始化或旧版迁移）”。migrated_read：
+ * 1=有效标记，0=不存在（ENOENT），-1=损坏／不可读／其他错误。
+ * migrated_write：原子 tmp+rename 写 "1\n"，成功 1 失败 0。
+ * migration_decision（纯函数）：snap>=0 → 0 放行；snap==-1 → -1 应
+ * DEGRADED（X-01，站长 2026-11-15 亲令严格 fail-closed：取消自动迁移，
+ * 无 .gen 的旧版快照一律 DEGRADED，须管理员跑显式迁移工具
+ * QFRLEA.exe --migrate-revoked；have_gen／have_migrated 不再区分）。
+ * （故意不用 have_binding 做参数：迁移前验证器已确认快照合法，迁移
+ * 只写 .gen＋标记、不动表，无论有无绑定都安全。） */
+int lea_revoked_migrated_path(const char *path, char *out, size_t out_size);
+int lea_revoked_migrated_read(const char *mpath);
+int lea_revoked_migrated_write(const char *mpath);
+int lea_revoked_migration_decision(int have_gen, int have_migrated, long long snap);
 /* 测试钩子（仅单测用，测试专用编译隔离：只在定义 LEA_TEST_HOOKS 时
  * 声明；生产构建不定义）：merge 每轮基线读后、写前重读前调用一次，
  * 世代合并在世代推进后、最终重读前亦调用一次（同一钩子），用于确定
@@ -233,6 +365,10 @@ struct lea_queue_item {
     int dangerous; /* 所在 lane */
     lea_idem_entry_t *idem; /* 关联幂等条目（服务层填写） */
     void *ctx;              /* 服务层私有：完成事件／结果缓冲 */
+    /* B1：入队前 batch-seq 检查已记的 prev_seq（-1=该 batch 本次新建）。
+     * 看门狗／sys.reset 清队列时，未执行的 batch 步须用它回滚，否则该
+     * seq 被记为“已消费”，重试同步会被判重复拒绝（与队列满路径同款）。 */
+    long long batch_prev_seq;
     lea_queue_item_t *next;
 };
 
@@ -294,6 +430,18 @@ int lea_queue_enqueue(lea_queue_t *q, lea_queue_item_t *item,
 /* 出队：危险 lane 优先（单独串行 lane）；无项返回 NULL。 */
 lea_queue_item_t *lea_queue_dequeue(lea_queue_t *q);
 void lea_queue_item_free(lea_queue_item_t *item);
+/* RC-02：按 api_key_id 摘除队列中全部待执行项（吊销踢出用）。返回摘下的
+ * 链表头（调用方负责逐项完成＋释放），*removed_out 回填条数（可为 NULL）。
+ * 危险 lane 与普通 lane 都摘；摘下的链表保持各 lane 内的原入队顺序。
+ * api_key_id 为空即返回 NULL。 */
+lea_queue_item_t *lea_queue_remove_key(lea_queue_t *q, const char *api_key_id, int *removed_out);
+/* S-022：按 job_id 找排队项（只看不摘；job_id 缺省等同 request_id）。
+ * 匹配 env.job_id 或 env.request_id；无匹配返回 NULL。 */
+lea_queue_item_t *lea_queue_find_by_request_id(lea_queue_t *q, const char *job_id);
+/* S-022：按 job_id 摘除排队项（job.cancel 用；调用方负责标记幂等终态、
+ * batch seq 回滚、g_inflight 扣减、通知等待方与释放）。已在执行的项
+ * 不在队列里，摘不到——调用方另查活动 job。job_id 为空返回 NULL。 */
+lea_queue_item_t *lea_queue_cancel_by_request_id(lea_queue_t *q, const char *job_id);
 
 #ifdef __cplusplus
 }

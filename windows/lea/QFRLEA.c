@@ -10,9 +10,10 @@
  *   - 一行 JSON 请求 → 一行 JSON 响应。
  *   - 第二层准入（DESIGN §6.2）：Ed25519 服务端签名（占位，见
  *     lea_crypto.c，默认 fail-closed）＋ binding_epoch ＋ scope ＋
- *     API Key 归属（本地吊销表）＋重放表。签名规范串 v1 唯一规范源：
- *     ~/workspace/qfremote/local-agent/ds-review-stage2/CANONICAL-SIGNING-V1.md
- *     （信封 16 行／票据 9 行，两端同一份）。
+ *     API Key 归属（本地吊销表）＋重放表。签名规范串唯一规范源：
+ *     信封 v2 见 windows/lea/CANONICAL-SIGNING-V2.md（20 行），
+ *     票据 v1 见 ds-review-stage2/CANONICAL-SIGNING-V1.md §3
+ *     （票据 9 行，两端同一份）。v1 信封不再接受。
  *   - 幂等：本地持久化去重表 %ProgramData%\QFR\LEA\state\idempotency.jsonl。
  *   - 队列：同一设备串行 FIFO（worker 单线程），上限 100 条；危险命令单独 lane。
  *   - 脚本：只允许白名单脚本（初始仅 qf-agent-heal.ps1，hash 见 whitelist.h，
@@ -21,7 +22,9 @@
  *     引用转义，禁 shell 拼接；路径规范化＋最终路径验根防符号链接绕根
  *     （#21①）；hash 与执行同一批字节——验后复制执行副本（#21②）。
  *   - 文件读写：只限 work 目录，最终路径验根（#21①）；file.read 的
- *     size 用实际读到的字节数（#21④）。
+ *     size 用实际读到的字节数（#21④）；file.write 走原子写
+ *     （lea_file_write_atomic：临时文件＋校验字节数＋成功才替换，
+ *     batch1-fix3，失败保留旧文件、不报成功）。
  *   - app.open：只允许显式 exe 白名单（H16：名＋SHA-256 双重判定，初版仅
  *     QFUserHelper.exe；安装目录内其他 exe 一律拒绝）。
  *   - UI 类命令：经命名管道 \\.\pipe\QFR\LEA\UserHelper\v1 转发 USH
@@ -50,6 +53,9 @@
  *   x86_64-w64-mingw32-gcc -O2 -Wall -o QFRLEA.exe QFRLEA.c lea_protocol.c \
  *       lea_crypto.c lea_state.c lea_audit.c -ladvapi32 -lcrypt32
  * 调试：QFRLEA.exe debug —— 前台跑管道循环（不注册 SCM），供真机自测。
+ * 首装（A1）：QFRLEA.exe --install-service [--repair]／--repair／
+ *   --uninstall-service／--verify-manifest <dir> <manifest>，见 lea_install.h。
+ *   只认本地命令行，绝不经 LEA API／qf-lea-client 远程调用。
  * 测试冒烟构建（仅单测／真机冒烟，生产绝不启用）：
  *   加 -DLEA_TEST_UNSIGNED=1 后 signature "TEST-UNSIGNED" 放行。
  */
@@ -68,10 +74,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include "lea_protocol.h"
 #include "lea_crypto.h"
 #include "lea_state.h"
 #include "lea_audit.h"
+#include "lea_filewrite.h" /* batch1-fix3：file.write 原子写入（P0） */
+#include "lea_install.h"
+#include "lea_local.h" /* S-021：本机控制状态（暂停／授权／撤销／状态查询） */
+#include "lea_appclose.h" /* batch1-fix2：app.close 全量核对＋优雅退出 */
 #include "whitelist.h"
 
 #define SERVICE_NAME_W L"QFRLEA"
@@ -115,6 +126,61 @@ static lea_batch_seq_t g_batch_seq; /* H10：批量 batch_id/seq 单调表 */
 static HANDLE g_queue_event = NULL;
 static int g_inflight = 0; /* 已入队未完成数 */
 static long long g_last_prune_hour = -1;
+/* B1（2026-11-13，PLAN §2 B1）：活动 job 登记表（g_lock 保护）——worker
+ * 执行期间登记，执行器子进程句柄（powershell 子进程＋Job Object）由
+ * run_powershell_script 填入；看门狗线程每 1 秒扫描，超 deadline 即强杀。
+ * 单 worker 串行执行，同一时刻最多一个活动 job。 */
+typedef struct {
+    int active;
+    char request_id[64];
+    char job_id[64]; /* S-022：job.cancel／job.query 按 job_id 匹配活动 job */
+    char command[32];
+    char api_key_id[64];     /* RC-02：活动 job 所属 Key（吊销命中时强杀用） */
+    ULONGLONG deadline_tick; /* GetTickCount64 单调时钟 */
+    HANDLE hProcess;         /* 执行器子进程（可为 NULL，如 USH 转发／文件操作） */
+    HANDLE hJob;             /* 子进程绑定的 Job Object（可为 NULL） */
+    int timed_out;           /* 看门狗已强杀（worker 收尾时据此改判 TIMEOUT） */
+    int reset_kill;          /* sys.reset／看门狗清队时强杀（worker 收尾时改判 RESET） */
+    int revoked_kill;        /* RC-02：Key 吊销时强杀（worker 收尾时改判 KEY_REVOKED） */
+} lea_active_job_t;
+static lea_active_job_t g_active_job;
+/* B1 前置声明（看门狗／执行器重置，定义在 execute_item 之前；run_powershell_script
+ * 在其前引用登记函数，故先声明）。 */
+static void lea_active_job_begin(const lea_envelope_t *env);
+static void lea_active_job_set_handles(HANDLE hProcess, HANDLE hJob);
+static void lea_active_job_clear_handles(void);
+static void lea_active_job_end(void);
+static int lea_active_job_check_timeout(void); /* 0=正常，1=看门狗超时，2=reset 强杀，3=吊销强杀（RC-02） */
+static void lea_reset_executor(const char *reason); /* 杀活动 job 树＋清待执行队列（RESET） */
+/* S-021：本机状态助手（定义在 handle_internal 之前；execute_item／
+ * handle_envelope 用前置声明）。 */
+static int local_status_snapshot(lea_local_status_t *out);
+static void lea_refresh_local_status(const char *last_command, const char *last_result);
+static void handle_lea_status(const lea_envelope_t *env, char *resp, size_t resp_size);
+static DWORD WINAPI watchdog_loop(LPVOID unused);
+static int pipe_write_all(HANDLE pipe, const char *buf, size_t len); /* B1：handle_envelope 写 ACK 用，定义在后 */
+static HANDLE g_watchdog_thread = NULL;
+/* B1：队列最老等待项入队 tick（单调时钟；队列空时为 0）。看门狗 5 秒
+ * 检查用：最老等待超 30 秒即判积压异常。 */
+static ULONGLONG g_queue_oldest_tick = 0;
+/* B1/G2：agent 级看门狗（同看门狗线程，1 秒扫描）——MeshCentral agent
+ * （服务名 "Mesh Agent"，进程 MeshAgent.exe）直接拉起的 runcommands
+ * 子进程根（排除 LEA 自身路径），墙钟 25 秒警告、30 秒强杀整棵树。
+ * 阈值见 lea_agent_watchdog_*（G2 定夺：b 主选＋c 组合，见证据目录
+ * ds-answer-g2.md；a 不采用）。 */
+#define LEA_G2_AGENT_EXE "MeshAgent.exe"
+#define LEA_G2_WARN_SEC 25
+#define LEA_G2_KILL_SEC 30
+#define LEA_G2_MAX_ROOTS 32
+typedef struct {
+    DWORD pid;
+    ULONGLONG first_seen_tick;
+    ULONGLONG create_time; /* GetProcessTimes 100ns 刻度，防 PID 复用 */
+    int warned;
+    int seen;              /* 本轮扫描是否仍存在 */
+} lea_g2_root_t;
+static lea_g2_root_t g_g2_roots[LEA_G2_MAX_ROOTS];
+static int g_g2_root_count = 0;
 
 /* 路径（UTF-8） */
 static char g_base_dir[MAX_PATH];      /* %ProgramData%\QFR\LEA */
@@ -125,6 +191,25 @@ static char g_install_dir[MAX_PATH];   /* QFRLEA.exe 所在目录 */
 static char g_idem_path[MAX_PATH];
 static char g_binding_path[MAX_PATH];
 static char g_revoked_path[MAX_PATH];
+/* F-01 吊销表状态（见 revocation_startup_init／key_revocation_check）：
+ * g_revoked_gen_max：本机已接受的最大吊销世代（启动时读 .gen，之后只增；
+ * 快照世代低于它即陈旧，ERROR）。g_revoked_has_history：曾经有已接受
+ * 世代或绑定历史——文件突然缺失时不当空表。g_revocation_degraded：
+ * 启动／最近一次检查发现吊销表异常（缺失有历史／格式错／ACL／链接异常），
+ * 业务信封一律拒绝直至推送恢复；检查通过即清零（可自愈，不锁死）。 */
+static long long g_revoked_gen_max = 0;
+static int g_revoked_gen_loaded = 0;
+static int g_revoked_has_history = 0;
+static int g_revocation_degraded = 0;
+/* RC-01 握手态（本机内存态，重启即失；服务端凭 HANDSHAKE_REQUIRED 重握）。
+ * g_lock 保护。 */
+static lea_handshake_state_t g_handshake;
+/* S-021：本机最近执行命令（g_lock 保护；状态文件是持久态，此处是
+ * 内存快照，供状态快照叠加最新值）。 */
+static char g_local_last_command[32] = { 0 };
+static char g_local_last_result[64] = { 0 };
+static long long g_local_last_command_at = 0;
+static void revocation_startup_init(void);
 static char g_ushtokens_dir[MAX_PATH]; /* %ProgramData%\QFR\LEA\ush-tokens（H03） */
 static char g_service_log_path[MAX_PATH];
 
@@ -598,20 +683,45 @@ static int ush_token_read(char *out, size_t out_size) {
     return 1;
 }
 
-/* ---------- 吊销表 ---------- */
-static int key_is_revoked(const char *api_key_id) {
-    FILE *f = fopen(g_revoked_path, "r");
-    if (!f) return 0;
-    char line[128];
-    int found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        size_t n = strlen(line);
-        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' '))
-            line[--n] = '\0';
-        if (line[0] && strcmp(line, api_key_id) == 0) { found = 1; break; }
+/* ---------- 吊销表（F-01 三态，fail-closed） ---------- */
+/* 旧 key_is_revoked()：fopen 失败直接 return 0（未吊销），即 GPT 第二轮
+ * 审计 F-01（P1）fail-open。本函数改为三态（见 lea_state.h
+ * lea_revoked_check）：REVOKED / NOT_REVOKED / ERROR；ERROR 时调用点
+ * 一律拒绝（LEA_ERR_REVOCATION_UNAVAILABLE，不可重试）。
+ * 世代高水位：启动时从 .gen 加载，之后只增——H21 推送先写世代、再写
+ * 表，检查时世代高于水位即跟进；低于水位即陈旧快照，ERROR。 */
+static lea_revocation_status_t key_revocation_check(const char *api_key_id) {
+    /* S-021：一键撤销（本机）——revoke-all.json 在位即全部 Key 已撤销，
+     * 不必再读吊销表；g_base_dir 未初始化（服务启动前）时查不到标记，
+     * 由下行正常吊销表逻辑继续（此时尚无信封处理）。 */
+    if (g_base_dir[0] && lea_local_has_revoke_all(g_base_dir))
+        return LEA_REVOCATION_REVOKED;
+    long long snap = -1;
+    lea_revocation_status_t st = lea_revoked_check(
+        g_revoked_path, api_key_id,
+        g_revoked_gen_loaded ? g_revoked_gen_max : 0,
+        g_revoked_has_history, &snap);
+    if (st == LEA_REVOCATION_ERROR) {
+        g_revocation_degraded = 1;
+    } else {
+        /* X-01：启动 DEGRADED 的运行期一致口径——本次检查未见 sidecar
+         * （snap==-1）时一律 ERROR，不分两种情形：
+         *   ① 本机已加载世代、.gen 在运行中丢失（原有防线）；
+         *   ② 本机未加载世代、无 .gen 的旧版快照（X-01 新增；否则启动
+         *      置的 DEGRADED 会被首个信封的检查清掉、绕过显式迁移——
+         *      大肥鱼复核后自查发现；启动与运行期须同一口径）。
+         * 首次安装不受影响（启动时已写 .gen=0 并加载，snap==0）。 */
+        if (snap == -1) {
+            g_revocation_degraded = 1;
+            return LEA_REVOCATION_ERROR;
+        }
+        g_revocation_degraded = 0;
+        if (snap >= 0 && snap > g_revoked_gen_max) {
+            g_revoked_gen_max = snap;
+            g_revoked_gen_loaded = 1;
+        }
     }
-    fclose(f);
-    return found;
+    return st;
 }
 
 /* ---------- 命令行引用转义（C 版 ArgumentList 等价物） ---------- */
@@ -686,6 +796,214 @@ static int resolve_final_path_utf8(const char *path_utf8, char *out, size_t out_
     if (!strip_nt_prefix_w(wfinal, wnorm, MAX_PATH)) return 0;
     utf16_to_utf8(wnorm, out, out_size);
     return out[0] != '\0';
+}
+
+/* ---------- 吊销表启动初始化（F-01 条件式，不许无条件“缺失即建空表”） ---------- */
+/* 吊销文件须为普通文件——拒绝符号链接／重解析点／硬链接／路径替换
+ * （最终路径须与期望路径一致，大小写不敏感）。仅启动时检查。 */
+static int revoked_path_is_plain_file(const char *path_utf8) {
+    WCHAR w[MAX_PATH];
+    utf8_to_utf16(path_utf8, w, MAX_PATH);
+    DWORD attr = GetFileAttributesW(w);
+    if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return 0;
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) return 0;
+    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    int ok = GetFileInformationByHandle(h, &info) && info.nNumberOfLinks == 1;
+    CloseHandle(h);
+    if (!ok) return 0;
+    char final_path[MAX_PATH] = { 0 };
+    if (!resolve_final_path_utf8(path_utf8, final_path, sizeof(final_path))) return 0;
+    return _stricmp(final_path, path_utf8) == 0;
+}
+
+/* 吊销文件 DACL 只允许 SYSTEM／Administrators 的允许 ACE；出现其他主体、
+ * 拒绝 ACE 或空／缺失 DACL 即失败。继承来的 ACE 同样受限（state 目录
+ * DACL 只有 SY+BA，故 H21 推送新建的文件天然通过；不要求 PROTECTED
+ * 标志——推送新建文件是继承 DACL，无此标志）。仅启动时检查。 */
+static int revoked_acl_is_sys_admin_only(const char *path_utf8) {
+    WCHAR w[MAX_PATH];
+    utf8_to_utf16(path_utf8, w, MAX_PATH);
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    PACL pDacl = NULL;
+    DWORD rc = GetNamedSecurityInfoW(w, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                     NULL, NULL, &pDacl, NULL, &pSD);
+    if (rc != ERROR_SUCCESS || !pDacl) { if (pSD) LocalFree(pSD); return 0; }
+    BYTE sysSid[SECURITY_MAX_SID_SIZE], baSid[SECURITY_MAX_SID_SIZE];
+    DWORD sysSize = sizeof(sysSid), baSize = sizeof(baSid);
+    int ok = 0;
+    if (CreateWellKnownSid(WinLocalSystemSid, NULL, sysSid, &sysSize) &&
+        CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, baSid, &baSize)) {
+        ACL_SIZE_INFORMATION info;
+        if (GetAclInformation(pDacl, &info, sizeof(info), AclSizeInformation) &&
+            info.AceCount > 0) {
+            ok = 1;
+            for (DWORD i = 0; i < info.AceCount; i++) {
+                void *pAce = NULL;
+                if (!GetAce(pDacl, i, &pAce) || !pAce) { ok = 0; break; }
+                ACE_HEADER *hdr = (ACE_HEADER *)pAce;
+                if (hdr->AceType != ACCESS_ALLOWED_ACE_TYPE) { ok = 0; break; }
+                PSID sid = (PSID)&((ACCESS_ALLOWED_ACE *)pAce)->SidStart;
+                if (!EqualSid(sid, sysSid) && !EqualSid(sid, baSid)) { ok = 0; break; }
+            }
+        }
+    }
+    LocalFree(pSD);
+    return ok;
+}
+
+/* 迁移标记状态（启动层，DS-Q4）：1=有效标记（文件内容＋普通文件形态＋
+ * ACL 均通过），0=不存在，-1=损坏／路径派生失败／形态或 ACL 未通过。
+ * 只在 snap==-1 且 !g_revoked_gen_loaded 时查，其他状态下标记无关，
+ * 不查，避免无关损坏导致误 DEGRADED。 */
+static int revoked_migrated_state(void) {
+    char mpath[MAX_PATH] = { 0 };
+    if (!lea_revoked_migrated_path(g_revoked_path, mpath, sizeof(mpath))) return -1;
+    int r = lea_revoked_migrated_read(mpath);
+    if (r == 1) {
+        if (!revoked_path_is_plain_file(mpath) || !revoked_acl_is_sys_admin_only(mpath)) return -1;
+        return 1;
+    }
+    return r;
+}
+
+/* 显式迁移旧版无世代快照（--migrate-revoked 工具用，X-01）：写
+ * .gen=<generation>＋标记（各带 SYSTEM／Administrators ACL），.gen 绝不
+ * 写 0（generation 须 ≥1，由调用方校验）。全成功才算成；任一失败调用方
+ * 进 DEGRADED／报错，不写残集。 */
+static int revoked_migrate_legacy_snapshot_gen(long long generation) {
+    char gen_path[MAX_PATH] = { 0 };
+    char mpath[MAX_PATH] = { 0 };
+    if (!lea_revoked_gen_path(g_revoked_path, gen_path, sizeof(gen_path))) return 0;
+    if (!lea_revoked_migrated_path(g_revoked_path, mpath, sizeof(mpath))) return 0;
+    if (!lea_revoked_generation_write(gen_path, generation)) return 0;
+    if (!set_sys_admin_acl(gen_path)) return 0;
+    if (!lea_revoked_migrated_write(mpath)) return 0;
+    if (!set_sys_admin_acl(mpath)) return 0;
+    return 1;
+}
+
+/* F-01 启动初始化（条件式）：
+ *   - 首次安装（无世代 sidecar、无绑定历史、文件缺失）：完成 ACL 后
+ *     明确初始化为空表＋世代 0，进入 ACTIVE。
+ *   - 曾经有已接受世代或绑定曾经 ACTIVE，文件突然缺失：不自动建空表，
+ *     进 DEGRADED（拒绝业务信封），记日志，留待人工／推送恢复。
+ *   - 文件存在：检查存在性、ACL、链接形态、格式、可读性，任一失败即
+ *     DEGRADED。世代文件损坏同样 DEGRADED（快照世代无法确立）。
+ * DEGRADED 不是锁死：key_revocation_check 每次检查通过即清零，H21
+ * 推送恢复文件后自动恢复，无需重启。 */
+static void revocation_startup_init(void) {
+    char gen_path[MAX_PATH] = { 0 };
+    char mpath[MAX_PATH] = { 0 };
+    int have_gen = 0;      /* sidecar 存在且有效 */
+    int gen_corrupt = 0;   /* sidecar 存在但损坏，或路径算不出 */
+    long long gen = 0;
+    if (lea_revoked_gen_path(g_revoked_path, gen_path, sizeof(gen_path))) {
+        FILE *gf = fopen(gen_path, "rb");
+        if (gf) {
+            fclose(gf);
+            if (lea_revoked_generation_read(gen_path, &gen)) have_gen = 1;
+            else gen_corrupt = 1;
+        } else if (errno != ENOENT) {
+            /* .gen 打不开且不是“不存在”（EACCES 等）：不可读≠缺失，fail-closed。 */
+            gen_corrupt = 1;
+        }
+    } else {
+        gen_corrupt = 1;
+    }
+    lea_revoked_migrated_path(g_revoked_path, mpath, sizeof(mpath));
+    /* 绑定历史：binding.dat 存在，或已加载的绑定曾经 ACTIVE。 */
+    int have_binding = 0;
+    {
+        FILE *bf = fopen(g_binding_path, "rb");
+        if (bf) { fclose(bf); have_binding = 1; }
+    }
+    if (g_binding.state == LEA_BIND_ACTIVE) have_binding = 1;
+    g_revoked_has_history = (have_gen || have_binding);
+    if (have_gen) { g_revoked_gen_max = gen; g_revoked_gen_loaded = 1; }
+    if (gen_corrupt) {
+        g_revocation_degraded = 1;
+        svc_log("ERROR revoked generation file corrupt %s, entering DEGRADED", gen_path);
+        return;
+    }
+    if (have_gen) {
+        /* .gen 在位：须与吊销表同等保护（普通文件形态＋SYSTEM／Administrators 专属 ACL）。 */
+        if (!revoked_path_is_plain_file(gen_path) || !revoked_acl_is_sys_admin_only(gen_path)) {
+            g_revocation_degraded = 1;
+            svc_log("ERROR revoked generation file not plain file or ACL not SYSTEM/Administrators-only, entering DEGRADED");
+            return;
+        }
+    }
+    FILE *f = fopen(g_revoked_path, "rb");
+    if (!f) {
+        if (!g_revoked_has_history) {
+            if (lea_revoked_write(g_revoked_path, NULL, 0) &&
+                lea_revoked_generation_write(gen_path, 0) &&
+                lea_revoked_migrated_write(mpath) &&
+                set_sys_admin_acl(g_revoked_path) && set_sys_admin_acl(gen_path) &&
+                set_sys_admin_acl(mpath)) {
+                g_revoked_has_history = 1;
+                g_revoked_gen_max = 0;
+                g_revoked_gen_loaded = 1;
+                g_revocation_degraded = 0;
+                svc_log("revoked table initialized empty (first install)");
+            } else {
+                g_revocation_degraded = 1;
+                svc_log("ERROR revoked table first-install init failed, entering DEGRADED");
+            }
+        } else {
+            g_revocation_degraded = 1;
+            svc_log("ERROR revoked_keys.txt missing with history (gen=%s binding=%s), entering DEGRADED",
+                    have_gen ? "yes" : "no", have_binding ? "yes" : "no");
+        }
+        return;
+    }
+    fclose(f);
+    if (!revoked_path_is_plain_file(g_revoked_path)) {
+        g_revocation_degraded = 1;
+        svc_log("ERROR revoked_keys.txt is symlink/reparse/hardlink or final path mismatch, entering DEGRADED");
+        return;
+    }
+    if (!revoked_acl_is_sys_admin_only(g_revoked_path)) {
+        g_revocation_degraded = 1;
+        svc_log("ERROR revoked_keys.txt ACL not SYSTEM/Administrators-only, entering DEGRADED");
+        return;
+    }
+    long long snap = -1;
+    if (!lea_revoked_validate_snapshot(g_revoked_path,
+            g_revoked_gen_loaded ? g_revoked_gen_max : 0,
+            g_revoked_has_history, &snap)) {
+        g_revocation_degraded = 1;
+        svc_log("ERROR revoked_keys.txt failed strict validation at startup, entering DEGRADED");
+        return;
+    }
+    if (snap == -1 && !g_revoked_gen_loaded) {
+        /* X-01（站长 2026-11-15 亲令，严格 fail-closed）：无 sidecar 的
+         * 旧格式快照一律 DEGRADED，不再自动迁移；须管理员显式跑
+         * QFRLEA.exe --migrate-revoked [--generation N] 迁移（有日志）。
+         * 迁移标记在位（迁移后 .gen 又丢）同样 DEGRADED，不再静默重建。
+         * DEGRADED 不是锁死：迁移工具写好文件后，下次吊销检查通过即
+         * 自动恢复，无需重启。 */
+        int have_migrated = revoked_migrated_state();
+        if (have_migrated < 0) {
+            g_revocation_degraded = 1;
+            svc_log("ERROR revoked migration marker corrupt or unreadable, entering DEGRADED");
+            return;
+        }
+        (void)have_migrated;
+        g_revocation_degraded = 1;
+        svc_log("ERROR revoked generation file missing with legacy snapshot, entering DEGRADED (run QFRLEA.exe --migrate-revoked to migrate explicitly)");
+        return;
+    }
+    g_revocation_degraded = 0;
+    if (snap >= 0 && snap > g_revoked_gen_max) {
+        g_revoked_gen_max = snap;
+        g_revoked_gen_loaded = 1;
+    }
+    svc_log("revoked table OK generation=%lld", g_revoked_gen_max);
 }
 
 /* ---------- 脚本白名单 ---------- */
@@ -958,10 +1276,14 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
         hJob = NULL;
     }
     if (create_flags & CREATE_SUSPENDED) ResumeThread(pi.hThread);
+    /* B1：把子进程＋Job 句柄登记进活动 job 表，看门狗超 deadline 时可强杀。
+     * 句柄归属仍是本函数（看门狗只终止、不关闭），返回前须先清登记再关句柄。 */
+    lea_active_job_set_handles(pi.hProcess, hJob);
     DWORD w = WaitForSingleObject(pi.hProcess, (DWORD)timeout_ms);
     if (w == WAIT_TIMEOUT) {
         if (hJob) TerminateJobObject(hJob, 1);
         else TerminateProcess(pi.hProcess, 1);
+        lea_active_job_clear_handles();
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         if (hJob) CloseHandle(hJob);
@@ -970,6 +1292,7 @@ static int run_powershell_script(const char *script_norm, char args[][512], int 
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     if (exit_code) *exit_code = code;
+    lea_active_job_clear_handles();
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     /* 正常结束也关 Job 句柄：KILL_ON_JOB_CLOSE 会清掉脚本残留的孙子进程。 */
@@ -1438,6 +1761,522 @@ static void lea_ctx_release(lea_item_ctx_t *ctx) {
     }
 }
 
+/* ================= B1：通道自愈（PLAN §2 B1） =================
+ * 活动 job 登记（worker 执行期间）＋看门狗（1 秒扫描）＋执行器重置。
+ * 全部共享态（g_active_job／g_queue_oldest_tick／g_g2_roots）由 g_lock
+ * 保护；看门狗只终止进程树、不关闭句柄（句柄归属执行器，防双关竞态）。 */
+
+/* worker 在分发执行器前登记；deadline = 现在＋分级强杀时限。 */
+static void lea_active_job_begin(const lea_envelope_t *env) {
+    EnterCriticalSection(&g_lock);
+    memset(&g_active_job, 0, sizeof(g_active_job));
+    g_active_job.active = 1;
+    snprintf(g_active_job.request_id, sizeof(g_active_job.request_id), "%s", env->request_id);
+    snprintf(g_active_job.job_id, sizeof(g_active_job.job_id), "%s", env->job_id[0] ? env->job_id : env->request_id);
+    snprintf(g_active_job.command, sizeof(g_active_job.command), "%s", env->command);
+    snprintf(g_active_job.api_key_id, sizeof(g_active_job.api_key_id), "%s", env->api_key_id);
+    g_active_job.deadline_tick = GetTickCount64() + (ULONGLONG)lea_job_deadline_ms(env);
+    LeaveCriticalSection(&g_lock);
+}
+
+/* 执行器（run_powershell_script）在子进程建好后登记句柄；看门狗据此强杀。 */
+static void lea_active_job_set_handles(HANDLE hProcess, HANDLE hJob) {
+    EnterCriticalSection(&g_lock);
+    if (g_active_job.active) {
+        g_active_job.hProcess = hProcess;
+        g_active_job.hJob = hJob;
+    }
+    LeaveCriticalSection(&g_lock);
+}
+
+/* 执行器在关闭句柄前清登记（防看门狗拿到已关句柄）。 */
+static void lea_active_job_clear_handles(void) {
+    EnterCriticalSection(&g_lock);
+    g_active_job.hProcess = NULL;
+    g_active_job.hJob = NULL;
+    LeaveCriticalSection(&g_lock);
+}
+
+static void lea_active_job_end(void) {
+    EnterCriticalSection(&g_lock);
+    memset(&g_active_job, 0, sizeof(g_active_job));
+    LeaveCriticalSection(&g_lock);
+}
+
+/* worker 收尾时查：0=正常，1=看门狗已超时强杀，2=sys.reset／清队强杀，
+ * 3=Key 吊销强杀（RC-02）。吊销优先于 reset／超时（同一 job 不可兼得，
+ * 吊销是其终态 verdict）。 */
+static int lea_active_job_check_timeout(void) {
+    int r = 0;
+    EnterCriticalSection(&g_lock);
+    if (g_active_job.revoked_kill) r = 3;
+    else if (g_active_job.reset_kill) r = 2;
+    else if (g_active_job.timed_out) r = 1;
+    LeaveCriticalSection(&g_lock);
+    return r;
+}
+
+/* 强杀活动 job 的进程树（看门狗／reset／吊销共用）。kind：0=超时，
+ * 1=reset，2=吊销。返回 0=无活动 job；1=进程树已强杀（有 Job／进程句
+ * 柄）；2=仅置标志（无子进程句柄，等执行器返回后 worker 改判——大肥鱼
+ * 复核：只置标志不是“已终止”，调用方须区分回报，见 lea.key_revoked）。 */
+static int lea_watchdog_kill_active_job_kind(int kind) {
+    HANDLE hJob = NULL, hProcess = NULL;
+    EnterCriticalSection(&g_lock);
+    if (!g_active_job.active) {
+        LeaveCriticalSection(&g_lock);
+        return 0;
+    }
+    hJob = g_active_job.hJob;
+    hProcess = g_active_job.hProcess;
+    if (kind == 1) g_active_job.reset_kill = 1;
+    else if (kind == 2) g_active_job.revoked_kill = 1;
+    else g_active_job.timed_out = 1;
+    LeaveCriticalSection(&g_lock);
+    if (hJob) {
+        TerminateJobObject(hJob, 1);
+        svc_log("B1 watchdog kill job request=%s kind=%d", g_active_job.request_id, kind);
+        return 1;
+    } else if (hProcess) {
+        TerminateProcess(hProcess, 1);
+        svc_log("B1 watchdog kill process request=%s kind=%d", g_active_job.request_id, kind);
+        return 1;
+    } else {
+        /* 无子进程句柄（USH 转发／文件操作）：只置标志，等执行器自身
+         * deadline 返回后 worker 改判；杀不到进程是已知局限。 */
+        svc_log("B1 watchdog mark timeout (no child process) request=%s kind=%d",
+                g_active_job.request_id, kind);
+        return 2;
+    }
+}
+
+/* 旧名保留（调用点：reset／看门狗超时；返回值同 kind 函数 0/1/2，调用点均忽略）。 */
+static int lea_watchdog_kill_active_job(int is_reset) {
+    return lea_watchdog_kill_active_job_kind(is_reset ? 1 : 0);
+}
+
+/* RC-02：吊销命中活动 job 时强杀并记 revoked_kill（worker 收尾改判
+ * KEY_REVOKED）。仅当活动 job 的 api_key_id 与被吊销 Key 之一匹配时才杀；
+ * 返回 0=无匹配活动 job；1=进程树已强杀；2=仅置标志（无子进程句柄，
+ * 等执行器返回后改判——不是“已终止”，调用方须区分回报）。 */
+static int lea_active_job_kill_revoked(const char *const *key_ids, int n_key_ids) {
+    if (!key_ids || n_key_ids <= 0) return 0;
+    EnterCriticalSection(&g_lock);
+    int match = 0;
+    if (g_active_job.active) {
+        for (int i = 0; i < n_key_ids; i++) {
+            if (key_ids[i] && strcmp(g_active_job.api_key_id, key_ids[i]) == 0) { match = 1; break; }
+        }
+    }
+    LeaveCriticalSection(&g_lock);
+    if (!match) return 0;
+    return lea_watchdog_kill_active_job_kind(2);
+}
+
+/* 清空待执行队列：每项回 RESET（可重试，未执行）＋幂等回 RECEIVED＋
+ * batch seq 回滚。调用方须持有 g_lock 完成出队与台账更新；完成通知
+ * （填结果＋SetEvent＋释放 worker 侧引用）在放锁后做。 */
+static void lea_drain_queue_reset(void) {
+    lea_queue_item_t *head = NULL, *tail = NULL;
+    int drained = 0;
+    EnterCriticalSection(&g_lock);
+    lea_queue_item_t *it;
+    while ((it = lea_queue_dequeue(&g_queue)) != NULL) {
+        drained++;
+        it->next = NULL;
+        if (!head) head = tail = it;
+        else { tail->next = it; tail = it; }
+        if (it->idem) {
+            lea_idem_set_status(&g_idem, it->idem, LEA_IDEM_RECEIVED, NULL, now_unix());
+        }
+        /* 未入队／未执行：回滚 4.5 步已记的 seq，否则重试同 seq 被判重复。 */
+        lea_batch_seq_rollback(&g_batch_seq, it->env.device_id, it->env.account_id,
+                               it->env.batch_id, it->env.seq, it->batch_prev_seq);
+    }
+    if (head) idem_persist_locked();
+    if (drained > 0) {
+        /* 清掉的项永不到 worker_loop 的 g_inflight--，此处一次扣减，
+         * 否则每次 reset 都永久漏记 N 条，队列准入（total＋inflight≤8）
+         * 会越收越紧。RC-02 排查时发现的既有问题，同款口径一并修。 */
+        g_inflight -= drained;
+        if (g_inflight < 0) g_inflight = 0;
+    }
+    g_queue_oldest_tick = 0;
+    /* G2 跟踪根一并清空（看门狗下轮重新发现；被杀的根不再跟踪）。 */
+    g_g2_root_count = 0;
+    memset(g_g2_roots, 0, sizeof(g_g2_roots));
+    LeaveCriticalSection(&g_lock);
+    /* 放锁后逐项完成（原管道线程收到 RESET 后释放自己的引用；此处
+     * 释放 worker 侧引用——worker 永远不会再取到这些项）。 */
+    while (head) {
+        lea_queue_item_t *cur = head;
+        head = head->next;
+        lea_item_ctx_t *ctx = (lea_item_ctx_t *)cur->ctx;
+        if (ctx) {
+            char resp[LEA_MAX_RESPONSE] = { 0 };
+            build_resp(resp, sizeof(resp), 0, LEA_ERR_RESET, cur->env.request_id,
+                       lea_error_retryable(LEA_ERR_RESET), "reset-by-watchdog-or-sys-reset", NULL);
+            snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
+            SetEvent(ctx->done);
+            lea_ctx_release(ctx); /* worker 侧引用 */
+        }
+        lea_queue_item_free(cur);
+    }
+}
+
+/* RC-02：按 Key 清待执行队列（吊销踢出用）。调用方（lea.key_revoked）
+ * 不必持锁；本函数内部完成出队与台账更新，完成通知在放锁后做（同
+ * lea_drain_queue_reset）。与 reset 清队的区别：逐项回 KEY_REVOKED
+ * （不可重试）＋幂等记 FAILED（终态并缓存 KEY_REVOKED 响应，防同幂等键
+ * 重试再执行）＋batch seq 回滚＋g_inflight 扣减。返回摘下条数。 */
+static int lea_drain_queue_revoked(const char *const *key_ids, int n_key_ids) {
+    if (!key_ids || n_key_ids <= 0) return 0;
+    lea_queue_item_t *head = NULL, *tail = NULL;
+    int removed = 0;
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < n_key_ids; i++) {
+        if (!key_ids[i] || !key_ids[i][0]) continue;
+        int n = 0;
+        lea_queue_item_t *list = lea_queue_remove_key(&g_queue, key_ids[i], &n);
+        while (list) {
+            lea_queue_item_t *cur = list;
+            list = list->next;
+            cur->next = NULL;
+            if (!head) head = tail = cur;
+            else { tail->next = cur; tail = cur; }
+            removed++;
+            /* 幂等记 FAILED 并缓存 KEY_REVOKED 响应（终态）：同幂等键重试
+             * 直接回缓存 verdict，不再执行。 */
+            char resp[LEA_MAX_RESPONSE] = { 0 };
+            build_resp(resp, sizeof(resp), 0, LEA_ERR_KEY_REVOKED, cur->env.request_id,
+                       lea_error_retryable(LEA_ERR_KEY_REVOKED), "key-revoked", NULL);
+            if (cur->idem) {
+                lea_idem_set_status(&g_idem, cur->idem, LEA_IDEM_FAILED, resp, now_unix());
+            }
+            lea_batch_seq_rollback(&g_batch_seq, cur->env.device_id, cur->env.account_id,
+                                   cur->env.batch_id, cur->env.seq, cur->batch_prev_seq);
+        }
+    }
+    if (head) idem_persist_locked();
+    if (removed > 0) {
+        g_inflight -= removed;
+        if (g_inflight < 0) g_inflight = 0;
+    }
+    LeaveCriticalSection(&g_lock);
+    /* 放锁后逐项完成（同 reset 清队：填结果＋SetEvent＋释放 worker 侧引用）。 */
+    while (head) {
+        lea_queue_item_t *cur = head;
+        head = head->next;
+        lea_item_ctx_t *ctx = (lea_item_ctx_t *)cur->ctx;
+        if (ctx) {
+            char resp[LEA_MAX_RESPONSE] = { 0 };
+            build_resp(resp, sizeof(resp), 0, LEA_ERR_KEY_REVOKED, cur->env.request_id,
+                       lea_error_retryable(LEA_ERR_KEY_REVOKED), "key-revoked", NULL);
+            snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
+            SetEvent(ctx->done);
+            lea_ctx_release(ctx); /* worker 侧引用 */
+        }
+        lea_queue_item_free(cur);
+    }
+    return removed;
+}
+
+/* 执行器重置（sys.reset 与看门狗积压共用）：杀活动 job 树＋清待执行队列。
+ * 不杀 MeshCentral agent、不重启服务、不重启整机。 */
+static void lea_reset_executor(const char *reason) {
+    svc_log("B1 reset executor reason=%s", reason ? reason : "");
+    lea_watchdog_kill_active_job(1);
+    lea_drain_queue_reset();
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "reset";
+    ev.command = "sys.reset";
+    ev.result = "ok";
+    ev.detail = reason ? reason : "";
+    audit_event(&ev);
+}
+
+/* 看门狗 1 秒检查：活动 job 超 deadline 即强杀。 */
+static void lea_watchdog_check_active_job(void) {
+    int over = 0;
+    char req[64] = { 0 };
+    EnterCriticalSection(&g_lock);
+    if (g_active_job.active && !g_active_job.timed_out && !g_active_job.reset_kill &&
+        GetTickCount64() > g_active_job.deadline_tick) {
+        over = 1;
+        snprintf(req, sizeof(req), "%s", g_active_job.request_id);
+    }
+    LeaveCriticalSection(&g_lock);
+    if (over) {
+        lea_watchdog_kill_active_job(0);
+        /* audit_for_envelope 须传有效信封（会解引用），此处无信封，
+         * 直接构造最小审计事件。 */
+        lea_audit_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "watchdog";
+        ev.request_id = req;
+        ev.command = "job-timeout-kill";
+        ev.result = "killed";
+        ev.detail = "deadline-exceeded";
+        audit_event(&ev);
+    }
+}
+
+/* 看门狗 5 秒检查：队列最老等待超 30 秒即判积压异常，杀活动 job 树＋清队。 */
+static void lea_watchdog_check_backlog(void) {
+    int over = 0;
+    EnterCriticalSection(&g_lock);
+    if (g_queue_oldest_tick != 0 &&
+        GetTickCount64() - g_queue_oldest_tick > 30000) {
+        over = 1;
+    }
+    LeaveCriticalSection(&g_lock);
+    if (over) {
+        svc_log("B1 watchdog queue backlog oldest>30s, resetting executor");
+        lea_reset_executor("watchdog-queue-backlog");
+    }
+}
+
+/* ---------- G2：agent 级看门狗（MeshCentral agent 子进程树） ----------
+ * 只跟踪“父进程是 MeshAgent.exe 的直接子进程”；LEA 自身（qf-lea-client、
+ * QFRLEA、QFRemote）与 agent 本体永不进跟踪表。墙钟 25 秒警告、30 秒
+ * 强杀整棵树（优先临时 Job Object，失败则后序 TerminateProcess）。 */
+typedef struct {
+    DWORD pid;
+    DWORD ppid;
+    ULONGLONG create_time; /* GetProcessTimes 100ns 刻度，防 PID 复用 */
+    char image[MAX_PATH];
+} lea_proc_entry_t;
+
+static int lea_proc_image_is_excluded(const char *image) {
+    /* 精确镜像名排除（禁按 powershell.exe 之类进程名整体放行）。 */
+    const char *base = image;
+    const char *slash = strrchr(image, '\\');
+    if (slash) base = slash + 1;
+    return _stricmp(base, "qf-lea-client.exe") == 0 ||
+           _stricmp(base, "QFRLEA.exe") == 0 ||
+           _stricmp(base, "QFRemote.exe") == 0 ||
+           _stricmp(base, "MeshAgent.exe") == 0 ||
+           _stricmp(base, "QFRLEA.exe") == 0;
+}
+
+/* 一次快照：返回进程数（≤max），-1=快照失败。 */
+static int lea_proc_snapshot(lea_proc_entry_t *out, int max) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    int n = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (n >= max) break;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            ULONGLONG ct = 0;
+            if (h) {
+                FILETIME cft, eft, kft, uft;
+                if (GetProcessTimes(h, &cft, &eft, &kft, &uft)) {
+                    ct = ((ULONGLONG)cft.dwHighDateTime << 32) | cft.dwLowDateTime;
+                }
+                CloseHandle(h);
+            }
+            out[n].pid = pe.th32ProcessID;
+            out[n].ppid = pe.th32ParentProcessID;
+            out[n].create_time = ct;
+            char utf8[MAX_PATH] = { 0 };
+            utf16_to_utf8(pe.szExeFile, utf8, sizeof(utf8));
+            snprintf(out[n].image, sizeof(out[n].image), "%s", utf8);
+            n++;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return n;
+}
+
+/* 从快照里找 pid 的创建时间（防 PID 复用），找不到返回 0。 */
+static ULONGLONG lea_proc_create_time(lea_proc_entry_t *procs, int n, DWORD pid) {
+    for (int i = 0; i < n; i++)
+        if (procs[i].pid == pid) return procs[i].create_time;
+    return 0;
+}
+
+/* 收集 root_pid 的整棵树（root＋全部后代，按发现顺序；创建时间逐个校验）。
+ * 返回个数（≤max），root 本人不在树内或创建时间对不上返回 0。 */
+static int lea_g2_collect_tree(DWORD root_pid, ULONGLONG root_ct,
+                               lea_proc_entry_t *procs, int n,
+                               DWORD *out_pids, ULONGLONG *out_cts, int max) {
+    if (lea_proc_create_time(procs, n, root_pid) != root_ct || root_ct == 0) return 0;
+    int count = 0;
+    /* BFS：先 root，再逐层后代。 */
+    out_pids[count] = root_pid;
+    out_cts[count] = root_ct;
+    count++;
+    for (int i = 0; i < count; i++) {
+        for (int j = 0; j < n && count < max; j++) {
+            if (procs[j].ppid == out_pids[i]) {
+                /* 去重（同一 pid 只进一次）。 */
+                int dup = 0;
+                for (int k = 0; k < count; k++) if (out_pids[k] == procs[j].pid) { dup = 1; break; }
+                if (!dup) {
+                    out_pids[count] = procs[j].pid;
+                    out_cts[count] = procs[j].create_time;
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+/* 强杀一棵树：优先临时 Job Object（KILL_ON_JOB_CLOSE），逐个挂不进则
+ * 后序 TerminateProcess。杀前逐个重查创建时间，防 PID 复用误杀。 */
+static int lea_g2_kill_tree(DWORD root_pid, ULONGLONG root_ct) {
+    lea_proc_entry_t procs[1024];
+    int n = lea_proc_snapshot(procs, 1024);
+    if (n < 0) return 0;
+    DWORD pids[256];
+    ULONGLONG cts[256];
+    int count = lea_g2_collect_tree(root_pid, root_ct, procs, n, pids, cts, 256);
+    if (count <= 0) return 0;
+    int killed = 0;
+    /* 先试 Job Object：全部挂进临时 job 再一次清树。 */
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    int job_ok = 0;
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        ZeroMemory(&jeli, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+            job_ok = 1;
+            for (int i = 0; i < count; i++) {
+                HANDLE h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pids[i]);
+                if (!h) { job_ok = 0; break; }
+                if (!AssignProcessToJobObject(hJob, h)) { CloseHandle(h); job_ok = 0; break; }
+                CloseHandle(h);
+            }
+        }
+        if (job_ok) {
+            TerminateJobObject(hJob, 1);
+            killed = count;
+        }
+        CloseHandle(hJob);
+        if (job_ok) return killed;
+    }
+    /* 回退：后序（先子后父）逐个 TerminateProcess。PID 复用防护在
+     * lea_g2_collect_tree 的 root 创建时间校验＋本快照的新鲜度（毫秒级）。 */
+    for (int i = count - 1; i >= 0; i--) {
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pids[i]);
+        if (!h) continue;
+        if (TerminateProcess(h, 1)) killed++;
+        CloseHandle(h);
+    }
+    return killed;
+}
+
+/* G2 1 秒扫描：发现 MeshAgent 直接子进程并跟踪，25 秒警告、30 秒强杀。 */
+static void lea_g2_watchdog_scan(void) {
+    lea_proc_entry_t procs[1024];
+    int n = lea_proc_snapshot(procs, 1024);
+    if (n < 0) return;
+    /* 收集 agent PID（可能多实例）。 */
+    DWORD agent_pids[16];
+    int agent_n = 0;
+    for (int i = 0; i < n && agent_n < 16; i++) {
+        const char *base = procs[i].image;
+        const char *slash = strrchr(base, '\\');
+        if (slash) base = slash + 1;
+        if (_stricmp(base, LEA_G2_AGENT_EXE) == 0) agent_pids[agent_n++] = procs[i].pid;
+    }
+    if (agent_n == 0) return;
+    ULONGLONG now = GetTickCount64();
+    EnterCriticalSection(&g_lock);
+    /* 本轮 seen 清零。 */
+    for (int i = 0; i < g_g2_root_count; i++) g_g2_roots[i].seen = 0;
+    /* 发现新的直接子进程根。 */
+    for (int i = 0; i < n; i++) {
+        int is_child = 0;
+        for (int a = 0; a < agent_n; a++) if (procs[i].ppid == agent_pids[a]) { is_child = 1; break; }
+        if (!is_child) continue;
+        if (lea_proc_image_is_excluded(procs[i].image)) continue;
+        /* 已在跟踪表里？ */
+        int idx = -1;
+        for (int k = 0; k < g_g2_root_count; k++)
+            if (g_g2_roots[k].pid == procs[i].pid) { idx = k; break; }
+        if (idx >= 0) {
+            /* PID 复用：创建时间变了即当新根。 */
+            if (g_g2_roots[idx].create_time != procs[i].create_time) {
+                g_g2_roots[idx].create_time = procs[i].create_time;
+                g_g2_roots[idx].first_seen_tick = now;
+                g_g2_roots[idx].warned = 0;
+            }
+            g_g2_roots[idx].seen = 1;
+            continue;
+        }
+        if (g_g2_root_count >= LEA_G2_MAX_ROOTS) continue;
+        lea_g2_root_t *r = &g_g2_roots[g_g2_root_count++];
+        r->pid = procs[i].pid;
+        r->first_seen_tick = now;
+        r->create_time = procs[i].create_time;
+        r->warned = 0;
+        r->seen = 1;
+    }
+    /* 扫描跟踪表：警告／强杀／清理已退出。 */
+    for (int i = 0; i < g_g2_root_count;) {
+        lea_g2_root_t *r = &g_g2_roots[i];
+        if (!r->seen) {
+            /* 已退出：移出表。 */
+            g_g2_roots[i] = g_g2_roots[--g_g2_root_count];
+            continue;
+        }
+        ULONGLONG age_ms = now - r->first_seen_tick;
+        if (age_ms >= (ULONGLONG)LEA_G2_KILL_SEC * 1000) {
+            DWORD pid = r->pid;
+            ULONGLONG ct = r->create_time;
+            g_g2_roots[i] = g_g2_roots[--g_g2_root_count];
+            LeaveCriticalSection(&g_lock);
+            int killed = lea_g2_kill_tree(pid, ct);
+            EnterCriticalSection(&g_lock);
+            svc_log("B1 G2 watchdog kill agent child root pid=%lu killed=%d", (unsigned long)pid, killed);
+            lea_audit_event_t ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "watchdog";
+            ev.command = "agent-child-timeout";
+            ev.result = "killed";
+            ev.detail = "g2-root-30s-kill";
+            audit_event(&ev);
+            continue;
+        }
+        if (!r->warned && age_ms >= (ULONGLONG)LEA_G2_WARN_SEC * 1000) {
+            r->warned = 1;
+            DWORD pid = r->pid;
+            LeaveCriticalSection(&g_lock);
+            svc_log("B1 G2 watchdog warn agent child pid=%lu age=%llums", (unsigned long)pid, age_ms);
+            EnterCriticalSection(&g_lock);
+        }
+        i++;
+    }
+    LeaveCriticalSection(&g_lock);
+}
+
+/* 看门狗线程：1 秒扫描活动 job 与 G2 agent 子进程；每 5 秒查队列积压。
+ * 退出条件：g_stop_event 受信或 g_running 清零。 */
+static DWORD WINAPI watchdog_loop(LPVOID unused) {
+    (void)unused;
+    int tick = 0;
+    while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
+        if (g_stop_event) {
+            if (WaitForSingleObject(g_stop_event, 1000) != WAIT_TIMEOUT) break;
+        } else {
+            Sleep(1000);
+        }
+        if (InterlockedCompareExchange(&g_running, 1, 1) != 1) break;
+        tick++;
+        lea_watchdog_check_active_job();
+        lea_g2_watchdog_scan();
+        if (tick % 5 == 0) lea_watchdog_check_backlog();
+    }
+    return 0;
+}
+
 /* ---------- 执行分发（worker 线程） ---------- */
 /* 返回 1=已完成并填好 result_json；result_json 为完整一行响应 JSON。 */
 static void execute_item(lea_queue_item_t *item) {
@@ -1466,13 +2305,43 @@ static void execute_item(lea_queue_item_t *item) {
         audit_for_envelope(env, "execute", "expired", LEA_ERR_EXPIRED,
                            (long)(GetTickCount64() - t0_tick),
                            "expired-before-execution");
+        lea_refresh_local_status(env->command, LEA_ERR_EXPIRED); /* S-021 */
         snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
         SetEvent(ctx->done);
         lea_ctx_release(ctx);
         return;
     }
+    /* RC-02：执行前二次查吊销表——入队后、执行前 Key 被吊销的命令不得
+     * 执行（大肥鱼复核：排队命令只在准入时查过一次，离线期间吊销到达后
+     * 旧排队命令仍会执行；60 秒信封 TTL 兜底一部分，本检查彻底堵住）。
+     * 与 H10 过期预检同款收尾：幂等记 FAILED（终态，不可重试），管道
+     * 调用方收到吊销响应。 */
+    {
+        const char *rcode = lea_revocation_error_code(key_revocation_check(env->api_key_id));
+        if (rcode) {
+            char resp[LEA_MAX_RESPONSE] = { 0 };
+            build_resp(resp, sizeof(resp), 0, rcode, env->request_id, 0,
+                               "key-revoked-before-execution", NULL);
+            EnterCriticalSection(&g_lock);
+            if (item->idem) {
+                lea_idem_set_status(&g_idem, item->idem, LEA_IDEM_FAILED, resp, t0);
+                idem_persist_locked();
+            }
+            LeaveCriticalSection(&g_lock);
+            audit_for_envelope(env, "execute", "rejected", rcode,
+                               (long)(GetTickCount64() - t0_tick),
+                               "key-revoked-before-execution");
+            lea_refresh_local_status(env->command, rcode); /* S-021 */
+            snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
+            SetEvent(ctx->done);
+            lea_ctx_release(ctx);
+            return;
+        }
+    }
     const lea_command_spec_t *spec = lea_command_spec(env->command);
     long timeout_ms = lea_effective_timeout_ms(env);
+    /* B1：执行器分发前登记活动 job（deadline＝分级强杀时限），看门狗据此强杀。 */
+    lea_active_job_begin(env);
     char resp[LEA_MAX_RESPONSE] = { 0 };
     char detail[512] = { 0 };
     char ush_code_buf[64] = { 0 }; /* 承接 USH 透传的 code（worker 单线程，无竞争） */
@@ -1567,6 +2436,12 @@ static void execute_item(lea_queue_item_t *item) {
             }
         }
     } else if (strcmp(env->command, "file.read") == 0) {
+        /* B1：file.read 不接受 recursive=true（本实现只读单个文件；递归
+         * 遍历须走 L2 隔离 lane，当前直接拒绝，不静默当单文件读）。 */
+        if (lea_params_has_true(env->params_raw, "recursive")) {
+            ok = 0; code = LEA_ERR_PATH_NOT_ALLOWED;
+            snprintf(detail, sizeof(detail), "%s", "recursive-not-allowed");
+        } else {
         char path[512] = { 0 };
         if (!lea_json_string(env->params_raw, "path", path, sizeof(path))) {
             ok = 0; code = LEA_ERR_BAD_ENVELOPE;
@@ -1624,6 +2499,7 @@ static void execute_item(lea_queue_item_t *item) {
                 }
             }
         }
+        } /* B1 recursive else */
     } else if (strcmp(env->command, "file.write") == 0) {
         char path[512] = { 0 };
         char content_b64[LEA_MAX_ENVELOPE] = { 0 };
@@ -1646,14 +2522,19 @@ static void execute_item(lea_queue_item_t *item) {
                     ok = 0; code = LEA_ERR_BAD_ENVELOPE;
                     snprintf(detail, sizeof(detail), "%s", "content_b64-invalid-or-oversize");
                 } else {
-                    FILE *f = fopen(norm, "wb");
-                    if (!f) {
+                    /* batch1-fix3（GPT P0）：旧实现直接 fopen(norm,"wb")
+                     * 后 fwrite/fclose 全不检查返回值——写满／部分写入
+                     * 仍报成功，且 "wb" 先截断原文件。现改走原子写：
+                     * 临时文件写满并校验字节数＋fflush／fclose，成功
+                     * 后才同卷替换目标；任何一步失败都保留旧文件、
+                     * 返回 LEA_ERR_EXEC_FAILED，绝不报成功。 */
+                    char wdetail[64] = { 0 };
+                    if (!lea_file_write_atomic(norm, data, (size_t)n,
+                                               wdetail, sizeof(wdetail))) {
                         free(data);
                         ok = 0; code = LEA_ERR_EXEC_FAILED;
-                        snprintf(detail, sizeof(detail), "%s", "file-open-failed");
+                        snprintf(detail, sizeof(detail), "%s", wdetail);
                     } else {
-                        fwrite(data, 1, (size_t)n, f);
-                        fclose(f);
                         free(data);
                         snprintf(result_buf, sizeof(result_buf), "{\"size\":%ld}", n);
                         result_json = result_buf;
@@ -1719,27 +2600,131 @@ static void execute_item(lea_queue_item_t *item) {
             ok = 0; code = LEA_ERR_PATH_NOT_ALLOWED;
             snprintf(detail, sizeof(detail), "process-not-in-close-whitelist:%.64s", name);
         } else {
-            /* 按进程名枚举并终止（SYSTEM 身份）。此处用 Toolhelp 快照。 */
-            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            int killed = 0;
-            if (snap != INVALID_HANDLE_VALUE) {
-                PROCESSENTRY32W pe;
-                pe.dwSize = sizeof(pe);
-                if (Process32FirstW(snap, &pe)) {
-                    do {
-                        if (_wcsicmp(pe.szExeFile, L"QFRemote.exe") == 0) {
-                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+            /* batch1-fix2：旧实现按进程名枚举就 TerminateProcess（SYSTEM
+             * 身份），会误杀其他登录用户的同名实例。新实现全量核对＋
+             * 优先优雅退出（见 lea_appclose.h）：
+             *   ① 被授权会话＝活动控制台会话（与 H01 同口径）；
+             *   ② 该会话用户的 SID（WTS 用户名 → LookupAccountName）；
+             *   ③ 该用户安装位置的 QFRemote.exe 全路径（其卸载注册表
+             *      InstallLocation，取不到即拒绝）；
+             *   ④ 可选 params.process_id：指定时只许碰该 PID；
+             *   ⑤ 优雅退出（WM_CLOSE）优先，强制结束前重探测＋重核对
+             *      （含创建时刻，防 PID 复用）。任一步解析失败即
+             *      fail-closed：一个进程也不杀。 */
+            long long pid_ll = 0;
+            int pid_r = lea_json_top_level_long(env->params_raw, "process_id", &pid_ll);
+            if (pid_r < 0 || (pid_r == 1 && (pid_ll <= 0 || pid_ll > 0xFFFFFFFFLL))) {
+                ok = 0; code = LEA_ERR_BAD_ENVELOPE;
+                snprintf(detail, sizeof(detail), "%s", "params.process_id-invalid");
+            } else {
+                DWORD auth_session = WTSGetActiveConsoleSessionId();
+                char auth_sid[LEA_APPCLOSE_SID_MAX] = { 0 };
+                char auth_image[LEA_APPCLOSE_PATH_MAX] = { 0 };
+                if (auth_session == 0xFFFFFFFFUL ||
+                    !lea_appclose_authorized_identity(auth_session, auth_sid,
+                                                      sizeof(auth_sid),
+                                                      auth_image, sizeof(auth_image))) {
+                    ok = 0; code = LEA_ERR_INTERNAL;
+                    snprintf(detail, sizeof(detail), "%s",
+                             "authorized-identity-unavailable");
+                } else {
+                    lea_appclose_authorized_t auth;
+                    memset(&auth, 0, sizeof(auth));
+                    auth.session_id = auth_session;
+                    snprintf(auth.user_sid, sizeof(auth.user_sid), "%s", auth_sid);
+                    snprintf(auth.image_path, sizeof(auth.image_path), "%s", auth_image);
+                    auth.pid = (pid_r == 1) ? (unsigned long)pid_ll : 0;
+                    auth.create_time = 0;
+                    /* 枚举＋探测＋核对：只收全量通过的候选（记 PID＋创建时刻，
+                     * 供强制阶段重核对钉死）。 */
+                    DWORD elig_pids[64];
+                    ULONGLONG elig_cts[64];
+                    int elig_n = 0;
+                    int skipped = 0;
+                    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                    if (snap != INVALID_HANDLE_VALUE) {
+                        PROCESSENTRY32W pe;
+                        pe.dwSize = sizeof(pe);
+                        if (Process32FirstW(snap, &pe)) {
+                            do {
+                                if (_wcsicmp(pe.szExeFile, L"QFRemote.exe") != 0)
+                                    continue;
+                                lea_appclose_candidate_t cand;
+                                char reason[64] = { 0 };
+                                if (!lea_appclose_probe(pe.th32ProcessID, &cand)) {
+                                    skipped++;
+                                    svc_log("app.close skip pid=%lu reason=probe-failed",
+                                            (unsigned long)pe.th32ProcessID);
+                                    continue;
+                                }
+                                if (!lea_appclose_target_allowed(&cand, &auth,
+                                                                 reason, sizeof(reason))) {
+                                    skipped++;
+                                    svc_log("app.close skip pid=%lu reason=%s",
+                                            (unsigned long)pe.th32ProcessID, reason);
+                                    continue;
+                                }
+                                if (elig_n < 64) {
+                                    elig_pids[elig_n] = cand.pid;
+                                    elig_cts[elig_n] = cand.create_time;
+                                    elig_n++;
+                                } else {
+                                    skipped++;
+                                    svc_log("app.close skip pid=%lu reason=eligible-cap",
+                                            (unsigned long)cand.pid);
+                                }
+                            } while (Process32NextW(snap, &pe));
+                        }
+                        CloseHandle(snap);
+                    }
+                    /* 优雅退出优先：共享 5 秒预算（不超信封超时）。 */
+                    int graceful = 0, forced = 0;
+                    if (elig_n > 0) {
+                        int exited[64] = { 0 };
+                        unsigned long grace_ms = 5000;
+                        if (timeout_ms > 0 && timeout_ms < 5000)
+                            grace_ms = (unsigned long)timeout_ms;
+                        lea_appclose_request_exit(elig_pids, elig_n, grace_ms, exited);
+                        /* 强制阶段：逐个重探测＋重核对（PID＋创建时刻钉死，
+                         * 防优雅等待期间 PID 复用）；已退出的计 graceful。 */
+                        for (int i = 0; i < elig_n; i++) {
+                            if (exited[i]) { graceful++; continue; }
+                            if (lea_appclose_process_exited(elig_pids[i]) == 1) {
+                                graceful++;
+                                continue;
+                            }
+                            lea_appclose_candidate_t cand2;
+                            lea_appclose_authorized_t auth2 = auth;
+                            auth2.pid = elig_pids[i];
+                            auth2.create_time = elig_cts[i];
+                            char reason2[64] = { 0 };
+                            if (!lea_appclose_probe(elig_pids[i], &cand2) ||
+                                !lea_appclose_target_allowed(&cand2, &auth2,
+                                                           reason2, sizeof(reason2))) {
+                                skipped++;
+                                svc_log("app.close force-skip pid=%lu reason=%s",
+                                        (unsigned long)elig_pids[i], reason2);
+                                continue;
+                            }
+                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                                                   elig_pids[i]);
                             if (h) {
-                                if (TerminateProcess(h, 0)) killed++;
+                                if (TerminateProcess(h, 0)) forced++;
                                 CloseHandle(h);
                             }
                         }
-                    } while (Process32NextW(snap, &pe));
+                    }
+                    int killed = graceful + forced;
+                    svc_log("app.close session=%lu killed=%d graceful=%d forced=%d "
+                            "skipped=%d requested_pid=%lu",
+                            (unsigned long)auth_session, killed, graceful, forced,
+                            skipped, (unsigned long)auth.pid);
+                    snprintf(result_buf, sizeof(result_buf),
+                             "{\"killed\":%d,\"graceful\":%d,\"forced\":%d,\"skipped\":%d}",
+                             killed, graceful, forced, skipped);
+                    result_json = result_buf;
                 }
-                CloseHandle(snap);
             }
-            snprintf(result_buf, sizeof(result_buf), "{\"killed\":%d}", killed);
-            result_json = result_buf;
         }
     } else if (spec && spec->executor == LEA_EXEC_USH) {
         /* UI 类：worker 用 item->env 重建信封行转发给 USH。
@@ -1812,6 +2797,27 @@ static void execute_item(lea_queue_item_t *item) {
         snprintf(detail, sizeof(detail), "%s", "unknown-command");
     }
 
+    /* B1：看门狗／reset 已强杀时改判（执行器返回的“成功／失败”不可信，
+     * 进程已被强杀；RESET 表示未执行完、可重试，TIMEOUT 表示超 deadline）。
+     * RC-02：吊销强杀改判 KEY_REVOKED（不可重试，命令已因 Key 吊销作废）。 */
+    {
+        int to = lea_active_job_check_timeout();
+        if (to == 3) {
+            ok = 0; code = LEA_ERR_KEY_REVOKED;
+            snprintf(detail, sizeof(detail), "%s", "key-revoked-during-execution");
+            result_json = NULL;
+        } else if (to == 2) {
+            ok = 0; code = LEA_ERR_RESET;
+            snprintf(detail, sizeof(detail), "%s", "reset-by-watchdog-or-sys-reset");
+            result_json = NULL;
+        } else if (to == 1) {
+            ok = 0; code = LEA_ERR_TIMEOUT;
+            snprintf(detail, sizeof(detail), "%s", "watchdog-kill-deadline-exceeded");
+            result_json = NULL;
+        }
+    }
+    lea_active_job_end();
+
     /* #19：执行耗时用毫秒单调时钟实测，不再用秒级 now_unix() 相减。 */
     long duration_ms = (long)(GetTickCount64() - t0_tick);
     build_resp(resp, sizeof(resp), ok, code, env->request_id,
@@ -1828,6 +2834,7 @@ static void execute_item(lea_queue_item_t *item) {
     LeaveCriticalSection(&g_lock);
     audit_for_envelope(env, "execute", ok ? "ok" : "failed", ok ? "" : code,
                        duration_ms, detail);
+    lea_refresh_local_status(env->command, ok ? "ok" : code); /* S-021 */
     snprintf(ctx->result_json, sizeof(ctx->result_json), "%s", resp);
     SetEvent(ctx->done);
     lea_ctx_release(ctx); /* worker 侧引用；管道线程侧引用另行释放 */
@@ -1863,6 +2870,8 @@ static DWORD WINAPI worker_loop(LPVOID unused) {
         for (;;) {
             EnterCriticalSection(&g_lock);
             lea_queue_item_t *item = lea_queue_dequeue(&g_queue);
+            /* B1：出队后队列空即清最老等待打点（下次入队重新打点）。 */
+            if (!item) g_queue_oldest_tick = 0;
             LeaveCriticalSection(&g_lock);
             if (!item) break;
             execute_item(item);
@@ -1885,19 +2894,225 @@ static void handle_sys_info(const lea_envelope_t *env, char *resp, size_t resp_s
     long long epoch = g_binding.epoch;
     char account[128];
     snprintf(account, sizeof(account), "%s", g_binding.account_id);
+    /* RC-01：握手态＋吊销态（诊断用；握手按本信封 epochs 核对）。 */
+    char fp[17] = { 0 };
+    int hs = 0;
+    if (lea_server_pubkey_fingerprint(fp))
+        hs = lea_handshake_is_complete(&g_handshake, fp, env->binding_epoch, env->grant_epoch);
+    int rev_degraded = g_revocation_degraded;
     LeaveCriticalSection(&g_lock);
     int ush = ush_probe();
     long uptime = (long)(now_unix() - g_started_at);
     snprintf(result, sizeof(result),
              "{\"version\":\"%s\",\"protocol_version\":%d,\"binding_state\":\"%s\","
              "\"account_id\":\"%s\",\"binding_epoch\":%lld,\"queue_depth\":%d,"
-             "\"queue_max\":%d,\"ush_available\":%s,\"uptime_s\":%ld}",
+             "\"queue_max\":%d,\"ush_available\":%s,\"uptime_s\":%ld,"
+             "\"handshake_completed\":%s,\"revocation_state\":\"%s\"}",
              LEA_VERSION_STR, LEA_PROTOCOL_VERSION, bstate, account, epoch,
-             qd, LEA_QUEUE_MAX, ush ? "true" : "false", uptime);
+             qd, LEA_QUEUE_MAX, ush ? "true" : "false", uptime,
+             hs ? "true" : "false", rev_degraded ? "degraded" : "ok");
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
+}
+
+/* ---------- sys.ping（内联，B1） ---------- */
+/* 健康探测：不进队列、不占幂等，L0 短 lane。返回看门狗与队列快照，供
+ * 服务端通道健康探测（DEGRADED→RECOVERING 流转）用。 */
+static void handle_sys_ping(const lea_envelope_t *env, char *resp, size_t resp_size) {
+    char result[1024];
+    int active = 0, g2roots = 0, oldest_wait_ms = 0;
+    ULONGLONG now_tick = GetTickCount64();
+    EnterCriticalSection(&g_lock);
+    int qd = lea_queue_total(&g_queue);
+    int inflight = g_inflight;
+    const char *bstate = lea_bind_state_name(g_binding.state);
+    long long epoch = g_binding.epoch;
+    active = g_active_job.active;
+    g2roots = g_g2_root_count;
+    if (g_queue_oldest_tick != 0) oldest_wait_ms = (int)(now_tick - g_queue_oldest_tick);
+    LeaveCriticalSection(&g_lock);
+    int ush = ush_probe();
+    long uptime = (long)(now_unix() - g_started_at);
+    snprintf(result, sizeof(result),
+             "{\"version\":\"%s\",\"protocol_version\":%d,\"binding_state\":\"%s\","
+             "\"binding_epoch\":%lld,\"queue_depth\":%d,\"inflight\":%d,"
+             "\"queue_max\":%d,\"active_job\":%s,\"oldest_wait_ms\":%d,"
+             "\"g2_roots\":%d,\"ush_available\":%s,\"uptime_s\":%ld}",
+             LEA_VERSION_STR, LEA_PROTOCOL_VERSION, bstate, epoch,
+             qd, inflight, LEA_B1_QUEUE_MAX, active ? "true" : "false",
+             oldest_wait_ms, g2roots, ush ? "true" : "false", uptime);
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
+}
+
+/* ---------- sys.reset（内联，B1） ---------- */
+/* 执行器重置：杀活动 job 树＋清待执行队列（RESET）。不杀 MeshCentral
+ * agent、不重启服务、不重启整机。只认已准入的信封（与 sys.info 同款准入）。 */
+static void handle_sys_reset(const lea_envelope_t *env, char *resp, size_t resp_size) {
+    int had_active = 0, qd = 0;
+    EnterCriticalSection(&g_lock);
+    had_active = g_active_job.active;
+    qd = lea_queue_total(&g_queue);
+    LeaveCriticalSection(&g_lock);
+    lea_reset_executor("sys.reset");
+    char result[256];
+    snprintf(result, sizeof(result),
+             "{\"reset\":\"ok\",\"had_active_job\":%s,\"cleared_queued\":%d}",
+             had_active ? "true" : "false", qd);
     build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
 }
 
 /* ---------- 内部命令（登录事件／绑定票据／登出） ---------- */
+/* ---------- C1：自助绑定内部门支（QFRLEA 只转发票据，不碰 Key 明文） ---------- */
+/* 取 USH 响应顶层 "data" 对象原文（含花括号）。USH 响应由
+ * ush_build_response 生成，data 在顶层；失败响应无 data 即返回 0。 */
+static int ush_response_data(const char *resp, char *out, size_t out_size) {
+    if (!resp || !out || out_size < 3) return 0;
+    int depth = 0, in_str = 0, esc = 0;
+    for (const char *p = resp; *p; p++) {
+        char c = *p;
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+            continue;
+        }
+        if (c == '"') {
+            if (depth == 1 && strncmp(p, "\"data\"", 6) == 0) {
+                const char *q = p + 6;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q != ':') { in_str = 1; continue; }
+                q++;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q != '{') return 0;
+                int d = 0, s2 = 0, e2 = 0;
+                const char *start = q;
+                for (const char *r = q; *r; r++) {
+                    char cc = *r;
+                    if (s2) {
+                        if (e2) e2 = 0;
+                        else if (cc == '\\') e2 = 1;
+                        else if (cc == '"') s2 = 0;
+                        continue;
+                    }
+                    if (cc == '"') { s2 = 1; continue; }
+                    if (cc == '{') d++;
+                    else if (cc == '}') {
+                        d--;
+                        if (d == 0) {
+                            size_t len = (size_t)(r - start + 1);
+                            if (len + 1 > out_size) return 0;
+                            memcpy(out, start, len);
+                            out[len] = '\0';
+                            return 1;
+                        }
+                    }
+                }
+                return 0;
+            }
+            in_str = 1;
+            continue;
+        }
+        if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') depth--;
+    }
+    return 0;
+}
+
+/* 自助命令转 USH：读 H03 token 插入命令 JSON 后经 ush_forward 发往
+ * USH 管道；USH 响应 ok 时把其 data 对象透传为本命令的 result，
+ * 失败时透传 USH 的 code。QFRLEA 不解析、不留存 Key 明文。 */
+static void selfbind_forward_ush(const char *ush_cmd_json, long timeout_ms,
+                                 char *resp, size_t resp_size) {
+    char token[65] = { 0 };
+    char env_tok[LEA_MAX_ENVELOPE] = { 0 };
+    char ush_resp[LEA_MAX_RESPONSE] = { 0 };
+    char udetail[256] = { 0 };
+    if (!ush_token_read(token, sizeof(token))) {
+        build_resp(resp, resp_size, 0, LEA_ERR_USH_UNAVAILABLE, "", 0, "ush-token-missing", NULL);
+        return;
+    }
+    if (!lea_json_insert_string_field(ush_cmd_json, "ush_token", token,
+                                      env_tok, sizeof(env_tok))) {
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "ush-token-insert-failed", NULL);
+        return;
+    }
+    if (!ush_forward(env_tok, timeout_ms, ush_resp, sizeof(ush_resp),
+                     udetail, sizeof(udetail))) {
+        build_resp(resp, resp_size, 0, LEA_ERR_USH_UNAVAILABLE, "", 0, udetail, NULL);
+        svc_log("selfbind ush-forward failed: %s", udetail);
+        return;
+    }
+    int uok = 0;
+    if (!lea_ush_response_ok(ush_resp, &uok)) {
+        build_resp(resp, resp_size, 0, LEA_ERR_EXEC_FAILED, "", 0, "ush-response-no-ok", NULL);
+        return;
+    }
+    char ush_code[64] = { 0 };
+    lea_json_string(ush_resp, "code", ush_code, sizeof(ush_code));
+    if (uok) {
+        char data[4096] = { 0 };
+        if (ush_response_data(ush_resp, data, sizeof(data)))
+            build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", data);
+        else
+            build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", NULL);
+    } else {
+        build_resp(resp, resp_size, 0,
+                   ush_code[0] ? ush_code : LEA_ERR_EXEC_FAILED, "", 0, "", NULL);
+    }
+}
+
+/* ---------- S-021：本机状态助手 ---------- */
+/* 快照：读状态文件（lea_local_status_snapshot），绑定字段为空时用内存
+ * 绑定补， 最近命令用内存快照（g_local_*）叠加——文件写盘是 best-effort，
+ * 内存值永远最新。调用方须在 g_lock 外调用（内部不加锁，只读 g_binding
+ * 时上锁抄出）。 */
+static int local_status_snapshot(lea_local_status_t *out) {
+    if (!out) return 0;
+    if (!lea_local_status_snapshot(g_base_dir, out)) return 0;
+    EnterCriticalSection(&g_lock);
+    char account[128] = { 0 }, device[128] = { 0 };
+    snprintf(account, sizeof(account), "%s", g_binding.account_id);
+    snprintf(device, sizeof(device), "%s", g_binding.device_id);
+    char lc[32] = { 0 }, lr[64] = { 0 };
+    long long lat = g_local_last_command_at;
+    snprintf(lc, sizeof(lc), "%s", g_local_last_command);
+    snprintf(lr, sizeof(lr), "%s", g_local_last_result);
+    LeaveCriticalSection(&g_lock);
+    if (!out->account_id[0] && account[0])
+        snprintf(out->account_id, sizeof(out->account_id), "%s", account);
+    if (!out->device_id[0] && device[0])
+        snprintf(out->device_id, sizeof(out->device_id), "%s", device);
+    if (lc[0]) {
+        snprintf(out->last_command, sizeof(out->last_command), "%s", lc);
+        snprintf(out->last_result, sizeof(out->last_result), "%s", lr);
+        out->last_command_at = lat;
+    }
+    return 1;
+}
+
+/* 刷新最近命令：更新内存快照并写状态文件（best-effort，写盘失败
+ * 不影响执行结果本身）。 */
+static void lea_refresh_local_status(const char *last_command, const char *last_result) {
+    EnterCriticalSection(&g_lock);
+    if (last_command) snprintf(g_local_last_command, sizeof(g_local_last_command), "%s", last_command);
+    if (last_result) snprintf(g_local_last_result, sizeof(g_local_last_result), "%s", last_result);
+    g_local_last_command_at = now_unix();
+    LeaveCriticalSection(&g_lock);
+    lea_local_refresh_status(g_base_dir, last_command, last_result, now_unix());
+}
+
+/* lea.status 内联处理（信封第 2 步，与 sys.info 同款准入、绕过暂停门）。 */
+static void handle_lea_status(const lea_envelope_t *env, char *resp, size_t resp_size) {
+    lea_local_status_t st;
+    char result[2048];
+    if (!local_status_snapshot(&st) ||
+        !lea_local_status_to_json(&st, result, sizeof(result))) {
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env->request_id, 0,
+                           "local-status-unavailable", NULL);
+        return;
+    }
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
+}
+
 static void handle_internal(const char *text, char *resp, size_t resp_size) {
     char cmd[64] = { 0 };
     /* H08：内部命令各字段同样只认顶层成员（嵌套同名键不得遮蔽顶层值）。 */
@@ -1918,6 +3133,9 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
                                                now_unix());
         binding_persist_locked();
         LeaveCriticalSection(&g_lock);
+        /* S-021：换号登录清除本机一键撤销标记（旧号撤销不带到新号），并刷新状态。 */
+        lea_local_clear_revoke_all(g_base_dir);
+        lea_refresh_local_status("session.login_changed", "ok");
         lea_audit_event_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.event = "binding";
@@ -1944,6 +3162,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         lea_binding_revoke(&g_binding, now_unix());
         binding_persist_locked();
         LeaveCriticalSection(&g_lock);
+        lea_refresh_local_status("session.logout", "ok"); /* S-021 */
         lea_audit_event_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.event = "binding";
@@ -1985,8 +3204,15 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
             svc_log("binding confirm rejected: %s", reason);
             return;
         }
+        /* F-05：同一锁内比对票据身份与本机 PENDING 绑定（见
+         * lea_binding_confirm）：错账号／错设备的有效签名票据不得激活
+         * 本机绑定。期望身份在锁内抄出，供拒绝时审计排障（不记票据
+         * 签名原文）。 */
+        char expect_account[128] = { 0 }, expect_device[128] = { 0 };
         EnterCriticalSection(&g_lock);
-        int okc = lea_binding_confirm(&g_binding, tk.binding_epoch, tk.grant_epoch, tk.grant_muse_execute,
+        snprintf(expect_account, sizeof(expect_account), "%s", g_binding.account_id);
+        snprintf(expect_device, sizeof(expect_device), "%s", g_binding.device_id);
+        int okc = lea_binding_confirm(&g_binding, tk.account_id, tk.device_id, tk.binding_epoch, tk.grant_epoch, tk.grant_muse_execute,
                                       tk.scopes, tk.lease_id, tk.expires_at, tk.signature,
                                       now_unix());
         if (okc) binding_persist_locked();
@@ -1994,7 +3220,25 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         LeaveCriticalSection(&g_lock);
         if (!okc) {
             build_resp(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, "", 0,
-                               "epoch-mismatch-or-not-pending", NULL);
+                               "identity-epoch-or-expiry-mismatch", NULL);
+            char detail[640]; /* 4×127 字符身份＋固定文本，须 ＞556 防截断 */
+            snprintf(detail, sizeof(detail),
+                     "expected account=%s device=%s, ticket account=%s device=%s",
+                     expect_account, expect_device, tk.account_id, tk.device_id);
+            lea_audit_event_t ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "binding";
+            ev.account_id = tk.account_id;
+            ev.device_id = tk.device_id;
+            ev.binding_epoch = cur_epoch;
+            ev.command = "binding.confirm";
+            ev.result = "rejected";
+            ev.error_code = LEA_ERR_BINDING_CHANGED;
+            ev.detail = detail;
+            audit_event(&ev);
+            svc_log("binding confirm rejected: expected account=%s device=%s, "
+                    "ticket account=%s device=%s", expect_account, expect_device,
+                    tk.account_id, tk.device_id);
             return;
         }
         lea_audit_event_t ev;
@@ -2078,11 +3322,432 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
+    if (strcmp(cmd, "lea.key_revoked") == 0) {
+        /* RC-02：服务端吊销踢出（经 qf-lea-client.exe --internal-b64 下发，
+         * 调用方已由 pipe_client_thread 按 H01 验过：安装目录客户端＋
+         * 主程序父进程）。
+         * 三步：① key_ids 并集合并进本机吊销表（尽力，失败只记日志不阻断
+         * 后两步——服务端 H21 推送已是主同步路径）；② 清该 Key 的排队
+         * 命令（回 KEY_REVOKED，不可重试）；③ 强杀该 Key 的活动 job
+         * （worker 收尾改判 KEY_REVOKED）。 */
+        char ids[LEA_REVOKED_MAX_IDS][128];
+        int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
+        if (n < 0) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
+            return;
+        }
+        const char *ptrs[LEA_REVOKED_MAX_IDS];
+        for (int i = 0; i < n; i++) ptrs[i] = ids[i];
+        int merged = lea_revoked_merge(g_revoked_path, ptrs, n);
+        if (!merged)
+            svc_log("WARN lea.key_revoked merge failed count=%d (queue/job kill continues)", n);
+        int cleared = lea_drain_queue_revoked(ptrs, n);
+        /* 强杀分真杀／只置标志两档（见 lea_watchdog_kill_active_job_kind）：
+         * 只置标志不是“已终止”，响应须如实分开报，不得用 killed 掩盖。 */
+        int kill_rc = lea_active_job_kill_revoked(ptrs, n);
+        int killed = (kill_rc == 1) ? 1 : 0;
+        int marked = (kill_rc == 2) ? 1 : 0;
+        lea_audit_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "keys";
+        ev.command = "lea.key_revoked";
+        ev.result = "ok";
+        char ev_detail[192];
+        snprintf(ev_detail, sizeof(ev_detail),
+                 "revoked=%d cleared_queued=%d killed_active=%d marked_active=%d merged=%s",
+                 n, cleared, killed, marked, merged ? "yes" : "no");
+        ev.detail = ev_detail;
+        audit_event(&ev);
+        svc_log("lea.key_revoked count=%d cleared_queued=%d killed_active=%d marked_active=%d merged=%d",
+                n, cleared, killed, marked, merged);
+        char result[192];
+        snprintf(result, sizeof(result),
+                 "{\"revoked_count\":%d,\"cleared_queued\":%d,\"killed_active\":%d,\"marked_active\":%d,\"merged\":%s}",
+                 n, cleared, killed, marked, merged ? "true" : "false");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        return;
+    }
+    /* ---------- C1：自助绑定 ---------- */
+    if (strcmp(cmd, "selfbind.ush-status") == 0) {
+        /* USH 探活：ui.ping 不过会话门（锁屏也能回），只验 H03 token。
+         * 5 秒预算：探活只是读 token 文件＋一次管道往返。 */
+        selfbind_forward_ush("{\"command\":\"ui.ping\"}", 5000, resp, resp_size);
+        return;
+    }
+    if (strcmp(cmd, "selfbind.clear-credential") == 0) {
+        /* 清本机凭据：转 USH 删 DPAPI 凭据文件＋元数据。10 秒预算。 */
+        selfbind_forward_ush("{\"command\":\"selfbind.clear-credential\"}", 10000,
+                             resp, resp_size);
+        return;
+    }
+    if (strcmp(cmd, "selfbind.status") == 0) {
+        /* 本机链接态：转 USH 读元数据（不含凭据）。5 秒预算。 */
+        selfbind_forward_ush("{\"command\":\"selfbind.status\"}", 5000, resp, resp_size);
+        return;
+    }
+    if (strcmp(cmd, "selfbind.renew") == 0) {
+        /* 静默续期：转 USH（读本机凭据＋设备签名调 renew）。30 秒预算。 */
+        char device[128] = { 0 };
+        if (!lea_json_top_level_string(text, "device_id", device, sizeof(device)) || !device[0]) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "selfbind-fields-invalid", NULL);
+            return;
+        }
+        if (strncmp(device, "node//", 6) == 0)
+            memmove(device, device + 6, strlen(device + 6) + 1);
+        char ush_cmd[512] = { 0 };
+        size_t off = 0;
+        int okj = 1;
+        int _n = snprintf(ush_cmd, sizeof(ush_cmd), "{\"command\":\"selfbind.renew\",\"device_id\":\"");
+        if (_n < 0 || (size_t)_n >= sizeof(ush_cmd)) okj = 0;
+        else {
+            off = (size_t)_n;
+            if (!lea_json_escape_into(ush_cmd, sizeof(ush_cmd), &off, device)) okj = 0;
+            else if (off + 3 >= sizeof(ush_cmd)) okj = 0;
+            else { ush_cmd[off++] = '"'; ush_cmd[off++] = '}'; ush_cmd[off] = '\0'; }
+        }
+        if (!okj) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "selfbind-command-overflow", NULL);
+            return;
+        }
+        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size);
+        return;
+    }
+    if (strcmp(cmd, "selfbind.deliver-ticket") == 0) {
+        /* 票据转 USH：主进程已从 SPA 拿到 issue 票据，此处只做字段校验
+         * 与 JSON 组装，不碰 Key 明文（明文只在 USH 内出现）。
+         * device_id 归一化为裸形（去 node// 前缀）：规范串与绑定台账
+         * 键一律用裸形，签名时 USH 同样用裸形入串。 */
+        char ticket[256] = { 0 }, challenge[128] = { 0 }, account[128] = { 0 };
+        char device[128] = { 0 }, nonce[128] = { 0 }, devname[128] = { 0 };
+        char platform[64] = { 0 };
+        long long expires_at = 0;
+        if (!lea_json_top_level_string(text, "ticket", ticket, sizeof(ticket)) || !ticket[0] ||
+            !lea_json_top_level_string(text, "challenge", challenge, sizeof(challenge)) || !challenge[0] ||
+            !lea_json_top_level_string(text, "account_id", account, sizeof(account)) || !account[0] ||
+            !lea_json_top_level_string(text, "device_id", device, sizeof(device)) || !device[0] ||
+            !lea_json_top_level_string(text, "nonce", nonce, sizeof(nonce)) || !nonce[0] ||
+            !lea_json_top_level_long(text, "expires_at", &expires_at) || expires_at <= 0) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "selfbind-fields-invalid", NULL);
+            return;
+        }
+        lea_json_top_level_string(text, "device_name", devname, sizeof(devname));
+        lea_json_top_level_string(text, "platform", platform, sizeof(platform));
+        char server_base[256] = { 0 };
+        lea_json_top_level_string(text, "server_base", server_base, sizeof(server_base));
+        if (strncmp(device, "node//", 6) == 0)
+            memmove(device, device + 6, strlen(device + 6) + 1);
+        /* 组 USH 命令行：字符串逐个转义（设备名可能含引号／反斜杠／中文，
+         * 票据／challenge／nonce 只含 [A-Za-z0-9_-] 仍统一走转义）。 */
+        char ush_cmd[2048] = { 0 };
+        size_t off = 0;
+        int okj = 1;
+        #define SB_APPEND(...) do { \
+            if (off >= sizeof(ush_cmd)) { okj = 0; break; } \
+            int _n = snprintf(ush_cmd + off, sizeof(ush_cmd) - off, __VA_ARGS__); \
+            if (_n < 0) { okj = 0; break; } \
+            off += (size_t)_n; \
+            if (off >= sizeof(ush_cmd)) { okj = 0; break; } \
+        } while (0)
+        #define SB_STR(v) do { \
+            if (off + 1 >= sizeof(ush_cmd)) { okj = 0; break; } \
+            ush_cmd[off++] = '"'; \
+            if (!lea_json_escape_into(ush_cmd, sizeof(ush_cmd), &off, (v))) { okj = 0; break; } \
+            if (off + 1 >= sizeof(ush_cmd)) { okj = 0; break; } \
+            ush_cmd[off++] = '"'; ush_cmd[off] = '\0'; \
+        } while (0)
+        SB_APPEND("{\"command\":\"selfbind.deliver-ticket\",\"account_id\":");
+        SB_STR(account);
+        SB_APPEND(",\"device_id\":");
+        SB_STR(device);
+        SB_APPEND(",\"params\":{\"ticket\":");
+        SB_STR(ticket);
+        SB_APPEND(",\"challenge\":");
+        SB_STR(challenge);
+        SB_APPEND(",\"nonce\":");
+        SB_STR(nonce);
+        SB_APPEND(",\"device_name\":");
+        SB_STR(devname);
+        SB_APPEND(",\"platform\":");
+        SB_STR(platform);
+        SB_APPEND(",\"server_base\":");
+        SB_STR(server_base);
+        SB_APPEND(",\"expires_at\":%lld}}", expires_at);
+        #undef SB_APPEND
+        #undef SB_STR
+        if (!okj) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "selfbind-command-overflow", NULL);
+            return;
+        }
+        /* 30 秒预算：USH 内做 CNG 签名＋一次 WinHTTP 服务端往返。 */
+        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size);
+        return;
+    }
+    if (strcmp(cmd, "job.cancel") == 0) {
+        /* S-022：取消排队未执行的 job。只认顶层 job_id（调用方传 ACK 里
+         * 拿到的 job_id；job_id 缺省等同 request_id）。
+         * 排队项＋命令可取消 → 摘队、幂等记 CANCELLED、batch seq 回滚、
+         * 唤醒等待方（CANCELLED 响应）；运行中 job → 只记 CANCEL_REQUESTED
+         * （继续跑到终态，不强杀）；终态 job → 幂等取消（返回终态）；
+         * 查无 → NOT_FOUND；危险命令／已在执行 → NOT_CANCELLABLE。 */
+        char job_id[64] = { 0 };
+        if (!lea_json_top_level_string(text, "job_id", job_id, sizeof(job_id)) || !job_id[0]) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "job_id-missing", NULL);
+            return;
+        }
+        lea_queue_item_t *cancel_item = NULL;
+        lea_item_ctx_t *cancel_ctx = NULL;
+        char cancel_resp[LEA_MAX_RESPONSE] = { 0 };
+        char cancel_command[32] = { 0 };
+        char cancel_status[32] = { 0 };
+        int cancel_kind = 0; /* 0=未找到，1=已取消排队项，2=运行中已记请求，3=终态，4=不可取消 */
+        EnterCriticalSection(&g_lock);
+        lea_queue_item_t *found = lea_queue_find_by_request_id(&g_queue, job_id);
+        if (found) {
+            snprintf(cancel_command, sizeof(cancel_command), "%s", found->env.command);
+            if (!lea_command_is_cancellable(&found->env)) {
+                cancel_kind = 4;
+            } else {
+                lea_queue_item_t *it = lea_queue_cancel_by_request_id(&g_queue, job_id);
+                if (it) {
+                    cancel_item = it;
+                    cancel_ctx = (lea_item_ctx_t *)it->ctx;
+                    if (it->idem) {
+                        build_resp(cancel_resp, sizeof(cancel_resp), 0, LEA_ERR_CANCELLED,
+                                   it->env.request_id, 0, "cancelled-by-job-cancel", NULL);
+                        /* 排队项幂等态为 RUNNING（入队时已置），直接记 CANCELLED；
+                         * CANCELLING 只走 CANCEL_REQUESTED→CANCELLING（运行中
+                         * 取消请求被执行器接手时），此处不经过。 */
+                        lea_idem_mark_cancelled(&g_idem, it->idem, cancel_resp, now_unix());
+                    }
+                    lea_batch_seq_rollback(&g_batch_seq, it->env.device_id, it->env.account_id,
+                                           it->env.batch_id, it->env.seq, it->batch_prev_seq);
+                    g_inflight--;
+                    if (g_inflight < 0) g_inflight = 0;
+                    idem_persist_locked();
+                    cancel_kind = 1;
+                }
+            }
+        } else if (g_active_job.active &&
+                   (strcmp(g_active_job.request_id, job_id) == 0 ||
+                    (g_active_job.job_id[0] && strcmp(g_active_job.job_id, job_id) == 0))) {
+            /* 运行中：不强杀。危险性以幂等条目为准（含 params.dangerous 的
+             * ui.* 在入队时已按 params 判定过危险并记在条目上）。 */
+            snprintf(cancel_command, sizeof(cancel_command), "%s", g_active_job.command);
+            lea_idem_entry_t *aide = lea_idem_lookup_by_job(&g_idem, job_id);
+            const lea_command_spec_t *aspec = lea_command_spec(g_active_job.command);
+            int acancel = aspec && aspec->executor != LEA_EXEC_INLINE &&
+                          !(aide && aide->dangerous);
+            if (!acancel) {
+                cancel_kind = 4;
+            } else if (!aide) {
+                cancel_kind = 4; /* 活动 job 无幂等条目（不应发生），fail-closed */
+            } else if (aide->status == LEA_IDEM_CANCEL_REQUESTED) {
+                cancel_kind = 2; /* 已记过请求，幂等成功 */
+            } else if (lea_idem_request_cancel(&g_idem, aide, now_unix())) {
+                idem_persist_locked();
+                cancel_kind = 2;
+            } else {
+                cancel_kind = 4; /* 状态已变（竞态），按不可取消回 */
+            }
+        } else {
+            lea_idem_entry_t *e = lea_idem_lookup_by_job(&g_idem, job_id);
+            if (e) {
+                cancel_kind = 3;
+                snprintf(cancel_status, sizeof(cancel_status), "%s", lea_idem_status_name(e->status));
+                snprintf(cancel_command, sizeof(cancel_command), "%s", e->command);
+            } else {
+                cancel_kind = 0;
+            }
+        }
+        LeaveCriticalSection(&g_lock);
+        /* 放锁后唤醒被取消项的等待方（同 reset 清队口径：填 CANCELLED 响应）。 */
+        if (cancel_item && cancel_ctx) {
+            if (!cancel_resp[0]) {
+                build_resp(cancel_resp, sizeof(cancel_resp), 0, LEA_ERR_CANCELLED,
+                           cancel_item->env.request_id, 0, "cancelled-by-job-cancel", NULL);
+            }
+            snprintf(cancel_ctx->result_json, sizeof(cancel_ctx->result_json), "%s", cancel_resp);
+            SetEvent(cancel_ctx->done);
+            lea_ctx_release(cancel_ctx);
+            lea_queue_item_free(cancel_item);
+        }
+        /* job_id 进 JSON 前转义（调用方传入，未必是 token 字符集）。 */
+        char jid_esc[128] = { 0 };
+        size_t joff = 0;
+        if (!lea_json_escape_into(jid_esc, sizeof(jid_esc), &joff, job_id)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "job-id-escape-failed", NULL);
+            return;
+        }
+        if (cancel_kind == 1) {
+            char result[256] = { 0 };
+            snprintf(result, sizeof(result),
+                     "{\"job_id\":\"%s\",\"status\":\"CANCELLED\",\"command\":\"%s\"}",
+                     jid_esc, cancel_command);
+            build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+            svc_log("job.cancel cancelled job=%s command=%s", job_id, cancel_command);
+        } else if (cancel_kind == 2) {
+            char result[256] = { 0 };
+            snprintf(result, sizeof(result),
+                     "{\"job_id\":\"%s\",\"status\":\"CANCEL_REQUESTED\",\"command\":\"%s\"}",
+                     jid_esc, cancel_command);
+            build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+            svc_log("job.cancel cancel-requested job=%s command=%s", job_id, cancel_command);
+        } else if (cancel_kind == 3) {
+            char result[256] = { 0 };
+            snprintf(result, sizeof(result),
+                     "{\"job_id\":\"%s\",\"status\":\"%s\",\"command\":\"%s\",\"cancelled\":false}",
+                     jid_esc, cancel_status, cancel_command);
+            build_resp(resp, resp_size, 1, LEA_OK, "", 0, "already-terminal", result);
+            svc_log("job.cancel already-terminal job=%s status=%s", job_id, cancel_status);
+        } else if (cancel_kind == 4) {
+            build_resp(resp, resp_size, 0, LEA_ERR_NOT_CANCELLABLE, "", 0,
+                       "command-not-cancellable-or-already-running", NULL);
+            svc_log("job.cancel not-cancellable job=%s command=%s", job_id, cancel_command);
+        } else {
+            build_resp(resp, resp_size, 0, LEA_ERR_NOT_FOUND, "", 0, "job-not-found", NULL);
+        }
+        return;
+    }
+    if (strcmp(cmd, "job.query") == 0) {
+        /* S-022：查 job 状态。排队 → RECEIVED，活动 → RUNNING，幂等表 →
+         * 终态／取消态（含缓存响应），查无 → NOT_FOUND。 */
+        char job_id[64] = { 0 };
+        if (!lea_json_top_level_string(text, "job_id", job_id, sizeof(job_id)) || !job_id[0]) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "job_id-missing", NULL);
+            return;
+        }
+        char qstatus[32] = { 0 }, qcommand[32] = { 0 };
+        char qcached[LEA_MAX_RESPONSE] = { 0 };
+        int qfound = 0, qcancellable = 0, qcancel_requested = 0;
+        EnterCriticalSection(&g_lock);
+        lea_queue_item_t *found = lea_queue_find_by_request_id(&g_queue, job_id);
+        if (found) {
+            qfound = 1;
+            snprintf(qstatus, sizeof(qstatus), "%s", "RECEIVED");
+            snprintf(qcommand, sizeof(qcommand), "%s", found->env.command);
+            qcancellable = lea_command_is_cancellable(&found->env);
+        } else if (g_active_job.active &&
+                   (strcmp(g_active_job.request_id, job_id) == 0 ||
+                    (g_active_job.job_id[0] && strcmp(g_active_job.job_id, job_id) == 0))) {
+            qfound = 1;
+            snprintf(qstatus, sizeof(qstatus), "%s", "RUNNING");
+            snprintf(qcommand, sizeof(qcommand), "%s", g_active_job.command);
+            lea_idem_entry_t *aide = lea_idem_lookup_by_job(&g_idem, job_id);
+            const lea_command_spec_t *aspec = lea_command_spec(g_active_job.command);
+            qcancellable = aspec && aspec->executor != LEA_EXEC_INLINE &&
+                           !(aide && aide->dangerous);
+            qcancel_requested = (aide && aide->status == LEA_IDEM_CANCEL_REQUESTED) ? 1 : 0;
+        } else {
+            lea_idem_entry_t *e = lea_idem_lookup_by_job(&g_idem, job_id);
+            if (e) {
+                qfound = 1;
+                snprintf(qstatus, sizeof(qstatus), "%s", lea_idem_status_name(e->status));
+                snprintf(qcommand, sizeof(qcommand), "%s", e->command);
+                qcancel_requested = (e->status == LEA_IDEM_CANCEL_REQUESTED) ? 1 : 0;
+                if (e->result[0]) snprintf(qcached, sizeof(qcached), "%s", e->result);
+            }
+        }
+        LeaveCriticalSection(&g_lock);
+        if (!qfound) {
+            build_resp(resp, resp_size, 0, LEA_ERR_NOT_FOUND, "", 0, "job-not-found", NULL);
+            return;
+        }
+        char jid_esc[128] = { 0 };
+        size_t joff = 0;
+        char result[LEA_MAX_RESPONSE] = { 0 };
+        if (!lea_json_escape_into(jid_esc, sizeof(jid_esc), &joff, job_id)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "job-id-escape-failed", NULL);
+            return;
+        }
+        int n = 0;
+        if (qcached[0]) {
+            /* 终态缓存响应原样附后（idem 缓存写时已去尾换行，合法 JSON）。 */
+            n = snprintf(result, sizeof(result),
+                         "{\"job_id\":\"%s\",\"status\":\"%s\",\"command\":\"%s\","
+                         "\"cancellable\":%s,\"cancel_requested\":%s,\"cached_result\":%s}",
+                         jid_esc, qstatus, qcommand,
+                         qcancellable ? "true" : "false",
+                         qcancel_requested ? "true" : "false", qcached);
+        } else {
+            n = snprintf(result, sizeof(result),
+                         "{\"job_id\":\"%s\",\"status\":\"%s\",\"command\":\"%s\","
+                         "\"cancellable\":%s,\"cancel_requested\":%s}",
+                         jid_esc, qstatus, qcommand,
+                         qcancellable ? "true" : "false",
+                         qcancel_requested ? "true" : "false");
+        }
+        if (n < 0 || (size_t)n >= sizeof(result)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "job-query-result-overflow", NULL);
+            return;
+        }
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        return;
+    }
+    /* S-021：本机控制命令（只走本地管道：调用方已由 pipe_client_thread
+     * 按 H01 验过安装目录客户端＋主程序父进程；不走信封验签、不进队列）。
+     * 读状态（lea.status）与改状态（暂停／撤销／授权）都在此。 */
+    if (strcmp(cmd, "lea.status") == 0) {
+        lea_local_status_t st;
+        char result[2048];
+        if (!local_status_snapshot(&st) ||
+            !lea_local_status_to_json(&st, result, sizeof(result))) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0,
+                               "local-status-unavailable", NULL);
+            return;
+        }
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
+        return;
+    }
+    if (strcmp(cmd, "lea.pause") == 0) {
+        if (!lea_local_set_paused(g_base_dir, 1)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "pause-failed", NULL);
+            return;
+        }
+        lea_refresh_local_status("lea.pause", "ok");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"paused\":true}");
+        return;
+    }
+    if (strcmp(cmd, "lea.resume") == 0) {
+        if (!lea_local_set_paused(g_base_dir, 0)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "resume-failed", NULL);
+            return;
+        }
+        lea_refresh_local_status("lea.resume", "ok");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"paused\":false}");
+        return;
+    }
+    if (strcmp(cmd, "lea.revoke-all-keys") == 0) {
+        if (!lea_local_set_revoke_all(g_base_dir, 1)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoke-failed", NULL);
+            return;
+        }
+        lea_refresh_local_status("lea.revoke-all-keys", "ok");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"revoked_all\":true}");
+        return;
+    }
+    if (strcmp(cmd, "lea.authorize-dangerous") == 0) {
+        if (!lea_local_set_dangerous_consent(g_base_dir, 1)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "authorize-failed", NULL);
+            return;
+        }
+        lea_refresh_local_status("lea.authorize-dangerous", "ok");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"dangerous_consented\":true}");
+        return;
+    }
+    if (strcmp(cmd, "lea.revoke-dangerous-consent") == 0) {
+        if (!lea_local_set_dangerous_consent(g_base_dir, 0)) {
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoke-consent-failed", NULL);
+            return;
+        }
+        lea_refresh_local_status("lea.revoke-dangerous-consent", "ok");
+        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"dangerous_consented\":false}");
+        return;
+    }
     build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "unknown-internal-cmd", NULL);
 }
 
 /* ---------- 信封处理（管道线程） ---------- */
-static void handle_envelope(const char *text, char *resp, size_t resp_size) {
+static void handle_envelope(const char *text, char *resp, size_t resp_size, HANDLE pipe) {
     lea_envelope_t env;
     long long t0 = now_unix();
     if (!lea_parse_envelope(text, t0, &env)) {
@@ -2096,8 +3761,10 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         return;
     }
     /* 1. 签名验签（占位 fail-closed）。
-     * 规范串 v1（CANONICAL-SIGNING-V1.md §2）：16 行，覆盖全部关键字段
-     * （batch_id／seq／account_id／api_key_id／timeout_ms／params 哈希）。 */
+     * 规范串 v2（CANONICAL-SIGNING-V2.md §2）：20 行，覆盖全部关键字段
+     * （batch_id／seq／account_id／api_key_id／timeout_ms／params 哈希
+     * ／grant_epoch）。验签对象是解析后重建的规范串，不是收到的原文
+     * ——解析字段与验签字段必须一致。 */
     char canonical[4096];
     if (!lea_envelope_canonical(&env, canonical, sizeof(canonical))) {
         build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env.request_id, 0,
@@ -2116,16 +3783,98 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         svc_log("REJECT sig request=%s reason=%s", env.request_id, reason);
         return;
     }
-    /* 2. sys.info 内联，不进队列／不占幂等。 */
-    if (strcmp(env.command, "sys.info") == 0) {
-        /* sys.info 同样要过准入（未绑定时返回 NOT_BOUND；Key 已吊销也拒绝）。 */
+    /* 1.5 RC-01 握手门：验签后、任何业务命令前。
+     *   - sys.handshake 自身：同款准入（绑定／epoch／授权＋吊销三态）＋
+     *     params 校验（指纹须等于本机编译期公钥指纹、protocol_version 须
+     *     为 2）后标记完成；任一失败即拒绝，不标记。
+     *   - sys.ping 健康探针只读、无执行，免于此门（B1 自愈探测须能过；
+     *     仍过验签＋准入）。
+     *   - 其余命令握手未完成即回 HANDSHAKE_REQUIRED，不入队、不执行、
+     *     不占重放／幂等；服务端凭此码重握一次再重试（见 lea-core.js）。
+     *   --internal 本地控制命令不在此门内（另见 handle_internal，本地
+     *   SYSTEM 起源、按进程身份鉴权）。 */
+    if (strcmp(env.command, "sys.handshake") == 0) {
+        EnterCriticalSection(&g_lock);
+        char herr[64] = { 0 };
+        int hadmitted = lea_admit(&env, &g_binding, NULL, 0, herr, sizeof(herr));
+        LeaveCriticalSection(&g_lock);
+        if (hadmitted) {
+            const char *rcode = lea_revocation_error_code(key_revocation_check(env.api_key_id));
+            if (rcode) {
+                hadmitted = 0;
+                snprintf(herr, sizeof(herr), "%s", rcode);
+            }
+        }
+        if (!hadmitted) {
+            build_resp(resp, resp_size, 0, herr, env.request_id,
+                               lea_error_retryable(herr), "", NULL);
+            audit_for_envelope(&env, "admit-reject", "rejected", herr, 0, "");
+            return;
+        }
+        char fp[17] = { 0 };
+        char pfp[128] = { 0 };
+        long long pver = -1;
+        int fp_ok = lea_server_pubkey_fingerprint(fp);
+        int params_ok = lea_json_string(env.params_raw, "server_pubkey_fp", pfp, sizeof(pfp)) &&
+                        lea_json_long(env.params_raw, "protocol_version", &pver) &&
+                        lea_handshake_check_params(fp_ok ? fp : "", pfp, pver);
+        if (!params_ok) {
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env.request_id, 0,
+                               "handshake-params-mismatch", NULL);
+            audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_BAD_ENVELOPE, 0,
+                               "handshake-params-mismatch");
+            svc_log("REJECT handshake params request=%s", env.request_id);
+            return;
+        }
+        EnterCriticalSection(&g_lock);
+        lea_handshake_mark_complete(&g_handshake, fp, env.binding_epoch, env.grant_epoch);
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 1, LEA_OK, env.request_id, 0, "", "{\"handshake\":\"ok\"}");
+        audit_for_envelope(&env, "handshake", "ok", "", 0, "");
+        svc_log("handshake completed device=%s binding_epoch=%lld grant_epoch=%lld",
+                env.device_id, env.binding_epoch, env.grant_epoch);
+        return;
+    }
+    if (strcmp(env.command, "sys.ping") != 0) {
+        char fp[17] = { 0 };
+        int complete = 0;
+        if (lea_server_pubkey_fingerprint(fp)) {
+            EnterCriticalSection(&g_lock);
+            complete = lea_handshake_is_complete(&g_handshake, fp, env.binding_epoch, env.grant_epoch);
+            LeaveCriticalSection(&g_lock);
+        }
+        if (!complete) {
+            /* RC-01：被拒信封也要占重放表（防“先拒后重放”：已验签的旧信
+             * 封在握手完成后被再次提交——信封有 60 秒 TTL，单次占表即堵
+             * 住该窗口；未过验签的信封不占表，防伪造占表 DoS）。
+             * 服务端重试一律用全新信封（新 request_id／nonce，复用幂等
+             * 键），不受影响。 */
+            EnterCriticalSection(&g_lock);
+            lea_replay_check_and_add(&g_replay, env.request_id, env.nonce, t0);
+            LeaveCriticalSection(&g_lock);
+            build_resp(resp, resp_size, 0, LEA_ERR_HANDSHAKE_REQUIRED, env.request_id, 0,
+                               "handshake-required", NULL);
+            audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_HANDSHAKE_REQUIRED, 0,
+                               "handshake-required");
+            return;
+        }
+    }
+    /* 2. sys.info／sys.ping／sys.reset／lea.status 内联，不进队列／不占幂等。 */
+    if (strcmp(env.command, "sys.info") == 0 || strcmp(env.command, "sys.ping") == 0 ||
+        strcmp(env.command, "sys.reset") == 0 || strcmp(env.command, "lea.status") == 0) {
+        /* 三者同样要过准入（未绑定时返回 NOT_BOUND；Key 已吊销也拒绝）。
+         * F-01 三态（lea_revocation_error_code，单测覆盖）：仅 NOT_REVOKED
+         * 放行；REVOKED → KEY_REVOKED；ERROR → REVOCATION_UNAVAILABLE。 */
         EnterCriticalSection(&g_lock);
         char err[64] = { 0 };
         int admitted = lea_admit(&env, &g_binding, NULL, 0, err, sizeof(err));
         LeaveCriticalSection(&g_lock);
-        if (admitted && key_is_revoked(env.api_key_id)) {
-            admitted = 0;
-            snprintf(err, sizeof(err), "%s", LEA_ERR_KEY_REVOKED);
+        if (admitted) {
+            const char *rcode = lea_revocation_error_code(key_revocation_check(env.api_key_id));
+            if (rcode) {
+                admitted = 0;
+                snprintf(err, sizeof(err), "%s", rcode);
+            }
         }
         if (!admitted) {
             build_resp(resp, resp_size, 0, err, env.request_id,
@@ -2133,7 +3882,16 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
             audit_for_envelope(&env, "admit-reject", "rejected", err, 0, "");
             return;
         }
-        handle_sys_info(&env, resp, resp_size);
+        if (strcmp(env.command, "sys.ping") == 0) {
+            handle_sys_ping(&env, resp, resp_size);
+        } else if (strcmp(env.command, "sys.reset") == 0) {
+            handle_sys_reset(&env, resp, resp_size);
+        } else if (strcmp(env.command, "lea.status") == 0) {
+            /* S-021：与 sys.info 同款准入，绕过暂停门（暂停时仍可查状态）。 */
+            handle_lea_status(&env, resp, resp_size);
+        } else {
+            handle_sys_info(&env, resp, resp_size);
+        }
         return;
     }
     /* 3. 重放表。 */
@@ -2147,20 +3905,44 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
                            "replay");
         return;
     }
-    /* 4. 准入（绑定／设备／epoch／授权／scope）；Key 吊销另查本地吊销文件。 */
+    /* 4. 准入（绑定／设备／epoch／授权／scope）；Key 吊销另查本地吊销文件。
+     * F-01 三态：仅 NOT_REVOKED 放行；REVOKED → KEY_REVOKED；
+     * ERROR → REVOCATION_UNAVAILABLE（见 lea_revocation_error_code）。 */
     EnterCriticalSection(&g_lock);
     char err[64] = { 0 };
     int admitted = lea_admit(&env, &g_binding, NULL, 0, err, sizeof(err));
     LeaveCriticalSection(&g_lock);
-    if (admitted && key_is_revoked(env.api_key_id)) {
-        admitted = 0;
-        snprintf(err, sizeof(err), "%s", LEA_ERR_KEY_REVOKED);
+    if (admitted) {
+        const char *rcode = lea_revocation_error_code(key_revocation_check(env.api_key_id));
+        if (rcode) {
+            admitted = 0;
+            snprintf(err, sizeof(err), "%s", rcode);
+        }
     }
     if (!admitted) {
         build_resp(resp, resp_size, 0, err, env.request_id,
                            lea_error_retryable(err), "", NULL);
         audit_for_envelope(&env, "admit-reject", "rejected", err, 0, "");
         svc_log("REJECT admit request=%s code=%s", env.request_id, err);
+        return;
+    }
+    /* 4.4 S-021：本机暂停门＋危险授权门（在幂等／入队之前；lea.status
+     * 已在第 2 步内联处理，不到此处，故暂停时仍可查状态）。 */
+    if (lea_local_is_paused(g_base_dir)) {
+        build_resp(resp, resp_size, 0, LEA_ERR_PAUSED, env.request_id, 0,
+                           "local-paused", NULL);
+        audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_PAUSED, 0,
+                           "local-paused");
+        svc_log("REJECT paused request=%s", env.request_id);
+        return;
+    }
+    if (lea_command_is_dangerous(&env) && !lea_local_has_dangerous_consent(g_base_dir)) {
+        build_resp(resp, resp_size, 0, LEA_ERR_SCOPE_DENIED, env.request_id, 0,
+                           "dangerous-consent-required", NULL);
+        audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_SCOPE_DENIED, 0,
+                           "dangerous-consent-required");
+        svc_log("REJECT dangerous-consent-required request=%s command=%s",
+                env.request_id, env.command);
         return;
     }
     /* 4.5 H10：batch_id／seq 单调性——同批 seq 必须严格递增（乱序／重放步
@@ -2190,6 +3972,31 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     lea_idem_entry_t *idem = lea_idem_get_or_create(&g_idem, env.device_id,
                                                     env.account_id, env.idempotency_key,
                                                     dangerous, t0);
+    /* FIX1：缓存命中前先核对请求指纹——同幂等键不同动作内容（command／params
+     * 任一变）不得回放旧成功／旧失败结果；旧条目无指纹且已有终态缓存时同样
+     * 拒绝回放（fail-closed，须换新键重发）。检查在一切回放／重执行之前，
+     * 且拒绝时不改表（不覆盖旧指纹与旧结果）。 */
+    if (idem) {
+        char cur_fp[65] = { 0 };
+        lea_idem_fingerprint(cur_fp, env.command, env.params_raw);
+        int fp_check = lea_idem_replay_check(idem, cur_fp);
+        if (fp_check != 0) {
+            const char *detail = fp_check == 1 ? "idempotent-fingerprint-mismatch"
+                                               : "idempotent-fingerprint-missing-legacy";
+            LeaveCriticalSection(&g_lock);
+            build_resp(resp, resp_size, 0, LEA_ERR_IDEMPOTENT_MISMATCH, env.request_id,
+                       lea_error_retryable(LEA_ERR_IDEMPOTENT_MISMATCH),
+                       "same idempotency_key bound to different request; use a new key", NULL);
+            audit_for_envelope(&env, "execute", "rejected", LEA_ERR_IDEMPOTENT_MISMATCH, 0, detail);
+            svc_log("REJECT idempotent-mismatch request=%s key=%s detail=%s",
+                    env.request_id, env.idempotency_key, detail);
+            return;
+        }
+        /* 新条目／尚未缓存终态结果的条目：记下本次请求指纹（随 RUNNING 置位持久化）。 */
+        if (idem->req_fp[0] == '\0') {
+            snprintf(idem->req_fp, sizeof(idem->req_fp), "%s", cur_fp);
+        }
+    }
     if (idem && (idem->status == LEA_IDEM_SUCCEEDED || idem->status == LEA_IDEM_FAILED) &&
         idem->result[0]) {
         /* 缓存命中：原样返回终态响应（补一个换行，管道协议要求一行以 \n 结束）。 */
@@ -2220,6 +4027,13 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         return;
     }
     lea_idem_set_status(&g_idem, idem, LEA_IDEM_RUNNING, NULL, t0);
+    /* S-022：job 查询用——条目记 request_id／job_id／command（新条目才填，
+     * 重复提交不覆盖首次记录；旧条目此三字段为空，查询时回 not-found）。 */
+    if (idem->request_id[0] == '\0') {
+        snprintf(idem->request_id, sizeof(idem->request_id), "%s", env.request_id);
+        snprintf(idem->job_id, sizeof(idem->job_id), "%s", env.job_id[0] ? env.job_id : env.request_id);
+        snprintf(idem->command, sizeof(idem->command), "%s", env.command);
+    }
     idem_persist_locked();
     /* 6. 入队。 */
     lea_queue_item_t *item = (lea_queue_item_t *)calloc(1, sizeof(*item));
@@ -2243,8 +4057,13 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
     item->dangerous = dangerous;
     item->idem = idem;
     item->ctx = ctx;
+    item->batch_prev_seq = batch_prev_seq; /* B1：reset 清队时回滚 batch seq 用 */
     char qerr[64] = { 0 };
-    if (!lea_queue_enqueue(&g_queue, item, qerr, sizeof(qerr))) {
+    /* B1：队列准入（在队＋在执行合计 ≤8）。满即回 QUEUE_FULL（沿用既有
+     * 队列满路径：batch seq 回滚＋幂等回 RECEIVED），不入队；100 条容量
+     * 上限几乎到不了，8 条准入是绑定约束。 */
+    if (!lea_queue_admit_ok(lea_queue_total(&g_queue) + g_inflight) ||
+        !lea_queue_enqueue(&g_queue, item, qerr, sizeof(qerr))) {
         free(item);
         CloseHandle(ctx->done);
         free(ctx);
@@ -2260,14 +4079,39 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size) {
         return;
     }
     g_inflight++;
+    if (g_queue_oldest_tick == 0) g_queue_oldest_tick = GetTickCount64(); /* B1：队空→非空，打点 */
     LeaveCriticalSection(&g_lock);
     SetEvent(g_queue_event);
+    /* B1：入队成功即回 ACK 行（客户端 2 秒 ACK 时限；同步命令再等结果行，
+     * 异步命令收到 ACK 即退出）。ACK 写失败（客户端已断开）不影响执行。 */
+    {
+        char ack[LEA_MAX_RESPONSE] = { 0 };
+        char ack_result[192] = { 0 };
+        const char *jid = env.job_id[0] ? env.job_id : env.request_id;
+        snprintf(ack_result, sizeof(ack_result), "{\"job_id\":\"%s\"}", jid);
+        build_resp(ack, sizeof(ack), 1, "QFR_LEA_ACCEPTED", env.request_id, 0,
+                   "queued", ack_result);
+        pipe_write_all(pipe, ack, strlen(ack));
+    }
+    /* B1：异步模式（L2 长命令）发 ACK 后即返，不等执行完成。纵深防御：
+     * 只有 tier==L2（长命令）才认 async；L0／L1 信封纵写 async 也强制
+     * 同步（防信封被改写后把短命令变异步、绕过结果等待）。 */
+    if (env.mode[0] && strcmp(env.mode, "async") == 0 &&
+        lea_command_tier(env.command) == LEA_TIER_LONG) {
+        lea_ctx_release(ctx);
+        return;
+    }
     /* 7. 等执行完成（按 timeout_ms；超时则回 timeout，任务继续跑，幂等表留终态）。 */
     long timeout_ms = lea_effective_timeout_ms(&env);
     DWORD w = WaitForSingleObject(ctx->done, (DWORD)timeout_ms);
     if (w == WAIT_TIMEOUT) {
+        /* S-022：超时即结果未知；危险命令禁止重复提交（新 key 重发会再执行
+         * 一次副作用）。同幂等键重查仍安全（RUNNING 回 DUPLICATE，终态回缓存）。 */
+        const char *tjid = env.job_id[0] ? env.job_id : env.request_id;
         char result[256];
-        snprintf(result, sizeof(result), "{\"job_id\":\"%s\"}", env.request_id);
+        snprintf(result, sizeof(result),
+                 "{\"job_id\":\"%s\",\"result_unknown\":true,\"do_not_resubmit\":%s}",
+                 tjid, dangerous ? "true" : "false");
         build_resp(resp, resp_size, 0, LEA_ERR_TIMEOUT, env.request_id, 0,
                            "execution still running past timeout_ms", result);
         audit_for_envelope(&env, "execute", "timeout", LEA_ERR_TIMEOUT,
@@ -2400,7 +4244,7 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
                 handle_internal(buf, resp, sizeof(resp));
             }
         } else {
-            handle_envelope(buf, resp, sizeof(resp));
+            handle_envelope(buf, resp, sizeof(resp), pipe);
         }
         /* #14：响应写同样走重叠 I/O（句柄为 OVERLAPPED）。 */
         pipe_write_all(pipe, resp, strlen(resp));
@@ -2511,10 +4355,12 @@ static int lea_service_init(void) {
     lea_replay_init(&g_replay);
     lea_idem_init(&g_idem);
     lea_queue_init(&g_queue);
+    lea_handshake_init(&g_handshake); /* RC-01：握手态初始为未完成 */
     lea_batch_seq_init(&g_batch_seq);
     g_queue_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     ensure_dirs();
     binding_load();
+    revocation_startup_init(); /* F-01：吊销表启动初始化（条件式，见上） */
     idem_load();
     /* 启动恢复：崩溃残留的 RUNNING/RECEIVED 标 UNKNOWN（不自动重试）。 */
     EnterCriticalSection(&g_lock);
@@ -2545,6 +4391,10 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
     report_status(SERVICE_RUNNING, 0);
     HANDLE worker = CreateThread(NULL, 0, worker_loop, NULL, 0, NULL);
     HANDLE listener = CreateThread(NULL, 0, pipe_loop, NULL, 0, NULL);
+    /* B1：看门狗线程（1 秒循环，活动 job 超 deadline 强杀、积压清队、
+     * G2 MeshCentral agent 子进程树扫描）。 */
+    g_watchdog_thread = CreateThread(NULL, 0, watchdog_loop, NULL, 0, NULL);
+    if (!g_watchdog_thread) svc_log("WARN watchdog thread start failed");
     WaitForSingleObject(g_stop_event, INFINITE);
     InterlockedExchange(&g_running, 0);
     if (g_queue_event) SetEvent(g_queue_event);
@@ -2556,6 +4406,7 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
     }
     if (listener) WaitForSingleObject(listener, 5000);
     if (worker) WaitForSingleObject(worker, 5000);
+    if (g_watchdog_thread) WaitForSingleObject(g_watchdog_thread, 5000); /* B1 */
     EnterCriticalSection(&g_lock);
     idem_persist_locked();
     LeaveCriticalSection(&g_lock);
@@ -2563,14 +4414,121 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
     svc_log("SERVICE stopped");
 }
 
+/* X-01：显式迁移工具（管理员手动跑，须管理员权限——写 ProgramData 状态
+ * 文件＋设 SYSTEM／Administrators ACL；非管理员时写盘／ACL 失败即报错）。
+ * 用法：QFRLEA.exe --migrate-revoked [--generation N] [--accept-empty]
+ *   --generation N：写入的世代（缺省 1，须 ≥1；应与服务端／备份的真实
+ *     世代一致；下次服务端同步世代更高时向上纠正）。
+ *   --accept-empty：0 字节文件须显式确认才按空表迁移（大肥鱼复核：0 字
+ *     节不能自证“旧版从未吊销过”，崩溃截断／磁盘损坏／清空都可能产生
+ *     0 字节；无此旗时 0 字节文件拒绝迁移）。
+ * 前置：.gen 已存在时拒绝覆盖；快照须通过严格校验（空文件是唯一例外：
+ * 旧版从未吊销过任何 Key 时表就是空的——文件存在且 0 字节、且带
+ * --accept-empty 时才按合法空表迁移；文件缺失／内容损坏一律拒绝，须从
+ * 备份恢复）；迁移成功写 .gen＋标记（同款 ACL）并记日志；失败不写残集。
+ * 服务正在跑时也可迁移：下次吊销检查通过即自动脱离 DEGRADED，无需重启。 */
+static int lea_migrate_revoked_cmd(int argc, char **argv) {
+    ensure_dirs();
+    long long generation = 1;
+    int accept_empty = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--accept-empty") == 0) {
+            accept_empty = 1;
+        } else if (strcmp(argv[i], "--generation") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "usage: QFRLEA.exe --migrate-revoked [--generation N] [--accept-empty]\n");
+                return 2;
+            }
+            char *end = NULL;
+            generation = strtoll(argv[++i], &end, 10);
+            if (!end || *end != '\0' || generation < 1) {
+                fprintf(stderr, "--generation must be an integer >= 1\n");
+                return 2;
+            }
+        } else {
+            fprintf(stderr, "usage: QFRLEA.exe --migrate-revoked [--generation N] [--accept-empty]\n");
+            return 2;
+        }
+    }
+    char gen_path[MAX_PATH] = { 0 };
+    if (!lea_revoked_gen_path(g_revoked_path, gen_path, sizeof(gen_path))) {
+        fprintf(stderr, "cannot derive generation path\n");
+        return 1;
+    }
+    FILE *gf = fopen(gen_path, "rb");
+    if (gf) {
+        fclose(gf);
+        fprintf(stderr, "generation file already exists, refusing to overwrite\n");
+        return 1;
+    }
+    long long snap = -1;
+    if (!lea_revoked_validate_snapshot(g_revoked_path, 0, 1, &snap)) {
+        /* 唯一例外：文件存在且 0 字节＝旧版从未吊销过的合法空表——但 0 字
+         * 节不能自证（截断／损坏／清空都可能产生），须管理员显式带
+         * --accept-empty 确认才迁移（大肥鱼复核）；无此旗即拒绝。 */
+        FILE *f = fopen(g_revoked_path, "rb");
+        int empty = 0;
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            empty = (ftell(f) == 0);
+            fclose(f);
+        }
+        if (!empty || !accept_empty) {
+            fprintf(stderr, "revoked snapshot failed strict validation, refusing to migrate (restore from backup)%s\n",
+                    empty ? " (0-byte file: pass --accept-empty to migrate it as an empty table)" : "");
+            return 1;
+        }
+        svc_log("migrate-revoked: legacy snapshot is empty (no keys ever revoked), migrating as empty table (explicit --accept-empty)");
+    }
+    if (!revoked_migrate_legacy_snapshot_gen(generation)) {
+        fprintf(stderr, "migration failed (generation/marker write or ACL failed)\n");
+        return 1;
+    }
+    svc_log("revoked table migrated explicitly to generation %lld", generation);
+    printf("revoked table migrated to generation %lld\n", generation);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    /* S-021：本机控制子命令只认本地命令行，在服务启动前分流——服务
+     * 运行时收不到它们，命名管道／LEA API／qf-lea-client 也调不到它们。
+     * CLI 直接读写 %ProgramData%\QFR\LEA 下状态文件。 */
+    if (argc > 1 && lea_is_local_control_subcommand(argv[1])) {
+        return lea_local_cli(argc, argv, NULL);
+    }
+    /* A1（2026-11-13）：首装服务子命令只认本地命令行，在
+     * StartServiceCtrlDispatcherW 之前分流——服务运行时收不到它们，
+     * 命名管道／LEA API／qf-lea-client 也调不到它们（白名单不加）。
+     * binPath 只取本 exe 所在目录，不接受调用方传入路径。 */
+    if (argc > 1 && lea_is_service_subcommand(argv[1])) {
+        if (strcmp(argv[1], "--install-service") == 0) {
+            int repair = (argc > 2 && strcmp(argv[2], "--repair") == 0);
+            return lea_service_install(repair);
+        }
+        if (strcmp(argv[1], "--repair") == 0)
+            return lea_service_install(1);
+        if (strcmp(argv[1], "--uninstall-service") == 0)
+            return lea_service_uninstall();
+        if (strcmp(argv[1], "--verify-manifest") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "usage: QFRLEA.exe --verify-manifest <dir> <manifest>\n");
+                return 2;
+            }
+            return lea_verify_manifest(argv[2], argv[3]);
+        }
+        if (strcmp(argv[1], "--migrate-revoked") == 0)
+            return lea_migrate_revoked_cmd(argc, argv);
+        return 2;
+    }
     if (argc > 1 && strcmp(argv[1], "debug") == 0) {
         g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
         lea_service_init();
         svc_log("DEBUG mode start");
         HANDLE worker = CreateThread(NULL, 0, worker_loop, NULL, 0, NULL);
+        g_watchdog_thread = CreateThread(NULL, 0, watchdog_loop, NULL, 0, NULL); /* B1 */
         pipe_loop(NULL);
         if (worker) WaitForSingleObject(worker, 5000);
+        if (g_watchdog_thread) WaitForSingleObject(g_watchdog_thread, 5000); /* B1 */
         return 0;
     }
     SERVICE_TABLE_ENTRYW table[] = {
@@ -2578,7 +4536,7 @@ int main(int argc, char **argv) {
         { NULL, NULL }
     };
     if (!StartServiceCtrlDispatcherW(table)) {
-        fprintf(stderr, "QFRLEA is a Windows service. Install with windows/lea/install-lea-service.ps1.\n");
+        fprintf(stderr, "QFRLEA is a Windows service. Install with: QFRLEA.exe --install-service (run as administrator).\n");
         return 1;
     }
     return 0;

@@ -5,6 +5,9 @@
  *   ③ 非 ush-*.png 文件不动；④ 不存在目录返回 0 不崩；
  *   ⑤ 加固调用不崩（wine 下 ACL 可能 stub，返回 0 时只记 SKIP 不判失败；
  *      真机须返回 1，见 WINDOWS-TESTS.md）。
+ * S-025（2026-11-15）：inline 截图断言（结果含 downscaled／
+ * masked_password_fields／notice_shown 三字段、宽高 >0、最长边 ≤1920；
+ * 无桌面会话导致抓屏失败时记 SKIP 不判失败）。
  * 用法：x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -std=c11
  *   -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -I.. -o /tmp/test_ush_snapshot.exe
  *   test_ush_snapshot.c ../ush_snapshot.c ../ush_json.c
@@ -131,6 +134,37 @@ int main(void) {
         if (rc == 1) t(1, "H24 harden 成功返回 1");
         else printf("SKIP H24 harden 返回 0（wine/FS 不支持 ACL，真机须为 1）\n");
         RemoveDirectoryW(sub);
+    }
+
+    /* S-025：inline 截图含三字段、最长边 ≤1920；无桌面会话时抓屏失败记 SKIP。
+     * （wine 下无桌面会话，capture_rect 即败，属环境限制、不判失败；
+     * 真机验收见 WINDOWS-TESTS.md：4K 降采样实效、真实密码框遮罩目视、
+     * 提示条目视。） */
+    {
+        ush_request_t rq;
+        memset(&rq, 0, sizeof(rq));
+        snprintf(rq.params_json, sizeof(rq.params_json), "%s", "{\"mode\":\"inline\"}");
+        rq.timeout_ms = 5000;
+        char *data = (char *)malloc(8 * 1024 * 1024);
+        char ec[64] = { 0 }, et[512] = { 0 };
+        if (!data) {
+            printf("SKIP S-025 malloc 失败\n");
+        } else {
+            int ok = ush_ui_snapshot(&rq, data, 8 * 1024 * 1024, ec, sizeof(ec), et, sizeof(et));
+            if (!ok) {
+                printf("SKIP S-025 inline 截图失败（无桌面会话，err=%s：%s）\n", ec, et);
+            } else {
+                t(strstr(data, "\"downscaled\":") != NULL, "S-025 inline 结果含 downscaled");
+                t(strstr(data, "\"masked_password_fields\":") != NULL, "S-025 inline 结果含 masked_password_fields");
+                t(strstr(data, "\"notice_shown\":") != NULL, "S-025 inline 结果含 notice_shown");
+                long w = 0, h = 0;
+                ush_json_get_long(data, "width", &w);
+                ush_json_get_long(data, "height", &h);
+                t(w > 0 && h > 0, "S-025 inline 宽高 >0");
+                t((w > h ? w : h) <= 1920, "S-025 inline 最长边 ≤1920");
+            }
+            free(data);
+        }
     }
 
     /* 清理测试目录。 */

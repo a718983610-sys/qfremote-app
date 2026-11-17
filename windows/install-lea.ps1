@@ -1,5 +1,11 @@
 ﻿# QFRemote LEA 本地代理安装脚本（Stage 1 MVP，DESIGN.md §9/§10）
 # ============================================================
+# A1（2026-11-13）：首装主路径已迁入 QFRLEA.exe --install-service
+# （安装器内层 admin 段直接调它装服务＋写注册表）；本脚本降为兼容／
+# 修复脚本：完整模式（下）仍可手动跑（修服务／回滚），首装时安装器
+# 只调 -TasksOnly（仅注册 USH 登录计划任务，见 Register-AllUshTasks）。
+# 旧调用方（install-system-services.ps1 登录后一次 UAC）仍可调完整模式，
+# 但主程序登录时不再走那条路（见 main.js leaHealthCheck／repairLeaService）。
 # 由 install-system-services.ps1 在应用首次登录后的一次 UAC 内调用
 # （与 QFSysHelper / QFLockSvc 同一次提权，不另弹 UAC）：
 #   install-lea.ps1 -LeaDir <随包暂存的 LEA 目录> [-MainVersion <主程序版本>]
@@ -7,15 +13,21 @@
 #   LEA 服务本体与客户端随包暂存在 $LeaDir 下；本脚本只做固定动作，
 #   不接受除下列参数外的任何输入，不执行任何其他脚本：
 #   ① 备份上一版到 ...\LEA\rollback\<旧版本>\（回滚用）
-#   ② 拷文件到 %ProgramFiles%\QFR\LEA\
+#   ② 先把载荷拷进 staging（$dataDir\staging\<新版本>）并重验全部哈希，
+#      验过才替换进安装目录（S-019，2026-11-15）；staging 在装完／失败
+#      收尾时清理
 #   ③ 建 %ProgramData%\QFR\LEA\（含 inbox\ / logs\ / state\）并配 ACL
 #      （仅 SYSTEM + Administrators）
 #   ④ 创建并启动 QFRLEA 服务（LocalSystem，失败自动重启）
 #   ⑤ 注册用户登录启动 USH（计划任务，触发器"用户登录"；T22：枚举本机全部
 #      交互用户逐个注册，安装时用户沿用 "QFRLEA User Helper"，其余用户另建
 #      "QFRLEA User Helper - <DOMAIN_user>" 任务）
-#   ⑥ 写版本绑定（注册表 HKLM\SOFTWARE\QFRemote\LEA + 安装目录 version.json）
-#   ⑦ 运行自检并写报告 %ProgramData%\QFR\LEA\install-report.json
+#   ⑥ 运行自检；自检通过后才提交（写版本绑定＋lea-manifest.json 清单，
+#      再实核绑定与清单哈希），提交失败即回滚上一版（S-019，2026-11-15）。
+#      自检不过／提交不过时自动回滚（备份在 ...\LEA\rollback\<旧版本>\），
+#      回滚结果写进 install-report.json 的 rollback 一节
+#   ⑦ 写 machine-readable 报告 %ProgramData%\QFR\LEA\install-report.json
+#      （trace_id/status/detail/checks/at＋steps/versions/manifest/rollback）
 # 失败处理（DESIGN §9.2/§10.1，P2-02 问题 6 修订）：每步重试 3 次，退避 5s/15s/45s；
 # 仍失败时写 LEA_DEGRADED 标记 + 报告 + 日志，本脚本 exit 1（退出码即失败信号）；
 # 但不阻塞主程序——调用方 install-system-services.ps1 的 LEA 段只读标记/报告、
@@ -37,7 +49,8 @@ param(
   [Parameter(Mandatory = $true)][string]$LeaDir,
   [string]$MainVersion = '',
   [string]$ProtocolVersion = '1',
-  [string]$Rollback = ''
+  [string]$Rollback = '',
+  [switch]$TasksOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -237,6 +250,23 @@ function Remove-StaleDegradedMarker {
   }
 }
 
+# S-019（2026-11-15）：安装步骤台账＋回滚／清单记录——写进 machine-readable
+# 报告（Write-InstallReport 的 steps/versions/manifest/rollback 四节）。
+$script:installSteps = @()
+$script:rollbackInfo = @{ attempted = $false; restored_version = ''; ok = $false }
+$script:manifestInfo = @{ file = ''; sha256 = '' }
+function Add-InstallStep([string]$name, [string]$status, [string]$detail) {
+  $script:installSteps += @{ name = $name; status = $status; detail = $detail; at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') }
+  Write-LeaLog ("step " + $name + ": " + $status + " " + $detail)
+}
+function Remove-LeaStaging([string]$dir) {
+  # staging 残留 best-effort 清理（装完／失败收尾时调；清不掉只记日志）。
+  if (-not $dir) { return }
+  try {
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop }
+  } catch { Write-LeaLog ("staging cleanup failed: " + $dir + " " + $_.Exception.Message) }
+}
+
 function Stop-LeaUsh([int]$TimeoutSeconds = 30) {
   # P2-02 问题 4：运行中的 USH（QFUserHelper.exe）锁住安装目录同名文件，copy-files
   # 必然失败。taskkill 强停全部 USH 实例，等进程退出并核验；$true=已停（或本来就
@@ -323,26 +353,107 @@ $dataDir = Join-Path $env:ProgramData 'QFR\LEA'
 $regPath = 'HKLM:\SOFTWARE\QFRemote\LEA'
 $reportFile = Join-Path $dataDir 'install-report.json'
 $serviceExeName = 'QFRLEA.exe'        # LEA 服务本体（windows/lea/ 线：QFRLEA.c 交叉编译产物）
-$clientExeName = 'qf-lea-client.exe'    # LEA 客户端（windows/lea/ 线；QFRLEA.c 注释所指的 runcommands 接令程序，尚未出包）
+$clientExeName = 'qf-lea-client.exe'    # LEA 客户端（windows/lea/ 线；QFRLEA.c 注释所指的 runcommands 接令程序，已出包，随服务一并安装）
 $ushExeName = 'QFUserHelper.exe'        # USH（windows/ush/ 线：build.sh 产物）
 $retryDelays = @(5, 15, 45)             # 重试退避 5s/15s/45s（DESIGN §9.2）
 $script:ushWasStopped = $false # P2-02 问题 4：本轮是否停过 USH（停过才在收尾经登录任务拉起来）
+
+function Register-AllUshTasks {
+  # A1：USH 登录任务注册（原正常安装步骤 ⑤，全文搬出；完整安装与
+  # -TasksOnly 共用）。QFRLEA.exe --install-service 不管计划任务
+  # （服务安装归 C，任务注册归本脚本——Task Scheduler COM 在 C 里做
+  # 风险高，PS1 的 T22／r13 路径已实证）。
+  # T22：不再只注册安装时用户——枚举本机全部交互用户逐个注册。安装时用户
+  # 沿用原任务名 'QFRLEA User Helper'（兼容旧版），其余用户用
+  # 'QFRLEA User Helper - <DOMAIN_user>'（任务名不含 '\'）。主用户注册失败
+  # 走重试；其余用户单次尝试、失败只记日志不影响其他用户；尚无配置文件的新
+  # 用户不在枚举之列（下次 install-lea 运行枚举到后再补注册；主程序没有 USH
+  # 任务注册逻辑，不承诺“登录时重试”）。
+  # r13（查因 ①）：backfill 以 SYSTEM 跑本脚本时 $env:USERNAME=SYSTEM，
+  # -UserId SYSTEM -LogonType Interactive 是非法组合，任务计划以 XML 校验错
+  # (14,8):UserId: 拒绝，3 次重试白烧约 20 秒。服务账号时跳过主任务重试，
+  # 改以枚举到的首个交互用户为“安装用户”，沿用旧主任务名注册；其余用户仍
+  # 走后缀任务循环。“主用户用旧名、其余用户用后缀名”的兼容约定不变。
+  # 返回 $true=安装用户主任务已注册；$false=主任务未注册（USH 缺失／
+  # 无交互用户／主任务重试耗尽；其余用户失败不影响返回值）。
+  $ctxWho = ''
+  try { $ctxWho = (whoami.exe 2>$null) } catch { }
+  if (-not $ctxWho) { try { $ctxWho = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { } }
+  Write-LeaLog ('install user context: USERNAME=' + $env:USERNAME + ' / whoami=' + $ctxWho)
+  $ushTarget = Join-Path $installDir $ushExeName
+  if (-not (Test-Path -LiteralPath $ushTarget)) {
+    Write-LeaLog 'USH exe not in payload yet, skipping task registration (LEA service unaffected)'
+    return $false
+  }
+  $interactiveUsers = @(Get-LeaInteractiveUsers)
+  $installUser = $env:USERNAME
+  $installUserShort = $installUser
+  if (Test-LeaServiceAccount) {
+    if ($interactiveUsers.Count -gt 0) {
+      $installUser = $interactiveUsers[0]
+      $installUserShort = ($installUser -split '\\')[-1]
+      Write-LeaLog ('install user is a service account; using first interactive user for the main task: ' + $installUser)
+    } else {
+      $installUser = ''
+      $installUserShort = ''
+      Write-LeaLog 'install user is a service account and no interactive user was enumerated; main task registration skipped'
+    }
+  }
+  $mainOk = $false
+  if ($installUser) {
+    $mainOk = Invoke-WithRetry 'register-ush-task' { Register-UshTaskForUser $installUser 'QFRLEA User Helper' $ushTarget }
+    if (-not $mainOk) { Write-LeaLog 'USH task registration failed for install user (non-blocking, continuing with per-user tasks from enumeration)' }
+  }
+  foreach ($u in $interactiveUsers) {
+    $short = ($u -split '\\')[-1]
+    if ($short -eq $installUserShort) { continue } # 安装时用户已有主任务
+    $taskName = 'QFRLEA User Helper - ' + ($u -replace '\\', '_')
+    try {
+      Register-UshTaskForUser $u $taskName $ushTarget
+      Write-LeaLog ("USH task registered for user: " + $u)
+    } catch { Write-LeaLog ("USH task registration failed for user (non-blocking): " + $u + " " + $_.Exception.Message) }
+  }
+  return $mainOk
+}
+
+# ---- A1 -TasksOnly 模式：只注册 USH 登录任务（首装内层安装器调用） ----
+# 服务安装／版本绑定／自检一律不管（那是 QFRLEA.exe --install-service 的活）。
+# USH 在 $installDir（安装器已解压落地）；任务注册失败即 exit 1（调用方
+# 据此写 ushTasksState=failed，安装本身不因此失败——服务已起是 A1 验收项）。
+if ($TasksOnly) {
+  if (Register-AllUshTasks) {
+    Write-LeaLog 'TasksOnly ok'
+    try {
+      New-Item -ItemType Directory -Force -Path 'HKLM:\SOFTWARE\QFR\LEA' | Out-Null
+      New-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\QFR\LEA' -Name 'ushTasksState' -Value 'ok' -PropertyType String -Force | Out-Null
+    } catch { Write-LeaLog ('TasksOnly: ushTasksState registry write failed (non-fatal): ' + $_.Exception.Message) }
+    exit 0
+  }
+  Write-LeaLog 'TasksOnly failed: main USH task registration failed'
+  try {
+    New-Item -ItemType Directory -Force -Path 'HKLM:\SOFTWARE\QFR\LEA' | Out-Null
+    New-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\QFR\LEA' -Name 'ushTasksState' -Value 'failed' -PropertyType String -Force | Out-Null
+  } catch { }
+  exit 1
+}
 
 # 载荷期望哈希（H17）：拷文件前逐件验 SHA-256。块内由
 # windows/lea/gen_whitelist.py --update-installer 现算刷新，勿手改哈希值。
 # BEGIN LEA-EXPECTED-HASHES (gen_whitelist.py --update-installer)
 $expectedHashes = @{
-  'QFRLEA.exe' = 'c0021648ed01946370bea266bfa56b2e04a3110601353970264accf0d981cf2a'
-  'QFUserHelper.exe' = '33107c9cb7f9e151386a51a71f6216aa98fbe14379218489d682efeab03d2320'
-  'qf-lea-client.exe' = 'a93635de8091a0631566f1116bdc0b560fab45c9e8f1cd8e143485fdfcc20889'
+  'QFRLEA.exe' = 'c84032f787dd7c91e3cd0d573bb4b099f3b2ff7b0ccb8df99b0cb0610cd659bd'
+  'QFUserHelper.exe' = '334abe542eda70a23f1c5ab05ca5a5f6c03250fec469a6e2d9347899f24f5d41'
+  'qf-lea-client.exe' = '9d164c1a2d6150c1ea962744e05772734fd61e3ef7f48887ad81238c7aa03de6'
 }
 # END LEA-EXPECTED-HASHES
 
-function Test-LeaPayloadHash {
-  # 拷文件前验哈希（H17）：$LeaDir 里三件载荷须逐件存在且 SHA-256 与期望一致。
+function Test-LeaPayloadHash([string]$dir = '') {
+  # 拷文件前验哈希（H17）：指定目录里三件载荷须逐件存在且 SHA-256 与期望一致。
+  # 不传目录即验 $LeaDir；S-019 staging 步传 staging 目录重验。
   # 返回 $true=全过；失败时记日志（调用方据此写 LEA_DEGRADED，不继续安装）。
+  $base = if ($dir) { $dir } else { $LeaDir }
   foreach ($name in $expectedHashes.Keys) {
-    $p = Join-Path $LeaDir $name
+    $p = Join-Path $base $name
     if (-not (Test-Path -LiteralPath $p)) {
       Write-LeaLog ("payload hash check failed: missing " + $name)
       return $false
@@ -412,6 +523,139 @@ function Write-VersionBinding([string]$leaVersion, [string]$mainVersion, [string
   Set-Content -LiteralPath (Join-Path $installDir 'version.json') -Value $ver -Encoding UTF8
 }
 
+# S-019（2026-11-15）：双 manifest 之 LEA 半＋事务提交／回滚。
+function Get-LeaStagingDir([string]$version) {
+  return (Join-Path $dataDir ("staging\" + $version))
+}
+function Write-LeaManifest([string]$leaVersion, [string]$mainVersion, [string]$protocolVersion, [string]$previousVersion) {
+  # 提交时写 lea-manifest.json：三件已装载荷逐件 SHA-256＋字节数＋四段版本。
+  # 返回 $true=已写且清单指纹已算出；失败返回 $false（调用方改判提交失败）。
+  $files = @()
+  try {
+    foreach ($name in $expectedHashes.Keys) {
+      $p = Join-Path $installDir $name
+      if (-not (Test-Path -LiteralPath $p)) { Write-LeaLog ("manifest failed: missing installed file " + $name); return $false }
+      $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+      $len = (Get-Item -LiteralPath $p).Length
+      $files += @{ name = $name; sha256 = $h.ToLower(); bytes = $len }
+    }
+    $manifest = @{
+      schema_version = 1
+      lea_version = $leaVersion
+      main_version = $mainVersion
+      protocol_version = $protocolVersion
+      previous_version = $previousVersion
+      files = $files
+      committed_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    } | ConvertTo-Json -Depth 4
+    $mp = Join-Path $installDir 'lea-manifest.json'
+    Set-Content -LiteralPath $mp -Value $manifest -Encoding UTF8 -Force
+    $script:manifestInfo = @{ file = 'lea-manifest.json'; sha256 = ((Get-FileHash -LiteralPath $mp -Algorithm SHA256).Hash).ToLower() }
+    Write-LeaLog ("lea manifest written: " + $script:manifestInfo.sha256)
+    return $true
+  } catch {
+    Write-LeaLog ("manifest write failed: " + $_.Exception.Message)
+    return $false
+  }
+}
+function Test-LeaManifest {
+  # 提交后复核：lea-manifest.json 所列哈希与已装文件逐件一致。
+  try {
+    $mp = Join-Path $installDir 'lea-manifest.json'
+    $m = Get-Content -LiteralPath $mp -ErrorAction Stop | ConvertFrom-Json
+    if (-not $m.files) { return $false }
+    foreach ($f in $m.files) {
+      $p = Join-Path $installDir ([string]$f.name)
+      if (-not (Test-Path -LiteralPath $p)) { return $false }
+      $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+      if ($h.ToLower() -ne ([string]$f.sha256).ToLower()) { return $false }
+    }
+    return $true
+  } catch { return $false }
+}
+function Test-LeaCommit {
+  # 提交复核：版本绑定已写＋清单哈希一致。
+  return ((Test-Path -LiteralPath (Join-Path $installDir 'version.json')) -and (Test-LeaManifest))
+}
+function Invoke-LeaRollback([string]$version) {
+  # 回滚执行体（S-019：从 -Rollback 模式抽出，失败自动回滚共用）：
+  # 停服务 → 停 USH → 恢复备份文件 → 清新增文件 → 恢复版本绑定 →
+  # 启动服务 → 自检。返回 $true=恢复且自检全过；任一步失败返回 $false。
+  # 本函数不 exit、不写报告／标记（调用方定）；USH 拉起也由调用方定。
+  $rbDir = Join-Path $installDir ("rollback\" + $version)
+  if (-not (Test-Path -LiteralPath $rbDir)) {
+    Write-LeaLog ("rollback failed: no backup for version " + $version)
+    return $false
+  }
+  try {
+    try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch { }
+    Start-Sleep -Seconds 2
+    # P2-02 问题 4：回滚也要拷文件，运行中的 USH 同样会锁住 QFUserHelper.exe。
+    if (-not (Stop-LeaUsh 30)) {
+      Write-LeaLog 'rollback failed: running USH could not be stopped'
+      return $false
+    }
+    $rbFiles = Get-ChildItem -LiteralPath $rbDir -File
+    $rbNames = @($rbFiles | ForEach-Object { $_.Name })
+    # 残留 .lea-tmp 先清（与正常安装 copy 步对称；DS 评审意见）。
+    Get-ChildItem -LiteralPath $installDir -File -Filter '*.lea-tmp' -ErrorAction SilentlyContinue | ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
+    }
+    $rbFiles | ForEach-Object {
+      # 拷到临时文件再替换，避免目标文件写一半被中断。
+      $rbDest = Join-Path $installDir $_.Name
+      $rbTmp = $rbDest + '.lea-tmp'
+      Copy-Item -LiteralPath $_.FullName -Destination $rbTmp -Force
+      Move-Item -LiteralPath $rbTmp -Destination $rbDest -Force
+    }
+    # T19：清理回滚后新增的文件（备份里没有的顶层文件），不留新版残留；
+    # rollback\ 子目录本身不在顶层文件之列，不受影响。
+    Get-ChildItem -LiteralPath $installDir -File | Where-Object { $_.Name -notin $rbNames } | ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop; Write-LeaLog ("rollback removed added file: " + $_.Name) } catch { Write-LeaLog ("rollback remove added file failed: " + $_.Name + " " + $_.Exception.Message) }
+    }
+    # T19：恢复版本绑定——优先用备份里带回的 version.json（lea/main/protocol
+    # 三段齐全）；旧备份（备份时排除了 version.json）没有该文件时，清理步已
+    # 删掉新版 version.json，此处用回滚目标版本号写绑定，主程序版本沿用本次
+    # 传入值、协议版本沿用本次传入值。
+    $restored = $null
+    try { $restored = Get-Content -LiteralPath (Join-Path $installDir 'version.json') -ErrorAction Stop | ConvertFrom-Json } catch { }
+    $rbLea = if ($restored -and $restored.lea_version) { [string]$restored.lea_version } else { $version }
+    $rbMain = if ($restored -and $restored.main_version) { [string]$restored.main_version } else { $MainVersion }
+    $rbProto = if ($restored -and $restored.protocol_version) { [string]$restored.protocol_version } else { $ProtocolVersion }
+    Write-VersionBinding $rbLea $rbMain $rbProto
+    Write-LeaLog ("rollback version binding restored: lea=" + $rbLea + " main=" + $rbMain + " protocol=" + $rbProto)
+    Start-Service -Name $serviceName -ErrorAction Stop
+    Start-Sleep -Seconds 2
+    $checks = Test-LeaSelfCheck
+    if ($checks.all_ok) { Write-LeaLog 'rollback self-check ok'; return $true }
+    Write-LeaLog 'rollback self-check failed'
+    return $false
+  } catch {
+    Write-LeaLog ('rollback failed: ' + $_.Exception.Message)
+    return $false
+  }
+}
+function Invoke-LeaFailureRollback([string]$version) {
+  # 失败回滚（S-019）：备份存在时恢复上一版全部目标（文件＋版本绑定），
+  # 服务拉起＋自检；结果记进 $script:rollbackInfo，返回 $true=恢复且自检通过。
+  # 本函数不 exit、不写 degraded——报告／标记由调用方统一写。
+  if (-not $version) {
+    Write-LeaLog 'failure rollback skipped: no previous version (fresh install)'
+    return $false
+  }
+  $rbDir = Join-Path $installDir ("rollback\" + $version)
+  if (-not (Test-Path -LiteralPath $rbDir)) {
+    Write-LeaLog ("failure rollback skipped: no backup for version " + $version)
+    return $false
+  }
+  $script:rollbackInfo.attempted = $true
+  $script:rollbackInfo.restored_version = $version
+  $ok = Invoke-LeaRollback $version
+  $script:rollbackInfo.ok = $ok
+  Write-LeaLog ("failure rollback attempted: version=" + $version + " ok=" + $ok)
+  return $ok
+}
+
 function Test-LeaReportUrl([string]$url) {
   # T20：上报 URL 白名单——只许本站固定 HTTPS 域名，防提权脚本被环境变量
   # 指到任意地址 POST。须同时满足：绝对地址、https、主机恰为
@@ -428,11 +672,27 @@ function Test-LeaReportUrl([string]$url) {
   } catch { return $false }
 }
 
+function Test-LeaServiceAccount {
+  # r13（查因 ①）：当前身份是否为服务账号（SYSTEM／LOCAL SERVICE／
+  # NETWORK SERVICE）。服务账号不能作交互登录主体，
+  # New-ScheduledTaskPrincipal -UserId <服务账号> -LogonType Interactive
+  # 是非法组合，任务计划以 XML 校验错 (14,8):UserId: 拒绝；backfill 以
+  # SYSTEM 跑本脚本时 $env:USERNAME=SYSTEM，三次重试注定失败（r12 实测）。
+  # SID 为准、名作辅：$env:USERNAME 在域改名等情况下未必是 SYSTEM。
+  try {
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($sid -eq 'S-1-5-18' -or $sid -eq 'S-1-5-19' -or $sid -eq 'S-1-5-20') { return $true }
+  } catch { }
+  $n = $env:USERNAME
+  return ($n -eq 'SYSTEM' -or $n -eq 'LOCAL SERVICE' -or $n -eq 'NETWORK SERVICE')
+}
+
 function Get-LeaInteractiveUsers {
   # T22：枚举本机交互用户（有本地配置文件的非系统用户），供 USH 计划任务
   # 逐个注册；SYSTEM／服务账号／Default 等特殊配置文件排除。返回形如
   # 'DOMAIN\user' 的账号名；SID 转账号名失败的跳过并记日志。
-  # 未登录过（尚无配置文件）的新用户不在此列，由主程序登录时补注册兜底。
+  # 未登录过（尚无配置文件）的新用户不在此列，下次 install-lea 运行枚举
+  # 到后再补注册（主程序没有 USH 任务注册逻辑）。
   $users = @()
   try {
     $profiles = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special }
@@ -457,9 +717,12 @@ function Register-UshTaskForUser([string]$userName, [string]$taskName, [string]$
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 }
 
-function Test-LeaSelfCheck {
+function Test-LeaSelfCheck([string]$pendingVersion = '') {
   # 自检清单（DESIGN §9.3，服务端联调前以本机可验项为准）：
   # 服务 Running、命名管道可连接、安装目录与版本绑定齐全。
+  # S-019：版本绑定改为自检通过后才提交（commit），故自检时 version.json
+  # 可能还是旧版／全新安装时根本不存在；version_bound 在此取“已装绑定
+  # 存在，或本次运行有待提交的新版本号”（提交后 Test-LeaCommit 再实核）。
   $checks = @{}
   try {
     $svc = Get-Service -Name $serviceName -ErrorAction Stop
@@ -473,7 +736,7 @@ function Test-LeaSelfCheck {
   $checks.client_present = Test-Path -LiteralPath (Join-Path $installDir $clientExeName)
   $checks.service_present = Test-Path -LiteralPath (Join-Path $installDir $serviceExeName)
   $checks.ush_present = Test-Path -LiteralPath (Join-Path $installDir $ushExeName)
-  $checks.version_bound = (Test-Path -LiteralPath (Join-Path $installDir 'version.json'))
+  $checks.version_bound = ((Test-Path -LiteralPath (Join-Path $installDir 'version.json')) -or ($pendingVersion -ne ''))
   $checks.all_ok = $checks.service_running -and $checks.client_present -and $checks.service_present -and $checks.version_bound
   return $checks
 }
@@ -493,13 +756,21 @@ function Write-InstallReport([hashtable]$checks, [string]$status, [string]$detai
   $traceId = [Guid]::NewGuid().ToString()
   try {
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    # S-019：报告加四节 machine-readable 内容（旧键不动，wrapper 兼容）：
+    # steps 安装步骤台账、versions 四段版本、manifest 清单指纹、rollback
+    # 回滚结果。早期失败路径上 $leaVersion/$oldVersion 尚未赋值时对应
+    # versions 值为 null（ConvertTo-Json 正常输出 null，不报错）。
     $report = @{
       trace_id = $traceId
       status = $status
       detail = $detail
       checks = $checks
       at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    } | ConvertTo-Json -Depth 4
+      steps = $script:installSteps
+      versions = @{ lea_version = $leaVersion; main_version = $MainVersion; protocol_version = $ProtocolVersion; previous_version = $oldVersion }
+      manifest = $script:manifestInfo
+      rollback = $script:rollbackInfo
+    } | ConvertTo-Json -Depth 5
   } catch {
     Write-LeaLog ('install report build failed: ' + $_.Exception.Message)
     return $false
@@ -585,56 +856,18 @@ if ($Rollback) {
     Write-LeaLog ("rollback failed: no backup for version " + $Rollback)
     exit 1
   }
-  try {
-    try { Stop-Service -Name $serviceName -Force -ErrorAction Stop } catch { }
-    Start-Sleep -Seconds 2
-    # P2-02 问题 4：回滚也要拷文件，运行中的 USH 同样会锁住 QFUserHelper.exe。
-    if (-not (Stop-LeaUsh 30)) {
-      Write-LeaLog 'rollback failed: running USH could not be stopped'
-      $null = Write-Degraded 'rollback-ush-stop-failed'
-      exit 1
-    }
-    $rbFiles = Get-ChildItem -LiteralPath $rbDir -File
-    $rbNames = @($rbFiles | ForEach-Object { $_.Name })
-    # 残留 .lea-tmp 先清（与正常安装 copy 步对称；DS 评审意见）。
-    Get-ChildItem -LiteralPath $installDir -File -Filter '*.lea-tmp' -ErrorAction SilentlyContinue | ForEach-Object {
-      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
-    }
-    $rbFiles | ForEach-Object {
-      # 拷到临时文件再替换，避免目标文件写一半被中断。
-      $rbDest = Join-Path $installDir $_.Name
-      $rbTmp = $rbDest + '.lea-tmp'
-      Copy-Item -LiteralPath $_.FullName -Destination $rbTmp -Force
-      Move-Item -LiteralPath $rbTmp -Destination $rbDest -Force
-    }
-    # T19：清理回滚后新增的文件（备份里没有的顶层文件），不留新版残留；
-    # rollback\ 子目录本身不在顶层文件之列，不受影响。
-    Get-ChildItem -LiteralPath $installDir -File | Where-Object { $_.Name -notin $rbNames } | ForEach-Object {
-      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop; Write-LeaLog ("rollback removed added file: " + $_.Name) } catch { Write-LeaLog ("rollback remove added file failed: " + $_.Name + " " + $_.Exception.Message) }
-    }
-    # T19：恢复版本绑定——优先用备份里带回的 version.json（lea/main/protocol
-    # 三段齐全）；旧备份（备份时排除了 version.json）没有该文件时，清理步已
-    # 删掉新版 version.json，此处用回滚目标版本号写绑定，主程序版本沿用本次
-    # 传入值、协议版本沿用本次传入值。
-    $restored = $null
-    try { $restored = Get-Content -LiteralPath (Join-Path $installDir 'version.json') -ErrorAction Stop | ConvertFrom-Json } catch { }
-    $rbLea = if ($restored -and $restored.lea_version) { [string]$restored.lea_version } else { $Rollback }
-    $rbMain = if ($restored -and $restored.main_version) { [string]$restored.main_version } else { $MainVersion }
-    $rbProto = if ($restored -and $restored.protocol_version) { [string]$restored.protocol_version } else { $ProtocolVersion }
-    Write-VersionBinding $rbLea $rbMain $rbProto
-    Write-LeaLog ("rollback version binding restored: lea=" + $rbLea + " main=" + $rbMain + " protocol=" + $rbProto)
-    Start-Service -Name $serviceName -ErrorAction Stop
-    Start-Sleep -Seconds 2
-    $checks = Test-LeaSelfCheck
-    $reportOk = Write-InstallReport $checks 'rolled-back' ("restored version " + $Rollback)
-    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
-    if ($checks.all_ok -and $reportOk) { Write-LeaLog 'rollback ok'; exit 0 } else { $null = Write-Degraded 'rollback self-check failed'; exit 1 }
-  } catch {
-    Write-LeaLog ('rollback failed: ' + $_.Exception.Message)
-    $null = Write-Degraded 'rollback failed'
-    if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
-    exit 1
-  }
+  # S-019：回滚执行体已抽到 Invoke-LeaRollback（失败自动回滚共用）；
+  # 此处只定报告／标记／退出码。$rbOk 已含恢复后自检结果；报告状态按
+  # 实际结果取 rolled-back／degraded，不谎报。
+  $rbOk = Invoke-LeaRollback $Rollback
+  $checks = Test-LeaSelfCheck
+  $rbStatus = if ($rbOk -and $checks.all_ok) { 'rolled-back' } else { 'degraded' }
+  $rbDetail = if ($rbOk -and $checks.all_ok) { ("restored version " + $Rollback) } else { 'rollback-failed' }
+  $reportOk = Write-InstallReport $checks $rbStatus $rbDetail
+  if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+  if ($rbOk -and $checks.all_ok -and $reportOk) { Write-LeaLog 'rollback ok'; exit 0 }
+  $null = Write-Degraded 'rollback failed'
+  exit 1
 }
 
 # ---- 正常安装 ----
@@ -668,25 +901,57 @@ try {
 
 # H17：拷文件前验三件载荷哈希；缺失／不对即拒绝安装（degraded，exit 1）。
 if (-not (Test-LeaPayloadHash)) {
+  Add-InstallStep 'payload-hash' 'failed' 'payload-hash-mismatch'
   $degradedOk = Write-Degraded 'payload-hash-mismatch'
   $reportOk = Write-InstallReport @{} 'degraded' 'payload-hash-mismatch'
   if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
   exit 1
 }
+Add-InstallStep 'payload-hash' 'ok' '3 payload files verified'
+
+# S-019：staging——先把随包全部文件拷进 staging 目录并重验三件载荷哈希，
+# 验过才替换进安装目录；staging 在 copy 步成功后即清理（载荷源仍在 $LeaDir）。
+$stagingDir = Get-LeaStagingDir $leaVersion
+try {
+  if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction Stop }
+  New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+  Get-ChildItem -LiteralPath $LeaDir -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stagingDir $_.Name) -Force -ErrorAction Stop
+  }
+} catch {
+  Add-InstallStep 'stage-copy' 'failed' $_.Exception.Message
+  $degradedOk = Write-Degraded 'stage-copy-failed'
+  $reportOk = Write-InstallReport @{} 'degraded' 'stage-copy-failed'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  exit 1
+}
+Add-InstallStep 'stage-copy' 'ok' $stagingDir
+if (-not (Test-LeaPayloadHash $stagingDir)) {
+  Add-InstallStep 'stage-verify' 'failed' 'payload-hash-mismatch in staging'
+  $degradedOk = Write-Degraded 'stage-verify-failed'
+  $reportOk = Write-InstallReport @{} 'degraded' 'stage-verify-failed'
+  if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
+  Remove-LeaStaging $stagingDir
+  exit 1
+}
+Add-InstallStep 'stage-verify' 'ok' '3 staged files verified'
 
 # P2-02 问题 4 前置检查：USH 在跑即先停（等退出并核验）；停不掉即报错退出，
 # 不许静默继续（否则 copy-files 必然锁文件失败）。
 if (-not (Stop-LeaUsh 30)) {
+  Add-InstallStep 'ush-stop' 'failed' 'ush-stop-failed'
   $degradedOk = Write-Degraded 'ush-stop-failed'
   $reportOk = Write-InstallReport @{} 'degraded' 'ush-stop-failed'
   if (-not $degradedOk -or -not $reportOk) { Write-LeaLog 'WARNING: degraded evidence incomplete (marker/report write failed); failure evidence is log-only' }
   exit 1
 }
+Add-InstallStep 'ush-stop' 'ok' 'USH stopped or not running'
 
 $failedStep = ''
 try {
   # ① 备份上一版（回滚用）
   Backup-Rollback $oldVersion
+  if ($oldVersion) { Add-InstallStep 'backup' 'ok' ("backed up " + $oldVersion) } else { Add-InstallStep 'backup' 'skipped' 'fresh install, nothing to back up' }
 
   # ② 拷文件到 %ProgramFiles%\QFR\LEA\
   $ok = Invoke-WithRetry 'copy-files' {
@@ -701,7 +966,8 @@ try {
     Get-ChildItem -LiteralPath $installDir -File -Filter '*.lea-tmp' -ErrorAction SilentlyContinue | ForEach-Object {
       try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
     }
-    Get-ChildItem -LiteralPath $LeaDir -File | ForEach-Object {
+    # S-019：从 staging 替换（staging 里已重验哈希；不直接读随包目录）。
+    Get-ChildItem -LiteralPath $stagingDir -File | ForEach-Object {
       $dest = Join-Path $installDir $_.Name
       $tmp = $dest + '.lea-tmp'
       Copy-Item -LiteralPath $_.FullName -Destination $tmp -Force
@@ -709,6 +975,8 @@ try {
     }
   }
   if (-not $ok) { $failedStep = 'copy-files'; throw 'copy-files failed' }
+  Add-InstallStep 'copy-files' 'ok' 'staged files installed'
+  Remove-LeaStaging $stagingDir
 
   # ③ 数据目录 + ACL（仅 SYSTEM + Administrators）
   $ok = Invoke-WithRetry 'data-dir-acl' {
@@ -742,6 +1010,7 @@ try {
     if (-not $sysRule -or -not $adminRule) { throw 'data dir ACL verification failed: SYSTEM/Administrators FullControl missing after Set-Acl' }
   }
   if (-not $ok) { $failedStep = 'data-dir-acl'; throw 'data-dir-acl failed' }
+  Add-InstallStep 'data-dir-acl' 'ok' 'data dir + ACL verified'
 
   # ④ 创建并启动 QFRLEA 服务（LocalSystem；失败自动重启：第 1/2 次 5s、后续 30s）
   $serviceTarget = Join-Path $installDir $serviceExeName
@@ -757,37 +1026,33 @@ try {
     if ($svc.Status -ne 'Running') { throw 'service not running after start' }
   }
   if (-not $ok) { $failedStep = 'create-service'; throw 'create-service failed' }
+  Add-InstallStep 'create-service' 'ok' 'service running'
 
   # ⑤ 注册用户登录启动 USH（计划任务，触发器"用户登录"）
-  # T22：不再只注册安装时用户——枚举本机全部交互用户逐个注册。安装时用户
-  # 沿用原任务名 'QFRLEA User Helper'（兼容旧版），其余用户用
-  # 'QFRLEA User Helper - <DOMAIN_user>'（任务名不含 '\'）。主用户注册失败
-  # 走重试；其余用户单次尝试、失败只记日志不影响其他用户；尚无配置文件的新
-  # 用户由主程序登录时补注册兜底。
-  $ushTarget = Join-Path $installDir $ushExeName
-  if (Test-Path -LiteralPath $ushTarget) {
-    $installUser = $env:USERNAME
-    $ok = Invoke-WithRetry 'register-ush-task' { Register-UshTaskForUser $installUser 'QFRLEA User Helper' $ushTarget }
-    if (-not $ok) { Write-LeaLog 'USH task registration failed for install user (non-blocking, main app will retry on login)' }
-    foreach ($u in (Get-LeaInteractiveUsers)) {
-      $short = ($u -split '\\')[-1]
-      if ($short -eq $installUser) { continue } # 安装时用户已有主任务
-      $taskName = 'QFRLEA User Helper - ' + ($u -replace '\\', '_')
-      try {
-        Register-UshTaskForUser $u $taskName $ushTarget
-        Write-LeaLog ("USH task registered for user: " + $u)
-      } catch { Write-LeaLog ("USH task registration failed for user (non-blocking): " + $u + " " + $_.Exception.Message) }
-    }
-  } else {
-    Write-LeaLog 'USH exe not in payload yet, skipping task registration (LEA service unaffected)'
-  }
+  # A1：逻辑已抽到 Register-AllUshTasks（完整安装与 -TasksOnly 共用）；
+  # 主任务失败只记日志、不阻塞安装（原语义不变）。
+  if (-not (Register-AllUshTasks)) { Write-LeaLog 'USH task registration failed for install user (non-blocking, continuing)'; Add-InstallStep 'ush-tasks' 'failed' 'non-blocking, continuing' } else { Add-InstallStep 'ush-tasks' 'ok' 'USH logon tasks registered' }
 
-  # ⑥ 写版本绑定
-  Write-VersionBinding $leaVersion $MainVersion $ProtocolVersion
-
-  # ⑦ 自检并上报
-  $checks = Test-LeaSelfCheck
+  # ⑥ 自检（S-019：版本绑定不再先写，改在自检通过后提交）
+  $checks = Test-LeaSelfCheck $leaVersion
   if ($checks.all_ok) {
+    # S-019 提交：写版本绑定＋lea-manifest.json，再实核绑定与清单哈希；
+    # 提交不过按安装失败处理（回滚＋degraded），不谎报 ok。
+    Add-InstallStep 'self-check' 'ok' 'all checks passed'
+    Write-VersionBinding $leaVersion $MainVersion $ProtocolVersion
+    $manifestOk = Write-LeaManifest $leaVersion $MainVersion $ProtocolVersion $oldVersion
+    if (-not $manifestOk -or -not (Test-LeaCommit)) {
+      Add-InstallStep 'commit' 'failed' 'version binding or manifest verification failed'
+      Write-LeaLog 'commit failed: version binding or manifest verification failed'
+      $null = Invoke-LeaFailureRollback $oldVersion
+      $degradedOk = Write-Degraded 'commit-failed'
+      $reportOk = Write-InstallReport $checks 'degraded' 'commit-failed'
+      if (-not $degradedOk) { Write-LeaLog 'WARNING: LEA_DEGRADED marker could not be written; failure evidence is log-only' }
+      if (-not $reportOk) { Write-LeaLog 'WARNING: install-report.json could not be written; wrapper report check will see a stale report' }
+      if ($script:ushWasStopped) { Start-LeaUshTask | Out-Null }
+      exit 1
+    }
+    Add-InstallStep 'commit' 'ok' ("lea-manifest " + $script:manifestInfo.sha256)
     # P2-02 问题 5：成功路径必须清掉陈旧标记并重写报告；清不掉／写不进即改判
     # degraded（标记残留时 leaServiceInstalled() 恒 false，报 ok 是谎报）。
     # 顺序是先写报告、后删标记（DS 评审意见）：报告写失败时标记还在，
@@ -817,6 +1082,9 @@ try {
     exit 1
   } else {
     Write-LeaLog ('self-check failed: ' + (($checks.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) -join ','))
+    Add-InstallStep 'self-check' 'failed' 'self-check failed'
+    # S-019：自检不过即回滚上一版（文件＋绑定），回滚结果进报告。
+    $null = Invoke-LeaFailureRollback $oldVersion
     $degradedOk = Write-Degraded 'self-check-failed'
     $reportOk = Write-InstallReport $checks 'degraded' 'self-check-failed'
     if (-not $degradedOk) { Write-LeaLog 'WARNING: LEA_DEGRADED marker could not be written; failure evidence is log-only' }
@@ -826,6 +1094,10 @@ try {
   }
 } catch {
   Write-LeaLog ('LEA install failed at ' + $failedStep + ': ' + $_.Exception.Message)
+  if ($failedStep) { Add-InstallStep $failedStep 'failed' $_.Exception.Message }
+  # S-019：失败回滚所有目标（上一版文件＋版本绑定），结果写进报告。
+  $null = Invoke-LeaFailureRollback $oldVersion
+  Remove-LeaStaging $stagingDir
   $markerOk = Write-Degraded ('install-failed:' + $failedStep)
   $reportOk = $false
   try { $reportOk = Write-InstallReport @{} 'degraded' ('install-failed:' + $failedStep) } catch { }

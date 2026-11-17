@@ -8,6 +8,11 @@
 否则服务算出的 hash 与白名单对不上、拒绝执行（fail-closed）。
 H20：install-lea.ps1 纳入 whitelist.json（main.js 提权拉起前验 hash；LEA
 服务安装脚本自此有白名单约束，不再是注释里说的“未纳入白名单”状态）。
+A1（2026-11-13）：QFRLEA.exe 纳入 whitelist.json——main.js 登录修复
+（repairLeaService）一次 UAC 调 QFRLEA.exe --install-service --repair
+前先验它的 SHA-256；白名单里没有这一项时 verifyFileHash 恒 false，
+修复永报 hash-mismatch。lea/build.sh 末尾本就跑本脚本，QFRLEA.exe
+每重编一次哈希即自动刷新。header-only 模式跳过全部 exe（只含脚本 hash）。
 """
 import hashlib
 import json
@@ -23,6 +28,9 @@ FILES = {
     "install-system-services.ps1": os.path.join(WIN, "install-system-services.ps1"),
     "install-lea.ps1": os.path.join(WIN, "install-lea.ps1"),
     "QFSysHelper.exe": os.path.join(HERE, "QFSysHelper.exe"),
+    # A1：登录修复前验 QFRLEA.exe 哈希用（见上）。QFSysHelper 服务端
+    # （whitelist.h）不用它，只进 whitelist.json。
+    "QFRLEA.exe": os.path.join(WIN, "lea", "QFRLEA.exe"),
 }
 
 
@@ -87,7 +95,7 @@ def main():
         return 2
     hashes = {}
     for name, p in FILES.items():
-        if name == "QFSysHelper.exe" and mode == "header-only":
+        if name.endswith('.exe') and mode == "header-only":
             continue
         if not os.path.exists(p):
             print(f"MISSING: {p}")

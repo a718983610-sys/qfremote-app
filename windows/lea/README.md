@@ -28,7 +28,7 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
 | `QFRLEA.c` | 服务本体（约 1500 行）：管道、准入、队列 worker、脚本／文件／应用执行、USH 转发、DPAPI 绑定、服务控制、debug 模式 |
 | `qf-lea-client.c` | LEA 客户端：接 `dispatch <base64>`／`apply <inbox 文件>`／`--file`／裸 JSON／stdin 的信封，连管道 2s，收响应打印 stdout（下发动词统一 S3，DESIGN §3） |
 | `lea_protocol.h/.c` | 纯 C 协议层：信封解析、时间窗、命令表、路径规范化、响应构造 |
-| `lea_crypto.h/.c` | 纯 C 密码学层：SHA-256、Base64、Ed25519 验签**占位**、Key 脱敏 |
+| `lea_crypto.h/.c` | 纯 C 密码学层：SHA-256、Base64、Ed25519 验签（已实现，见 §三-3）、Key 脱敏 |
 | `lea_state.h/.c` | 纯 C 状态层：绑定状态机、重放表、幂等表（持久化）、队列（双 lane） |
 | `lea_audit.h/.c` | 纯 C 审计层：JSONL 行构造、按天滚动、30 天清理 |
 | `whitelist.h` | 脚本白名单 hash（`gen_whitelist.py` 生成，勿手改） |
@@ -60,14 +60,17 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    binding_epoch/nonce/issued_at/expires_at/idempotency_key/command/params/
    timeout_ms/signature/trace_id）；时间窗 `expires_at-issued_at ≤ 60s`、
    时钟偏差 ±30s；nonce/request_id 去重保留 10 分钟。
-3. **签名验签（占位，fail-closed）**：`lea_crypto.c` 的 `lea_verify_*` 默认
-   **一律拒绝**（原因 `ed25519-pubkey-not-configured`，错误码
-   `QFR_LEA_SIG_NOT_CONFIGURED`）；格式错误的签名另报 `QFR_LEA_BAD_SIGNATURE`。
-   仅编译时定义 `LEA_TEST_UNSIGNED=1` 才接受 signature `TEST-UNSIGNED`
+3. **签名验签（已实现，fail-closed）**：`lea_crypto.c` 的 `lea_verify_*` 已接
+   真实 Ed25519 验签（vendored Orlp ed25519，仅验签路径；接受标准 base64
+   与 base64url 两种签名编码）。服务端公钥由编译期宏
+   `LEA_SERVER_PUBKEY_HEX`（64 字符 hex）编入发版包；未编入公钥时
+   `lea_server_pubkey_hex()` 返回 NULL，验签一律拒绝（原因
+   `ed25519-pubkey-not-configured`，错误码 `QFR_LEA_SIG_NOT_CONFIGURED`）；
+   格式错误的签名另报 `QFR_LEA_BAD_SIGNATURE`。仅编译时定义
+   `LEA_TEST_UNSIGNED=1` 才接受 signature `TEST-UNSIGNED`
    （单测／真机冒烟专用，`build.sh` 默认不启用，生产构建经 `strings`
-   核查不含 `test-only-unsigned-accepted`）。接入真实公钥时，在
-   `lea_crypto.c` 内实现 Ed25519 验签并删除测试分支（已留 `TODO` 与
-   `lea_server_pubkey_hex()` 接入口；规范串格式须与服务端冻结后写入此处）。
+   核查不含 `test-only-unsigned-accepted`）。规范串格式见
+   `CANONICAL-SIGNING-V2.md`（信封 v2）与 `CANONICAL-SIGNING-V1.md` §3（票据 v1）。
 4. **第二层准入**（`lea_admit`，顺序按 DESIGN §6.2）：绑定态 → 设备一致 →
    epoch 一致 → 账号一致 → `muse.execute` 授权 → 本地吊销表（`state/revoked_keys.txt`，
    每行一个 key_id；服务端吊销的本地镜像——写入方：服务端下发命令前经
@@ -95,7 +98,9 @@ Muse → 服务端 API → runcommands → qf-lea-client.exe → 命名管道 \\
    文件读写仅限 `%ProgramData%\QFR\LEA\work\`（规范化＋前缀判定，`..`
    越界拒绝；`file.read` 内联上限 32KB，超限拒绝）。`app.open` 仅限显式 exe
    白名单（H16：名＋SHA-256 双重判定，初版仅 `QFUserHelper.exe`，见 `whitelist.h`）；
-   `app.close` MVP 仅允许 `QFRemote.exe`（清单待站长确认）。
+   `app.close` MVP 仅允许 `QFRemote.exe`（清单待站长确认）；关闭前须全量核对
+   Session ID／用户 SID／完整路径（仅限活动控制台会话本用户的安装位置），
+   优先优雅退出（WM_CLOSE），强制结束前重探测＋重核对（含创建时刻）。
 8. **UI 类转 USH**：`ui.click/input/snapshot/tree` 由 worker 重建信封行，
    经 `\\.\pipe\QFR\LEA\UserHelper\v1` 转发（连接超时 2s，执行按
    `timeout_ms`）；USH 不可用时明确报 `QFR_LEA_USH_UNAVAILABLE`
@@ -159,7 +164,7 @@ sh test/run_tests.sh
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 核心单测（测试构建） | **326 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名占位、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）**、**H02 票据签名存取与加载重验、H03 信封行末 `ush_token` 插入、H07 同账号重登不升 epoch／换号升 epoch 且清签名、H07 第二轮 `lea_binding_login_result` 格式锁死**、**中组 C（#22 params 缺失／20KB 保留／40KB 拒绝／非对象拒绝、#17 顶层字符串数组＋吊销写入排序去重与非法整单拒绝、#26 700 条约 5.6MB 幂等表流式写盘与逐行加载回表）** |
+| 核心单测（测试构建） | **326 通过，0 失败** | `test_lea.c`：SHA-256 向量、协议解析、签名验签、重放、绑定状态机、准入各码、幂等往返＋保留期、路径规范化、队列、审计脱敏、响应构造、参数提取、**规范串 v1（信封／票据定稿向量与 JS 端字节一致、篡改敏感性、字段规则、seq／timeout／grant 严格校验、长 scope token、票据完整 JSON 解析 `lea_parse_ticket`、整数字段全程 64 位、重建转义 #25 全字段＋严格 JSON 校验、显式 `null` 拒绝、转义键解码、`\u0000` 拒绝、顶层值切片解析）**、**H02 票据签名存取与加载重验、H03 信封行末 `ush_token` 插入、H07 同账号重登不升 epoch／换号升 epoch 且清签名、H07 第二轮 `lea_binding_login_result` 格式锁死**、**中组 C（#22 params 缺失／20KB 保留／40KB 拒绝／非对象拒绝、#17 顶层字符串数组＋吊销写入排序去重与非法整单拒绝、#26 700 条约 5.6MB 幂等表流式写盘与逐行加载回表）** |
 | 核心单测（严格构建） | **321 通过，0 失败** | 同上（无 `LEA_TEST_UNSIGNED` 时 `TEST-UNSIGNED` 被拒，fail-closed 得证） |
 | mingw 交叉编译 | **通过，零警告** | `QFRLEA.exe`（PE32+ x64，503003 B）、`qf-lea-client.exe`（266641 B） |
 | 生产构建核查 | **通过** | `strings QFRLEA.exe` 不含 `test-only-unsigned-accepted`（0 处），含 `ed25519-pubkey-not-configured`（2 处） |
@@ -199,12 +204,14 @@ sh test/run_tests.sh
 - 危险命令完整清单（DESIGN §14 #4）：当前定义见 §三-11。
 - `app.close` 允许清单：当前仅 `QFRemote.exe`。
 - 服务账户：当前 `LocalSystem`（DESIGN §14 #7 待定；专用低权账户需另评估）。
-- Ed25519 服务端公钥接入（服务端线）；签名规范串已冻结为 v1
-  （`ds-review-stage2/CANONICAL-SIGNING-V1.md`，信封 16 行／票据 9 行，两端同一份）。
-  **兼容性：v1 与旧串完全不兼容，旧串验签失败是预期行为，不设版本协商、不设 v0 回落；
+- Ed25519 服务端公钥接入（服务端线）；签名规范串已冻结为 v2（F-02，2026-11-14）
+  （信封 `windows/lea/CANONICAL-SIGNING-V2.md`，20 行；票据仍 v1，
+  `ds-review-stage2/CANONICAL-SIGNING-V1.md` §3，9 行，两端同一份）。
+  **兼容性：v2 与旧串完全不兼容，v1 信封直接拒绝，旧串验签失败是预期行为，
+  不设版本协商、不设 v1 回落；回滚必须两端成对；
   LEA 尚未随任何正式版发布（现行版 2.4.4 无 LEA），服务端与 LEA 随同一版本升级，
   不存在滚动混用；发版说明须写死“必须同时升级两端”。**
-  （`ds-review-stage2/CANONICAL-SIGNING-V1.md`，信封 16 行／票据 9 行，两端同一份）。
+  （信封 `windows/lea/CANONICAL-SIGNING-V2.md`，20 行；票据 9 行，两端同一份）。
 - USH 管道协议细节（USH 线）：当前按一行 JSON 请求 → 一行 JSON 响应假设，
   与 QFSysHelper 同形。
 - `installer.nsi` 的 `SEC_LEA` 段与 `main.js` 登录成功分支调用

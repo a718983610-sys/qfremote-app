@@ -47,6 +47,7 @@
 #include "ush_log.h"
 #include "ush_uia.h"
 #include "ush_snapshot.h"
+#include "ush_selfbind.h" /* C1：自助绑定（设备签名调 complete 换凭据） */
 
 #define USH_VERSION "1.0.0-mvp"
 #define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1"
@@ -154,27 +155,35 @@ static void enable_dpi_awareness(void) {
 }
 
 /* ---------- 管道一次性调用（启动探活用，2 秒超时） ---------- */
+/* N-11（2026-11-15）：旧实现在写／读两段各建一个事件——写事件在
+ * memset 覆盖 OVERLAPPED 后丢失且永不关闭（每次探活泄漏 1 个句柄），
+ * 读事件又在 :186 与 :190 各关一次（第二次 CloseHandle 必返
+ * ERROR_INVALID_HANDLE）。修法：全程只建一个事件、只关一次；写等待
+ * 与读等待之间 ResetEvent＋重填 OVERLAPPED，不再 memset 丢句柄。 */
 static int pipe_probe_alive(void) {
     if (!WaitNamedPipeW(PIPE_NAME_W, 500)) return 0;
     HANDLE h = CreateFileW(PIPE_NAME_W, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ev) { CloseHandle(h); return 0; }
     const char *req = "{\"command\":\"ui.ping\",\"request_id\":\"ush-startup-probe\"}\n";
     OVERLAPPED ov;
     memset(&ov, 0, sizeof(ov));
-    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ov.hEvent = ev;
     DWORD written = 0;
     int alive = 0;
     if (WriteFile(h, req, (DWORD)strlen(req), &written, &ov) ||
         GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(ov.hEvent, 2000) == WAIT_OBJECT_0) {
+        if (WaitForSingleObject(ev, 2000) == WAIT_OBJECT_0) {
             char resp[512];
             DWORD read = 0;
+            ResetEvent(ev);
             memset(&ov, 0, sizeof(ov));
-            ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+            ov.hEvent = ev;
             if (ReadFile(h, resp, sizeof(resp) - 1, &read, &ov) ||
                 GetLastError() == ERROR_IO_PENDING) {
-                if (WaitForSingleObject(ov.hEvent, 2000) == WAIT_OBJECT_0) {
+                if (WaitForSingleObject(ev, 2000) == WAIT_OBJECT_0) {
                     DWORD got = 0;
                     if (GetOverlappedResult(h, &ov, &got, FALSE) && got > 0) {
                         resp[got] = '\0';
@@ -182,11 +191,10 @@ static int pipe_probe_alive(void) {
                     }
                 }
             }
-            if (ov.hEvent) CloseHandle(ov.hEvent);
         }
         CancelIo(h);
     }
-    if (ov.hEvent) CloseHandle(ov.hEvent);
+    CloseHandle(ev);
     CloseHandle(h);
     return alive;
 }
@@ -361,6 +369,15 @@ static void handle_request(const char *req_text, char *resp, size_t resp_size,
             "{\"alive\":true,\"version\":\"%s\",\"pid\":%lu,\"session_id\":%lu}",
             USH_VERSION, (unsigned long)GetCurrentProcessId(), (unsigned long)session_id);
         ok = 1;
+    } else if (rq.cmd == USH_CMD_SELFBIND || rq.cmd == USH_CMD_SELFBIND_CLEAR ||
+               rq.cmd == USH_CMD_SELFBIND_STATUS || rq.cmd == USH_CMD_SELFBIND_RENEW) {
+        /* C1 自助绑定：不做 UI、不进会话门（锁屏也能链接／吊销／续期）。
+         * H03 token 门已在上游通过（LEA 来路必带 token）；本模块不验
+         * 准入，只信 LEA。凭据明文只进 USH，不进 data_buf（见模块头）。 */
+        ok = ush_selfbind_dispatch(&rq, data_buf, USH_MAX_RESPONSE,
+                                   err_code, sizeof(err_code),
+                                   err_text, sizeof(err_text));
+        code = ok ? "done" : err_code;
     } else {
         /* 会话门：UI 类指令要求交互式会话已解锁 */
         char gate_err[64] = {0};
@@ -521,6 +538,18 @@ static BOOL WINAPI ctrl_handler(DWORD type) {
 }
 
 int main(int argc, char **argv) {
+    /* --deregister（卸载第 0 步，2026-11-14）：一次性注销服务端设备登记。
+     * 必须在单实例互斥／token／管道／UIA 之前分流——卸载时 USH 很可能已在
+     * 运行（登录任务常驻），互斥体会让第二个实例直接退出；本分支不建管道、
+     * 不写 token、不碰 UIA、不写日志，只做一次注销即退出。退出码：0＝已注销
+     * 或本机无绑定（noop）；1＝已尝试但失败（NSIS 不看退出码，照常继续卸载）。 */
+    if (argc > 1 && strcmp(argv[1], "--deregister") == 0) {
+        char out[256] = { 0 };
+        int rc = ush_selfbind_deregister(out, sizeof(out));
+        printf("%s\n", out[0] ? out : "{\"deregister\":\"failed\",\"reason\":\"unknown\"}");
+        fflush(stdout);
+        return (rc == 0 || rc == 1) ? 0 : 1;
+    }
     int debug = (argc > 1 && strcmp(argv[1], "debug") == 0);
     enable_dpi_awareness();
     ush_log_init();

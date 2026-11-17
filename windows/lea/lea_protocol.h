@@ -1,9 +1,12 @@
 /* QFRLEA 协议层（纯 C，无 Windows 依赖，可在 Linux 上单测）。
  *
- * 信封：一行 JSON，见 DESIGN.md §4.1。字段：
+ * 信封：一行 JSON，见 DESIGN.md §4.1。字段（v2，F-02）：
  *   version, request_id, batch_id, seq, device_id, account_id, api_key_id,
- *   binding_epoch, nonce, issued_at, expires_at, idempotency_key,
+ *   binding_epoch, grant_epoch, nonce, issued_at, expires_at, idempotency_key,
  *   command, params, timeout_ms, signature
+ *
+ * v2-only：version 必须为 2，v1 信封直接拒绝，无回落、无版本协商
+ * （见 windows/lea/CANONICAL-SIGNING-V2.md §5）。
  *
  * 本层只做：解析、形状校验、时间窗／重放窗判定、命令表（执行方／默认超时／
  * 是否危险／所需 scope）、路径规范化与白名单目录判定、错误码表。
@@ -19,7 +22,7 @@
 extern "C" {
 #endif
 
-#define LEA_PROTOCOL_VERSION 1
+#define LEA_PROTOCOL_VERSION 2
 #define LEA_VERSION_STR "0.1.0-mvp"
 #define LEA_MAX_ENVELOPE 65536
 #define LEA_MAX_RESPONSE 65536
@@ -36,6 +39,28 @@ extern "C" {
  * 旧值 8192 会把长参数命令静默改成无参执行（超长 params 须明确拒绝，
  * 见 lea_parse_envelope）。 */
 #define LEA_MAX_PARAMS 32768
+/* B1（2026-11-13，PLAN §2 B1）：输出上限 256KB——单条 job 的全部输出
+ * （脚本 stdout/stderr 合计）超限即截断并终止该 job。响应行本身仍受
+ * LEA_MAX_RESPONSE（64KB）约束，故 256KB 是 job 级上限、64KB 是行级上限。 */
+#define LEA_MAX_JOB_OUTPUT_BYTES 262144
+/* B1：执行队列准入上限 8 条（满则回 busy／QUEUE_FULL）。lea_state 的
+ * 队列容量仍为 LEA_QUEUE_MAX（100，后备），B1 的 8 条是在 QFRLEA.c
+ * 入队前做的准入判断（lea_queue_admit_ok），不得把 LEA_QUEUE_MAX 改
+ * 成 8（单测锁死 100，改了即回归失败）。 */
+#define LEA_B1_QUEUE_MAX 8
+/* B1 命令分级时限（job 强杀 deadline 上限，毫秒）：
+ *   L0 控制／健康 8000；L1 普通 8000；L2 长／危险 120000。
+ * deadline = min(有效超时, 本级上限)；L2 下限不抬（信封超时 <30s 即
+ * 按信封值杀，不延长）。 */
+/* B1 命令分级（与 JS COMMANDS.tier 逐项一致）：0=控制／健康（sys.*），
+ * 1=普通，2=长／危险（script.run、file.write）。tier 2 含义是“长／危险”，
+ * 不是“异步”——mode（sync/async）只由命令定（仅 script.run 走 async）。 */
+#define LEA_TIER_INLINE 0
+#define LEA_TIER_NORMAL 1
+#define LEA_TIER_LONG   2
+#define LEA_B1_TIER0_DEADLINE_MAX_MS 8000
+#define LEA_B1_TIER1_DEADLINE_MAX_MS 8000
+#define LEA_B1_TIER2_DEADLINE_MAX_MS 120000
 
 /* 错误码（DESIGN.md §4.5 为主；带 * 的为 MVP 补充码，见 README）。 */
 #define LEA_OK "done"
@@ -48,21 +73,29 @@ extern "C" {
 #define LEA_ERR_BINDING_CHANGED "QFR_BINDING_CHANGED"
 #define LEA_ERR_NOT_AUTHORIZED "QFR_MUSE_NOT_AUTHORIZED"
 #define LEA_ERR_KEY_REVOKED "QFR_API_KEY_REVOKED"
+#define LEA_ERR_REVOCATION_UNAVAILABLE "QFR_LEA_REVOCATION_UNAVAILABLE" /* F-01：吊销表不可用（读失败／格式错／陈旧／缺失有历史），不可重试 */
 #define LEA_ERR_SCOPE_DENIED "QFR_SCOPE_DENIED"
 #define LEA_ERR_DEVICE_NOT_WHITELISTED "QFR_DEVICE_NOT_WHITELISTED"
 #define LEA_ERR_GRANT_REVOKED "QFR_GRANT_REVOKED"
 #define LEA_ERR_DUPLICATE "QFR_LEA_DUPLICATE_IN_PROGRESS"
 #define LEA_ERR_UNKNOWN "QFR_LEA_EXECUTION_UNKNOWN"
+#define LEA_ERR_IDEMPOTENT_MISMATCH "QFR_LEA_IDEMPOTENT_MISMATCH" /* FIX1：同幂等键不同请求内容，拒绝回放旧结果（不可重试——须换新键） */
 #define LEA_ERR_QUEUE_FULL "QFR_QUEUE_FULL"
 #define LEA_ERR_CALLER_NOT_ALLOWED "QFR_LEA_CALLER_NOT_ALLOWED" /* * 内部命令调用方不是已安装的 qf-lea-client.exe（H01） */
 #define LEA_ERR_USH_UNAVAILABLE "QFR_LEA_USH_UNAVAILABLE"      /* * USH 未运行/连不上 */
 #define LEA_ERR_SCRIPT_NOT_ALLOWED "QFR_LEA_SCRIPT_NOT_ALLOWED" /* * 白名单外脚本 */
 #define LEA_ERR_PATH_NOT_ALLOWED "QFR_LEA_PATH_NOT_ALLOWED"     /* * 目录越界 */
 #define LEA_ERR_TIMEOUT "QFR_LEA_TIMEOUT"                       /* * 执行超时 */
+#define LEA_ERR_RESET "QFR_LEA_RESET"                         /* B1：执行器被 sys.reset／看门狗清队列重置（可重试，未执行） */
 #define LEA_ERR_EXPIRED "QFR_LEA_EXPIRED"                       /* * 入队后执行前已过期（H10） */
 #define LEA_ERR_NOT_INSTALLED "QFR_LEA_NOT_INSTALLED"
 #define LEA_ERR_EXEC_FAILED "QFR_LEA_EXEC_FAILED"               /* * 执行失败通用码 */
 #define LEA_ERR_INTERNAL "QFR_LEA_INTERNAL"                     /* * 服务内部错误 */
+#define LEA_ERR_HANDSHAKE_REQUIRED "QFR_LEA_HANDSHAKE_REQUIRED" /* RC-01：握手未完成，业务命令拒绝投递（不可重试——服务端重握后重试） */
+#define LEA_ERR_CANCELLED "QFR_LEA_CANCELLED" /* S-022：job 被 job.cancel 取消（排队未执行；终态，不可重试） */
+#define LEA_ERR_NOT_CANCELLABLE "QFR_LEA_NOT_CANCELLABLE" /* S-022：命令不可取消（危险命令／已在执行） */
+#define LEA_ERR_NOT_FOUND "QFR_LEA_NOT_FOUND" /* S-022：job.query／job.cancel 查无此 job */
+#define LEA_ERR_PAUSED "QFR_LEA_PAUSED" /* S-021：本机已暂停（lea.pause），业务命令一律拒绝，直至 lea.resume */
 
 typedef enum {
     LEA_EXEC_LEA = 0,  /* LEA 服务本机执行 */
@@ -77,12 +110,40 @@ typedef struct {
     long max_timeout_ms;
     int dangerous;              /* 1=危险命令：单独串行 lane，禁自动重试 */
     const char *required_scope; /* NULL=只需 muse.execute；否则另需该 scope */
+    int tier;                   /* B1 命令分级：0=控制／健康，1=普通，2=长／危险 */
 } lea_command_spec_t;
 
 /* 命令表见 DESIGN.md §4.4。危险命令初始定义（待站长确认完整清单，
  * DESIGN §14 #4）：script.run、file.write，以及 params.dangerous=true
- * 的 ui.click / ui.input。 */
+ * 的 ui.click / ui.input。
+ * RC-01：sys.handshake 在表内（tier 0 内联），使 lea_admit 能对其做同款
+ * 准入；握手门本身在 QFRLEA.c handle_envelope（验签后、业务命令前）。 */
 const lea_command_spec_t *lea_command_spec(const char *name);
+
+/* RC-01 握手态（纯数据，调用方持有；QFRLEA.c 持一份静态实例）。
+ * 完成态须 (指纹, binding_epoch, grant_epoch) 与当前一致，任一变化即失效。
+ * 服务端先发 sys.handshake（params 带服务端公钥指纹＋协议版本 2），设备
+ * 验签＋核对指纹/版本＋同款准入后才标记完成；未完成时任何业务命令
+ * （sys.ping 健康探针除外——只读、无执行，B1 自愈探测须能过）一律回
+ * QFR_LEA_HANDSHAKE_REQUIRED，不入队、不执行。--internal 本地控制命令
+ * 不走此门（本地 SYSTEM 起源、按进程身份鉴权）。 */
+typedef struct {
+    int completed;
+    char fp[17]; /* 服务端公钥指纹（16 位 hex＋\0） */
+    long long binding_epoch;
+    long long grant_epoch;
+} lea_handshake_state_t;
+
+void lea_handshake_init(lea_handshake_state_t *s);
+int lea_handshake_is_complete(const lea_handshake_state_t *s, const char *fp,
+                              long long binding_epoch, long long grant_epoch);
+void lea_handshake_mark_complete(lea_handshake_state_t *s, const char *fp,
+                                 long long binding_epoch, long long grant_epoch);
+void lea_handshake_invalidate(lea_handshake_state_t *s);
+/* 握手 params 校验：指纹须等于本机编译期公钥指纹且 protocol_version 须为 2。
+ * fp 为本机指纹（lea_server_pubkey_fingerprint 的输出）；无公钥（fp 为空）
+ * 即拒绝。params_fp 为信封 params.server_pubkey_fp 的值。 */
+int lea_handshake_check_params(const char *fp, const char *params_fp, long long protocol_version);
 
 typedef struct {
     int valid;
@@ -94,6 +155,10 @@ typedef struct {
     char account_id[128];
     char api_key_id[64];
     long long binding_epoch;
+    /* F-02：授权代次（grant_epoch）。信封必填字段：解析时必须存在且
+     * 为无符号整数（0..2^53-1，最短十进制、无前导零），不得缺省为 0；
+     * lea_admit() 校验 env.grant_epoch == bind->grant_epoch。 */
+    long long grant_epoch;
     char nonce[128];
     long long issued_at;
     long long expires_at;
@@ -102,6 +167,19 @@ typedef struct {
     char params_raw[LEA_MAX_PARAMS]; /* params 对象原文（用于 params_hash 与参数提取） */
     long long timeout_ms;  /* 0=用命令默认超时 */
     int has_timeout;
+    /* B1 信封新字段（PLAN §2 B1；全部可选，老版本忽略）：
+     *   job_id：服务端 job 标识（缺失时等同 request_id）；
+     *   mode： "sync"（同步短 lane）／"async"（隔离异步 job）；
+     *   deadline_ms：调用方期望的 job 强杀时限（毫秒），仅作调度提示，
+     *     不得放宽分级上限（lea_job_deadline_ms 取 min 后再夹 tier 上限）。
+     * F-02（v2）：job_id／mode／deadline_ms 已进 v2 规范串（20 行），
+     * 与 grant_epoch 一起签名；缺省值与解析缺省一致（job_id 缺省 ''、
+     * mode 缺省 ''、deadline_ms 缺省 0），签信封原文值。nonce 字段
+     * v1 已有，不新增。 */
+    char job_id[64];
+    char mode[16];
+    long long deadline_ms;
+    int has_deadline;
     char signature[512];
     char trace_id[64]; /* 可选 */
     char error[64];    /* valid=0 时的错误码 */
@@ -110,7 +188,31 @@ typedef struct {
 
 int lea_command_is_dangerous(const lea_envelope_t *env);
 
+/* S-022：按命令的可取消性——排队未执行的命令能否被 job.cancel 取消。
+ * 内联命令（不进队列）与危险命令（表内危险，或 ui.* 带 params.dangerous=true）
+ * 不可取消：危险命令一旦受理必须跑到终态，否则副作用是否发生无法交代；
+ * 其余进队列的命令（ui.*／file.read／app.*／sys.*）可取消。
+ * 未知命令返回 0（fail-closed）。注意：已在执行的 job 亦不可取消
+ * （无中途强杀开关；取消只对排队项生效，运行中 job 只记 CANCEL_REQUESTED）。 */
+int lea_command_is_cancellable(const lea_envelope_t *env);
+
+/* B1 命令分级：返回命令的 tier（0/1/2），未知命令返回 -1。 */
+int lea_command_tier(const char *name);
+/* B1 job 强杀 deadline（毫秒）= min(有效超时, 本级上限)；未知命令 5000。 */
+long lea_job_deadline_ms(const lea_envelope_t *env);
+/* B1 队列准入：当前深度 < LEA_B1_QUEUE_MAX（8）才放行；满即回 busy。 */
+static inline int lea_queue_admit_ok(int depth) {
+    return depth < LEA_B1_QUEUE_MAX;
+}
+/* B1：params 内指定布尔键为 true 时返回 1（file.read recursive 拒绝用）。
+ * 键缺失／非布尔／false 返回 0。 */
+int lea_params_has_true(const char *params_raw, const char *key);
+
 /* 解析一行 JSON 信封。只做形状校验，不验签名／绑定／幂等。
+ * v2-only：version != 2 即拒绝；grant_epoch 必须存在且为无符号整数
+ * （0..2^53-1，最短十进制、无前导零、无符号位），不得缺省为 0；
+ * 顶层未知字段／重复字段一律拒绝（与 JS envelopeSigningBytes
+ * 未知字段拒绝同规则）；整数字段用严格顶层解析（全量消费、溢出拒）。
  * now_unix: 调用方传入当前 unix 秒（便于单测注入时钟）。 */
 int lea_parse_envelope(const char *text, long long now_unix, lea_envelope_t *out);
 
@@ -164,7 +266,7 @@ int lea_path_under_root(const char *norm_path, const char *norm_root);
 /* idempotency_key / request_id / nonce 字符集：[A-Za-z0-9_-]，长度 8..128。 */
 int lea_validate_token(const char *s);
 
-/* 规范串 v1 身份字段规则（见 CANONICAL-SIGNING-V1.md §1）：
+/* 规范串 v2 身份字段规则（见 CANONICAL-SIGNING-V2.md §1）：
  * 非空、长度 1..127 字节，不得含 <0x20、0x7F 控制字符（含 \n \r）。
  * 允许 '"'、'\\'、空格等可打印字符（JSON 重建时转义，见 lea_rebuild_envelope）。
  * device_id / account_id / api_key_id / batch_id（非空时）/ lease_id（非空时）均用此规则。 */
@@ -175,9 +277,11 @@ int lea_validate_id_field(const char *s);
  * 严格字典序升序、无空格、无空 token、无重复。 */
 int lea_validate_scopes_str(const char *s);
 
-/* 信封规范串 v1（CANONICAL-SIGNING-V1.md §2）：16 行 \n 连接串，
- * 域名行 qfr-lea-envelope-v1，params 只含 stable JSON 的 SHA-256 hex，
- * timeout_ms 取有效超时（线上值或命令默认值）。字段非法或空间不足返回 0。 */
+/* 信封规范串 v2（CANONICAL-SIGNING-V2.md §2）：20 行 \n 连接串，
+ * 域名行 qfr-lea-envelope-v2，params 只含 stable JSON 的 SHA-256 hex，
+ * timeout_ms 取有效超时（线上值或命令默认值）。grant_epoch 在
+ * binding_epoch 之后一行，须为 0..2^53-1 的无符号整数（JS 安全整数界，
+ * 超界／负数即构造失败）。字段非法或空间不足返回 0。 */
 int lea_envelope_canonical(const lea_envelope_t *env, char *out, size_t out_size);
 
 /* 票据规范串 v1（CANONICAL-SIGNING-V1.md §3）：9 行 \n 连接串，
@@ -221,7 +325,8 @@ int lea_parse_ticket(const char *text, lea_ticket_t *out);
 
 /* 重建信封行（供 LEA→USH 转发；签名等字段原样带回，USH 只信 LEA 不再验签）。
  * pkg1 #25：全部字符串字段经 JSON 转义后拼接，%s 直拼禁止；
- * params_raw 原文 verbatim 拼接（签名覆盖同一份字节）。空间不足返回 0。 */
+ * params_raw 原文 verbatim 拼接（签名覆盖同一份字节）。
+ * F-02：重建行含 version（2）与 grant_epoch，缺一不可。空间不足返回 0。 */
 int lea_rebuild_envelope(const lea_envelope_t *env, char *out, size_t out_size);
 
 /* JSON 转义后追加到 buf（不含外层引号），返回 0=空间不足。 */
@@ -245,9 +350,11 @@ int lea_build_response(char *out, size_t out_size, int ok, const char *code,
                        const char *request_id, int retryable,
                        const char *detail, const char *result_json);
 
-/* 仅 BINDING_PENDING 可重试（DESIGN §4.5）。 */
+/* 仅 BINDING_PENDING 与 B1 RESET 可重试（DESIGN §4.5；RESET 表示命令
+ * 未执行即被清队列，重试安全）。 */
 static inline int lea_error_retryable(const char *code) {
-    return code && strcmp(code, LEA_ERR_BINDING_PENDING) == 0;
+    return code && (strcmp(code, LEA_ERR_BINDING_PENDING) == 0 ||
+                    strcmp(code, LEA_ERR_RESET) == 0);
 }
 
 #ifdef __cplusplus

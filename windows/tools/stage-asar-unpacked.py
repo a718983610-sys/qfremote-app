@@ -90,7 +90,7 @@ def main() -> int:
             print(f"FATAL: 源文件不存在：{src}", file=sys.stderr)
             return 1
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
+        shutil.copy2(src, dst)
         if sha256_hex(dst) != sha256_hex(src):
             print(f"FATAL: 拷贝后哈希不一致：{dst}", file=sys.stderr)
             return 1

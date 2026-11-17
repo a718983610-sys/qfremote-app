@@ -11,6 +11,17 @@
  *     器时应精确报 CoCreateInstance/PNGEncoder＋失败 hr（即原 SKIP 分支）。
  *     r9-fix2：编码器改直接 CoCreateInstance（绕过工厂 CreateEncoder 的
  *     元数据校验；真机 WIC 元数据注册不完整，Implemented Categories 缺失）。
+ *  ③ N-09 file 模式截图：直调 snapshot_open_file_stream（file 分支的
+ *     工厂＋流搭建）在“从未初始化 COM 的专用线程”上（复现 USH 管道
+ *     线程条件；主线程前面 UIA 段已初始化过 COM，故须另起线程）。修前
+ *     直接 CoCreateInstance 建 WIC 工厂报 0x800401F0、步骤为
+ *     handler/CoCreateInstance，截图恒败；修后入口即按需 CoInitializeEx，
+ *     工厂＋流建出、文件落盘，同线程第二次 open 同样成功（进出平衡）。
+ *     全程 file 模式快照（抓屏 BitBlt）在沙箱 Wine 下跑不了（无显示
+ *     驱动，BitBlt 报 1400），仍待真机验。
+ *  ④ N-10 回退中心点：bounding_rect_center 对 [left,top,width,height]
+ *     算 left+width/2、top+height/2（旧代码把 width/height 当右／下边沿
+ *     算 (left+width)/2，点在元素之外）。
  *  ② ui.input 坐标定位：find_element 在无任何元素定位字段时立即返 0
  *     （修前空转满 deadline 才返 0，坐标 input 恒 5000ms 超时）；另验
  *     ush_parse_target 能从顶层 params 读出 r8 原样 {"x":200,"y":736}，
@@ -94,6 +105,57 @@ static int encode_once(HRESULT *hr_out, const char **step_out, HRESULT *hr_init_
            ok, sig_ok, (unsigned long long)sz, dstep,
            (unsigned long)dhr, (unsigned long)dinit);
     return ok && sig_ok;
+}
+
+/* N-09：file 模式快照线程上下文＋线程入口（线程内绝不调 CoInitializeEx，
+ * 复现 USH 管道线程条件）。线程内直调 snapshot_open_file_stream（file
+ * 分支的工厂＋流搭建，不依赖抓屏——沙箱 Wine 下 BitBlt 不可用，
+ * 全程 file 模式快照仍待真机验）。 */
+typedef struct {
+    int opened;          /* open 返回值 */
+    int com_init;        /* 本次调用是否由我们初始化 COM */
+    HRESULT hr;          /* open 的失败 hr（成功时 S_OK） */
+    const char *step;    /* open 的失败步骤（成功时 handler/stream-setup） */
+    HRESULT hr_init;     /* open 内 CoInitializeEx 结果 */
+    int file_created;    /* InitializeFromFilename 是否落盘建出文件 */
+    int opened_twice;    /* 同线程第二次 open 是否成功（进出平衡） */
+    char path[MAX_PATH];
+} n09_ctx_t;
+
+static DWORD WINAPI n09_file_snapshot_thread(LPVOID p) {
+    n09_ctx_t *ctx = (n09_ctx_t *)p;
+    IWICImagingFactory *factory = NULL;
+    IWICStream *wstream = NULL;
+    IStream *istream = NULL;
+    int com_init = 0;
+    HRESULT hr = S_OK;
+    const char *step = "";
+    HRESULT hr_init = S_OK;
+    ctx->opened = snapshot_open_file_stream(ctx->path, &factory, &wstream, &istream,
+                                            &com_init, &hr, &step, &hr_init);
+    ctx->com_init = com_init;
+    ctx->hr = hr;
+    ctx->step = step;
+    ctx->hr_init = hr_init;
+    if (ctx->opened) {
+        DWORD a = GetFileAttributesA(ctx->path);
+        ctx->file_created = (a != INVALID_FILE_ATTRIBUTES);
+        istream->lpVtbl->Release(istream);
+        wstream->lpVtbl->Release(wstream);
+        factory->lpVtbl->Release(factory);
+        /* 进出平衡：反初始化后线程回到未初始化态，再开一次须同样成功。 */
+        if (com_init) CoUninitialize();
+        factory = NULL; wstream = NULL; istream = NULL; com_init = 0;
+        ctx->opened_twice = snapshot_open_file_stream(ctx->path, &factory, &wstream, &istream,
+                                                      &com_init, &hr, &step, &hr_init);
+        if (ctx->opened_twice) {
+            istream->lpVtbl->Release(istream);
+            wstream->lpVtbl->Release(wstream);
+            factory->lpVtbl->Release(factory);
+            if (com_init) CoUninitialize();
+        }
+    }
+    return 0;
 }
 
 int main(void) {
@@ -232,6 +294,54 @@ int main(void) {
         ush_uia_shutdown();
     } else {
         printf("SKIP r9b input ValuePattern/点击打字（wine 下 UIA 建不出，真机验）\n");
+    }
+
+    /* N-10：BoundingRectangle 回退中心点——[left,top,width,height]，
+     * 中心为 left+width/2、top+height/2（旧代码把 width/height 当右／下
+     * 边沿算 (left+width)/2，点在元素之外）。 */
+    {
+        POINT pt;
+        double r1[4] = { 100, 200, 50, 80 };
+        bounding_rect_center(r1, &pt);
+        printf("  [rect-center] (100,200,50,80) -> (%ld,%ld)\n", (long)pt.x, (long)pt.y);
+        t(pt.x == 125 && pt.y == 240, "N-10 回退中心点 left=100,width=50 得 x=125（非旧值 75）");
+        double r2[4] = { 0, 0, 101, 51 };
+        bounding_rect_center(r2, &pt);
+        t(pt.x == 50 && pt.y == 25, "N-10 回退中心点 101x51 得 (50,25)");
+        double r3[4] = { -10, -20, 30, 40 };
+        bounding_rect_center(r3, &pt);
+        t(pt.x == 5 && pt.y == 0, "N-10 回退中心点负坐标 (-10,-20,30,40) 得 (5,0)");
+    }
+
+    /* N-09：file 模式工厂＋流搭建——专用线程从不初始化 COM（复现 USH
+     * 管道线程）。修前：open 内直接 CoCreateInstance 报 0x800401F0、
+     * 步骤为 handler/CoCreateInstance；修后：入口即按需初始化，工厂＋
+     * 流建出、文件落盘。 */
+    {
+        static n09_ctx_t ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        char tmpdir[MAX_PATH];
+        DWORD tn = GetTempPathA(MAX_PATH, tmpdir);
+        if (tn == 0 || tn >= MAX_PATH) snprintf(tmpdir, sizeof(tmpdir), "C:\\");
+        snprintf(ctx.path, sizeof(ctx.path), "%sn09-probe.png", tmpdir);
+        DeleteFileA(ctx.path);
+        HANDLE th = CreateThread(NULL, 0, n09_file_snapshot_thread, &ctx, 0, NULL);
+        if (th) {
+            WaitForSingleObject(th, 30000);
+            CloseHandle(th);
+            printf("  [n09 open] opened=%d com_init=%d hr=0x%08lx step=%s init=0x%08lx file=%d twice=%d path=%s\n",
+                   ctx.opened, ctx.com_init, (unsigned long)ctx.hr, ctx.step,
+                   (unsigned long)ctx.hr_init, ctx.file_created, ctx.opened_twice, ctx.path);
+            t(ctx.opened && ctx.com_init && ctx.hr_init == S_OK,
+              "N-09 无 COM 线程上 file 模式建 WIC 工厂＋流成功（本次调用初始化 COM）");
+            t(ctx.step && strcmp(ctx.step, "handler/CoCreateInstance") != 0,
+              "N-09 失败点不在 handler/CoCreateInstance（修前恒败点）");
+            t(ctx.file_created, "N-09 InitializeFromFilename 落盘建出文件");
+            t(ctx.opened_twice, "N-09 同线程第二次 open 同样成功（CoUninitialize 进出平衡）");
+            DeleteFileA(ctx.path);
+        } else {
+            t(0, "N-09 file 模式测试线程能建出");
+        }
     }
 
     printf("----\n%d passed, %d failed\n", g_pass, g_fail);
