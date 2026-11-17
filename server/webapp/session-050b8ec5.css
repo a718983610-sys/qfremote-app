@@ -4,100 +4,112 @@
    合并裁定与偏差：redesign-v2/ADOPTION.md
    ===================================================================== */
 /* ---------- 0. 变量层 ---------- */
+/* Q3a 实施：第二套 tokens 已删除，本块只留 var(--全局token) 别名与局部组件覆盖（app.css :root 为唯一 token 源）。
+   圆角按定夺 6/9 收敛到 8/16 两档；玻璃渐变按 Q3a 删除，改实色表面＋边框层级；绿按定夺 8 走 --success。 */
 .viewer{
-  /* 字体 */
-  --font-sans: -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
-  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  /* 字体：直接继承 :root 全局值（--font-sans/--font-mono 在 qf-tokens.css 与
+     app.css 的 :root 均有定义）。S-073 收尾：--font-sans: var(--font-sans) 等
+     自引用按 CSS 规范成环后计算值为空、实为继承 no-op，删之不改变计算值。 */
 
-  /* 字阶 */
-  --fs-1: 20px;   --fw-1: 700; --lh-1: 26px; --ls-1: -0.02em;
-  --fs-2: 17px;   --fw-2: 600; --lh-2: 22px; --ls-2: -0.012em;
-  --fs-3: 15px;   --fw-3: 400; --lh-3: 22px; --ls-3: 0em;
-  --fs-4: 13px;   --fw-4: 500; --lh-4: 18px; --ls-4: 0.004em;
-  --fs-5: 11.5px; --fw-5: 600; --lh-5: 14px; --ls-5: 0.05em;
-  --fs-6: 14px;   --fw-6: 600; --lh-6: 20px; --ls-6: 0.006em;
+  /* 字阶（17px→18px、11.5px→12px 就近取全局字阶，见 REPORT） */
+  --fs-1: var(--fs-20); --fw-1: var(--fw-600); /* REWORK A §2.2：字重只用 400/500/600，标题 600 */ --lh-1: var(--lh-title); --ls-1: var(--ls-tight);
+  --fs-2: var(--fs-16); --fw-2: var(--fw-600); /* REWORK：字阶 16/24 */ --lh-2: var(--lh-title); --ls-2: var(--ls-tight);
+  --fs-3: var(--fs-14); --fw-3: var(--fw-400); /* REWORK：正文 14/22 */ --lh-3: var(--lh-body); --ls-3: var(--ls-normal);
+  --fs-4: var(--fs-13); --fw-4: var(--fw-500); --lh-4: var(--lh-body); --ls-4: var(--ls-normal);
+  --fs-5: var(--fs-12); --fw-5: var(--fw-600); --lh-5: var(--lh-tight); --ls-5: var(--ls-wide);
+  --fs-6: var(--fs-14); --fw-6: var(--fw-600); --lh-6: var(--lh-title); --ls-6: var(--ls-normal);
 
-  /* 间距 */
-  --sp-1: 2px;  --sp-2: 4px;  --sp-3: 6px;  --sp-4: 8px;
-  --sp-5: 10px; --sp-6: 12px; --sp-7: 16px; --sp-8: 20px;
-  --sp-9: 24px; --sp-10: 32px; --sp-11: 40px;
+  /* 间距（4/8 全局栅格；2/6/10px 用 calc(var) 保值）
+     S-073：--sp-1: calc(var(--sp-1)/2) 是自引用（成环后计算值为空、实为继承
+     :root 值），删之不改变计算值；--sp-2..--sp-11 是非自引用别名，保留。 */
+  --sp-2: var(--sp-1); --sp-3: calc(var(--sp-1) + var(--sp-1) / 2); --sp-4: var(--sp-2);
+  --sp-5: calc(var(--sp-2) + var(--sp-1) / 2); --sp-6: var(--sp-3); --sp-7: var(--sp-4); --sp-8: var(--sp-5);
+  --sp-9: var(--sp-6); --sp-10: var(--sp-7); --sp-11: var(--sp-8);
 
-  /* 浮距与尺寸 */
-  --chrome-w: 1184px;
-  --float-x: 16px;
-  --float-y: 16px;
-  --bar-h: 60px;
-  --bar-px: 16px;
-  --tools-h: 64px;
-  --tools-px: 12px;
-  --input-h: 56px;
-  --strip-h: 40px;
-  --iconbtn: 44px;
-  --iconbtn-sm: 36px;
-  --row-h: 56px;
-  --iconblk: 36px;
-  --safe-t: env(safe-area-inset-top, 0px);
-  --safe-b: env(safe-area-inset-bottom, 0px);
+  /* 浮距与尺寸（局部组件尺寸，用 calc(var) 保值） */
+  --chrome-w: var(--col-max);
+  --float-x: var(--sp-4);
+  --float-y: var(--sp-4);
+  --bar-h: calc(var(--sp-9) + var(--sp-3));
+  --bar-px: var(--sp-4);
+  --tools-h: var(--sp-10);
+  --tools-px: var(--sp-3);
+  --input-h: calc(var(--sp-9) + var(--sp-2));
+  --strip-h: var(--sp-8);
+  --iconbtn: calc(var(--sp-8) + var(--sp-1));
+  --iconbtn-sm: calc(var(--sp-7) + var(--sp-1));
+  --row-h: calc(var(--sp-9) + var(--sp-2));
+  --iconblk: calc(var(--sp-7) + var(--sp-1));
+  /* S-073：--safe-t/--safe-b 自引用已删（成环后计算值为空、实为继承 :root 的
+     env(safe-area-inset-*) 值），删之不改变计算值。 */
   --stage-t: calc(var(--float-y) + var(--bar-h) + 12px);
   --stage-b: calc(var(--float-y) + var(--tools-h) + 12px);
 
-  /* 圆角 */
-  --r-8: 8px; --r-10: 10px; --r-14: 14px; --r-18: 18px;
-  --r-20: 20px; --r-22: 22px; --r-24: 24px;
-  --r-full: 999px; --r-circle: 50%;
+  /* 圆角（定夺 6/9：只留 8/16 两档） */
+  --r-8: var(--radius-1); --r-10: var(--radius-1); --r-14: var(--radius-1); --r-18: var(--radius-2);
+  --r-20: var(--radius-2); --r-22: var(--radius-2); --r-24: var(--radius-2);
+  --r-full: var(--r-pill); --r-circle: var(--r-round);
 
-  /* 阴影 */
-  --sh-1: 0 0 0 0.5px rgba(11,43,91,.05), 0 1px 2px rgba(8,20,40,.06);
-  --sh-chrome: 0 0 0 0.5px rgba(11,43,91,.06), 0 6px 16px -4px rgba(4,10,22,.24), 0 28px 64px -20px rgba(4,10,22,.50);
-  --sh-card: 0 0 0 0.5px rgba(11,43,91,.05), 0 8px 24px -8px rgba(4,10,22,.24), 0 40px 80px -24px rgba(4,10,22,.40);
-  --sh-btn: 0 1px 2px rgba(11,43,91,.10);
-  --sh-btn-hover: 0 2px 8px -2px rgba(11,43,91,.16);
-  --sh-brand: 0 4px 12px -2px rgba(36,112,224,.42), 0 1px 2px rgba(11,43,91,.12);
-  --sh-danger: 0 4px 12px -2px rgba(217,45,32,.40), 0 1px 2px rgba(11,43,91,.12);
-  --sh-inset-hi: inset 0 1px 0 rgba(255,255,255,.95);
+  /* 阴影（定夺 10：深色即 none；会话浮层走浅色克制阶梯）
+     S-073：--sh-* 是语义 token（不复制基础字面量，现已用 var 别名指向全局
+     --shadow-*，定性为语义层，保留）。 */
+  --sh-1: var(--shadow-1);
+  --sh-chrome: var(--shadow-3);
+  --sh-card: var(--shadow-3);
+  --sh-btn: var(--shadow-1);
+  --sh-btn-hover: var(--shadow-1);
+  --sh-brand: var(--shadow-1);
+  --sh-danger: var(--shadow-1);
+  --sh-inset-hi: var(--shadow-none);
 
-  /* 材质 */
-  --glass-bg: linear-gradient(180deg, rgba(255,255,255,.88) 0%, rgba(255,255,255,.74) 100%);
-  --glass-blur: blur(24px) saturate(180%);
-  --glass-bd: rgba(255,255,255,.66);
-  --glass-inner: inset 0 -1px 0 rgba(11,43,91,.06);
-  --dark-glass-bg: rgba(20,28,44,.58);
-  --dark-glass-blur: blur(20px) saturate(150%);
-  --dark-glass-bd: rgba(255,255,255,.14);
-  --dark-glass-inner: inset 0 1px 0 rgba(255,255,255,.10);
-  --inset-bg: rgba(11,43,91,.055);
-  --sheet-bg: rgba(252,253,255,.97);
-  --scrim: rgba(8,14,26,.48);
-  --scrim-blur: blur(6px) saturate(120%);
+  /* 材质（玻璃渐变已删：实色表面＋边框层级；backdrop blur 关）
+     S-073：--glass-* 是语义 token（不复制基础字面量，现已用 var 别名指向全局
+     --surface-*/--border/--shadow-none，定性为语义层，保留）。 */
+  --glass-bg: var(--surface-3);
+  --glass-blur: none;
+  --glass-bd: var(--border);
+  --glass-inner: var(--shadow-none);
+  --dark-glass-bg: var(--dark-surface-1);
+  --dark-glass-blur: none;
+  --dark-glass-bd: var(--dark-border-hover);
+  --dark-glass-inner: var(--shadow-none);
+  --inset-bg: var(--brand-soft);
+  --sheet-bg: var(--surface-2);
+  --scrim: var(--overlay-scrim);
+  --scrim-blur: none;
 
-  /* 色 */
-  --brand: #2470E0;
-  --brand-lt: #5B9BFF;
-  --brand-dk: #0B2B5B;
-  --brand-bg: rgba(36,112,224,.10);
-  --orange: #FF8A1E;
-  --green: #12B76A;
-  --red: rgb(217,45,32);
-  --ink: #1F2D47;
-  --ink-2: #5D6E84;
-  --hairline: rgba(11,43,91,.08);
-  --hairline-dk: rgba(255,255,255,.12);
-  --canvas-0: #0E141E;
-  --canvas-1: #141C29;
-  --canvas-2: #1A2233;
-  --on-dark: rgba(255,255,255,.92);
-  --on-dark-2: rgba(255,255,255,.62);
-  --amber-txt: #A45A08;
-  --amber-bg: rgba(255,138,30,.16);
-  --amber-ring: rgba(255,138,30,.30);
-  --green-txt: #0A7A47;
-  --green-bg: rgba(18,183,106,.15);
-  --green-ring: rgba(18,183,106,.28);
-  --red-txt: #B42318;
-  --red-bg: rgba(217,45,32,.12);
-  --red-ring: rgba(217,45,32,.24);
+  /* 色（会话为深色画布：表面／文字走 --dark-* 常量，语义走全局语义 token）
+     2026-11-13 黑白化实测：--brand: var(--brand) / --brand-lt: var(--brand-lt) /
+     --orange: var(--orange) 是自引用＝循环依赖，Chromium 计算值为空，.viewer 内全部品牌
+     底色（发送钮/主按钮/进度条/选中图标块）历来透明、从未真正上过色。删三行，.viewer
+     直接继承 :root 值（浅深主色、警告 token）。其余自引用
+     （--sp-1 / --font-* / --ease-* / --safe-*）已于 2026-11-15（S-073）同理删净，
+     删后计算值靠继承不变；--sp-2..--sp-11 / --dur-* / --r-full / --r-circle 是
+     非自引用别名，保留。 */
+  --brand-dk: var(--navy);
+  --brand-bg: var(--brand-soft);
+  --green: var(--success);
+  --red: var(--danger-light);
+  --ink: var(--tx);
+  --ink-2: var(--dark-text-2);/* 六项②：会话为深色画布，次级文字恒用深色次级（浅次级在深底上仅 2.44:1，且会另增一灰） */
+  --hairline: var(--border);
+  --hairline-dk: var(--dark-border-hover);
+  --canvas-0: var(--dark-surface-0);
+  --canvas-1: var(--dark-surface-1);
+  --canvas-2: var(--dark-surface-2);
+  --on-dark: var(--dark-text-1);
+  --on-dark-2: var(--dark-text-3);
+  --amber-txt: var(--warning);/* A 组旧口径，已废止（RL-C02）；本变量不再作小字正文色 */
+  --amber-bg: var(--warning-bg);
+  --amber-ring: var(--warning-ring);
+  --green-txt: var(--success);/* A 组旧口径，已废止（RL-C02）；本变量不再作小字正文色 */
+  --green-bg: var(--success-bg);
+  --green-ring: var(--success-ring);
+  --red-txt: var(--danger-light);/* 仅作图标／图形色，不再作小字正文色（RL-C02） */
+  --red-bg: var(--danger-bg);
+  --red-ring: var(--danger-ring);
 
-  /* 层级 */
+  /* 层级（会话内局部层叠顺序，数值保留） */
   --z-canvas: 0;
   --z-content: 10;
   --z-connect: 20;
@@ -110,13 +122,28 @@
   --z-scrim: 60;
 
   /* 动效 */
-  --dur-1: 120ms;
-  --dur-2: 180ms;
-  --dur-3: 240ms;
-  --dur-4: 320ms;
-  --ease-out: cubic-bezier(.16, 1, .3, 1);
-  --ease-std: cubic-bezier(.2, 0, 0, 1);
-  --ease-in: cubic-bezier(.4, 0, 1, 1);
+  --dur-1: var(--d2); /* REWORK B §0：控件 140ms */
+  --dur-2: var(--d3); /* 列表/弹窗 170ms */
+  --dur-3: var(--d4); /* 抽屉 210ms */
+  --dur-4: var(--d5); /* 页面 250ms */
+  /* S-073：--ease-*/--safe-*/--font-*/--sp-1 自引用已删（成环后计算值为空、
+     实为继承 :root 值），删之不改变计算值；--dur-* 是非自引用别名（var(--d2..d5)），保留。 */
+}
+
+/* W-10 深色分支（2026-11-13 扫荡修复）：chips 三色是常量深字，浅色 tint 底上正常、深色 tint 底上塌到 2.8–3.0:1；深色改亮值。另 seg 选中态品牌字深底 3.62:1，改亮字 */
+/* 黑白化深色翻转（2026-11-13）：--brand 深色为白，实底品牌钮与选中图标块须黑字（浅色黑底白字已天然过线） */
+[data-theme="dark"] .viewer .sv-iconbtn--brand,
+[data-theme="dark"] .viewer .sv-btn--primary,
+[data-theme="dark"] .viewer .sv-input[data-kb="manual"] .sv-iconbtn[data-act="keyboard"]{color:var(--on-brand)}
+[data-theme="dark"] .viewer .sv-opt[data-sel="true"] .sv-opt__ic,
+[data-theme="dark"] .viewer .sv-opt[aria-checked="true"] .sv-opt__ic{color:var(--on-brand)}
+[data-theme="dark"] .viewer{
+  --amber-txt: var(--warning);
+  --green-txt: var(--success);
+  --red-txt: var(--danger-light);/* 仅作图标／图形色，不再作小字正文色（RL-C02） */
+}
+[data-theme="dark"] .viewer .sv-seg__btn[aria-selected="true"]{
+  color: var(--seg-sel-fg);
 }
 
 /* ---------- 1. 基础 ---------- */
@@ -167,7 +194,14 @@
 .sv-stage{
   position: absolute;
   inset: 0;
-  z-index: var(--z-canvas);
+  /* 高-8（2026-11-13）：此处故意不设 z-index。带 z-index 的定位元素会建堆叠上下文，
+     子元素 .sv-mask 的 z-index:50 只在 .sv-stage 内部有效，整体仍被 .viewer 的直接
+     子元素 .sv-bar/.sv-tools（z-index:40）压住，失败遮罩盖不住顶栏/底栏。去掉后
+     .sv-stage 不建堆叠上下文，.sv-mask 直接参与 .viewer 层叠，50 > 40，失败时真正
+     盖住顶栏/底栏；正常态遮罩带 hidden 且 pointer-events:none，顶栏/底栏仍可点。
+     stage 内其余子元素层级不变（wall/canvas 0、connecting 20、strip 30，均 < 40），
+     .sv-connecting 自身带 z-index:20 仍建自己的堆叠上下文，其 z-index:-1 的 ::before
+     不会漏到 .viewer 背景之下。 */
   overflow: hidden;
   background: var(--canvas-0);
 }
@@ -177,9 +211,9 @@
   inset: 0;
   z-index: var(--z-canvas);
   background:
-    radial-gradient(120% 90% at 18% 8%, rgba(36,112,224,.22), transparent 62%),
-    radial-gradient(90% 80% at 84% 88%, rgba(11,43,91,.60), transparent 66%),
-    radial-gradient(70% 60% at 62% 30%, rgba(255,138,30,.07), transparent 64%),
+    radial-gradient(120% 90% at 18% 8%, var(--wall-glow-1), transparent 62%),
+    radial-gradient(90% 80% at 84% 88%, var(--wall-glow-2), transparent 66%),
+    radial-gradient(70% 60% at 62% 30%, var(--wall-glow-3), transparent 64%),
     linear-gradient(158deg, var(--canvas-2) 0%, var(--canvas-1) 52%, var(--canvas-0) 100%);
 }
 
@@ -188,10 +222,10 @@
   position: absolute;
   inset: 0;
   background-image:
-    repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 48px),
-    repeating-linear-gradient(90deg, rgba(255,255,255,.028) 0 1px, transparent 1px 48px);
-  -webkit-mask-image: radial-gradient(110% 90% at 50% 45%, #000 20%, transparent 78%);
-  mask-image: radial-gradient(110% 90% at 50% 45%, #000 20%, transparent 78%);
+    repeating-linear-gradient(0deg, var(--wall-grid) 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(90deg, var(--wall-grid) 0 1px, transparent 1px 48px);
+  -webkit-mask-image: radial-gradient(110% 90% at 50% 45%, var(--mask-black) 20%, transparent 78%);
+  mask-image: radial-gradient(110% 90% at 50% 45%, var(--mask-black) 20%, transparent 78%);
   pointer-events: none;
 }
 
@@ -206,7 +240,7 @@
   height: 36px;
   padding: 0 var(--sp-7);
   border-radius: var(--r-full);
-  background: rgba(255,255,255,.10);
+  background: var(--glass-10);
   border: 1px solid var(--dark-glass-bd);
   -webkit-backdrop-filter: var(--dark-glass-blur);
   backdrop-filter: var(--dark-glass-blur);
@@ -226,7 +260,14 @@
   bottom: var(--stage-b);
   left: 0;
   width: 100%;
-  height: auto;
+  /* 高-10（2026-11-13）：删掉 height:auto，高度由 top/bottom 约束解出。实测当前 DOM
+     里 .sv-canvas 是 div#qfFrameSlot（非替换元素，见 app.js buildSessionFrame），
+     top/bottom 同时设定时 height:auto 本就按绝对定位约束拉伸为 舞台高−stage-t−stage-b；
+     真 iframe（.qf-session-frame）由 app.js syncSessionFrameGeometry 按此槽矩形定尺寸，
+     故铺满上下 chrome 之间。height:100% 是错的：top 已占 --stage-t，height 再取
+     100% 会向下溢出 --stage-b、压住底栏，故不取。另注：报告称"iframe 取内在高度约
+     150px"在工作树不成立——没有 iframe 挂 .sv-canvas 类；若将来 iframe 直接挂此类，
+     替换元素 height:auto 才取内在高度，彼时须用 calc(100% − stage-t − stage-b)。 */
   border: 0;
   background: transparent;
   z-index: var(--z-canvas);
@@ -315,7 +356,7 @@
 
 .sv-iconbtn:active{
   transform: scale(.94);
-  background: rgba(11,43,91,.10);
+  background: var(--brand-soft);
 }
 
 .sv-iconbtn:focus-visible{
@@ -331,7 +372,7 @@
 /* 品牌实底钮 */
 .sv-iconbtn--brand{
   background: var(--brand);
-  color: #fff;
+  color: var(--dark-text-1);
   box-shadow: var(--sh-brand);
 }
 
@@ -396,11 +437,11 @@
 .sv-badge--wait{
   background: var(--amber-bg);
   border-color: var(--amber-ring);
-  color: var(--amber-txt);
+  color: var(--ink);
 }
 
 .sv-badge--wait .sv-badge__dot{
-  color: var(--orange);
+  color: var(--warning);
   animation: sv-dot-pulse 1.4s var(--ease-std) infinite;
 }
 
@@ -408,7 +449,7 @@
 .sv-badge--ok{
   background: var(--green-bg);
   border-color: var(--green-ring);
-  color: var(--green-txt);
+  color: var(--ink);
 }
 
 .sv-badge--ok .sv-badge__dot{
@@ -419,11 +460,11 @@
 .sv-badge--retry{
   background: var(--amber-bg);
   border-color: var(--amber-ring);
-  color: var(--amber-txt);
+  color: var(--ink);
 }
 
 .sv-badge--retry .sv-badge__dot{
-  color: var(--orange);
+  color: var(--warning);
   animation: sv-dot-pulse 1.4s var(--ease-std) infinite;
 }
 
@@ -432,7 +473,7 @@
   position: absolute;
   inset: 0;
   border-radius: var(--r-circle);
-  border: 1.5px solid var(--orange);
+  border: 1.5px solid var(--warning);
   animation: sv-dot-ring 1.4s var(--ease-out) infinite;
 }
 
@@ -522,7 +563,7 @@
   max-width: 60%;
   height: 4px;
   border-radius: var(--r-full);
-  background: rgba(255,255,255,.16);
+  background: var(--glass-16);
   overflow: hidden;
   margin-top: var(--sp-3);
 }
@@ -535,7 +576,7 @@
   height: 100%;
   border-radius: var(--r-full);
   background: linear-gradient(90deg, var(--brand) 0%, var(--brand-lt) 100%);
-  animation: sv-progress 1.3s var(--ease-std) infinite;
+  animation: sv-progress 900ms linear infinite; /* REWORK B §3.1：不确定进度 LIN 900ms loop */
 }
 
 @keyframes sv-progress{
@@ -582,7 +623,7 @@
   height: 14px;
   border-radius: var(--r-circle);
   border: 1.5px solid var(--amber-ring);
-  border-top-color: var(--orange);
+  border-top-color: var(--warning);
   animation: sv-spin .9s linear infinite;
 }
 
@@ -652,7 +693,7 @@
   font-weight: var(--fw-3);
   line-height: var(--lh-3);
   letter-spacing: var(--ls-3);
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 .sv-card__acts{
@@ -686,11 +727,11 @@
 
 .sv-btn:active{
   transform: scale(.98);
-  background: rgba(11,43,91,.10);
+  background: var(--brand-soft);
 }
 
 .sv-btn--primary{
-  color: #fff;
+  color: var(--dark-text-1);
   background: var(--brand);
   box-shadow: var(--sh-brand);
 }
@@ -700,13 +741,13 @@
 }
 
 .sv-btn--danger{
-  color: #fff;
-  background: var(--red);
+  color: var(--on-danger);
+  background: var(--alert-bg);
   box-shadow: var(--sh-danger);
 }
 
 .sv-btn--danger:active{
-  background: var(--red);
+  background: var(--alert-bg);
 }
 
 /* ---------- 10. 悬浮底栏 ---------- */
@@ -757,7 +798,7 @@
   font-weight: var(--fw-4);
   line-height: var(--lh-4);
   letter-spacing: var(--ls-4);
-  color: var(--ink-2);
+  color: var(--ink);
   background: transparent;
   transition:
     background-color var(--dur-2) var(--ease-std),
@@ -773,7 +814,7 @@
 
 .sv-seg__btn[aria-selected="true"]{
   color: var(--brand);
-  background: #fff;
+  background: var(--surface-3);
   box-shadow: var(--sh-btn);
 }
 
@@ -822,7 +863,7 @@
 
 .sv-actbtn:active{
   transform: scale(.96);
-  background: rgba(11,43,91,.10);
+  background: var(--brand-soft);
 }
 
 /* 发送到手机略微品牌化，但仍与设定同宽同位 */
@@ -880,13 +921,13 @@
 }
 
 .sv-input__field::placeholder{
-  color: var(--ink-2);
+  color: var(--text-2); /* R-W22：随主题占位 token；玻璃底（--surface-3）实算浅 7.05:1／深 9.12:1。--text-3 在玻璃底上仅 4.12:1，不达 4.5:1，故不用 app.css 浅色口径。 */
 }
 
 /* 手动模式下键盘钮实底常亮 */
 .sv-input[data-kb="manual"] .sv-iconbtn[data-act="keyboard"]{
   background: var(--brand);
-  color: #fff;
+  color: var(--dark-text-1);
   box-shadow: var(--sh-brand);
 }
 
@@ -1015,7 +1056,7 @@
   width: var(--iconblk);
   height: var(--iconblk);
   border-radius: var(--r-10);
-  background: rgba(255,255,255,.08);
+  background: var(--glass-08);
   border: 1px solid var(--hairline-dk);
   color: var(--on-dark);
 }
@@ -1061,7 +1102,7 @@
 }
 
 .sv-file .sv-iconbtn--sm:active{
-  background: rgba(255,255,255,.10);
+  background: var(--glass-10);
   color: var(--on-dark);
 }
 
@@ -1115,7 +1156,7 @@
 }
 
 .sv-tray__h .sv-iconbtn:active{
-  background: rgba(255,255,255,.10);
+  background: var(--glass-10);
   color: var(--on-dark);
 }
 
@@ -1219,7 +1260,7 @@
   font-weight: var(--fw-4);
   line-height: var(--lh-4);
   letter-spacing: var(--ls-4);
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 .sv-sheet__x{
@@ -1233,7 +1274,7 @@
   border: 0;
   border-radius: var(--r-full);
   background: var(--inset-bg);
-  color: var(--ink-2);
+  color: var(--ink);
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
@@ -1270,7 +1311,7 @@
   font-weight: var(--fw-5);
   line-height: var(--lh-5);
   letter-spacing: var(--ls-5);
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 .sv-sheet__lbl:first-child{
@@ -1390,7 +1431,7 @@
   font-weight: var(--fw-4);
   line-height: var(--lh-4);
   letter-spacing: var(--ls-4);
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 /* 行内状态片（上稿引用、此前未定义） */
@@ -1402,7 +1443,7 @@
   padding: 0 var(--sp-3);
   border-radius: var(--r-full);
   background: var(--inset-bg);
-  color: var(--ink-2);
+  color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--fs-5);
   font-weight: var(--fw-5);
@@ -1413,17 +1454,17 @@
 
 .sv-opt__s--ok{
   background: var(--green-bg);
-  color: var(--green-txt);
+  color: var(--ink);
 }
 
 .sv-opt__s--warn{
   background: var(--amber-bg);
-  color: var(--amber-txt);
+  color: var(--ink);
 }
 
 .sv-opt__s--err{
   background: var(--red-bg);
-  color: var(--red-txt);
+  color: var(--ink);
 }
 
 /* 单选点 */
@@ -1499,12 +1540,6 @@
   transform: translateX(var(--sp-8));
 }
 
-/* X-12：能力桥未接入时开关置灰不可点（aria-disabled，不用 disabled 属性，
-   否则点击收不到、toast 说明弹不出来）。 */
-.sv-opt__k[aria-disabled="true"]{
-  opacity: .45;
-  cursor: not-allowed;
-}
 
 .sv-opt__k svg{
   display: none;
@@ -1559,7 +1594,7 @@
   font-weight: var(--fw-4);
   line-height: var(--lh-4);
   letter-spacing: var(--ls-4);
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 /* ---------- 15.3 发送失败区 ---------- */
@@ -1579,7 +1614,7 @@
   width: calc(var(--sp-11) + var(--sp-2));
   height: calc(var(--sp-11) + var(--sp-2));
   border-radius: var(--r-circle);
-  background: var(--red);
+  background: var(--danger-solid);
   color: var(--on-dark);
   box-shadow: var(--sh-danger);
 }
@@ -1611,7 +1646,7 @@
   font-weight: var(--fw-4);
   line-height: var(--lh-4);
   letter-spacing: var(--ls-4);
-  color: var(--red-txt);
+  color: var(--ink);
 }
 
 .sv-sheet__retry{
@@ -1645,7 +1680,7 @@
 
 .sv-btn--ghost{
   background: transparent;
-  color: var(--ink-2);
+  color: var(--ink);
   box-shadow: none;
 }
 
@@ -1760,7 +1795,7 @@
    ===================================================================== */
 
 /* A1 正式版定位 */
-.qf-session-layer{ position:fixed; inset:0; z-index:80000; background:#0B1220; }
+.qf-session-layer{ position:fixed; inset:0; z-index:80000; background: var(--dark-surface-0); }
 .qf-session-layer .viewer{ position:absolute; inset:0; }
 .viewer .sv-scrim{ position:absolute; }
 .viewer .sv-fsx{ position:absolute; }
@@ -1868,7 +1903,7 @@
    故收编不移动节点：永驻 body 的预热框只改类名与几何升格为会话框；会话层在升格期
    转透明让位，暗色画布底由同级背板承担，浮层 chrome 仍在层内居上）。 */
 .qf-session-frame{ position:fixed; z-index:1; border:0; background:transparent; }
-.qf-session-backdrop{ position:fixed; inset:0; z-index:0; background:#0B1220; }
+.qf-session-backdrop{ position:fixed; inset:0; z-index:0; background: var(--dark-surface-0); }
 .qf-session-layer.qf-ext{ background:transparent; }
 .qf-session-layer.qf-ext .viewer{ background:transparent; }
 .qf-session-layer.qf-ext .sv-stage{ background:transparent; }
@@ -1885,5 +1920,5 @@
 #qfViewer{ pointer-events:none; }
 #qfStage{ pointer-events:none; }
 .qf-session-layer{ pointer-events:none; }
-.viewer .sv-bar, .viewer .sv-tools, .viewer .sv-input, .viewer .sv-mask{ pointer-events:auto; }
+.viewer .sv-bar, .viewer .sv-tools, .viewer .sv-input, .viewer .sv-files, .viewer .sv-mask{ pointer-events:auto; }
 .qf-session-frame{ pointer-events:auto; }

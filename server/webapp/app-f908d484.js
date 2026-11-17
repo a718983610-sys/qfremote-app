@@ -1,323 +1,9 @@
+/* app.js — W-05 机械拆分后：应用壳（2026-11-15，全进 3.0）
+ * 视图（Views.*）、会话融合（iframe 外壳＋阶段机）、聊天/论坛/订单等业务页与启动 boot。
+ * 本文件保留 windows/test 钉住的函数原样（doLogin/doLogout/checkSessionInner、节点图/
+ * 防御(a)函数簇、NODE_MAP_TTL_MS/CONTROL_PROBE_MS），改动须同步更新该线快照。
+ * 加载顺序第 4 位（最后）。 */
 'use strict';
-/* QFRemote 新控制台（影子版）——单页壳同框切换。
-   交互口径：《交互规格-QFClash移植.md》六项 + #32 登录落点/单一顶栏 + #34 主菜单次序。
-   数据口径：只消费既有服务端接口；购买/订单走 N-1、积分/福利走 N-2（均已上线接真）。 */
-
-/* ---------------- 图标 ---------------- */
-const ICONS = {
-  home: '<path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
-  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
-  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
-  chat: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.5 0-3-.4-4.2-1.1L3 20l1.1-5.3A8.5 8.5 0 1 1 21 11.5z"/>',
-  forum: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
-  headset: '<path d="M4 13a8 8 0 0 1 16 0"/><rect x="2" y="13" width="4" height="7" rx="2"/><rect x="18" y="13" width="4" height="7" rx="2"/><path d="M20 19a3 3 0 0 1-3 3h-3"/>',
-  key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M11 12L21 2"/><path d="M16 7l3 3"/>',
-  cart: '<circle cx="9" cy="21" r="1.6"/><circle cx="19" cy="21" r="1.6"/><path d="M2 3h3l2.6 12.5a2 2 0 0 0 2 1.5h8.7a2 2 0 0 0 2-1.6L22 7H6"/>',
-  award: '<circle cx="12" cy="9" r="6"/><path d="M8.6 14L7 22l5-3 5 3-1.6-8"/>',
-  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/>',
-  shield: '<path d="M12 22s8-3.6 8-10V5l-8-3-8 3v7c0 6.4 8 10 8 10z"/><path d="M9 11.5l2 2 4-4.5"/>',
-  gear: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
-  folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
-  bell: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/>',
-  chevR: '<path d="M9 6l6 6-6 6"/>',
-  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
-  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
-  refresh: '<path d="M21 12a9 9 0 1 1-2.9-6.6L21 8"/><path d="M21 3v5h-5"/>',
-  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
-  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/>',
-  /* 会话融合视图补图（2.4.0，路径与冻结稿 preview 图标库同源同风格） */
-  back: '<path d="M15 5l-7 7 7 7"/>',
-  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/>',
-  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
-  power: '<path d="M12 3v8M6.3 6.5a8 8 0 1 0 11.4 0"/>',
-  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
-  keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/>',
-  send: '<path d="M21 3L10 14M21 3l-7 18-4-7-7-4z"/>',
-  x: '<path d="M6 6l12 12M18 6L6 18"/>',
-  check: '<path d="M4 12.5l5 5L20 6.5"/>',
-  mute: '<path d="M4 10v4h3l5 4V6l-5 4H4z"/><path d="M16 9l5 6M21 9l-5 6"/>'
-};
-const ic = n => `<svg class="ic" viewBox="0 0 24 24">${ICONS[n] || ''}</svg>`;
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const $ = (s, r) => (r || document).querySelector(s);
-const fmtDate = ms => { if (!ms) return '—'; const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
-
-/* ---------------- 提示层（恒在最上层，z=100000） ---------------- */
-function toast(msg, type) {
-  const box = $('#toasts'); if (!box) return;
-  const t = document.createElement('div');
-  t.className = 'toast ' + (type || 'info'); t.textContent = msg;
-  box.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 320); }, 4200);
-}
-/* ---------------- 弹窗层（z=90000，低于提示层） ---------------- */
-function showModal(title, bodyHtml, buttons) {
-  const root = $('#modalRoot');
-  root.innerHTML = `<div class="mask"><div class="modal"><h3>${esc(title)}</h3><div class="mbody">${bodyHtml}</div><div class="mops"></div></div></div>`;
-  const ops = $('.mops', root);
-  (buttons || [{ label: '知道了' }]).forEach(b => {
-    const btn = document.createElement('button');
-    btn.className = 'btn' + (b.primary ? '' : ' grey'); btn.textContent = b.label;
-    btn.onclick = () => { if (b.onClick) b.onClick(); closeModal(); };
-    ops.appendChild(btn);
-  });
-  return root;
-}
-function closeModal() { $('#modalRoot').innerHTML = ''; }
-function confirmModal(title, text, okLabel, onOk) {
-  showModal(title, `<p>${esc(text)}</p>`, [{ label: '取消' }, { label: okLabel || '确认', primary: true, onClick: onOk }]);
-}
-
-/* ---------------- 接口层：正式失败提示、超时兜底、失败按白名单重试一次 ---------------- */
-/* 超时兜底（perf 线定版，与下述白名单融合）：单项默认上限见 API_TIMEOUT_MS，
-   AbortController 到点中止并以 timeout 标记返回；调用方显式传 opts.retry 时
-   以显式为准（lockApi 等既有调用点口径不改）。 */
-/* 网络层自动重试白名单——只有「重复提交不会产生第二次业务效果」的请求才
-   允许自动重发：
-   · 全部 GET/HEAD：安全方法，服务端仅读；
-   · POST /appeal/status：只读查询（服务端契约）；
-   · POST /chat/api/vault：按 msgId 幂等（服务端契约：同 msgId 重复提交
-     直接返回 {ok:true, dup:true} 不重复落账）；
-   · POST /chat/api/read：按会话写 marks[我]=max(原值, uptoSeq)，单调幂等。
-   其余一概不自动重发——尤其 POST /appeal：服务端按提交次数计数（永久
-   封禁 2 次/其他 3 次），「已落库但响应丢失」时重发会白白消耗一次额度；
-   POST /chat/api/send 会重复投递消息，同样不在白名单内。 */
-const API_TIMEOUT_MS = 30000;   // 默认单项上限【施工偏差 D1：DS 稿 12000 → 30000；现行本无超时，截图上传等大 POST 弱网可合法超 12s，关键路径另有显式超时（lockApi 表等），抬高默认值只防回归】
-const API_RETRY_DELAY_MS = 600; // 与原文案一致的退避间隔
-const API_RETRY_SAFE = [
-  ['POST', '/appeal/status'],
-  ['POST', '/chat/api/vault'],
-  ['POST', '/chat/api/read']
-];
-function apiRetrySafe(method, path) {
-  const m = String(method || 'GET').toUpperCase();
-  if (m === 'GET' || m === 'HEAD') return true;
-  const p = String(path || '').split('?')[0];
-  return API_RETRY_SAFE.some(x => x[0] === m && x[1] === p);
-}
-async function api(path, opts) {
-  opts = opts || {};
-  const method = (opts.method || 'GET').toUpperCase();
-  const timeoutMs = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : API_TIMEOUT_MS;
-  // 只对幂等方法自动重试：写操作（启停锁/重置/更新）重试会导致重复投递信封（幂等防呆）
-  const retryable = opts.retry !== undefined ? !!opts.retry : apiRetrySafe(method, path);
-  const maxAttempts = retryable ? 2 : 1;
-  let lastErr = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const init = { credentials: 'include', method, headers: {} };
-    if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
-    if (opts.form) { init.headers['Content-Type'] = 'application/x-www-form-urlencoded'; init.body = new URLSearchParams(opts.form).toString(); }
-    if (opts.headers) Object.assign(init.headers, opts.headers);
-    const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-    let timer = null;
-    if (ctl) { init.signal = ctl.signal; timer = setTimeout(() => { try { ctl.abort(); } catch (e) {} }, timeoutMs); }
-    try {
-      const r = await fetch(path, init);
-      const text = await r.text();
-      let json = null; try { json = JSON.parse(text); } catch (e) { /* 非 JSON 响应按文本处理 */ }
-      return { status: r.status, ok: r.ok, json, text };
-    } catch (e) {
-      lastErr = (e && e.name === 'AbortError') ? new Error('timeout') : e;
-      if (attempt + 1 < maxAttempts) await new Promise(r2 => setTimeout(r2, API_RETRY_DELAY_MS));
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-  return { status: 0, ok: false, json: null, text: '', networkError: lastErr, timeout: !!(lastErr && lastErr.message === 'timeout') };
-}
-
-function stateBox(title, text, retryFn) {
-  return `<div class="card"><div class="statebox"><b>${esc(title)}</b><p>${esc(text)}</p>${retryFn ? '<button class="btn sm" data-retry="1">重新加载</button>' : ''}</div></div>`;
-}
-function bindRetry(container, fn) { const b = $('[data-retry]', container); if (b) b.onclick = fn; }
-function netFail(container, retryFn) {
-  container.innerHTML = stateBox('网络暂时不可用', '与服务器的连接出现问题，请检查网络后重新加载。您的登录状态不会因此丢失。', true);
-  bindRetry(container, retryFn);
-}
-function apiErrText(r, fallback) {
-  if (r && r.json && (r.json.error || r.json.msg)) return r.json.error || r.json.msg;
-  return fallback || '服务暂时不可用，请稍后再试。';
-}
-function fmtSize(n) {
-  n = Number(n) || 0;
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
-  return (n / 1073741824).toFixed(2) + ' GB';
-}
-/* 问候语按本机时段分段（原写死「下午好」，任何时段打开都错） */
-function greetWord() {
-  const h = new Date().getHours();
-  if (h < 6) return '夜深了';
-  if (h < 9) return '早上好';
-  if (h < 12) return '上午好';
-  if (h < 14) return '中午好';
-  if (h < 18) return '下午好';
-  return '晚上好';
-}
-function fmtRemain(expMs) {
-  const ms = Number(expMs) - Date.now();
-  if (!expMs || ms <= 0) return '已过期';
-  const mins = Math.floor(ms / 60000);
-  if (mins < 60) return '剩余 ' + Math.max(mins, 1) + ' 分钟';
-  const h = Math.floor(mins / 60), m = mins % 60;
-  return '剩余 ' + h + ' 小时' + (m ? ' ' + m + ' 分钟' : '');
-}
-
-/* ---------------- 个人资料（2.3.2：统一档案 ext /profile/*） ----------------
-   契约（ext 定版）：GET /profile/api/me 回 {ok, username, nickname,
-   effectiveNickname, defaultNickname, hasAvatar, avatarMime,
-   avatarUpdatedAt, avatarUrl}；POST /profile/mod/submit 一次只提一项
-   {nickname} 或 {avatar:{mime,dataBase64}|null}，200 回
-   {ok,kind,applied,reviewId,category,msg?,profile}（机审驳回 applied=false
-   且 category 只给大类）；输入校验错误 400 {ok:false,code,msg}（msg 原样
-   回显，不改写）；GET /profile/mod/records（本人近 50 条）；
-   POST /profile/mod/<id>/appeal {note}（说明 ≤200 字，每行至多一次）。
-   登录账号名与昵称是两套东西：界面分行分称，登录名行文案恒为
-   「登录账号名（不可修改，如需变更请联系官方客服）」。 */
-const AVATAR_MAX_BYTES = 200 * 1024;
-const AVATAR_HARD_MAX_BYTES = 20 * 1024 * 1024; // 选图硬顶（核对 D5）：超此值不读文件、直接报定版文案
-const AVATAR_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-const AVATAR_TOO_LARGE_TEXT = '头像太大了，请先压缩到 200KB 以内再上传';
-const PROFILE_BUSY_TEXT = '系统繁忙，请稍后再试';
-let MyProfile = null;   // GET /profile/api/me 最近一次回包（统一档案正本视图）
-function b64OfBytes(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes, i, i + 0x8000)); return btoa(s); }
-function avatarFormatOk(mime) { return AVATAR_MIMES.indexOf(mime) >= 0; }
-function avatarDirectOk(size, mime) { return size <= AVATAR_MAX_BYTES && avatarFormatOk(mime); }
-function avatarQualitySteps() { const out = []; let q = 0.85; while (q >= 0.4) { out.push(Math.round(q * 100) / 100); q = Math.round((q - 0.15) * 100) / 100; } return out; }
-function profileAvatarHtml(p, size) {
-  size = size || 40;
-  if (p && p.hasAvatar && p.avatarUrl) return `<img class="qf-avatar" style="width:${size}px;height:${size}px" src="${esc(p.avatarUrl)}" alt="头像">`;
-  return `<img class="qf-avatar qf-avatar-ph" style="width:${size}px;height:${size}px" src="assets/avatar-placeholder.svg" alt="默认头像">`;
-}
-function myAvatarHtml(size) { return profileAvatarHtml(MyProfile, size); }
-function myEffectiveNickname() { return (MyProfile && MyProfile.effectiveNickname) || S.displayName || S.user || ''; }
-function paintIdentity() {
-  document.querySelectorAll('[data-my-avatar]').forEach(el => { el.innerHTML = profileAvatarHtml(MyProfile, Number(el.getAttribute('data-my-avatar')) || 34); });
-  document.querySelectorAll('[data-my-nick]').forEach(el => { el.textContent = myEffectiveNickname(); });
-}
-async function refreshMyProfile() {
-  const r = await api('/profile/api/me');
-  if (r.status === 200 && r.json && r.json.ok) {
-    MyProfile = r.json; S.profile = r.json;
-    if (r.json.effectiveNickname) S.displayName = r.json.effectiveNickname;
-    if (r.json.username) S.user = r.json.username;
-    paintIdentity();
-    return MyProfile;
-  }
-  return null;
-}
-function refreshMyProfileLazy() {
-  if (S.auth !== 'in' || MyProfile || refreshMyProfileLazy._p) return;
-  refreshMyProfileLazy._p = true;
-  refreshMyProfile().then(() => { refreshMyProfileLazy._p = false; }, () => { refreshMyProfileLazy._p = false; });
-}
-// 统一档案失效（核对 S1）：登出/被踢/会话失效/重新登录四处统一清，
-// 防同页切号后身份区串上一账号的昵称与头像（lazy 守卫见 MyProfile 非空即拦）。
-function clearMyProfile() { MyProfile = null; S.profile = null; }
-/* 头像预处理（照 QFClash 网页版 prepareAvatar 定版移植）：≤200KB 且格式
-   合规直传；超限 canvas 缩最长边 512px、先填白底再绘图（防透明 PNG 转
-   黑底）、JPEG 质量 0.85 起每次 −0.15 递减至 ≤200KB（下限 0.4）；
-   仍超限报「头像太大了，请先压缩到 200KB 以内再上传」。 */
-async function prepareAvatar(file) {
-  const MAX = AVATAR_MAX_BYTES;
-  // 核对 D5：先看 file.size 再决定读法——合规小图才全量读入直传；超硬顶直接
-  // 报定版文案不读；其余走 canvas 路径（object URL＋Image 本不需要先整文件读入）。
-  if (typeof file.size === 'number') {
-    if (avatarDirectOk(file.size, file.type)) { const buf = new Uint8Array(await file.arrayBuffer()); return { mime: file.type, dataBase64: b64OfBytes(buf) }; }
-    if (file.size > AVATAR_HARD_MAX_BYTES) { const tooBig = new Error(AVATAR_TOO_LARGE_TEXT); tooBig.code = 'AVATAR_TOO_LARGE'; throw tooBig; }
-  } else {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    if (avatarDirectOk(buf.length, file.type)) return { mime: file.type, dataBase64: b64OfBytes(buf) };
-  }
-  const url = URL.createObjectURL(file);
-  try {
-    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-    const scale = Math.min(1, 512 / Math.max(img.width, img.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(img.width * scale)); canvas.height = Math.max(1, Math.round(img.height * scale));
-    const actx = canvas.getContext('2d');
-    actx.fillStyle = '#ffffff'; actx.fillRect(0, 0, canvas.width, canvas.height);
-    actx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    let q = 0.85, blob = null;
-    while (q >= 0.4) {
-      blob = await new Promise(res => { canvas.toBlob(res, 'image/jpeg', q); });
-      if (blob && blob.size <= MAX) break;
-      q = Math.round((q - 0.15) * 100) / 100;
-    }
-    if (!blob || blob.size > MAX) { const tooBig = new Error(AVATAR_TOO_LARGE_TEXT); tooBig.code = 'AVATAR_TOO_LARGE'; throw tooBig; }
-    return { mime: 'image/jpeg', dataBase64: b64OfBytes(new Uint8Array(await blob.arrayBuffer())) };
-  } finally { URL.revokeObjectURL(url); }
-}
-function fmtProfileTime(v) {
-  if (v == null || v === '') return '';
-  const n = Number(v);
-  if (isFinite(n) && n > 0) return fmtDate(n < 1e12 ? n * 1000 : n);
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? String(v) : fmtDate(d.getTime());
-}
-/* 「个人资料」卡（纯渲染函数：Views.profile 与本地 harness 共用同一份）。
-   昵称与登录账号名分行分称（C1）：昵称行可编辑，登录名行恒带
-   「登录账号名（不可修改，如需变更请联系官方客服）」。 */
-function profileCardHtml(p) {
-  p = p || {};
-  const eff = p.effectiveNickname || p.nickname || p.username || '';
-  const def = p.defaultNickname || p.username || '';
-  return `<div class="card" id="pfProfileCard"><h3>个人资料</h3>
-    <div class="profile-head"><span id="pfAvatarSlot">${profileAvatarHtml(p, 76)}</span>
-      <span class="pf-names"><b id="pfEffNick">${esc(eff)}</b>
-      <small id="pfDefaultNick">默认昵称：${esc(def)}</small>
-      <small>未设置昵称时显示默认昵称（即登录账号名）。</small></span></div>
-    <div class="profile-login"><span>登录账号名（不可修改，如需变更请联系官方客服）</span><b id="pfLoginName">${esc(p.username || '')}</b></div>
-    <div class="field"><label for="pfNick">昵称 <span class="pf-count"><span id="pfNickCount">0</span> / 20</span></label>
-      <input id="pfNick" maxlength="20" value="${esc(p.nickname || '')}" placeholder="请输入昵称" autocomplete="off">
-      <p class="hint">昵称最多 20 字；提交后经审核，通过即生效。</p></div>
-    <div id="pfNickOut"></div>
-    <div class="pf-ops"><button class="btn sm" id="pf-nick-save">保存昵称</button><button class="btn sm grey" id="pf-nick-clear">清除昵称</button></div>
-    <div class="field" style="margin-top:18px"><label for="pfAvatarFile">头像</label>
-      <input id="pfAvatarFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-      <p class="hint">头像只支持 PNG、JPG、WebP 或 GIF 图片，大小不超过 200KB；超出时将先在本地压缩再上传。</p></div>
-    <div id="pfAvatarOut"></div>
-    <div class="pf-ops"><button class="btn sm" id="pf-avatar-upload">上传头像</button><button class="btn sm grey" id="pf-avatar-del">删除头像</button></div>
-    <h3 style="margin-top:22px">审核记录</h3><div id="pfRecords"><div class="skel" style="height:40px"></div></div>
-  </div>`;
-}
-function profileRecordsHtml(records) {
-  const list = (Array.isArray(records) ? records : []).slice(0, 50);
-  if (!list.length) return '<div class="statebox"><b>暂无审核记录</b><p>修改昵称或头像后，审核结果会显示在这里。</p></div>';
-  const kindLabel = k => k === 'avatar' ? '头像' : (k === 'nickname' ? '昵称' : String(k || '资料'));
-  const statusLabel = s => ({ approved: '已通过', rejected: '未通过', pending: '审核中', appealed: '已申诉', appeal_approved: '申诉通过', appeal_rejected: '申诉未通过' }[s] || String(s || ''));
-  return list.map(r => {
-    const canAppeal = r.status === 'rejected' && !r.appealed && !r.appeal && !r.appealStatus;
-    return `<div class="pfrec"><span class="tag">${esc(kindLabel(r.kind))}</span><span class="pfrec-main"><b>${esc(statusLabel(r.status))}</b>${r.category ? `<small>包含${esc(r.category)}</small>` : ''}</span><span class="pfrec-time">${esc(fmtProfileTime(r.createdAt != null ? r.createdAt : r.created_at))}</span>${canAppeal ? `<button class="btn sm ghost" data-appeal="${esc(r.id)}">申诉</button>` : ''}</div>`;
-  }).join('');
-}
-
-/* ---------------- 屏幕锁（隐私锁）桥：与软件端同一条 8445/lock 桥 ----------------
-   契约照双壳正本（app-src/lock.js、安卓 LockClient）：同源路径 /lock/*，
-   凭控制台会话（xid）鉴权，服务端按账号逐台核对机主；密码只在提交瞬间
-   过桥，不存、不记。GET /lock/devices 回 [{id,name,owner,locked,component}]，
-   其中 id 为 MeshCentral 节点 id；非机主设备由服务端直接过滤、不下发。 */
-/* 超时口径对齐服务端语义：读路径 8s（服务端冷查 ≤3s，留推进余量）；
-   写路径必须覆盖服务端对账窗口（RECONCILE 30s / UPDATE_RECONCILE 240s）+ 余量，
-   否则客户端先超时、服务端还在对账，会出现「客户端说失败、服务端记成功」。 */
-const LOCK_TIMEOUTS = { '/devices': 8000, '/enable': 45000, '/disable': 45000, '/reset': 45000, '/update': 260000 };
-async function lockApi(method, route, body) {
-  const timeoutMs = LOCK_TIMEOUTS[route] || 15000;
-  const opts = { method, timeoutMs };
-  if (body !== undefined) opts.json = body;
-  opts.retry = (method === 'GET' || method === 'HEAD'); // 写路径不自动重试（防重复投递信封）
-  return api('/lock' + route, opts);
-}
-
-
-function validateLockPw(pw) {
-  if (typeof pw !== 'string' || pw.length < 4) return '密码至少 4 位，请检查后重试。';
-  if (pw.length > 64) return '密码最多 64 位，请检查后重试。';
-  return null;
-}
 
 /* ---------------- 设备节点标识（node id）----------------
    /home/api/stats 的设备只有名称/系统/分组/在线，不带节点 id（服务端口径）。
@@ -336,6 +22,7 @@ function validateLockPw(pw) {
    端点兜底（5 秒缓存＋单飞，不另开浏览器 WS）。 */
 let nodeMapCache = null;
 let nodeMapInflight = null;
+let nodeMapGen = 0; // 高-1：节点映射代次——invalidate 时自增，在飞请求回来先比代次，旧代次一律不得回填缓存
 let nodeMapSlowInflight = null;
 let nodeMapSlowDeferred = false; // X-05：首屏 deferSlow 后待补的慢源探测（下次非首屏取数时起）
 const NODE_MAP_TTL_MS = 60000;
@@ -402,14 +89,16 @@ function fetchControlNodes(timeoutMs) {
    只在真正需要节点 id 时调用（见 fetchNodeMap 的 deferSlow），设备页首屏不调。 */
 function startSlowProbe() {
   if (nodeMapSlowInflight) return;
+  const gen0 = nodeMapGen; // 高-1：慢源回填前比代次，换账号后旧探测结果不写缓存、不刷设备行
   nodeMapSlowInflight = fetchControlNodes(CONTROL_PROBE_MS)
-    .then((grouped) => { applyControlNodes(grouped); refreshDevRowIds(document); })
+    .then((grouped) => { if (gen0 === nodeMapGen) { applyControlNodes(grouped); refreshDevRowIds(document); } })
     .catch(() => {})
     .then(() => { nodeMapSlowInflight = null; });
 }
 async function fetchNodeMap(opts) {
   const force = !!(opts && opts.force);
   const deferSlow = !!(opts && opts.deferSlow);
+  const gen0 = nodeMapGen; // 高-1：本次取数代次，快源回包与 .then 清位都先比代次
   // X-05：首屏 defer 过的慢源，在下一次非首屏取数时补起（哪怕本次命中页内缓存
   // 直接返回，也要把 WS 建起来，否则共享设备 id 会一直缺到 TTL 过期）。
   if (!deferSlow && nodeMapSlowDeferred && !nodeMapSlowInflight) { nodeMapSlowDeferred = false; startSlowProbe(); }
@@ -421,6 +110,11 @@ async function fetchNodeMap(opts) {
     try {
       // X-14：force 时 /lock/devices 带 ?force=1，跳过服务端非机主缓存与失败抑制实读一次。
       const lr = await lockApi('GET', force ? '/devices?force=1' : '/devices');
+      // 高-1：快源在飞期间已 invalidate（登出/换账号/强制下线）：旧账号结果
+      // 一个字节都不写缓存——校验必须在 applyLockDevices 之前，否则旧设备
+      // 已落缓存。返回当前缓存（新账号已取到的即新数据，尚未取到的为空壳
+      // 且 at=0，下次调用必重取），旧调用方凭原有守卫丢弃。
+      if (gen0 !== nodeMapGen) return ensureNodeMap();
       if (lr.status === 200 && lr.json && Array.isArray(lr.json.devices)) {
         applyLockDevices(lr.json.devices);
         // X-13：服务端回 partial/pending（读路径预算用尽、部分设备未实读）时
@@ -438,380 +132,18 @@ async function fetchNodeMap(opts) {
     if (deferSlow) nodeMapSlowDeferred = true;
     else startSlowProbe();
     return nm;
-  })().then((v) => { nodeMapInflight = null; return v; },
-            (e) => { nodeMapInflight = null; throw e; });
+  })().then((v) => { if (gen0 === nodeMapGen) nodeMapInflight = null; return v; },
+            (e) => { if (gen0 === nodeMapGen) nodeMapInflight = null; throw e; });
   return nodeMapInflight;
 }
 /* raceNodeId（点按 900ms 竞态解析）已随 2.4.0 会话直达整体删除：openSession 的
    解析序＝入口 data-nodeid 数据携带 → nodeIdFor 缓存 → ext /api/device/resolve
    兜底（见会话融合视图段），超时回落原生设备列表的路径不复存在。 */
-function invalidateNodeMap() { nodeMapCache = null; }
-
-/* ---------------- 设备间文件发送（N-3 端点组，会话鉴权） ---------------- */
-const FILE_MAX_BYTES = 200 * 1024 * 1024;
-function readFileBase64(file, onProgress) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
-    reader.onerror = () => reject(new Error('文件读取失败，请重新选择文件后重试。'));
-    reader.onload = () => {
-      const s = String(reader.result || '');
-      const i = s.indexOf(',');
-      resolve(i >= 0 ? s.slice(i + 1) : s);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-function xhrSendFile(payload, onProgress) {
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/license/api/files/send', true);
-    xhr.withCredentials = true;
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    // X-04：上传 60 秒无进展即 abort（原无任何超时，弱网可无限挂起）。
-    let lastProgressAt = Date.now();
-    const stallTimer = setInterval(() => {
-      if (Date.now() - lastProgressAt > 60000) { clearInterval(stallTimer); try { xhr.abort(); } catch (e) {} resolve({ status: 0, ok: false, json: null, text: '', networkError: true, stalled: true }); }
-    }, 5000);
-    xhr.upload.onprogress = (e) => { lastProgressAt = Date.now(); if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
-    xhr.onload = () => {
-      clearInterval(stallTimer);
-      let json = null; try { json = JSON.parse(xhr.responseText); } catch (e) {}
-      resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, json, text: xhr.responseText });
-    };
-    xhr.onerror = () => { clearInterval(stallTimer); resolve({ status: 0, ok: false, json: null, text: '', networkError: true }); };
-    xhr.send(JSON.stringify(payload));
-  });
-}
-async function downloadStagedFile(id, filename, onProgress) {
-  // X-04：下载加 30 秒无进展超时（原裸 fetch 无超时、无进度、无断点）——
-  // 失败文案带已收字节数，不再只说「下载失败」。
-  const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-  let timer = null;
-  const armStall = () => { if (ctl) { if (timer) clearTimeout(timer); timer = setTimeout(() => { try { ctl.abort(); } catch (e) {} }, 30000); } };
-  const disarm = () => { if (timer) { clearTimeout(timer); timer = null; } };
-  let r;
-  try {
-    armStall();
-    r = await fetch('/license/api/files/' + encodeURIComponent(id) + '/download', { credentials: 'include', signal: ctl ? ctl.signal : undefined });
-  } catch (e) { disarm(); throw new Error('下载中断（已收 0 MB），请重试。'); }
-  disarm();
-  if (!r.ok) throw new Error('下载失败（服务返回 ' + r.status + '），请稍后再试。');
-  const total = Number(r.headers.get('Content-Length') || 0);
-  let blob;
-  if (r.body && r.body.getReader) {
-    const reader = r.body.getReader(); const chunks = []; let got = 0;
-    try {
-      for (;;) {
-        armStall();
-        const part = await reader.read();
-        disarm();
-        if (part.done) break;
-        chunks.push(part.value); got += part.value.length;
-        if (onProgress && total) onProgress(got / total);
-      }
-    } catch (e) {
-      disarm();
-      try { await reader.cancel(); } catch (e2) {}
-      throw new Error('下载中断（已收 ' + (got / 1048576).toFixed(1) + ' MB），请重试。');
-    }
-    blob = new Blob(chunks);
-  } else { blob = await r.blob(); if (onProgress) onProgress(1); }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename || 'file';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-  return blob.size;
-}
-
-/* ---------------- 会话与本地缓存（进门不挡：先渲染、后校验） ---------------- */
-const Cache = {
-  load() { try { return JSON.parse(localStorage.getItem('qf-console-cache') || 'null'); } catch (e) { return null; } },
-  save(v) { try { localStorage.setItem('qf-console-cache', JSON.stringify(v)); } catch (e) {} },
-  clear() { try { localStorage.removeItem('qf-console-cache'); } catch (e) {} }
-};
-// P1-4a（2026-11-11）：手动登出的持久标记——登出状态必须活过页面重载。
-// r5 真因：S._manualLogout 只在内存，登出中途页面一重载即丢；缓存仍在，
-// 启动缓存路径按缓存复活壳、S.auth 回 'in'，表单 3 分钟不出（桩测已复现）。
-// 本标记在 doLogout 确认的第一时间写 localStorage；仅凭据提交的新登录
-// 成功（doLogin）才清；启动、showShell、checkSession 均认它。
-const ManualLogout = {
-  KEY: 'qf-console-manual-logout',
-  set() { try { localStorage.setItem(this.KEY, '1'); } catch (e) {} },
-  clear() { try { localStorage.removeItem(this.KEY); } catch (e) {} },
-  is() { try { return localStorage.getItem(this.KEY) === '1'; } catch (e) { return false; } }
-};
-const S = {
-  auth: 'unknown',           // unknown | in | out
-  user: null, displayName: '', isAdmin: false,
-  license: null, points: null, stats: null,
-  route: { name: 'home', param: null },
-  forumReady: false,
-  sessGen: 0                 // DS-R49：会话身份代数（新登录/登出/强制下线/会话结束递增，在飞请求据此丢弃迟到响应）
-};
-function cacheSave() {
-  if (S.auth !== 'in') return;
-  Cache.save({ user: S.user, displayName: S.displayName, isAdmin: S.isAdmin, license: S.license, points: S.points, route: S.route, at: Date.now() });
-}
-/* ============================================================
- * 会话中途封禁锁定 / 会话已结束呈现（新增区块）
- * 仅本区块与下列修改点涉及本件，其余函数不动。
- * ============================================================ */
-const BAN_LOCK_CHECK_MS = 30000;              // 锁定期 /me 复查周期
-const BAN_SIGNAL_PARAM_ACCOUNT_PATHS = [      // 信号③排除：以参数指定目标账号的查询类接口
-  '/license/api/status/query',
-  '/license/api/status/reveal',
-  '/license/api/verify-password'
-];
-
-const BanLock = {
-  state: 'off',        // off | locked | expired
-  reason: '',          // expired 来源：'locked'（锁定中会话被撤销）| 'died'（会话猝死）
-  data: null,          // /me 的 activeBan 原样对象（code/permanent/endsAt/id），不打印 code
-  timer: null,
-  flight: false,       // 复查单飞
-  suppress: false,     // 主动登出等场景下的抑制窗
-
-  active() { return this.state === 'locked' || this.state === 'expired'; },
-
-  enter(ban) {
-    if (this.state === 'expired') return;
-    if (this.state === 'locked') { if (ban) this.data = ban; return; }
-    if (this.suppress) return;
-    if (S.auth !== 'in') return;
-    this.state = 'locked';
-    this.reason = 'api';
-    this.data = ban || null;
-    try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
-    this.paint();
-    this.startTimer();
-  },
-
-  toExpired(reason) {
-    // X-01：锁屏/会话结束呈现前先拆会话帧（同 sessionDied 的理由）。
-    try { teardownSession(); } catch (e) {}
-    this.stopTimer();
-    this.state = 'expired';
-    this.reason = (reason === 'locked') ? 'locked' : 'died';
-    S.auth = 'out'; S.license = null; S.points = null; S.isAdmin = false; // DS-R24 B3：已结束页不得残留管理后台入口
-    try { Cache.clear(); } catch (e) {}
-    try { invalidateNodeMap(); } catch (e) {} // W1-2：会话结束即清设备映射缓存，防换账号残留上一账号设备清单
-    try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断呈现 */ }
-    this.paint();
-  },
-
-  exit() {
-    this.stopTimer();
-    this.state = 'off';
-    this.reason = '';
-    this.data = null;
-    this.flight = false;
-    this._lastPaintState = 'off';   // DS-R46：退出即作废上次绘制态，防旧表单节点被误保全
-  },
-
-  startTimer() {
-    this.stopTimer();
-    if (this.state !== 'locked') return;
-    this.timer = setInterval(() => { try { this.recheck(false); } catch (e) {} }, BAN_LOCK_CHECK_MS);
-  },
-
-  stopTimer() {
-    if (this.timer != null) {
-      try { clearInterval(this.timer); } catch (e) {}
-      this.timer = null;
-    }
-  },
-
-  async recheck(manual) {
-    if (this.state !== 'locked') return;
-    if (this.flight) return;
-    this.flight = true;
-    try {
-      const me = await api('/license/api/me');
-      if (me.status === 200 && me.json && me.json.ok) {
-        if (me.json.activeBan) {
-          const nb = me.json.activeBan;
-          const od = this.data || {};
-          const changed = (!!od.permanent !== !!nb.permanent) || (String(od.endsAt || '') !== String(nb.endsAt || ''));
-          this.data = nb;
-          if (manual && !changed) { try { toast('账号仍处于封禁状态。', 'warn'); } catch (e) {} }
-          if (manual || changed) this.paint();
-          return;
-        }
-        // 解封：退出锁定，按 checkSession 既有口径回填后回主壳
-        this.exit();
-        const probe = {};
-        const ok = await checkSession(true, { noDied: true, probe, force: true }); // X-02：解封复查是用户可见的恢复动作，页面不可见也不跳过
-        if (this.active()) return;            // 复查期间又被判封禁，保持锁定
-        if (probe.gated) return;              // DS-R44：checkSession 已画设备门，禁止 showAuth 覆盖
-        if (ok && S.auth === 'in') {
-          location.hash = '#home';
-          showShell();
-          try { toast('账号状态已恢复正常，欢迎回来。', 'ok'); } catch (e) {}
-        } else {
-          showAuth('login', { notice: '请重新登录。' });
-        }
-        return;
-      }
-      if (me.status === 401 || me.status === 403) {
-        this.toExpired('locked');
-        return;
-      }
-      if (manual) { try { toast('暂时无法确认账号状态，请稍后再试。', 'warn'); } catch (e) {} }
-    } catch (e) {
-      if (manual) { try { toast('暂时无法确认账号状态，请稍后再试。', 'warn'); } catch (e2) {} }
-    } finally {
-      this.flight = false;
-    }
-  },
-
-  paintStatusTool(box) {
-    if (!box) return;
-    box.innerHTML = '<div class="card" style="margin-top:16px"><h3>查询密钥（账号＋密码核验）</h3>'
-      + '<div class="field"><label>账号</label><input id="bn-sq-user"></div>'
-      + '<div class="field"><label>密码</label><input id="bn-sq-pass" type="password"></div>'
-      + '<button class="btn block" id="bn-sq-btn">查询</button><div id="bn-sq-out" style="margin-top:12px"></div></div>';
-    const btn = $('#bn-sq-btn', box);
-    if (!btn) return;
-    btn.onclick = async () => {
-      const r = await api('/license/api/status/query', {
-        method: 'POST',
-        json: { username: $('#bn-sq-user', box).value.trim(), password: $('#bn-sq-pass', box).value }
-      });
-      const out = $('#bn-sq-out', box);
-      if (!out) return;
-      out.innerHTML = r.json
-        ? '<div class="note ' + (r.json.ok ? 'blue' : 'err') + '">'
-          + esc(r.json.ok ? statusSummary(r.json) : (r.json.msg || '查询失败，请核对账号与密码。')) + '</div>'
-        : stateBox('暂时无法查询', '服务暂时不可用，请稍后再试。', false);
-    };
-  },
-
-  paint() {
-    const root = (typeof $ === 'function') ? $('#authRoot') : document.getElementById('authRoot');
-    if (!root) return;
-    const shell = document.getElementById('shellRoot');
-    if (shell) shell.hidden = true;
-    root.hidden = false;
-    var _bf = document.getElementById('bootFail'); if (_bf) _bf.style.display = 'none';   // W4-2 启动兜底隐藏（锁定界面显根路径同口径，门二观察项）
-    try {
-      const st = this.state;
-      const d = this.data || null;
-      const nm = esc(S.displayName || S.user || '');
-      const isPerm = !!(d && d.permanent);
-      let endsText = '';
-      if (!isPerm && d && d.endsAt) {
-        try { endsText = esc(String(fmtDate(d.endsAt) || '')); } catch (e) { endsText = ''; }
-      }
-      let title, body;
-      if (st === 'expired') {
-        title = '登录状态已结束';
-        body = (this.reason === 'locked')
-          ? '本账号的登录状态已被服务器结束。如您的账号处于封禁状态，重新登录后将显示封禁原因与申诉入口。'
-          : '当前登录状态已失效，请重新登录后继续使用。';
-      } else {
-        title = '账号已被封禁';
-        if (isPerm) body = '您的账号已被永久封禁，当前无法使用本控制台的各项功能。';
-        else if (endsText) body = '您的账号已被封禁，预计于 ' + endsText + ' 解除，当前无法使用本控制台的各项功能。';
-        else body = '您的账号当前处于封禁状态，暂时无法使用本控制台的各项功能。';
-        body += '如您认为该处理存在疑问，可提交申诉或联系智能客服。';
-      }
-
-      let html = '<div class="authwrap"><div class="auth">';
-      try {
-        if (typeof brandBlock === 'function') {
-          const b = brandBlock();
-          if (typeof b === 'string') html += b;
-        }
-      } catch (e) { /* 品牌块异常不影响锁定呈现 */ }
-      html += '<h1>' + esc(title) + '</h1>';
-      if (nm) html += '<div class="psub">' + nm + '</div>';
-      html += '<div class="note err">' + esc(body) + '</div>';
-      if (st === 'locked') html += '<div class="note">事由：违反平台规则</div>';
-      if (st === 'expired') html += '<button class="btn block" id="bn-relogin">重新登录</button>';
-      else html += '<button class="btn block" id="bn-appeal">提交申诉</button>';
-      html += '<div id="bn-links" style="margin-top:10px;text-align:center">';
-      if (st === 'expired') html += '<a class="txtlink" id="bn-appeal-link" style="cursor:pointer">提交申诉</a> ';
-      html += '<a class="txtlink" id="bn-support" style="cursor:pointer">联系智能客服</a> ';
-      html += '<a class="txtlink" id="bn-status" style="cursor:pointer">查询密钥</a> ';
-      if (st === 'locked') html += '<a class="txtlink" id="bn-recheck" style="cursor:pointer">重新检查</a> ';
-      if (S.isAdmin) html += '<a class="txtlink" id="bn-admin" style="cursor:pointer">管理后台</a> ';
-      html += '<a class="txtlink" id="bn-logout" style="cursor:pointer">退出登录</a>';
-      html += '</div><div id="bn-tools" style="margin-top:16px"></div></div></div>';
-      // DS-R46：自动复检重绘（locked→locked）时保全旧 #bn-tools 节点，
-      // 正在填的申诉/客服/查钥表单与已绑定监听不丢；状态迁移（进入锁定/
-      // 转已结束/退出后重入）不保全，照旧重置。上次绘制态由 _lastPaintState
-      // 记录（paint 末尾回写、exit 清零），防退出后残留节点被误保全。
-      const prevTools = (this._lastPaintState === 'locked' && this.state === 'locked') ? $('#bn-tools', root) : null;
-      root.innerHTML = html;
-
-      const self = this;
-      let box = $('#bn-tools', root);
-      if (prevTools && box && box.parentNode) { box.parentNode.replaceChild(prevTools, box); box = prevTools; }
-      this._lastPaintState = this.state;
-      const bind = (id, fn) => {
-        const el = $('#' + id, root);
-        if (!el) return;
-        el.onclick = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); try { fn(); } catch (e) {} };
-      };
-      const openAppeal = () => {
-        if (!box) return;
-        box.innerHTML = '';
-        if (typeof renderAppeal === 'function') renderAppeal(box, { user: S.user || '' });
-      };
-      bind('bn-appeal', openAppeal);
-      bind('bn-appeal-link', openAppeal);
-      bind('bn-support', () => {
-        if (!box) return;
-        box.innerHTML = '';
-        if (typeof Views !== 'undefined' && Views && typeof Views.support === 'function') {
-          Views.support(box, null, 0, { guest: true });
-        }
-      });
-      bind('bn-status', () => { if (box) self.paintStatusTool(box); });
-      bind('bn-recheck', () => { self.recheck(true); });
-      bind('bn-admin', () => { location.href = '/admin'; });
-      bind('bn-logout', () => { doLogout(); });
-      bind('bn-relogin', () => {
-        // P1-4e（2026-11-11）：exit() 万一抛错也不得吞掉表单——先清锁，
-        // 无论成败都出登录表单。
-        try { self.exit(); } catch (e) {}
-        showAuth('login', { notice: '请重新登录。' });
-      });
-    } catch (e) {
-      root.innerHTML = '<div class="authwrap"><div class="auth">'
-        + '<h1>账号已被封禁</h1>'
-        + '<div class="note err">当前账号暂时无法使用本控制台的各项功能。如需帮助，请提交申诉或联系智能客服。</div>'
-        + '<button class="btn block" id="bn-logout">退出登录</button>'
-        + '</div></div>';
-      const lo = $('#bn-logout', root);
-      if (lo) lo.onclick = () => { try { doLogout(); } catch (e2) {} };
-    }
-  }
-};
-
-/* 信号采集：只报「当前会话」的封禁信号，不误踢 */
-function noteBanSignal(res, path) {
-  if (!res || typeof res !== 'object') return;
-  if (S.auth !== 'in') return;                 // 未登录工具调用不得锁人（R1 守卫）
-  if (BanLock.suppress) return;
-  if (BanLock.active()) return;
-  const j = res.json;
-  if (!j || typeof j !== 'object') return;
-  if (j.code !== 'ACCOUNT_BANNED') return;
-  // DS-R45：参数化账号查询路径排除上移至 200/403 分流前共用——403 形
-  // 同样是替别人查号被拒，不得误锁当前会话（原仅 200 分支有此排除）。
-  const p = String(path || '').split('?')[0];
-  if (BAN_SIGNAL_PARAM_ACCOUNT_PATHS.indexOf(p) >= 0) return;  // 参数化账号查询，防误踢
-  if (res.status === 403) {                    // 信号①：ext 集中门 / denyIfBanned
-    BanLock.enter(null);
-    return;
-  }
-  if (res.status === 200 && j.ok === false) {  // 信号③：处理器自查发出的 200 形封禁拒绝
-    BanLock.enter(null);
-  }
-}
+/* 高-1：清缓存即作废在飞请求——代次自增使旧快源/慢源回包全部丢弃，
+ * nodeMapInflight 置空使下次调用不再复用旧 promise；慢源待补标记一并
+ * 清掉（旧账号的 deferSlow 不得在新账号下补探）。登出/换账号/强制下线
+ * 三处调用点共用此函数，一处修全防住。 */
+function invalidateNodeMap() { nodeMapCache = null; nodeMapGen++; nodeMapInflight = null; nodeMapSlowDeferred = false; }
 
 /* 会话猝死统一落点（R5）：返回是否已接管呈现 */
 function sessionDied(source) {
@@ -825,14 +157,6 @@ function sessionDied(source) {
   BanLock.toExpired('died');
   return true;
 }
-
-/* api() 零侵入包装：所有调用自动过一遍信号采集 */
-const apiInnerRaw = api;
-api = async function (path, opts) {
-  const res = await apiInnerRaw(path, opts);
-  try { noteBanSignal(res, path); } catch (e) { /* 信号采集异常不得影响业务返回 */ }
-  return res;
-};
 
 async function checkSessionInner(silent, opts) {
   // P1（2026-11-11）：本页内已显式登出（doLogout 置标记）后，心跳/定时器
@@ -890,43 +214,6 @@ async function checkSessionInner(silent, opts) {
   // 网络异常等：不把用户踢下线（手感规格：失败给正式提示、不崩页）
   if (!silent) toast('暂时无法确认登录状态，请稍后再试。', 'warn');
   return S.auth === 'in';
-}
-/* X-02：checkSession 单飞——240 秒定时器、60 秒心跳、BanLock 复查三路可并发，
-   已在飞时直接复用同一份 promise，不再各开一条服务端 WS 校验；页面不可见时
-   跳过本次校验（切回来由下一轮定时器补上），不在后台空打校验。 */
-let checkFlight = null;
-async function checkSession(silent, opts) {
-  if (checkFlight) return checkFlight;
-  if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && !(opts && opts.force)) return S.auth === 'in';
-  checkFlight = checkSessionInner(silent, opts);
-  try { return await checkFlight; }
-  finally { checkFlight = null; }
-}
-/* 登录页偏好与账密保存（#39）：两个勾选框的状态跨登出、跨重启持久；
- * 「记住账号密码」勾选且登录成功才落盘，取消勾选再次登录即彻底清除。 */
-const LoginPrefs = {
-  load() { try { return JSON.parse(localStorage.getItem('qf-console-login-prefs') || 'null') || { rem: true, saveCred: false }; } catch (e) { return { rem: true, saveCred: false }; } },
-  save(v) { try { localStorage.setItem('qf-console-login-prefs', JSON.stringify(v)); } catch (e) {} }
-};
-const SavedCred = {
-  load() { try { return JSON.parse(localStorage.getItem('qf-console-cred') || 'null'); } catch (e) { return null; } },
-  save(u, p) { try { localStorage.setItem('qf-console-cred', JSON.stringify({ u, p })); } catch (e) {} },
-  clear() { try { localStorage.removeItem('qf-console-cred'); } catch (e) {} }
-};
-function parseBanView(str) {
-  try {
-    let s = str.replace(/-/g, '+').replace(/_/g, '/');
-    while (s.length % 4) s += '=';
-    const obj = JSON.parse(atob(s));
-    return {
-      mode: obj.mode === 'frozen' ? 'frozen' : 'banned',
-      permanent: !!obj.permanent,
-      endsAt: obj.endsAt || null
-    };
-  } catch (e) {
-    // 数据缺失或损坏时也能画门，只是没有日期/类型可能偏封禁
-    return { mode: 'banned', permanent: false, endsAt: null };
-  }
 }
 
 async function doLogin(username, password, remember) {
@@ -990,22 +277,7 @@ async function doLogin(username, password, remember) {
   }
   if (me.status === 401 || me.status === 403) return { ok: false, msg: '账号或密码不正确，请核对后重试。' };
   return { ok: false, msg: '登录未完成，请稍后再试。' };
-}
-async function heartbeat() {
-  if (S.auth !== 'in') return;
-  if (BanLock.active()) return;
-  const gen = S.sessGen; // DS-R49：发起时捕获身份代数
-  const r = await api('/points/api/heartbeat', { method: 'POST', json: { client: 'web-console-shadow' } });
-  if (gen !== S.sessGen || S.auth !== 'in') return; // DS-R49＋DS-R24 B2：等待期间身份代数变化（含登出后快速重登）或已主动退出登录，迟到响应不再接管呈现、不写积分、不落强制下线（防误踢新会话）
-  if (r.status === 200 && r.json) {
-    if (r.json.forceLogout) { forceGate(r.json.gateCode || 'G1'); return; } // 批A-A5：按服务端下发 gateCode 落门，与 checkSession 同口径
-    S.points = r.json; cacheSave();
-    return;
-  }
-  if (r.status === 401) { sessionDied('heartbeat'); }
-}
-setInterval(heartbeat, 60000);                    // 在线计时/强制下线通道
-setInterval(() => { if (S.auth === 'in' && !BanLock.active()) checkSession(true); }, 240000); // 凭证静默续期校验
+} // 凭证静默续期校验
 function forceGate(code) {
   S.sessGen++; // DS-R49：强制下线＝登出等价落点，递增代数使其余在飞旧响应作废
   try { teardownSession(); } catch (e) {} // X-01：强制下线先拆会话帧
@@ -1020,6 +292,7 @@ async function doLogout() {
   confirmModal('退出登录', '退出后将清除本设备的登录状态与记住标记，再次使用需要重新登录。', '退出登录', async () => {
     BanLock.suppress = true;
     S.sessGen++; // DS-R49：登出即身份代数变化，旧在飞响应作废
+    const gen0 = S.sessGen; // 扫表 S11：本次登出的代次——8 秒竞速期间若已新登录/被强制下线，收尾不得再把新会话踢回登录页
     try { teardownSession(); } catch (e) {} // X-01：登出请求发出前先拆会话帧，防旧帧又发心跳类请求
     // P1-4a（2026-11-11）：确认的第一时间即写持久登出标记＋内存标记——
     // 必须在 /logout 竞速之前；页面若在登出中途重载，标记已落盘，启动
@@ -1041,6 +314,7 @@ async function doLogout() {
     } finally {
       BanLock.suppress = false;
     }
+    if (gen0 !== S.sessGen) return; // 扫表 S11：竞速期间身份已变（新登录/强制下线已接管呈现），旧登出收尾整段作废
     Cache.clear();
     invalidateNodeMap(); // W1-2：主动登出即清设备映射缓存，防换账号残留
     try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) { /* 聊天模块异常不得阻断登出 */ }
@@ -1074,146 +348,6 @@ async function doLogout() {
     });
   });
 }
-
-/* ---------------- 导航（#34：主菜单组严格次序，三容器同序） ---------------- */
-const MENU34 = [
-  { icon: 'home', label: '首页', route: 'home' },
-  { icon: 'user', label: '我的账户', route: 'profile' },
-  { icon: 'folder', label: '我的文件', route: 'files' },
-  { icon: 'users', label: '好友', route: 'friends' },
-  { icon: 'forum', label: '论坛', route: 'forum' },
-  // H26/QF-33/三端入口（站长 13:34 定）：API 生成入口放侧边栏，一打开就能看到。
-  { icon: 'key', label: 'API 密钥', route: 'apikeys' }
-];
-const FUNC = [
-  { icon: 'monitor', label: '我的设备', route: 'devices' },
-  { icon: 'chat', label: '聊天', route: 'chat' },
-  { icon: 'headset', label: '智能客服', route: 'support' },
-  { icon: 'cart', label: '购买密钥', route: 'purchase' },
-  { icon: 'award', label: '积分与福利', route: 'points' }
-];
-const BTABS = [
-  { icon: 'home', label: '首页', route: 'home' },
-  { icon: 'monitor', label: '设备', route: 'devices' },
-  { icon: 'chat', label: '消息', route: 'chat' },
-  { icon: 'user', label: '我的', route: 'profile' }
-];
-/* ===== P7-016 好友申请角标：模块级状态 ===== */
-let friendReqCount = -1;   // -1 未知/隐藏；>=0 最近一次确认的待处理申请数
-let badgeEpoch = 0;        // 角标数据代次，用于丢弃过期回包
-let badgeFlight = null;    // 正在飞行中的请求（并发去重）
-let badgeLastFetch = 0;    // 上次请求结束时间戳（节流）
-const FR_BADGE_TTL = 20000;
-
-/* 按当前 friendReqCount 生成角标 span，供 nav 模板复用 */
-function frBdgHtml() {
-  const n = friendReqCount;
-  return n > 0 ? `<span class="fr-bdg">${n}</span>` : `<span class="fr-bdg" hidden></span>`;
-}
-
-/* 写入角标：先镜像确保，再同步全部 .fr-bdg */
-function setFriendBadge(n) {
-  friendReqCount = n;
-  const burger = $('#burgerBtn');
-  if (burger && !burger.querySelector('.fr-bdg')) {
-    const sp = document.createElement('span');
-    sp.className = 'fr-bdg onbtn';
-    burger.appendChild(sp);
-  }
-  document.querySelectorAll('.fr-bdg').forEach(el => {
-    if (friendReqCount > 0) { el.hidden = false; el.textContent = String(friendReqCount); }
-    else { el.hidden = true; el.textContent = ''; }
-  });
-}
-
-/* 拉取 /api/friends/me 并刷新角标；失败永不改角标 */
-async function refreshFriendBadge(force) {
-  if (badgeFlight) return;                                              // 并发去重（force 同样让位）
-  if (!force && Date.now() - badgeLastFetch < FR_BADGE_TTL) return;     // 20s 节流
-  if (S.auth !== 'in') { setFriendBadge(-1); return; }
-  const flight = { epoch: badgeEpoch };
-  badgeFlight = flight;
-  try {
-    const r = await api('/api/friends/me');
-    if (r.status === 200 && r.json && Array.isArray(r.json.requestsIn)) {
-      if (flight.epoch === badgeEpoch) setFriendBadge(r.json.requestsIn.length);  // epoch 不符丢弃
-    }
-  } catch (e) {
-    /* 失败永不改角标：保留最近已知真值 */
-  } finally {
-    if (badgeFlight === flight) { badgeFlight = null; badgeLastFetch = Date.now(); }
-  }
-}
-
-window.addEventListener('focus', () => { refreshFriendBadge(false).catch(() => {}); });
-
-function navBtn(item, activeRoute, cls) {
-  const base = cls === undefined ? 'nav' : cls;
-  return `<button class="${base}${item.route === activeRoute ? ' on' : ''}" data-nav="${item.route}">${ic(item.icon)}<span>${item.label}</span>${item.route === 'friends' ? frBdgHtml() : ''}</button>`;
-}
-function menu34Html(activeRoute, cls) {
-  return MENU34.map(i => navBtn(i, activeRoute, cls)).join('') +
-    (S.isAdmin ? navBtn({ icon: 'gear', label: '站长管理', route: 'admin' }, activeRoute, cls) : '') + websiteNavHtml(cls) +
-    `<button class="${cls || 'nav'} red" data-nav="logout">${ic('logout')}<span>登出</span></button>`;
-}
-function renderNavs() {
-  const a = S.route.name === 'device' ? 'devices' : (S.route.name === 'remote' ? 'devices' : S.route.name);
-  $('#sidebar').innerHTML =
-    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
-    `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
-    `<div class="gtitle">主菜单</div>` +
-    MENU34.map(i => navBtn(i, a)).join('') +
-    `<div class="gtitle">功能</div>` +
-    FUNC.map(i => navBtn(i, a)).join('') +
-    (S.isAdmin ? `<div class="gtitle">站长</div>` + navBtn({ icon: 'gear', label: '站长管理', route: 'admin' }, a) : '') +
-    `<div class="sp"></div>` + websiteNavHtml('nav') +
-    `<button class="nav red" data-nav="logout">${ic('logout')}<span>登出</span></button>` +
-    `<div class="sidefoot">安全 · 便捷 · 远程连接</div>`;
-  $('#drawer').innerHTML =
-    `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="#FFFFFF" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FFFFFF"/></svg></span><span><b>QFRemote</b><small>REMOTE CONTROL</small></span></div>` +
-    `<button class="sideid" data-nav="profile"><span data-my-avatar="38">${myAvatarHtml(38)}</span><span class="sideidtx"><b data-my-nick>${esc(myEffectiveNickname())}</b><small>${esc(S.user || '')}</small></span></button>` +
-    `<div class="gtitle">主菜单</div>` + menu34Html(a, 'nav');
-  $('#acctMenu').innerHTML = MENU34.map(i =>
-    `<a data-nav="${i.route}" class="${i.route === a ? 'on' : ''}">${ic(i.icon)}<span>${i.label}</span>${i.route === 'friends' ? frBdgHtml() : ''}</a>`).join('') +
-    (S.isAdmin ? `<a data-nav="admin" class="${a === 'admin' ? 'on' : ''}">${ic('gear')}<span>站长管理</span></a>` : '') +
-    `<a href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>` +
-    `<a data-nav="logout" class="red">${ic('logout')}<span>登出</span></a>`;
-  $('#bnav').innerHTML = BTABS.map(i => navBtn(i, a, '')).join('');
-  $('#acctChip').innerHTML = `<span data-my-avatar="34">${myAvatarHtml(34)}</span><b data-my-nick>${esc(myEffectiveNickname())}</b>${frBdgHtml()}`;
-  refreshMyProfileLazy();
-  document.querySelectorAll('[data-nav]').forEach(el => {
-    el.addEventListener('click', () => {
-      const r = el.getAttribute('data-nav');
-      closeAcctMenu();
-      if (r === 'logout') { doLogout(); return; }
-      navigate(r);   // 抽屉内点选只换背后视图，按 #35 规格不自动收起抽屉
-    });
-  });
-}
-
-/* ---------------- 抽屉（#35：只占一部分 / 点项不收起；点外收起 2026-10-26 站长改令：
-   遮罩 #drawerScrim 承接抽屉外点击、只关抽屉，这一击不落到正文任何控件） ---------------- */
-let drawerOpen = false;
-function setDrawer(open) {
-  drawerOpen = open;
-  document.body.classList.toggle('drawer-open', open); // 抽屉打开态挂载（2026-11-11：顶栏已常驻品牌蓝，本类仅保留作抽屉打开态兜底）
-  const d = $('#drawer');
-  d.classList.toggle('open', open);
-  d.setAttribute('aria-hidden', open ? 'false' : 'true');
-  const sc = $('#drawerScrim');
-  if (sc) { sc.classList.toggle('on', open); sc.setAttribute('aria-hidden', open ? 'false' : 'true'); }
-}
-function closeAcctMenu() { const m = $('#acctMenu'); if (m) m.classList.remove('open'); }
-document.addEventListener('pointerdown', (e) => {
-  // 落点在抽屉之外只做收起。正文区已被 #drawerScrim 遮罩盖住（层级低于抽屉、高于正文），
-  // 点遮罩的这一击落在遮罩上、到不了正文控件（2026-10-26 站长改令，取代旧「点外收起不吞点击」）；
-  // 顶栏在遮罩层之上，其控件点击照旧生效（并在此顺带收起抽屉），汉堡钮自理开关。
-  if (drawerOpen && !e.target.closest('#drawer') && !e.target.closest('#burgerBtn')) setDrawer(false);
-  const m = $('#acctMenu');
-  if (m && m.classList.contains('open') && !e.target.closest('.acctwrap')) closeAcctMenu();
-});
-const drawerScrimEl = $('#drawerScrim');
-if (drawerScrimEl) drawerScrimEl.addEventListener('click', () => setDrawer(false));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setDrawer(false); closeAcctMenu(); closeModal(); } });
 
 /* ---------------- 路由（同框切换，不整页刷新） ---------------- */
@@ -1243,6 +377,10 @@ async function render() {
   if (S._chatStop) { try { S._chatStop(); } catch (e) {} S._chatStop = null; }
   renderNavs();
   const view = $('#view');
+  /* F-W3 返工：会话路由单独走 crossfade（B §3.1 D2/E-C）；先摘后挂＋强制回流，同会话切参也重启动画；非会话路由摘掉后回到导航 D3/E-S x+12 */
+  view.classList.remove('view-session');
+  void view.offsetWidth;
+  if (S.route.name === 'session') view.classList.add('view-session');
   const fn = Views[S.route.name] || Views.home;
   view.innerHTML = '';
   try { await fn(view, S.route.param, seq); }
@@ -1277,9 +415,6 @@ function showAuth(kind, extra) {
   if (parseRoute().name === 'appeal') authTool(root, 'appeal');
   return lp;
 }
-function brandBlock() {
-  return `<div class="brand"><span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><defs><linearGradient id="qfgrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3F8CFF"/><stop offset="1" stop-color="#2470E0"/></linearGradient></defs><path d="M 197.2 130.9 A 78 78 0 1 1 161.3 53.9" fill="none" stroke="url(#qfgrad)" stroke-width="25" stroke-linecap="round"/><circle cx="190.1" cy="85.8" r="16" fill="#FF8A1E"/></svg></span><span><b style="font-size:19px">QFRemote</b><br><small style="color:var(--sub);letter-spacing:2.4px;font-size:8.5px">REMOTE CONTROL</small></span></div>`;
-}
 
 /* ================= 未登录区 ================= */
 Views.login = function (root, extra) {
@@ -1290,25 +425,25 @@ Views.login = function (root, extra) {
     <form id="loginForm">
       <div class="field"><label>账号</label><input id="li-user" autocomplete="username" placeholder="请输入账号"></div>
       <div class="field"><label>密码</label><input id="li-pass" type="password" autocomplete="current-password" placeholder="请输入密码"><p class="ferr" id="li-err" hidden></p></div>
-      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin:4px 0 6px"><input type="checkbox" id="li-rem" style="accent-color:var(--brand);width:17px;height:17px">记住此设备（30 天内免登录）</label>
-      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin:0 0 14px"><input type="checkbox" id="li-save" style="accent-color:var(--brand);width:17px;height:17px">记住账号密码（下次打开自动填充）</label>
+      <label class="check-row check-row-m46 fs-13x5"><input type="checkbox" id="li-rem">记住此设备（30 天内免登录）</label>
+      <label class="check-row check-row-m014 fs-13x5"><input type="checkbox" id="li-save">记住账号（下次打开自动填充账号，密码每次手动输入）</label>
       <button class="btn block" id="li-btn" type="submit">登录</button>
     </form>
     <div id="li-freeze" hidden></div>
     <div class="authlinks"><a data-act="go-register">注册新账号</a><a data-act="go-support">忘记密码 / 需要帮助</a></div>
     <div class="note blue">账号被冻结或封禁时，登录后将直接显示原因与申诉入口；试用或密钥到期时，将显示到期时间与购买、激活入口。</div>
     <div id="authTools"></div>
-    <button class="kf" data-act="go-support" style="display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:14px;padding:12px 14px;background:#fff;font-weight:600;font-size:14.5px;margin-top:14px;width:100%;text-align:left;color:var(--tx)"><span class="tile" style="width:36px;height:36px;flex-basis:36px">${ic('headset')}</span>智能客服<small style="color:var(--sub);font-weight:400">未登录也可咨询</small><span class="chev" style="margin-left:auto;color:#B7C3D6">${ic('chevR')}</span></button>
-    <button class="btn block black" style="margin-top:12px" data-act="go-purchase">购买密钥</button>
+    <button class="kf-btn" data-act="go-support"><span class="tile">${ic('headset')}</span>智能客服<small>未登录也可咨询</small><span class="chev">${ic('chevR')}</span></button>
+    <button class="btn block black mt-12" data-act="go-purchase">购买密钥</button>
     <button class="txtlink" data-act="go-status">查询密钥</button>
     <button class="txtlink" data-act="go-rebind">申诉换绑设备</button>
     <div class="foot">勾选「记住此设备」后，登录状态将在本设备保留 30 天</div>
   </div></div>`;
-  // #39：恢复两个勾选框的上次状态；存有账密时真回填（取消勾选并登录后不再回填）
+  // #39：恢复两个勾选框的上次状态；存有账号时只回填账号，密码框永不回填（严-1）
   const prefs0 = LoginPrefs.load();
   $('#li-rem', root).checked = prefs0.rem !== false;
   $('#li-save', root).checked = !!prefs0.saveCred;
-  if (prefs0.saveCred) { const sc = SavedCred.load(); if (sc) { $('#li-user', root).value = sc.u || ''; $('#li-pass', root).value = sc.p || ''; } }
+  if (prefs0.saveCred) { const sc = SavedCred.load(); if (sc) { $('#li-user', root).value = sc.u || ''; } }
   $('#loginForm', root).addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = $('#li-btn', root); const err = $('#li-err', root); const fz = $('#li-freeze', root);
@@ -1319,7 +454,7 @@ Views.login = function (root, extra) {
     const r = await doLogin(uname, $('#li-pass', root).value, remChecked);
     if (r.ok) {
       LoginPrefs.save({ rem: remChecked, saveCred: saveChecked });
-      if (saveChecked) SavedCred.save(uname, $('#li-pass', root).value); else SavedCred.clear();
+      if (saveChecked) SavedCred.save(uname); else SavedCred.clear();
     }
     btn.disabled = false; btn.textContent = '登录';
     if (r.ok) {
@@ -1332,8 +467,8 @@ Views.login = function (root, extra) {
       // 账号冻结提示（与垫片冻结弹窗同口径）：写明原因＋申诉入口＋客服指引，
       // 不再让冻结被误显示成「账号或密码不正确」。
       fz.innerHTML = '<div class="note err">该账号今日密码输入错误已超过 5 次，今日不能再试。</div>'
-        + '<button class="btn block" id="li-appeal" type="button" style="margin-top:10px">提交申诉</button>'
-        + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-fz-support">智能客服</a>，或在客服中申请转人工。</p>';
+        + '<button class="btn block mt-10" id="li-appeal" type="button">提交申诉</button>'
+        + '<p class="hint mt-8">也可以先咨询<a href="#" id="li-fz-support">智能客服</a>，或在客服中申请转人工。</p>';
       fz.hidden = false;
       $('#li-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
       const sup = $('#li-fz-support', root);
@@ -1341,9 +476,9 @@ Views.login = function (root, extra) {
     } else if (r.locked && fz) {
       // W1-3：锁定漂移态中性提示（不写封禁/冻结、不露内部原因），给申诉与客服入口。
       fz.innerHTML = '<div class="note err">该账号当前暂时无法登录。</div>'
-        + '<div class="hint" style="margin-top:4px">可能是账号状态异常，请稍后再试。</div>'
-        + '<button class="btn block" id="li-lock-appeal" type="button" style="margin-top:10px">提交申诉</button>'
-        + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-lock-support">智能客服</a>，或在客服中申请转人工。</p>';
+        + '<div class="hint mt-4">可能是账号状态异常，请稍后再试。</div>'
+        + '<button class="btn block mt-10" id="li-lock-appeal" type="button">提交申诉</button>'
+        + '<p class="hint mt-8">也可以先咨询<a href="#" id="li-lock-support">智能客服</a>，或在客服中申请转人工。</p>';
       fz.hidden = false;
       $('#li-lock-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
       const lsup = $('#li-lock-support', root);
@@ -1360,11 +495,11 @@ Views.login = function (root, extra) {
             ? '您的账号已被永久封禁，当前无法使用本控制台的各项功能。'
             : '您的账号已被封禁' + (dateStr ? '，预计于 ' + dateStr + ' 解除' : '') + '，当前无法使用本控制台的各项功能。');
       fz.innerHTML = '<div class="note err">' + heading + '</div>'
-        + '<div class="note" style="margin-top:4px">' + reason + '</div>'
-        + '<div class="hint" style="margin-top:4px">事由：违反平台规则</div>'
-        + '<div class="hint" style="margin-top:8px">如您认为该处理存在疑问，可提交申诉或联系智能客服。</div>'
-        + '<button class="btn block" id="li-ban-appeal" type="button" style="margin-top:10px">提交申诉</button>'
-        + '<p class="hint" style="margin-top:8px">也可以先咨询<a href="#" id="li-ban-support">智能客服</a>，或在客服中申请转人工。'
+        + '<div class="note mt-4">' + reason + '</div>'
+        + '<div class="hint mt-4">事由：违反平台规则</div>'
+        + '<div class="hint mt-8">如您认为该处理存在疑问，可提交申诉或联系智能客服。</div>'
+        + '<button class="btn block mt-10" id="li-ban-appeal" type="button">提交申诉</button>'
+        + '<p class="hint mt-8">也可以先咨询<a href="#" id="li-ban-support">智能客服</a>，或在客服中申请转人工。'
         + ' <a href="#" id="li-ban-status">查询密钥</a></p>';
       fz.hidden = false;
       $('#li-ban-appeal', root).onclick = () => { authTool(root, 'appeal', { user: uname }); const tb = $('#authTools', root); if (tb) tb.scrollIntoView({ block: 'nearest' }); };
@@ -1389,10 +524,10 @@ function authTool(root, kind, opts) {
   if (kind === 'support') { box.innerHTML = ''; Views.support(box, null, 0, { guest: true }); return; }
   if (kind === 'purchase') { box.innerHTML = ''; Views.purchase(box, null, 0, { guest: true }); return; }
   if (kind === 'status') {
-    box.innerHTML = `<div class="card" style="margin-top:16px"><h3>查询密钥（账号＋密码核验）</h3>
+    box.innerHTML = `<div class="card mt-16"><h3>查询密钥（账号＋密码核验）</h3>
       <div class="field"><label>账号</label><input id="sq-user"></div>
       <div class="field"><label>密码</label><input id="sq-pass" type="password"></div>
-      <button class="btn block" id="sq-btn">查询</button><div id="sq-out" style="margin-top:12px"></div></div>`;
+      <button class="btn block" id="sq-btn">查询</button><div class="mt-12" id="sq-out"></div></div>`;
     $('#sq-btn', box).onclick = async () => {
       const r = await api('/license/api/status/query', { method: 'POST', json: { username: $('#sq-user', box).value.trim(), password: $('#sq-pass', box).value } });
       $('#sq-out', box).innerHTML = r.json ? `<div class="note ${r.json.ok ? 'blue' : 'err'}">${esc(r.json.ok ? statusSummary(r.json) : (r.json.msg || '查询失败，请核对账号与密码。'))}</div>` : stateBox('暂时无法查询', '服务暂时不可用，请稍后再试。', false);
@@ -1400,14 +535,14 @@ function authTool(root, kind, opts) {
     return;
   }
   if (kind === 'rebind') {
-    box.innerHTML = `<div class="card" style="margin-top:16px"><h3>申诉换绑设备</h3>
-      <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">请在<b>新设备</b>上提交：填写账号与密码核验身份，并填写本机设备码。审核通过后，同类槽位的旧设备将被替换，换绑不会被名额已满拦截。</p>
+    box.innerHTML = `<div class="card mt-16"><h3>申诉换绑设备</h3>
+      <p class="text-sub fs-13x5 mb-12">请在<b>新设备</b>上提交：填写账号与密码核验身份，并填写本机设备码。审核通过后，同类槽位的旧设备将被替换，换绑不会被名额已满拦截。</p>
       <div class="field"><label>账号</label><input id="rb-user"></div>
       <div class="field"><label>密码</label><input id="rb-pass" type="password"></div>
       <div class="field"><label>本机设备码</label><input id="rb-dc" placeholder="在新设备的软件端查看"></div>
       <div class="field"><label>设备类型</label><select id="rb-platform"><option value="pc">电脑</option><option value="mobile">手机</option></select></div>
       <div class="field"><label>情况说明</label><textarea id="rb-desc" rows="2" placeholder="例如：更换了新电脑"></textarea></div>
-      <button class="btn block" id="rb-btn">提交换绑申诉</button><div id="rb-out" style="margin-top:12px"></div></div>`;
+      <button class="btn block" id="rb-btn">提交换绑申诉</button><div class="mt-12" id="rb-out"></div></div>`;
     $('#rb-btn', box).onclick = async () => {
       const r = await api('/license/api/rebind/submit', { method: 'POST', json: { username: $('#rb-user', box).value.trim(), password: $('#rb-pass', box).value, desc: $('#rb-desc', box).value, deviceCode: $('#rb-dc', box).value.trim(), platform: $('#rb-platform', box).value, channel: 'web' } });
       $('#rb-out', box).innerHTML = `<div class="note ${r.json && r.json.ok ? 'ok' : 'err'}">${esc(r.json ? (r.json.msg || (r.json.ok ? '已提交，审核进度可在登录后「我的」中查看。' : '提交失败，请核对信息。')) : '服务暂时不可用，请稍后再试。')}</div>`;
@@ -1418,18 +553,6 @@ function authTool(root, kind, opts) {
     renderAppeal(box, opts || {});
     return;
   }
-}
-function statusSummary(j) {
-  /* P2-031：status/query 的状态字段嵌在 view 下（/me 才是平铺），两形状兼容取数 */
-  const v = (j && j.view) || j || {};
-  const parts = [];
-  if (v.planName) parts.push('套餐：' + v.planName);
-  if (v.maskedKey && v.maskedKey !== '—') parts.push('密钥：' + v.maskedKey);
-  if (v.displayStatus) parts.push('状态：' + v.displayStatus);
-  if (v.keyExpiresMs) parts.push('到期：' + fmtDate(v.keyExpiresMs));
-  else if (v.remainText) parts.push('有效期：' + v.remainText);
-  if (typeof v.webEnabled === 'boolean') parts.push('网页版：' + (v.webEnabled ? (v.webBy === 'trial' ? '已开通（试用期内）' : '已开通') : '未开通'));
-  return parts.length ? parts.join(' · ') : '已查询到您的密钥状态。';
 }
 /* 拦截判定：返回 gate 描述或 null（放行进首页） */
 function gateFor(me) {
@@ -1451,7 +574,7 @@ Views.gate = function (root, extra) {
     G1: { t: '尚未激活', b: '本账号还没有激活密钥。在下方输入密钥即可激活；没有密钥可以先购买，或使用积分兑换的密钥。' },
     G2: { t: '试用已到期', b: '免费试用已经结束。激活有效付费密钥后，即可继续使用网页版；积分兑换、赠送等免费来源密钥不包含网页版权益，无法用于开通网页版。' },
     G4: { t: '网页版尚未开通', b: '网页版需要真实付费购买密钥开通（赠送、活动发放与积分兑换等免费来源密钥不含网页版权益）。您仍可在软件端继续使用，或购买付费密钥后回到网页版。' },
-    G5: { t: '密钥已过期', b: '您的密钥已于 ' + fmtDate(me.keyExpiresMs) + ' 到期。重新购买或兑换新密钥后即可继续使用。' },
+    G5: { t: '密钥已过期', b: (typeof me.keyExpiresMs === 'number' && me.keyExpiresMs > 0 ? '您的密钥已于 ' + fmtDate(me.keyExpiresMs) + ' 到期。' : '您的密钥已过期。') + '重新购买或兑换新密钥后即可继续使用。' },
     BAN: { t: '账号已被封禁', b: '封禁事由类别：' + esc((me.activeBan && (me.activeBan.category || me.activeBan.reason)) || '违反平台规则') + '。如有异议，可以提交申诉，审核结果将在申诉进度中显示。' },
     FROZEN: { t: '账号已被冻结', b: '冻结期间暂时无法登录使用，到期后自动解冻；也可以提交申诉提前处理。' }
   }[extra.code] || { t: '暂时无法进入', b: '当前状态下暂时无法进入控制台，请按下方入口处理。' };
@@ -1462,7 +585,7 @@ Views.gate = function (root, extra) {
       ? `<button class="btn block" id="gt-appeal">提交申诉</button>`
       : `<div class="field"><label>输入激活密钥</label><input id="gt-key" placeholder="粘贴完整密钥串"></div>
          <button class="btn block" id="gt-claim">激活并进入</button>
-         <button class="btn block black" style="margin-top:12px" id="gt-buy">购买密钥</button>`}
+         <button class="btn block black mt-12" id="gt-buy">购买密钥</button>`}
     <button class="txtlink" id="gt-support">联系智能客服</button>
     <button class="txtlink" id="gt-logout">退出登录</button>
     <div id="gt-tools"></div>
@@ -1488,7 +611,7 @@ Views.register = function (root) {
       <div class="field"><label>账号</label><input id="rg-user" placeholder="至少 8 位字母与数字组合"><p class="hint">账号注册后不可更改，请谨慎填写。</p></div>
       <div class="field"><label>设置密码</label><input id="rg-pass" type="password" placeholder="请输入密码"></div>
       <div class="field"><label>确认密码</label><input id="rg-pass2" type="password" placeholder="请再次输入密码"></div>
-      <label style="display:flex;gap:8px;font-size:13.5px;margin-bottom:14px"><input type="checkbox" id="rg-agree" style="accent-color:var(--brand);width:17px;height:17px">我已阅读并同意《用户协议》与《隐私说明》</label>
+      <label class="check-row check-row-mb14 fs-13x5"><input type="checkbox" id="rg-agree">我已阅读并同意《用户协议》与《隐私说明》</label>
       <div class="note err" id="rg-err" hidden></div>
       <button class="btn block" id="rg-btn" type="submit">注册并开通试用</button>
     </form>
@@ -1519,10 +642,10 @@ Views.home = async function (view) {
   const name = esc(S.displayName || S.user || '');
   view.innerHTML = `
     <h1 class="pt">首页</h1><p class="psub">${greetWord()}，${name}。这是您的 QFRemote 总览，点开即在当前页面切换，不再整页跳转。</p>
-    <div id="homeLic">${lic.hasKey ? '' : '<div class="skel" style="height:46px"></div>'}</div>
-    <div class="card"><h3>账户安全</h3><div id="homeSec"><div class="skel" style="height:52px"></div></div></div>
-    <div class="card"><h3>我的设备</h3><div id="homeDev"><div class="skel" style="height:52px"></div></div></div>
-    <div class="card"><h3>付费与激活</h3><div id="homePay"><div class="skel" style="height:52px"></div></div></div>`;
+    <div id="homeLic">${lic.hasKey ? '' : '<div class="skel sk-h46"></div>'}</div>
+    <div class="card"><h3>账户安全</h3><div id="homeSec"><div class="skel sk-h52"></div></div></div>
+    <div class="card"><h3>我的设备</h3><div id="homeDev"><div class="skel sk-h52"></div></div></div>
+    <div class="card"><h3>付费与激活</h3><div id="homePay"><div class="skel sk-h52"></div></div></div>`;
   // 许可条
   const licBox = $('#homeLic', view);
   if (lic.hasKey) {
@@ -1536,9 +659,9 @@ Views.home = async function (view) {
     if (perm) entries = '';
     else if (!trial && lic.keyExpiresMs) entries = '<button class="btn sm ghost" data-go="purchase">购买叠加</button>';
     else entries = '<button class="btn sm" data-go="profile">输入密钥激活</button> <button class="btn sm ghost" data-go="purchase">购买密钥</button>';
-    licBox.innerHTML = `<div class="note ${trial ? 'blue' : 'ok'}"><b>${esc(lic.planName || '已激活')}</b> · ${esc(stateTxt)}${lic.remainText ? ' · ' + esc(lic.remainText) : (lic.keyExpiresMs ? ' · 到期：' + fmtDate(lic.keyExpiresMs) : '')}${lic.webEnabled ? '' : ' · 网页版购买付费密钥后开通'}${entries ? `<span style="float:right">${entries}</span>` : ''}</div>`;
+    licBox.innerHTML = `<div class="note ${trial ? 'blue' : 'ok'}"><b>${esc(lic.planName || '已激活')}</b> · ${esc(stateTxt)}${lic.remainText ? ' · ' + esc(lic.remainText) : (lic.keyExpiresMs ? ' · 到期：' + fmtDate(lic.keyExpiresMs) : '')}${lic.webEnabled ? '' : ' · 网页版购买付费密钥后开通'}${entries ? `<span class="note-ops">${entries}</span>` : ''}</div>`;
   } else {
-    licBox.innerHTML = `<div class="note warn"><b>尚未激活</b>　输入密钥激活后即可使用全部功能；没有密钥可以购买，或用积分兑换。<span style="float:right"><button class="btn sm" data-go="profile">输入密钥激活</button> <button class="btn sm ghost" data-go="purchase">购买密钥</button></span></div>`;
+    licBox.innerHTML = `<div class="note warn"><b>尚未激活</b>　输入密钥激活后即可使用全部功能；没有密钥可以购买，或用积分兑换。<span class="note-ops"><button class="btn sm" data-go="profile">输入密钥激活</button><button class="btn sm ghost" data-go="purchase">购买密钥</button></span></div>`;
   }
   // 账户安全
   // 预取：首页即预热 name→id 映射，避免用户点设备时才冷启（手机每次开页都是冷页）
@@ -1552,8 +675,8 @@ Views.home = async function (view) {
   // 设备
   const devBox = $('#homeDev', view);
   const devs = (S.stats && S.stats.devices) || [];
-  devBox.innerHTML = devs.length ? devs.map(d => devRowHtml(d)).join('') + `<p style="margin-top:10px"><button class="btn sm ghost" data-go="devices">查看全部设备</button></p>`
-    : `<div class="statebox"><b>暂无设备</b><p>设备由站长分配或好友共享给您；被控端安装并上线后会出现在这里。</p></div>`;
+  devBox.innerHTML = devs.length ? devs.map(d => devRowHtml(d)).join('') + `<button class="txtlink cardmore" data-go="devices">查看全部设备</button>`
+    : deviceEmptyHtml('未添加设备', '未添加设备。被控端安装并上线后会出现在这里。');
   // 付费与激活
   const pay = $('#homePay', view);
   const pts = S.points && (S.points.balance != null ? S.points.balance : (S.points.points != null ? S.points.points : null));
@@ -1565,15 +688,6 @@ Views.home = async function (view) {
   view.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => navigate(el.getAttribute('data-go'))));
   bindDevRows(view);
 };
-function rowHtml(icon, t, s, go, anchor) {
-  return `<button class="row" ${go ? `data-go="${go}"` : ''}${anchor ? ` data-anchor="${anchor}"` : ''}><span class="tile">${ic(icon)}</span><span><b>${esc(t)}</b><small>${esc(s)}</small></span><span class="chev">${ic('chevR')}</span></button>`;
-}
-/* 说明行专用（无落点、无行级操作）：渲染为普通 div、无箭头，避免「带箭头的
-   button 却无点击处理」的死钮外观（P2-036/037/038/039 同族清零口径）。行下方
-   另有真实操作按钮的标签行也用本式，操作仍走各自按钮。 */
-function rowInfoHtml(icon, t, s) {
-  return `<div class="row"><span class="tile">${ic(icon)}</span><span><b>${esc(t)}</b><small>${esc(s)}</small></span></div>`;
-}
 function devRowHtml(d) {
   /* 2.4.0 数据携带解析：渲染时能查到节点 id 就直接盖进按钮（data-nodeid），
      点按零等待；查不到的由 refreshDevRowIds 在节点图落地后补盖，再兜底 resolve 端点。
@@ -1582,12 +696,12 @@ function devRowHtml(d) {
   const nid = d.nodeid ? bareNodeId(d.nodeid) : nodeIdFor(d.name);
   const nidAttr = nid ? ` data-nodeid="${esc(nid)}"` : '';
   const pill = d.onlineUnknown
-    ? '<span class="pill">状态未知</span>'
+    ? '<span class="pill unknown">状态未知</span>'
     : `<span class="pill ${d.online ? 'ok' : 'off'}">${d.online ? '在线' : '离线'}</span>`;
   const ops = d.online
     ? `<button class="btn sm" data-remote="${esc(d.name)}"${nidAttr}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${nidAttr}>文件管理</button>`
-    : (d.onlineUnknown ? '<span class="pill">状态未知，暂不可连接</span>' : '<span class="pill off">设备离线时不可连接</span>');
-  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span>${pill}<span class="ops">${ops}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
+    : ''; // 排版深查批2：离线/未知时 .ops 只留详情按钮——此前 ops 内又放一条状态 pill，与外层 pill 重复（「离线」＋「设备离线时不可连接」并列）；状态由外层 pill 承担。
+  return `<div class="dev"><span class="devic">${ic('monitor')}</span><span class="devtx"><b>${esc(d.name)}</b><small>${esc(d.os || '')}${d.group ? ' · 分组：' + esc(d.group) : ''}</small></span>${pill}<span class="ops">${ops}<button class="btn sm grey" data-detail="${esc(d.name)}">详情</button></span></div>`;
 }
 /* 点按反馈：立即置忙＋一句可见文案（本稿唯一新增可见文案，7 字内）＋6s 兜底恢复。
    跳转类（远程桌面/终端）走 CANON 导航，页面会离开，无需回收；导航类（文件/详情）
@@ -1624,41 +738,6 @@ function bindDevRows(view) {
   view.querySelectorAll('[data-files]').forEach(el => tap(el, () => openSession('files', { name: el.getAttribute('data-files'), nodeid: el.getAttribute('data-nodeid') }), true));
   view.querySelectorAll('[data-detail]').forEach(el => tap(el, () => navigate('device', el.getAttribute('data-detail')), false));
 }
-
-/* 引擎同源入口（CANON）：会话融合视图的 iframe 与预热框都挂在本站同源的
-   /console-engine 反代路径下（2026-10-28 域名修复口径）。旧「点设备顶层跳原生页」
-   动线已于 2.4.0 退役：深链只在框内使用（/?node=<裸 id>&viewmode=<11|12|13>
-   &qfm=frame&hide=31，见会话融合视图段）；顶层打开仅保留为哨兵错误卡里用户
-   主动触发的兼容模式。viewmode 10＝原生设备页，融合视图永不使用。 */
-const QF_CANON_ORIGIN = location.origin + '/console-engine'; // 2026-10-28 域名修复：原写死裸 IP 8443 废止，改同源 /console-engine（nginx 同源反代到原生页），桌面会话全程留在当前域名
-/* 官网入口（站长 2026-10-26 11:12 令补）：三容器登出上方独立行＋「我的」页独立行，
-   不进 MENU34、不占 BTABS，#34 次序不动；新标签打开官网。 */
-const QF_WEBSITE_URL = 'https://qfremote.top/'; // 2026-10-28 域名修复：官网已迁 qfremote.top，不再跳 GitHub Pages 临时站
-const websiteNavHtml = (cls) => `<a class="${cls || 'nav'}" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">${ic('globe')}<span>官方网站</span></a>`;
-/* 站长管理入口补齐（站长 2026-10-26 12:58 亲报「网页版找不到站长管理」）：该入口原仅在
-   桌面侧边栏（#sidebar）渲染，≤760px 时侧边栏整体隐藏，抽屉/账户菜单/底部标签/「我的」页
-   均无此入口，站长手机端无路可达。按官网入口同例补为逻辑同位：仅 S.isAdmin 时在抽屉、
-   账户菜单与「我的」页各补一行（导航容器互为同位呈现，不构成 #20 重复入口）；不进
-   MENU34、不占 BTABS，#34 次序不动；目标为 SPA 内站长管理页（route=admin），服务端
-   /home/api/stats 的 isAdmin 判定（账号===ADMIN_EMAIL 且 siteadmin 全权）未动。 */
-/* ================= 会话融合视图（2.4.0：会话直达＋旧页关闭＋会话 UI 大改版） =================
-   定稿依据：redesign-v2 FREEZE（站长 2026-10-26 点头冻结）＋ DS-DESIGN 适配 A1–A10
-   ＋ phase-0 更正证据（E6–E9）。形态：#/session 单 iframe 同源融合——八入口点设备
-   直达会话，MeshCentral 原生设备列表/详情退出用户路径（前置翻牌随 2.4.0 组装执行）。
-   深链（E7 实测）：引擎根 /?node=<裸 id>&viewmode=<11|12|13>&qfm=frame&hide=31，
-   hide=31 位掩码隐引擎外壳；形态切换走框内 go(vm)（463ms 实测），换 src 会断控制
-   通道、禁用作常态路径。父页双层守卫：框内注入 CSS 压制 go() 复现的子导航条，
-   URL 规范化守卫把框内逃逸拉回 hide 形态。
-   id 解析序（根除 900ms 竞态）：入口数据携带 data-nodeid → 页内节点缓存 →
-   ext 只读端点 GET /api/device/resolve 兜底；全程不回落老列表。
-   预热（E8 承重项）：登录后隐藏框预热引擎源，会话打开时同设备同形态直接收编。 */
-const QF_SESSION_VM = { desktop: 11, terminal: 12, files: 13 };
-const QF_SESSION_KIND = { 11: 'desktop', 12: 'terminal', 13: 'files' };
-/* 发送到手机的会话邀请走 #25 暂存通道（服务端零改动，toNode 为不透明字符串键）：
-   本版寻址＝账号级 ctrl 邮箱（ctrl:account），同账号任一实例在「我的文件·待接收」
-   可领取并打开会话；实例级 ctrl:<instanceId> 精确寻址待壳端实例注册表立项后深化。
-   本机实例 id 键名登记：localStorage.qfCtrlInstanceId（≥128bit 随机，防未来撞键）。 */
-const QF_CTRL_MAILBOX = 'ctrl:account';
 function ctrlInstanceId() {
   try {
     let v = localStorage.getItem('qfCtrlInstanceId');
@@ -1735,9 +814,16 @@ const Sess = {
      哨兵：onload 后 12 秒 probe 仍为 blank 即 TIMEOUT_IFRAME_LOAD）。
      stageAt 以 performance.now() 计；超时码与文案见 failStage/showSessionMask。 */
   stage: '', stageAt: 0, webappReady: false, preflight: null, maskCode: '', navFallback: '', identityCheck: '',
+  sm: null, // S-075：连接状态机（QFSessionSM，纯逻辑；teardown 时清掉）
   forcedConnectN: 0, connectingSince: 0, connectAttempts: [],
   lostSince: 0, lostReloaded: false, reconnectN: 0, lastLostTry: 0,
-  lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, morphRetryAt: 0, stageTextSec: -1,
+  /* RC-04：重连会话 id（sess-＋16 hex，首次建连生成，同一会话内复用、新会话
+     重置，见 teardownSession）＋重连控制器（QFReconnect，内存态）＋恢复标记。 */
+  resumeId: '', reconnectCtl: null, _restoredByReconnect: false,
+  /* L5 客户端（RC-03/07/09/10）：中继 id、IDR 请求器、FEC 接收器、画质探针、
+     录制控制。只在会话内存活，teardownSession 时全部停掉。 */
+  relayId: '', idrCtl: null, fecCtl: null, qualityCtl: null, recCtl: null, backpressureLevel: '',
+  lastFailCode: '', lastFailNodeid: '', lastFailVm: 0, morphTries: 0, morphRetryAt: 0, morphTryVm: 0, stageTextSec: -1,
 };
 let QF_SESS_CTX = null;
 function sessOn(target, type, fn, opts) { target.addEventListener(type, fn, opts); Sess.listeners.push([target, type, fn, opts]); }
@@ -1753,17 +839,117 @@ function teardownSession() {
     const f = Sess.frame;
     f.classList.remove('qf-session-frame'); f.classList.add('qf-preheat');
     f.removeAttribute('style'); f.id = 'qfPreheat'; f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
-    const bd = document.getElementById('qfSessBackdrop'); if (bd) bd.remove();
   }
+  // 高-4：遮罩无条件移除——此前只在 frame 是预热框时才移除，全新建的帧走 teardown
+  // 会把 #qfSessBackdrop 留在页面上盖住内容且点不透。遮罩是会话级节点，与帧种类无关。
+  const bd = document.getElementById('qfSessBackdrop'); if (bd) bd.remove();
   /* W-04/X-01：失败终态的会话降格时，同步清掉预热框的旧身份——失败过的
      nodeid/vm 组合不得被下次复用分支原样升格（否则重进同一设备仍踩旧框）。 */
   if (Sess.state === 'failed' || Sess.lastFailCode) { QF_PRE.nodeid = ''; QF_PRE.vm = 0; QF_PRE.ready = false; }
   Sess.active = false; Sess.trapArmed = false; Sess.root = null; Sess.frame = null; Sess.adopted = false; Sess.state = 'idle';
   Sess.pendingVm = 0;   // DS P2-1：待办形态不跨会话残留
   Sess.stage = ''; Sess.stageAt = 0; Sess.webappReady = false; Sess.stageTextSec = -1;
+  Sess.sm = null; // S-075：拆会话即清状态机
   Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
-  Sess.morphTries = 0; Sess.morphRetryAt = 0;
+  Sess.morphTries = 0; Sess.morphRetryAt = 0; Sess.morphTryVm = 0;
+  /* RC-04：拆会话即作废重连控制器与会话 id——新会话须新 session_id（规范 §1），
+     旧票据不得跨会话复用；控制器先停（清定时器、防旧循环在新会话里续跑）。 */
+  if (Sess.reconnectCtl) { try { Sess.reconnectCtl.stop('restored', ''); } catch (e) {} Sess.reconnectCtl = null; }
+  Sess.resumeId = ''; Sess._restoredByReconnect = false;
+  /* L5 客户端全停：探针停、录制 end、FEC 接收器停；控制器置空。 */
+  sessStopL5Clients();
+}
+
+/* ---------- L5 客户端（RC-03/07/09/10）会话接线 ---------- */
+/* RC-07：挂 iframe 之前按宣告列表选址（QF-RELAY-1 §2.2）。
+ * 取列表 → pick → 校验待拨 URL（同源 /console-engine/ 深链）→ 异源跳过；
+ * 列表为空/取失败/三级耗尽 → 降级态（不建连、不用硬编码地址兜底）。
+ * 503 L5_UNAVAILABLE（服务端未加载 L5 模块）同样进降级态。 */
+async function sessSelectRelay(view, gen0) {
+  let client = null;
+  try { client = QFRelayClient({}); } catch (e) { return { ok: false, code: 'L5_UNAVAILABLE' }; }
+  const listR = await client.fetchList();
+  if (gen0 !== Sess.gen || !Sess.active) return { ok: false, code: 'ABORTED' };
+  if (!listR.ok) return { ok: false, code: listR.code === 'L5_UNAVAILABLE' ? 'L5_UNAVAILABLE' : 'RELAY_FETCH_FAILED' };
+  const pick = client.pickFor(() => sessionDeepLinkCurrent());
+  if (!pick.ok) return { ok: false, code: 'RELAY_DEGRADED', reason: pick.reason };
+  Sess.relayId = (pick.relay && pick.relay.id) || '';
+  return { ok: true, relay: pick.relay };
+}
+/* L5 客户端启动（setConnected 后调用）：IDR join、画质探针、FEC 接收器、录制。
+ * 各服务失败只影响本功能，不阻断会话；服务端端点未实现时（503）服务返回
+ * 码，调用方不伪造成功。 */
+function sessStartL5Clients(view) {
+  const agentId = bareNodeId(Sess.nodeid || '');
+  const sessionId = Sess.resumeId || (Sess.resumeId = qfNewSessionId());
+  // RC-03：IDR 请求器＋新观看端 join（绑定后 10s 宽限内发，利用免令牌桶机会）。
+  try {
+    Sess.idrCtl = QFIdrRequester({});
+    if (agentId) Sess.idrCtl.request(sessionId, agentId, 'join').catch(() => {});
+  } catch (e) {}
+  // RC-03：FEC 接收器（解码端库；分片到达通道在上游帧流内，待捕获埋点落地
+  // 后接线 ingest；不可恢复帧触发一次受控 IDR reason=loss）。
+  try {
+    Sess.fecCtl = QFFecReceiver({
+      onUnrecoverable: (frameId) => { try { if (Sess.idrCtl && agentId) Sess.idrCtl.request(sessionId, agentId, 'loss'); } catch (e) {} },
+    });
+  } catch (e) {}
+  // RC-09：画质探针（RTT/丢包/抖动由探针自身往返实测；decodeLag/pendingFrames
+  // 取 FEC 接收器待解块数——帧流在 iframe 内，取不到的观测值不填、不伪造）。
+  try {
+    Sess.qualityCtl = QFQualityProbe({
+      sessionId, agentId, idr: Sess.idrCtl,
+      collect: () => {
+        const q = (Sess.fecCtl && Sess.fecCtl.blocks) ? Sess.fecCtl.blocks.size : 0;
+        return { pendingFrames: q };
+      },
+      onTierChange: (from, to, split) => {
+        try { setQualityTierUI(to); } catch (e) {}
+        try { if (Sess.fecCtl) Sess.fecCtl.resetOnKeyframe(); } catch (e) {} // 清旧参考帧
+        try { if (Sess.recCtl) Sess.recCtl.sendEvent({ type: 'quality-change', at: Date.now(), from, to }); } catch (e) {}
+        try { toast(t('quality.autoDown'), 'warn'); } catch (e) {}
+      },
+      onBackpressure: (level, action) => {
+        // 背压执行（QF-QUALITY-1 §5）：L1 降帧率 / L2 降分辨率码率的编码器侧
+        // 动作在网页端无法直接执行（画面在 iframe 内）——只记级别、更新画质
+        // 行状态，不擅自降档；L3 丢弃到关键帧：清本地参考帧＋受控 IDR。
+        Sess.backpressureLevel = level || '';
+        try { setQualityBpUI(level, action); } catch (e) {}
+        if (level === 'L3') {
+          try { if (Sess.fecCtl) Sess.fecCtl.resetOnKeyframe(); } catch (e) {}
+          try { if (Sess.idrCtl && agentId) Sess.idrCtl.request(sessionId, agentId, 'loss'); } catch (e) {}
+        }
+      },
+    });
+    Sess.qualityCtl.start();
+  } catch (e) {}
+  // RC-10：录制控制（sessionId 传桌面会话 id 以便关联；POLICY_OFF 默认不录，
+  // 不发事件、不提示）。真实输入/剪贴板/关键帧捕获埋点在上游，待落地后接线。
+  try {
+    Sess.recCtl = QFRecording({});
+    Sess.recCtl.start(agentId, '', (Sess.qualityCtl && Sess.qualityCtl.tier) || 'balanced', sessionId).catch(() => {});
+  } catch (e) {}
+}
+function sessStopL5Clients() {
+  try { if (Sess.qualityCtl) Sess.qualityCtl.stop(); } catch (e) {}
+  Sess.qualityCtl = null;
+  try { if (Sess.recCtl && Sess.recCtl.state === 'recording') Sess.recCtl.end().catch(() => {}); } catch (e) {}
+  Sess.recCtl = null;
+  try { if (Sess.fecCtl) Sess.fecCtl.stop(); } catch (e) {}
+  Sess.fecCtl = null;
+  Sess.idrCtl = null;
+  Sess.relayId = '';
+  Sess.backpressureLevel = '';
+}
+/* 画质设定行更新（设置抽屉内）：当前档位名＋背压级别。 */
+function setQualityTierUI(tier) {
+  const el = document.getElementById('qfQualityTier');
+  if (el) { try { el.textContent = t('quality.tier.' + tier); } catch (e) { el.textContent = tier || ''; } }
+}
+function setQualityBpUI(level, action) {
+  const el = document.getElementById('qfQualityBp');
+  if (el) el.textContent = level ? ('背压 ' + level + (action ? ' · ' + action : '')) : '';
 }
 
 /* ---------- presence 预检与阶段文案（W-01/W-02/W-12 共用） ---------- */
@@ -1849,14 +1035,6 @@ async function checkPresence(nodeid) {
     return { ok: false, code: 'TIMEOUT' };
   } catch (e) { return { ok: false, code: 'TIMEOUT' }; }
 }
-const STAGE_TEXT = {
-  preflight: '正在检查设备在线状态…',
-  resolving: '正在解析设备…',
-  'iframe-attach': '正在加载控制台…',
-  'webapp-ready': '正在启动控制台…',
-  'peer-connecting': '正在连接设备…',
-  'video-ready': '正在建立画面通道…',
-};
 function setStage(view, stage) {
   Sess.stage = stage; Sess.stageAt = performance.now();
   const t = STAGE_TEXT[stage] || '正在建立会话…';
@@ -1864,7 +1042,17 @@ function setStage(view, stage) {
   const c = $('#qfConnecting', view);
   if (c) {
     const tt = c.querySelector('.sv-connecting__t'); if (tt) tt.textContent = t;
-    const dev = $('#qfConnDev', view); if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '');
+    const idx = QF_STAGE_MAP[stage];
+    const pct = (idx == null) ? null : Math.round(((idx + 1) / QF_STAGE_ORDER.length) * 100);
+    Sess.stagePct = pct;
+    const items = c.querySelectorAll('#qfStages li');
+    items.forEach((li, i) => {
+      const st = li.querySelector('.st-t');
+      li.classList.toggle('done', idx != null && i < idx);
+      li.classList.toggle('now', idx != null && i === idx);
+      if (st) st.textContent = (idx != null && i < idx) ? '完成' : (idx != null && i === idx) ? '进行中' : '等待';
+    });
+    const dev = $('#qfConnDev', view); if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '') + (pct != null ? ' · ' + pct + '%' : '');
   }
   Sess.stageTextSec = -1;
   try { console.debug('[qf-sess] stage=' + stage); } catch (e) {}
@@ -1876,7 +1064,9 @@ function refreshStageClock(view) {
   if (sec === Sess.stageTextSec) return;
   Sess.stageTextSec = sec;
   const dev = $('#qfConnDev', view);
-  if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '') + ' · 已用 ' + sec + ' 秒';
+  if (dev) dev.textContent = '目标设备：' + (Sess.name || Sess.nodeid || '') + ' · 已用 ' + sec + ' 秒' + (Sess.stagePct != null ? ' · ' + Sess.stagePct + '%' : '');
+  const now = document.querySelector('#qfStages li.now .st-t');
+  if (now) now.textContent = '进行中 · ' + sec + ' s';
 }
 /* 框内引擎会话对象是否与本会话同一台设备（W-05：probeFrame 的 connected 判定
    与 driveConnect 的 stale 判定共用；currentNode 不存在时不作否定，只认有值且不符）。 */
@@ -1942,9 +1132,15 @@ function sessionMarkup(name, kind) {
   const capLive = capBridgeLive();
   const capRows = QF_CAP_DEFS.map(c => {
     const on = sessCapOn(c.key);
-    // X-12：桥未接入时开关整体置 aria-disabled（不用 disabled 属性——被禁用的
-    // 按钮收不到点击，toast 说明就永远弹不出来；样式上同样置灰不可点）。
-    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${capLive && on ? ' sv-opt__s--ok' : ''}">${capLive ? (on ? '已开启' : '已关闭') : '未接入'}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"${capLive ? '' : ' aria-disabled="true"'}></button></div></li>`;
+    const hasPref = typeof sessCaps()[c.key] === 'boolean';
+    // X-12（2026-11-14 Q1(a) 新口径）：桥死期开关仍可操作、只记偏好，不置
+    // aria-disabled（该属性与可点击矛盾）；aria-checked 反映已记录偏好，
+    // 无记录偏好且桥死期时 aria-checked 为 false（不以 def 回落为 ON）；
+    // 能力状态由状态文本另行表达：live 时「已开启/已关闭」，死期有记录偏好
+    // 时「已记录偏好、能力未接入」，死期无记录偏好时 plain「未接入」。
+    const capTxt = capLive ? (on ? '已开启' : '已关闭') : (hasPref ? '已记录偏好、能力未接入' : '未接入');
+    const ariaChecked = (capLive || hasPref) ? on : false;
+    return `<li><div class="sv-opt sv-opt--set"><span class="sv-opt__ic">${ic(c.icon)}</span><span class="sv-opt__tx"><span class="sv-opt__n">${esc(c.name)}</span><span class="sv-opt__d">${esc(c.desc)}</span></span><span class="sv-opt__s${capLive && on ? ' sv-opt__s--ok' : ''}">${capTxt}</span><button class="sv-opt__k" data-cap="${c.key}" role="switch" aria-checked="${ariaChecked ? 'true' : 'false'}" aria-label="${esc(c.name)}开关"></button></div></li>`;
   }).join('');
   return `<div class="qf-session-layer"><div class="viewer" id="qfViewer" data-morph="${kind}" data-fs="false">
     <header class="sv-bar"><div class="sv-bar__inner">
@@ -1963,16 +1159,26 @@ function sessionMarkup(name, kind) {
         <p class="sv-connecting__t">正在建立会话…</p>
         <p class="sv-connecting__d" id="qfConnDev">目标设备：${esc(name || '')}</p>
         <div class="sv-progress"><div class="sv-progress__bar"></div></div>
+        <ol class="sv-stages" id="qfStages">
+          <li data-stage="init"><span class="st-dot"></span><span>初始化网络</span><span class="st-t">等待</span></li>
+          <li data-stage="resolve"><span class="st-dot"></span><span>解析设备</span><span class="st-t">等待</span></li>
+          <li data-stage="auth"><span class="st-dot"></span><span>鉴权</span><span class="st-t">等待</span></li>
+          <li data-stage="channel"><span class="st-dot"></span><span>建立通道</span><span class="st-t">等待</span></li>
+          <li data-stage="codec"><span class="st-dot"></span><span>协商编码</span><span class="st-t">等待</span></li>
+          <li data-stage="firstframe"><span class="st-dot"></span><span>首帧</span><span class="st-t">等待</span></li>
+        </ol>
       </div>
       <div class="sv-strip" id="qfStrip" hidden><span class="sv-strip__spin"></span><span class="sv-strip__txt" id="qfStripTxt">连接中断，正在自动重连…</span></div>
       <div class="sv-mask" id="qfMask" hidden><div class="sv-card">
         <h2 class="sv-card__t" id="qfMaskT">无法建立会话</h2>
         <p class="sv-card__d" id="qfMaskD"></p>
+        <p class="sv-mask-meta" id="qfMaskMeta"></p>
         <div id="qfMaskCands"></div>
         <div class="sv-card__acts">
           <button class="sv-btn sv-btn--primary" data-act="retry">重试</button>
           <button class="sv-btn" data-act="mask-back">返回设备详情</button>
           <button class="sv-btn" data-act="compat" id="qfCompatBtn" hidden>兼容模式打开</button>
+          <button class="sv-btn" data-act="copy-log" id="qfCopyLogBtn">复制诊断日志</button>
         </div>
       </div></div>
     </main>
@@ -1999,12 +1205,12 @@ function sessionMarkup(name, kind) {
       <div class="sv-sheet__b">
         <div id="qfSendList">
           <ul class="sv-opts"><li><button class="sv-opt" role="radio" aria-checked="true"><span class="sv-opt__ic">${ic('phone')}</span><span class="sv-opt__tx"><span class="sv-opt__n">我的手机</span><span class="sv-opt__d">本账号手机控制器，在「我的文件 · 待接收」领取后打开会话</span></span><span class="sv-opt__r"></span></button></li></ul>
-          <div style="height:14px"></div>
+          <div class="sp-h14"></div>
           <button class="sv-btn sv-btn--primary" id="qfSendGo">发送</button>
         </div>
         <div id="qfSendSent" hidden>
           <div class="sv-sheet__ok"><span class="sv-sheet__ok-ic">${ic('check')}</span><p class="sv-sheet__ok-tx">已发送到你的手机，正在打开远程桌面</p></div>
-          <div style="height:14px"></div>
+          <div class="sp-h14"></div>
           <button class="sv-btn sv-btn--primary" data-close="qfScrimSend">完成</button>
         </div>
         <div id="qfSendFail" hidden>
@@ -2027,11 +1233,15 @@ function sessionMarkup(name, kind) {
         </ul>
         <p class="sv-sheet__lbl">${capLive ? '会话能力（全部保留，按新样式重排）' : '会话能力（未接入，仅记录偏好）'}</p>
         <ul class="sv-opts">${capRows}</ul>
+        <p class="sv-sheet__lbl">画质</p>
+        <p class="sv-sheet__sub"><span id="qfQualityTier">${t('quality.tier.balanced')}</span><span id="qfQualityBp"></span></p>
+        <button class="sv-btn" id="qfQualityUpgrade">${t('quality.upgrade')}</button>
+        <p class="sv-sheet__sub">网络差时自动降档，恢复后需手动升档；升档须最近 20 秒网络持续健康。</p>
       </div>
     </div></div>
     <div class="sv-scrim" id="qfScrimConfirm" data-open="false" hidden><div class="sv-sheet" role="dialog" aria-modal="true" aria-labelledby="qfCfTtl">
       <div class="sv-sheet__grab"></div>
-      <div class="sv-sheet__h"><div class="sv-sheet__hd"><h3 class="sv-sheet__ttl" id="qfCfTtl">断开连接？</h3><p class="sv-sheet__sub">会话将被结束，你可以随时从设备详情重新连接。</p></div></div>
+      <div class="sv-sheet__h"><div class="sv-sheet__hd"><h3 class="sv-sheet__ttl" id="qfCfTtl">断开连接？</h3><p class="sv-sheet__sub">断开后会话将被结束，点底部导航或浏览器返回也会结束会话；你可以随时从设备详情重新连接。</p></div></div>
       <div class="sv-sheet__f">
         <button class="sv-btn sv-btn--danger" id="qfDiscGo">断开并返回</button>
         <button class="sv-btn" data-close="qfScrimConfirm">继续会话</button>
@@ -2039,17 +1249,6 @@ function sessionMarkup(name, kind) {
     </div></div>
   </div></div>`;
 }
-
-/* 设定 sheet 能力项（G4：原生能力一项不丢；驱动桥见 sessApplyCap） */
-const QF_CAP_DEFS = [
-  { key: 'lock', name: '键鼠锁定', desc: '锁定被控端本地键鼠', icon: 'lock', def: true },
-  { key: 'mute', name: '静音', desc: '关闭会话声音', icon: 'mute', def: false },
-  { key: 'bell', name: '通知', desc: '被控端通知转发', icon: 'bell', def: true },
-  { key: 'lang', name: '语言（输入法）', desc: '远端输入法切换', icon: 'globe', def: true },
-  { key: 'reg', name: '注册表', desc: '远程注册表编辑', icon: 'file', def: false },
-  { key: 'apps', name: '软件管理', desc: '被控端软件列表与卸载', icon: 'folder', def: false },
-  { key: 'events', name: '事件日志', desc: '被控端系统事件查看', icon: 'file', def: false },
-];
 function sessCaps() {
   try { return JSON.parse(localStorage.getItem('qfSessCaps') || '{}'); } catch (e) { return {}; }
 }
@@ -2061,10 +1260,13 @@ function sessCapOn(key) {
 }
 /* 能力驱动桥：优先引擎未来钩子 QFCap(key,on)；其次原生设定对话框控件（选择器映射
    待翻牌日按 phase-0 SELECTORS 纪律实捕后填 QF_CAP_NATIVE_MAP）；都不可用时仅记录
-   本地偏好，状态字示「未接入」，不假报已生效（DS P1-2）。 */
+   本地偏好，不假报已生效（DS P1-2）：桥死期状态字三态——有记录偏好时
+   「已记录偏好、能力未接入」，无记录偏好时「未接入」；桥活期为「已开启／已关闭」。 */
 const QF_CAP_NATIVE_MAP = {};
-/* 桥接实况（静态判定）：映射表为空期间，能力行一律按「未接入，仅记录偏好」
-   降级展示；开关点击时逐次以 sessApplyCap 的真实返回值决定状态字。 */
+/* 桥接实况（静态判定）：映射表为空期间桥死期，能力行按有无记录偏好分
+   「已记录偏好、能力未接入」／「未接入」两档展示；开关点击时死期只记偏好
+   （状态字改「已记录偏好、能力未接入」），活期以 sessApplyCap 的真实返回
+   值决定是否翻转状态字（回 false 时不翻、不改、不记）。 */
 function capBridgeLive() { return Object.keys(QF_CAP_NATIVE_MAP).length > 0; }
 function sessApplyCap(key, on) {
   try {
@@ -2138,6 +1340,7 @@ function sessionDeepLinkCurrent() { return sessionDeepLink(Sess.nodeid, Sess.vm)
 function frameNavigate(url) {
   const f = Sess.frame || QF_PRE.frame;
   if (!f) return;
+  const sg = Sess.gen; // 扫表 S10：replace 抛错后的 300ms 重试须认会话代次，旧会话的重试不得导航已拆/重建的帧
   QF_PRE.navGen++; // W-08：每次导航递增世代号（armFrameLoad 的闭包据此校验）
   try { f.contentWindow.location.replace(url); return; } catch (e) {
     // X-10：replace 抛错不再无条件回落 src 赋值（src 会在联合历史里新增条目、
@@ -2148,6 +1351,7 @@ function frameNavigate(url) {
     try { console.debug('[qf-sess] frameNavigate replace 抛错，300ms 后重试一次。'); } catch (e2) {}
     if (!f.contentWindow) { try { f.src = url; } catch (e2) {} Sess.navFallback = 'src-fallback'; return; }
     setTimeout(() => {
+      if (sg !== Sess.gen) return; // 扫表 S10：重试时会话已换代，旧导航作废
       try { f.contentWindow.location.replace(url); }
       catch (e2) { try { f.src = url; } catch (e3) {} Sess.navFallback = 'src-fallback'; }
     }, 300);
@@ -2155,8 +1359,8 @@ function frameNavigate(url) {
 }
 
 async function buildSessionFrame(view, preflightResult) {
-  Sess.pendingVm = 0; Sess.morphRetryAt = 0; // DS P2-1：新一轮构建起算，旧待办形态清零
-  Sess.reloaded = false; Sess.guardN = 0; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
+  Sess.pendingVm = 0; Sess.morphRetryAt = 0; Sess.morphTryVm = 0; // DS P2-1：新一轮构建起算，旧待办形态清零
+  Sess.reloaded = false; Sess.guardN = 0; Sess.guardToastShown = false; Sess.discN = 0; Sess.blankSince = 0; Sess.connectN = 0; Sess.lastConnectTry = 0;
   Sess.forcedConnectN = 0; Sess.connectingSince = 0; Sess.connectAttempts = [];
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
   Sess.maskCode = ''; Sess.navFallback = ''; Sess.preflight = null; Sess.webappReady = false; Sess.identityCheck = '';
@@ -2192,7 +1396,18 @@ async function buildSessionFrame(view, preflightResult) {
   Sess.identityCheck = identity.status;
   try { console.debug('[qf-sess] identity node=' + Sess.nodeid + ' status=' + identity.status); } catch (e) {}
   const identityMismatch = (identity.status === 'mismatch');
+  /* RC-07：挂 iframe 之前按宣告列表选址——列表为空/取失败/三级耗尽时进
+     降级态遮罩，不建连、不用硬编码地址兜底（QF-RELAY-1 §2.2/§2.3）。 */
+  const relaySel = await sessSelectRelay(view, gen0);
+  if (gen0 !== Sess.gen || !Sess.active) return;
+  if (!relaySel.ok) {
+    if (relaySel.code === 'ABORTED') return;
+    Sess.state = 'failed';
+    showSessionMask(view, 'RELAY_DEGRADED', { relay: relaySel.code, reason: relaySel.reason || '' });
+    return;
+  }
   Sess.t0 = performance.now(); Sess.state = 'connecting';
+  Sess.sm = QFSessionSM({ now: performance.now() }); // S-075：新会话即建状态机
   setStage(view, 'iframe-attach');
   /* 新一轮构建取代旧终态卡（如从候选列表点选进入）：先收卡，失败再由哨兵重新升卡 */
   const m0 = view.querySelector('#qfMask'); if (m0) m0.hidden = true; Sess.mask = null;
@@ -2421,7 +1636,16 @@ function startSentinel(view) {
     if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
     if (Sess.state === 'connecting') {
       refreshStageClock(view);
-      if (p === 'connected') { setConnected(view); return; }
+      /* S-075：每 tick 把探针信号喂给连接状态机（QFSessionSM，qf-runtime.js）：
+         只有状态机走到 HEALTHY（video 首帧＋input 通道双达标且稳定一周期）
+         才显「已连接」；INPUT_READY 段 20 秒未达标即落 TIMEOUT_INPUT_READY。
+         其余各段的超时仍由下方 W-02 阶段阶梯执行（与状态机同预算、同码）。 */
+      if (Sess.sm) {
+        Sess.sm.observe(p, { inputReady: sessInputReady() }, now);
+        const to = Sess.sm.checkTimeout(now);
+        if (to && to.failed && to.failed.state === 'INPUT_READY') { failStage(view, 'TIMEOUT_INPUT_READY', 'input-ready'); return; }
+      }
+      if (p === 'connected') { if (!Sess.sm || Sess.sm.state === 'HEALTHY') { setConnected(view); return; } /* 未 HEALTHY：等状态机走完 input 段，不提前显已连接 */ }
       if (p === 'videopending') {
         if (Sess.stage !== 'video-ready') setStage(view, 'video-ready');
         else if (now - Sess.stageAt > 20000) { failStage(view, 'TIMEOUT_VIDEO_READY', 'video-ready'); return; }
@@ -2434,7 +1658,7 @@ function startSentinel(view) {
           setStage(view, 'peer-connecting');
         }
         driveConnect();
-      } else if (p === 'blank') {
+      } else if ((p === 'blank') || (p === 'lost')) {
         driveConnect(); // 帧尚未绑定目标文档时 driveConnect 内部的 href 身份口径会自行拦下
       }
       // 阶段超时阶梯（每阶段只看本阶段内耗时）＋总闸 30 秒兜底（W-02 深查原规格）。
@@ -2463,28 +1687,25 @@ function startSentinel(view) {
         else if (now - Sess.blankSince > 16000) { Sess.state = 'failed'; showSessionMask(view, 'FAIL', null); return; }
       } else Sess.blankSince = 0;
     } else if (Sess.state === 'lost') {
-      if (p === 'connected') { setConnected(view); return; }
+      /* S-075：lost 态同样喂状态机（重连恢复须再走一遍 input 段才显已连接）。 */
+      if (Sess.sm) Sess.sm.observe(p, { inputReady: sessInputReady() }, now);
+      if (p === 'connected') { if (!Sess.sm || Sess.sm.state === 'HEALTHY') { setConnected(view); return; } }
       if (p === 'reject') { Sess.state = 'failed'; showSessionMask(view, 'REJECT', null); return; }
-      // W-07：每 5 秒主动重连一次（driveConnect 在 lost 态放行），真实次数进条文。
-      if (now - Sess.lastLostTry > 5000) {
-        Sess.lastLostTry = now;
-        if (driveConnect()) {
-          Sess.reconnectN++;
-          const t = $('#qfStripTxt', view);
-          if (t) t.textContent = '连接中断，正在重连（第 ' + Sess.reconnectN + ' 次尝试）';
-        }
-      }
-      if (!Sess.lostReloaded && Sess.lostSince && now - Sess.lostSince > 30000) {
-        Sess.lostReloaded = true; Sess.lostSince = now;
-        armFrameLoad(view, () => onFrameLoad(view, Sess.gen)); // W-08：重建导航重装世代校验
-        try { frameNavigate(sessionDeepLinkCurrent()); } catch (e) {}
-        toast('连接中断，正在重建会话…', 'info');
-      } else if (Sess.lostReloaded && Sess.lostSince && now - Sess.lostSince > 20000) {
-        Sess.state = 'failed'; showSessionMask(view, 'FAIL', { reason: 'lost-reconnect' }); return;
-      }
+      // RC-04：重连由 QFReconnect 控制器驱动（setLost 起，5 次/5 秒/凭据即停/
+      // 取消停循环）；哨兵只负责探针与终态判定，不再无限 driveConnect、不再
+      // 30 秒自动重建帧。控制器终态（耗尽/凭据/取消）由 onStop 落遮罩或改条文。
     }
   };
   Sess.timers.push(setTimeout(tick, 250));
+}
+/* S-075：input 通道是否就位——引擎会话对象在位且 currentNode 是本台。 */
+function sessInputReady() {
+  try {
+    const w = Sess.frame && Sess.frame.contentWindow;
+    if (!w) return false;
+    const hasEngine = Sess.vm === 11 ? !!w.desktop : Sess.vm === 12 ? !!w.terminal : !!w.files;
+    return hasEngine && frameNodeMatches(w);
+  } catch (e) { return false; }
 }
 function probeFrame() {
   let doc = null, w = null;
@@ -2545,9 +1766,25 @@ function setConnected(view) {
   // 成功连上即清失败标记（W-04：下次同设备同形态可正常复用预热框）。
   Sess.lastFailCode = ''; Sess.lastFailNodeid = ''; Sess.lastFailVm = 0;
   Sess.lostSince = 0; Sess.lostReloaded = false; Sess.reconnectN = 0; Sess.lastLostTry = 0;
+  /* RC-04：若本次是由重连恢复的，Toast 一声；随后为下次掉线申领一张新票据
+     （只存内存，旧票据已消费/过期不复用；部署的服务端未加载该端点时 issue() 回 404，
+     控制器记 endpointMissing、走 legacy 路径，不伪造成功）。 */
+  const wasReconnected = !!Sess._restoredByReconnect;
+  Sess._restoredByReconnect = false;
+  if (Sess.reconnectCtl) { try { Sess.reconnectCtl.stop('restored', ''); } catch (e) {} Sess.reconnectCtl = null; }
+  if (wasReconnected) { try { toast(t('reconnect.restored'), 'ok'); } catch (e) {} }
+  if (Sess.nodeid) {
+    try {
+      const ctl = QFReconnect({ deviceId: bareNodeId(Sess.nodeid), sessionId: Sess.resumeId || (Sess.resumeId = qfNewSessionId()) });
+      Sess.reconnectCtl = ctl;
+      ctl.issue().catch(() => {});
+    } catch (e) {}
+  }
   const c = $('#qfConnecting', view); if (c) c.hidden = true;
   const s = $('#qfStrip', view); if (s) s.hidden = true;
   setBadge(view, '', '已连接');
+  /* L5 客户端启动：IDR join、画质探针、FEC 接收器、录制（RC-03/09/10）。 */
+  try { sessStartL5Clients(view); } catch (e) {}
   if (Sess.name) { try { localStorage.setItem('qfLastSessionDevice', Sess.name); } catch (e) {} }
   // X-11：连上后若有待办形态切换，重试一次 go()（setMorph 的等待路径）。
   if (Sess.pendingVm && Sess.pendingGen === Sess.gen) {
@@ -2558,10 +1795,65 @@ function setConnected(view) {
 function setLost(view) {
   if (Sess.state !== 'lost') { Sess.lostSince = performance.now(); Sess.reconnectN = 0; Sess.lastLostTry = 0; }
   Sess.state = 'lost';
+  if (Sess.sm) Sess.sm.reset(performance.now()); // S-075：掉线即重建状态机，恢复须再走完 input 段
   Sess.discN++;
   const s = $('#qfStrip', view); if (s) s.hidden = false;
   const t = $('#qfStripTxt', view); if (t) t.textContent = '连接中断，正在自动重连…';
   setBadge(view, 'retry', '重连中');
+  // RC-04：进 lost 即起重连控制器（上限 5 次、间隔 5 秒、凭据失败立即停、
+  // 取消按钮停循环；重连期间输入短路）。票据在 setConnected 时已申领，
+  // 无票据（端点未加载/申领失败）时走 legacy driveConnect 路径。
+  try { sessEnsureReconnect(view); } catch (e) {}
+}
+/* RC-04 网页客户端重连控制器接线（规范 §5.2，L1 票据规范 v1）。
+ * 控制器是 QFReconnect（qf-runtime.js），本函数只做会话视图侧的接线：
+ * 次数文案、取消按钮、legacy 尝试（driveConnect，钉住函数原样调用）、
+ * 恢复判定（probeFrame() === 'connected'，钉住函数原样调用）、终态落点。 */
+function sessEnsureReconnect(view) {
+  let ctl = Sess.reconnectCtl;
+  if (ctl && ctl.state === 'reconnecting') return; // 已在跑，不重复起
+  if (!ctl || ctl.state === 'restored' || ctl.state === 'stopped') {
+    ctl = QFReconnect({ deviceId: bareNodeId(Sess.nodeid || ''), sessionId: Sess.resumeId || (Sess.resumeId = qfNewSessionId()) });
+    Sess.reconnectCtl = ctl;
+  }
+  // 取消按钮（只挂一次）：点后停循环，不再自动重连
+  const strip = $('#qfStrip', view);
+  if (strip && !strip.querySelector('[data-act="reconnect-cancel"]')) {
+    const btn = document.createElement('button');
+    btn.className = 'sv-btn sm';
+    btn.setAttribute('data-act', 'reconnect-cancel');
+    btn.textContent = t('reconnect.cancel');
+    btn.onclick = () => { try { Sess.reconnectCtl && Sess.reconnectCtl.cancel(); } catch (e) {} };
+    strip.appendChild(btn);
+  }
+  ctl.start({
+    onAttempt(n, max) {
+      Sess.reconnectN = n;
+      const tx = $('#qfStripTxt', view);
+      if (tx) tx.textContent = t('reconnect.attempt', { n, max });
+    },
+    onLegacyAttempt() { return driveConnect(); },
+    onLegacyOk() { try { return probeFrame() === 'connected'; } catch (e) { return false; } },
+    onRestored() {
+      try { driveConnect(); } catch (e) {} // 票据恢复后补调一次引擎连接，探针确认后 setConnected 收尾
+      Sess._restoredByReconnect = true;
+    },
+    onStop(reason, code) { sessReconnectStopped(view, reason, code); }
+  });
+}
+function sessReconnectStopped(view, reason, code) {
+  if (reason === 'restored') return; // 内部停（已恢复/拆会话），无终态动作
+  if (reason === 'cancelled') {
+    const tx = $('#qfStripTxt', view);
+    if (tx) tx.textContent = t('reconnect.cancelled');
+    setBadge(view, 'retry', '已取消重连');
+    return;
+  }
+  // 凭据失败（吊销/过期/换绑/重授权）与 5 次耗尽：落 FAIL 遮罩，手动重试入口在遮罩上
+  if (reason === 'credential') { try { toast(t('reconnect.stoppedCredential'), 'err'); } catch (e) {} }
+  else if (reason === 'exhausted') { try { toast(t('reconnect.exhausted'), 'err'); } catch (e) {} }
+  Sess.state = 'failed';
+  showSessionMask(view, 'FAIL', { reason: 'lost-reconnect' });
 }
 function showSessionMask(view, code, r) {
   const m = $('#qfMask', view); if (!m) return;
@@ -2594,7 +1886,7 @@ function showSessionMask(view, code, r) {
     T.textContent = '找到多台同名设备';
     D.textContent = '请选择要连接的设备：';
     if (cands && r && Array.isArray(r.candidates)) {
-      cands.innerHTML = r.candidates.map(c => `<button class="sv-btn" data-cand="${esc(c.nodeid)}" style="margin:4px 4px 0 0">${esc(c.name || c.nodeid)}${c.online ? '' : '（离线）'}</button>`).join('');
+      cands.innerHTML = r.candidates.map(c => `<button class="sv-btn m-4-4-0" data-cand="${esc(c.nodeid)}">${esc(c.name || c.nodeid)}${c.online ? '' : '（离线）'}</button>`).join('');
       cands.querySelectorAll('[data-cand]').forEach(b => b.onclick = () => {
         Sess.nodeid = bareNodeId(b.getAttribute('data-cand'));
         m.hidden = true;
@@ -2606,11 +1898,11 @@ function showSessionMask(view, code, r) {
     T.textContent = '无法定位这台设备';
     D.textContent = '未能取得设备的连接标识，请稍后重试，或使用兼容模式打开。';
     if (compat) compat.hidden = false;
-  } else if (code === 'TIMEOUT_IFRAME_LOAD' || code === 'TIMEOUT_WEBAPP_READY' || code === 'TIMEOUT_PEER_CONNECTING' || code === 'TIMEOUT_VIDEO_READY') {
+  } else if (code === 'TIMEOUT_IFRAME_LOAD' || code === 'TIMEOUT_WEBAPP_READY' || code === 'TIMEOUT_PEER_CONNECTING' || code === 'TIMEOUT_VIDEO_READY' || code === 'TIMEOUT_INPUT_READY') {
     // W-02/W-13：阶段超时专用分支（不再落入通用 else）——阶段名＋已耗秒数＋下一步。
     const stageName = (r && r.stage) || '';
     const secs = (r && typeof r.elapsedMs === 'number') ? Math.round(r.elapsedMs / 1000) : null;
-    const stageCn = { 'iframe-attach': '加载会话框', 'iframe-load': '加载控制台页面', 'webapp-ready': '启动控制台', 'peer-connecting': '连接设备', 'video-ready': '建立画面通道', preflight: '检查设备在线状态' }[stageName] || '建立连接';
+    const stageCn = { 'iframe-attach': '加载会话框', 'iframe-load': '加载控制台页面', 'webapp-ready': '启动控制台', 'peer-connecting': '连接设备', 'video-ready': '建立画面通道', 'input-ready': '确认输入可用', preflight: '检查设备在线状态' }[stageName] || '建立连接';
     T.textContent = '连接超时';
     D.textContent = '在「' + stageCn + '」阶段等待' + (secs != null ? '超过 ' + secs + ' 秒' : '') + '仍未完成'
       + (code === 'TIMEOUT_PEER_CONNECTING' ? '：设备可能离线或 agent 未响应，请确认设备在线后重试。' : '，请检查网络后重试。')
@@ -2622,6 +1914,14 @@ function showSessionMask(view, code, r) {
     const secs = (r && typeof r.elapsedMs === 'number') ? Math.round(r.elapsedMs / 1000) : null;
     D.textContent = '在「' + stageCn + '」阶段等待' + (secs != null ? '超过 ' + secs + ' 秒' : '') + '仍未完成，请检查网络后重试。（诊断码：TIMEOUT）';
     if (compat) compat.hidden = false;
+  } else if (code === 'RELAY_DEGRADED') {
+    // RC-07 降级态（QF-RELAY-1 §2.3）：只保留已建会话＋文件暂存通道，不新开
+    // 桌面会话；重试入口即遮罩重试按钮（清空 failedIds、重新取宣告列表）。
+    T.textContent = '中继全部不可用';
+    D.textContent = (r && r.relay === 'L5_UNAVAILABLE')
+      ? t('relay.unavailable') + '（诊断码：L5_UNAVAILABLE）。'
+      : t('relay.degraded') + '（诊断码：RELAY_DEGRADED）。';
+    if (retry) retry.className = 'sv-btn sv-btn--primary';
   } else { /* FAIL */
     T.textContent = '会话组件加载失败';
     const detail = [];
@@ -2631,6 +1931,17 @@ function showSessionMask(view, code, r) {
     if (r && r.reloaded) detail.push('已自动重载过一次');
     D.textContent = (detail.length ? detail.join('，') + '。' : '') + '请检查网络与设备状态后重试。（诊断码：FAIL）';
     if (compat) compat.hidden = false;
+  }
+  /* C §2.5 错误页：错误码＋发生时间＋会话 ID＋已尝试步骤（真实计数，不编） */
+  const meta = $('#qfMaskMeta', view);
+  if (meta) {
+    const d = new Date();
+    const ts = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+    const tried = [];
+    if (r && typeof r.connectN === 'number') tried.push('已尝试连接 ' + r.connectN + ' 次');
+    if (r && r.reloaded) tried.push('已自动重载 1 次');
+    if (r && r.stage) tried.push('卡在「' + (r.stage || '') + '」阶段');
+    meta.textContent = '错误码 ' + code + ' · 发生时间 ' + ts + ' · 会话 ID ' + (Sess.nodeid || '—') + (tried.length ? ' · ' + tried.join('；') : '');
   }
   m.hidden = false;
 }
@@ -2654,7 +1965,34 @@ function wireSession(view) {
   act('disconnect').onclick = () => openSheet('qfScrimConfirm');
   act('back').onclick = () => { if (!sessionBackChain(view)) exitSession(); };
   act('retry').onclick = () => retryFromMask(view);
+  /* RC-09 手动升档（QF-QUALITY-1 §4.2）：仅在健康时可点，拒绝时展示服务端
+     code 对应的原因；升档后 10s 观察窗内被降回记一次乒乓（服务端判定）。 */
+  const qUp = $('#qfQualityUpgrade', view);
+  if (qUp) qUp.onclick = async () => {
+    if (!Sess.qualityCtl) { toast(t('quality.noHealthWindow'), 'warn'); return; }
+    qUp.disabled = true;
+    try {
+      const r = await Sess.qualityCtl.upgrade();
+      if (r && r.ok) { setQualityTierUI(Sess.qualityCtl.tier); toast(t('quality.upgraded'), 'ok'); }
+      else if (r) {
+        const msg = { AT_TOP: t('quality.atTop'), NOT_HEALTHY: t('quality.notHealthy'), NO_HEALTH_WINDOW: t('quality.noHealthWindow'), PINGPONG_COOLDOWN: t('quality.pingpong') }[r.code];
+        toast(msg || (r.msg || r.code || ''), 'warn');
+      }
+    } catch (e) { toast(t('quality.noHealthWindow'), 'warn'); }
+    qUp.disabled = false;
+  };
+  /* MOBILE-FIX 2026-11-14（F-02）：mask-back（失败遮罩里的“返回设备详情”）
+     保持直接退出，不另弹确认——它是显式安全出口：遮罩只在会话未能建立时
+     出现，此时没有进行中的会话可保护；进行中的会话仍走断开确认（bnav／
+     返回／顶栏断开按钮均先弹确认单）。 */
   act('mask-back').onclick = () => exitSession();
+  const copyLog = act('copy-log');
+  if (copyLog) copyLog.onclick = async () => {
+    const meta = $('#qfMaskMeta', view);
+    const txt = 'QFRemote 诊断日志\n' + (meta ? meta.textContent : '') + '\n' + ($('#qfMaskD', view) ? $('#qfMaskD', view).textContent : '');
+    try { await navigator.clipboard.writeText(txt); toast('诊断日志已复制，包含会话 ID 与错误码。', 'ok'); /* C §5.1 */
+    } catch (e) { toast('复制失败，请手动记录错误码。', 'warn'); }
+  };
   act('compat').onclick = () => {
     /* 兼容模式＝用户主动触发的顶层打开（哨兵第 3 级），离开融合视图、事后审计有记 */
     const url = Sess.nodeid ? sessionDeepLink(Sess.nodeid, Sess.vm).replace('&qfm=frame&hide=31', '') : QF_CANON_ORIGIN;
@@ -2670,16 +2008,21 @@ function wireSession(view) {
     updateKbBtn(view);
   });
   updateKbBtn(view);
-  /* 设定：能力开关（偏好持久化＋驱动桥尝试）。DS P1-2：先问驱动桥，
-     sessApplyCap 返回 false（桥未接入）时状态字只示「未接入」——开关
-     只记偏好，绝不置「已开启/已关闭」生效态、不丢弃 false 返回。 */
+  /* 设定：能力开关（偏好持久化＋驱动桥尝试）。DS P1-2：先问驱动桥；
+桥未接入时只记偏好，状态字示「已记录偏好、能力未接入」，绝不置「已开启/已关闭」生效态；
+桥已接入时 sessApplyCap 返回 false 不翻 aria-checked、不改状态字、不记偏好。 */
   root.querySelectorAll('[data-cap]').forEach(o => o.onclick = () => {
     const key = o.getAttribute('data-cap');
     const on = o.getAttribute('aria-checked') !== 'true';
-    // X-12：桥未接入时只记偏好、不翻 aria-checked，并 toast 明示暂不生效。
+    // X-12（2026-11-14 Q1(a)）：桥未接入时只记偏好，aria-checked 反映已记录
+    // 偏好故随之翻转，状态 chip 改为「已记录偏好、能力未接入」（去掉 --ok 类），
+    // 并 toast 明示暂不生效。
     if (!capBridgeLive()) {
       const c0 = sessCaps(); c0[key] = on;
       try { localStorage.setItem('qfSessCaps', JSON.stringify(c0)); } catch (e) {}
+      o.setAttribute('aria-checked', on ? 'true' : 'false');
+      const chip0 = o.parentElement.querySelector('.sv-opt__s');
+      if (chip0) { chip0.textContent = '已记录偏好、能力未接入'; chip0.classList.remove('sv-opt__s--ok'); }
       toast('该能力尚未接入引擎，开关仅记录偏好，暂不生效。', 'info');
       return;
     }
@@ -2691,7 +2034,6 @@ function wireSession(view) {
     const chip = o.parentElement.querySelector('.sv-opt__s');
     if (chip) {
       if (applied) { chip.textContent = on ? '已开启' : '已关闭'; chip.classList.toggle('sv-opt__s--ok', on); }
-      else { chip.textContent = '未接入'; chip.classList.remove('sv-opt__s--ok'); }
     }
   });
   /* 终端输入行（bp-form 820 以下、终端形态显示；DS2 §4.3 软键盘 dvh 锁高在下方视口监听） */
@@ -2747,7 +2089,10 @@ function sessionBackChain(view) {
   /* 返回 true＝链内消化（留在会话）；false＝链已走完（应退出到设备详情） */
   if (Sess._anySheetOpen && Sess._anySheetOpen()) {
     const c = document.getElementById('qfScrimConfirm');
-    if (c && c.dataset.open === 'true') { Sess._closeAllSheets(); return false; }
+    /* MOBILE-FIX 2026-11-14（F-02）：确认单已开时再按返回＝关闭确认单、留在
+       会话里（即“继续会话”），拦截并消费这次返回；旧写法此处 return false
+       直接退出会话，第二次返回绕过了确认（大肥鱼：若真实会话复现应升 P1）。 */
+    if (c && c.dataset.open === 'true') { Sess._closeAllSheets(); return true; }
     Sess._closeAllSheets(); return true;
   }
   if (Sess.root && Sess.root.dataset.fs === 'true') { setFs(view, false); return true; }
@@ -2820,9 +2165,11 @@ function applyMorphChrome(view) {
    失败共用）：不静默断连，用户点了才 frameNavigate 重建；取消则留在原形态。 */
 function askMorphRebuild(view) {
   const kindCn = Sess.kind === 'terminal' ? '终端' : (Sess.kind === 'files' ? '文件管理' : '桌面');
+  const gen0 = Sess.gen; // 扫表 S9：确认框等待期间会话已拆/重建（新会话也是 active），旧确认不得重建新会话
   confirmModal('切换形态需要重建会话', '切换到' + kindCn + '需要重建会话，当前画面将中断，是否继续？', '重建会话', () => {
-    if (!Sess.active) return;
+    if (gen0 !== Sess.gen || !Sess.active) return;
     Sess.pendingVm = 0; Sess.morphRetryAt = 0; Sess.linkedVm = Sess.vm; Sess.state = 'connecting'; Sess.t0 = performance.now();
+    Sess.sm = QFSessionSM({ now: performance.now() }); // S-075：形态重建即重建状态机
     const cn = $('#qfConnecting', view); if (cn) cn.hidden = false;
     const st = $('#qfStrip', view); if (st) st.hidden = true;
     setBadge(view, 'wait', '连接中');
@@ -2840,14 +2187,18 @@ function retryPendingMorph(view) {
   if (Sess.morphRetryAt && performance.now() < Sess.morphRetryAt) return false;
   Sess.morphRetryAt = 0;
   const pv = Sess.pendingVm;
+  // 高-3：计数按目标形态分桶——待办目标变了即重计，A 形态的失败不算到 B 头上
+  if (Sess.morphTryVm !== pv) { Sess.morphTries = 0; Sess.morphTryVm = pv; }
   if (pv !== Sess.linkedVm && tryGo(pv)) { Sess.pendingVm = 0; Sess.linkedVm = pv; Sess.morphTries = 0; return true; }
   Sess.morphTries = (Sess.morphTries || 0) + 1;
-  if (Sess.morphTries >= 2) { Sess.morphTries = 0; askMorphRebuild(view); }
+  if (Sess.morphTries >= 2) { Sess.morphTries = 0; Sess.pendingVm = 0; Sess.morphRetryAt = 0; askMorphRebuild(view); }
   return false;
 }
 function setMorph(view, kind) {
   if (!QF_SESSION_VM[kind] || kind === Sess.kind) return;
   Sess.kind = kind; Sess.vm = QF_SESSION_VM[kind];
+  // 高-3：切换目标形态即重计——新目标的失败次数从 0 起算，不继承旧目标的计数
+  if (Sess.morphTryVm !== Sess.vm) { Sess.morphTries = 0; Sess.morphTryVm = Sess.vm; Sess.morphRetryAt = 0; }
   Sess.root.dataset.morph = kind;
   Sess.root.querySelectorAll('.sv-seg__btn').forEach(b => b.setAttribute('aria-selected', b.getAttribute('data-morph') === kind ? 'true' : 'false'));
   applyMorphChrome(view);
@@ -2864,7 +2215,7 @@ function setMorph(view, kind) {
       Sess.morphTries = (Sess.morphTries || 0) + 1;
       const kindCn = kind === 'terminal' ? '终端' : (kind === 'files' ? '文件管理' : '桌面');
       if (Sess.morphTries >= 2) {
-        Sess.morphTries = 0; Sess.morphRetryAt = 0;
+        Sess.morphTries = 0; Sess.morphRetryAt = 0; Sess.pendingVm = 0; // 高-3：第二次失败即清待办形态，不留半残重试态
         askMorphRebuild(view);
       } else {
         Sess.morphRetryAt = performance.now() + 1500; // 哨兵到点自动再试一次
@@ -2933,7 +2284,7 @@ function wireSendSheet(view) {
 Views.devices = async function (view, param, seq) {
   view.innerHTML = `<h1 class="pt">我的设备</h1><p class="psub">设备由站长分配或好友共享给您。在线设备可直接发起远程桌面、文件管理与远程终端。</p>
     <div class="tabs"><button class="on" data-tab="all">全部设备</button><button data-tab="mine">我的设备</button><button data-tab="shared">好友共享</button></div>
-    <div id="devList"><div class="card"><div class="skel" style="height:52px"></div></div></div>
+    <div id="devList"><div class="card"><div class="skel sk-h52"></div></div></div>
     <div class="note blue">可把文件发送到同账号的另一台设备（单文件上限 200 MB，离线暂存 24 小时）：在「我的文件」页选择「发送文件到其他设备」即可。</div>`;
   // 预取：进页面即并行拉节点映射（快源先回、慢源后台回填），不阻塞列表渲染；
   // 落地后把节点 id 盖进设备行（数据携带解析），并把上次会话设备升级为深链预热。
@@ -2947,6 +2298,7 @@ Views.devices = async function (view, param, seq) {
     try { const last = localStorage.getItem('qfLastSessionDevice'); const id = last && nodeIdFor(last); if (id) upgradePreheat(id, 11); } catch (e) {}
   }).catch(() => {});
   const st = await api('/home/api/stats');
+  if (seq != null && seq !== renderSeq) return; // 扫表 S7：stats 在飞期间已切页/重渲，旧账号回填不得写 S.stats、不得画旧设备列表
   if (st.status === 200 && st.json && st.json.ok) S.stats = st.json;
   // X-07：stats 失败（非 200 / ok 假 / 网络失败）且无旧缓存可用时，画网络失败态，
   // 不得画「暂无设备」（失败与真空必须分开，否则用户会以为设备被删了去重装 agent）。
@@ -2956,8 +2308,12 @@ Views.devices = async function (view, param, seq) {
     return;
   }
   const mine = (S.stats && S.stats.devices) || [];
+  // W-04：设备列表进单一状态源 QFStore.docs（持久域），各页只读 store；
+  // 写操作经 QFLocal 持久化＋跨标签页广播（见 QFStore.setDoc）。
+  try { QFStore.setDoc('devices', mine); QFStore._devicesAt = Date.now(); } catch (e) {}
   let shared = [];
   const fm = await api('/api/friends/me');
+  if (seq != null && seq !== renderSeq) return; // 扫表 S7：同上，共享列表回包亦然
   if (fm.status === 200 && fm.json) shared = (fm.json.sharesIn || []).map(s => ({ name: s.meshName || '共享设备组', os: '好友共享 · ' + ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'), group: s.owner || '', online: false, onlineUnknown: true })); // 批A-A2：档位判法对齐好友页与服务端词表 operate/view；X-07：共享行在线态未知，不得写死离线
   const box = $('#devList', view);
   const paint = (tab) => {
@@ -2967,15 +2323,16 @@ Views.devices = async function (view, param, seq) {
     let rows, emptyHtml;
     if (tab === 'shared') {
       rows = sharedRows;
-      emptyHtml = '<div class="statebox"><b>暂无好友共享的设备</b><p>好友把设备共享给您后，将显示在这里。</p></div>';
+      emptyHtml = deviceEmptyHtml('暂无好友共享的设备', '好友把设备共享给您后，将显示在这里。');
     } else if (tab === 'mine') {
       rows = mineRows;
-      emptyHtml = '<div class="statebox"><b>暂无设备</b><p>设备上线后将显示在这里。</p></div>';
+      emptyHtml = deviceEmptyHtml('未添加设备', '未添加设备。设备上线后将显示在这里。');
     } else {
       rows = mineRows.concat(sharedRows);
-      emptyHtml = '<div class="statebox"><b>暂无设备</b><p>设备上线后，或好友将设备共享给您后，将显示在这里。</p></div>';
+      emptyHtml = deviceEmptyHtml('未添加设备', '未添加设备。设备上线后，或好友将设备共享给您后，将显示在这里。');
     }
     box.innerHTML = `<div class="card">${rows.length ? rows.join('') : emptyHtml}</div>`;
+    box.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => navigate(el.getAttribute('data-go'))));
     bindDevRows(box);
   };
   paint('all');
@@ -2989,14 +2346,16 @@ Views.device = async function (view, name, seq) {
   // X-08：离线时三行远程入口初始即置灰不可点（原来头部说「不可连接」，下面三行照点不误）。
   const dis = d.online ? '' : ' disabled';
   view.innerHTML = `<h1 class="pt">设备详情 · ${esc(d.name)}</h1><p class="psub"><a data-back>← 返回我的设备</a></p>
-    <div class="card"><div class="dev" style="border:none;padding:0"><span class="devic">${ic('monitor')}</span><span><b style="font-size:17px">${esc(d.name)}</b><small>${esc(d.os || '')} · ${d.online ? '在线' : '离线'}</small></span><span class="ops" id="devHeadOps">${d.online ? `<button class="btn" data-remote="${esc(d.name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>'}</span></div></div>
+    <div class="card"><div class="dev dev-flat"><span class="devic">${ic('monitor')}</span><span><b class="fs-17">${esc(d.name)}</b><small>${esc(d.os || '')} · ${d.online ? '在线' : '离线'}</small></span><span class="ops" id="devHeadOps">${d.online ? `<button class="btn" data-remote="${esc(d.name)}">连接远程桌面</button>` : '<span class="pill off">设备离线时不可连接</span>'}</span></div></div>
     <div class="grid2"><div class="card" id="devConnCard"><h3>连接</h3>
       <button class="row" data-remote="${esc(d.name)}"${dis}><span class="tile">${ic('monitor')}</span><span><b>远程桌面</b><small>画面与键鼠控制</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-files="${esc(d.name)}"${dis}><span class="tile">${ic('folder')}</span><span><b>文件管理</b><small>浏览、上传与下载被控端文件</small></span><span class="chev">${ic('chevR')}</span></button><button class="row" data-terminal="${esc(d.name)}"${dis}><span class="tile">${ic('file')}</span><span><b>远程终端</b><small>命令行会话</small></span><span class="chev">${ic('chevR')}</span></button>
-      <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-remote="${esc(d.name)}"${dis}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${dis}>文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}"${dis}>远程终端</button></p></div>
-    <div class="card"><h3>设备信息</h3><div class="tblwrap"><table>
+      <p class="flex-row mt-10"><button class="btn sm" data-remote="${esc(d.name)}"${dis}>远程桌面</button><button class="btn sm ghost" data-files="${esc(d.name)}"${dis}>文件管理</button><button class="btn sm grey" data-terminal="${esc(d.name)}"${dis}>远程终端</button></p></div>
+    <div class="card"><h3>设备信息</h3><div class="tblwrap fit"><table>
       <tr><th>系统</th><td>${esc(d.os || '—')}</td></tr><tr><th>分组</th><td>${esc(d.group || '默认分组')}</td></tr>
-      <tr><th>状态</th><td data-devstatus>${d.online ? '在线' : '离线'}</td></tr><tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table></div></div></div>
-    <div class="card" id="lockCard"><h3>屏幕锁</h3><div id="lockBody"><div class="skel" style="height:52px"></div></div></div>
+      <tr><th>状态</th><td data-devstatus>${d.online ? '<span class="dot6"></span>在线' : '<span class="dot6 off"></span>离线'}</td></tr>
+      <tr><th>页面探针耗时</th><td class="num">—</td></tr><tr><th>码率</th><td class="num">—</td></tr><tr><th>编码</th><td>—</td></tr><tr><th>分辨率</th><td class="num">—</td></tr><tr><th>路径</th><td>—</td></tr>
+      <tr><th>共享状态</th><td>以好友页共享设置为准</td></tr><tr><th>屏幕锁</th><td>在本页下方「屏幕锁」面板中管理（仅设备所有者）</td></tr></table><p class="ev-meta">页面探针耗时、码率、编码、分辨率、路径来自会话 telemetry，会话建立后回填；无数据时显示 —，不编造。</p></div></div></div>
+    <div class="card" id="lockCard"><h3>屏幕锁</h3><div id="lockBody"><div class="skel sk-h52"></div></div></div>
     <div class="card"><h3>共享与安全</h3>
       ${rowHtml('users', '共享给好友', '在好友页选择好友后共享此设备（只看 / 可操作两档）', 'friends')}
       <button class="row" id="goLockPanel"><span class="tile">${ic('lock')}</span><span><b>屏幕锁</b><small>开启后被控端屏幕熄灭，只保留密码输入框；在本页上方「屏幕锁」面板中管理</small></span><span class="chev">${ic('chevR')}</span></button>
@@ -3075,29 +2434,29 @@ async function initLockPanel(view, deviceName) {
   const dev = nm.lockDevices.find(x => x.name === deviceName);
   if (!dev) {
     // 他人设备（或未登记机主）：服务端不下发该设备，不显示任何开关。
-    body.innerHTML = `<div class="note blue" style="margin:0">该设备不在您的屏幕锁管理范围内。仅设备所有者可管理其屏幕锁；好友共享给您的设备，请由设备所有者管理。</div>`;
+    body.innerHTML = `<div class="note blue m-0">该设备不在您的屏幕锁管理范围内。仅设备所有者可管理其屏幕锁；好友共享给您的设备，请由设备所有者管理。</div>`;
     return;
   }
   if (!dev.component) {
-    body.innerHTML = `<p style="margin-bottom:8px"><span class="pill warn">未安装组件</span></p><p style="color:var(--sub);font-size:13.5px">这台设备尚未安装屏幕锁组件，暂无法使用屏幕锁。</p>`;
+    body.innerHTML = `<p class="mb-8"><span class="pill warn">未安装组件</span></p><p class="text-sub fs-13x5">这台设备尚未安装屏幕锁组件，暂无法使用屏幕锁。</p>`;
     return;
   }
   const say = (html) => { const m = $('#lk-msg', body); if (m) m.innerHTML = html || ''; };
-  const fail = (r, fb) => say(`<div class="note err" style="margin:10px 0 0">${esc(apiErrText(r, fb))}</div>`);
+  const fail = (r, fb) => say(`<div class="note err my-10">${esc(apiErrText(r, fb))}</div>`);
   const setBusy = (on, label) => {
     busy = on;
     body.querySelectorAll('button').forEach(b => { b.disabled = on; });
-    if (on) say(`<p style="color:var(--sub);font-size:13.5px;margin-top:10px">${esc(label || '正在处理，请稍候…')}</p>`);
+    if (on) say(`<p class="ordnote" style="color:var(--sub)">${esc(label || '正在处理，请稍候…')}</p>`);
   };
   const refresh = () => { invalidateNodeMap(); initLockPanel(view, deviceName); };
   if (!dev.locked) {
     body.innerHTML = `
-      <div class="dev" style="border:none;padding:4px 0 0"><span><b>当前状态</b><small>未锁定</small></span><span class="ops"><span class="pill off">未锁定</span><button class="btn sm" id="lk-arm-open">开启屏幕锁</button></span></div>
-      <p style="color:var(--sub);font-size:13.5px;margin-top:8px">开启后，这台设备屏幕熄灭，只保留密码输入框，坐在设备前的人无法查看与操作；远程控制不受影响。</p>
+      <div class="dev dev-flat2"><span><b>当前状态</b><small>未锁定</small></span><span class="ops"><span class="pill off">未锁定</span><button class="btn sm" id="lk-arm-open">开启屏幕锁</button></span></div>
+      <p class="text-sub fs-13x5 mt-8">开启后，这台设备屏幕熄灭，只保留密码输入框，坐在设备前的人无法查看与操作；远程控制不受影响。</p>
       <div id="lk-arm-form" hidden>
         <div class="field"><label>设置本次密码（至少 4 位）</label><input id="lk-pw1" type="password" autocomplete="off"></div>
         <div class="field"><label>请再次输入</label><input id="lk-pw2" type="password" autocomplete="off"></div>
-        <p style="color:var(--sub);font-size:12.5px;margin-bottom:12px">密码只用这一次：在设备本地解锁成功后自动作废，下次开启时重新设置。</p>
+        <p class="text-sub fs-12x5 mb-12">密码只用这一次：在设备本地解锁成功后自动作废，下次开启时重新设置。</p>
         <button class="btn block" id="lk-arm-go">打开屏幕锁</button>
       </div>
       <div id="lk-msg"></div>`;
@@ -3109,8 +2468,8 @@ async function initLockPanel(view, deviceName) {
       if (busy) return;
       const pw = $('#lk-pw1', body).value, pw2 = $('#lk-pw2', body).value;
       const bad = validateLockPw(pw);
-      if (bad) { say(`<div class="note err" style="margin:10px 0 0">${esc(bad)}</div>`); return; }
-      if (pw !== pw2) { say('<div class="note err" style="margin:10px 0 0">两次输入的密码不一致，请检查后重试。</div>'); return; }
+      if (bad) { say(`<div class="note err my-10">${esc(bad)}</div>`); return; }
+      if (pw !== pw2) { say('<div class="note err my-10">两次输入的密码不一致，请检查后重试。</div>'); return; }
       setBusy(true, '正在开启屏幕锁，请稍候…');
       const r = await lockApi('POST', '/enable', { id: dev.id, password: pw });
       $('#lk-pw1', body).value = ''; $('#lk-pw2', body).value = '';
@@ -3121,9 +2480,9 @@ async function initLockPanel(view, deviceName) {
   }
   // 已锁定：关锁（二次确认）＋忘记密码重设（保持锁定，只换密码）
   body.innerHTML = `
-    <div class="dev" style="border:none;padding:4px 0 0"><span><b>当前状态</b><small>已锁定 · 远程控制不受影响</small></span><span class="ops"><span class="pill warn">已锁定</span></span></div>
-    <p style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn danger" id="lk-off">关闭屏幕锁</button><button class="btn grey" id="lk-reset-open">忘记密码？用登录密码重设</button></p>
-    <div id="lk-reset-form" hidden style="margin-top:12px">
+    <div class="dev dev-flat2"><span><b>当前状态</b><small>已锁定 · 远程控制不受影响</small></span><span class="ops"><span class="pill warn">已锁定</span></span></div>
+    <p class="flex-row mt-12"><button class="btn danger" id="lk-off">关闭屏幕锁</button><button class="btn grey" id="lk-reset-open">忘记密码？用登录密码重设</button></p>
+    <div class="mt-12" id="lk-reset-form" hidden>
       <div class="field"><label>您的 QFRemote 登录密码</label><input id="lk-lp" type="password" autocomplete="current-password"></div>
       <div class="field"><label>新锁密码（至少 4 位）</label><input id="lk-np1" type="password" autocomplete="off"></div>
       <div class="field"><label>请再次输入新锁密码</label><input id="lk-np2" type="password" autocomplete="off"></div>
@@ -3152,10 +2511,10 @@ async function initLockPanel(view, deviceName) {
   $('#lk-reset-go', body).onclick = async () => {
     if (busy) return;
     const lp = $('#lk-lp', body).value, np = $('#lk-np1', body).value, np2 = $('#lk-np2', body).value;
-    if (!lp) { say('<div class="note err" style="margin:10px 0 0">请输入登录密码。</div>'); return; }
+    if (!lp) { say('<div class="note err my-10">请输入登录密码。</div>'); return; }
     const bad = validateLockPw(np);
-    if (bad) { say(`<div class="note err" style="margin:10px 0 0">${esc(bad)}</div>`); return; }
-    if (np !== np2) { say('<div class="note err" style="margin:10px 0 0">两次输入的密码不一致，请检查后重试。</div>'); return; }
+    if (bad) { say(`<div class="note err my-10">${esc(bad)}</div>`); return; }
+    if (np !== np2) { say('<div class="note err my-10">两次输入的密码不一致，请检查后重试。</div>'); return; }
     setBusy(true, '正在重设密码，请稍候…');
     const r = await lockApi('POST', '/reset', { id: dev.id, loginPassword: lp, newPassword: np });
     ['#lk-lp', '#lk-np1', '#lk-np2'].forEach(s => { const i = $(s, body); if (i) i.value = ''; });
@@ -3169,18 +2528,19 @@ async function initLockPanel(view, deviceName) {
 function mountFileSend(container, opts) {
   opts = opts || {};
   container.innerHTML = `
-    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file"><div class="hint fs-chosen">尚未选择文件</div></div>
+    <div class="field"><label>选择文件（单文件上限 200 MB）</label><input type="file" class="fs-file filepick" id="fsFile"><label for="fsFile" class="btn sm ghost">选择文件</label><div class="hint fs-chosen">尚未选择文件</div></div>
     <div class="grid2">
       <div class="field"><label>来源设备</label><select class="fs-from"></select></div>
       <div class="field"><label>目标设备</label><select class="fs-to"></select></div>
     </div>
     <div class="bar fs-barwrap" hidden><i class="fs-bar" style="width:0%"></i></div>
-    <p class="fs-note" style="color:var(--sub);font-size:13px;margin:8px 0 12px"></p>
+    <p class="fs-note text-sub fs-13 m-8-0-12"></p>
     <button class="btn fs-go">发送文件</button>
-    <div class="fs-out" style="margin-top:12px"></div>`;
+    <button class="btn ghost fs-cancel" hidden>取消</button>
+    <div class="fs-out mt-12"></div>`;
   const fileIn = $('.fs-file', container), fromSel = $('.fs-from', container), toSel = $('.fs-to', container);
   const barWrap = $('.fs-barwrap', container), bar = $('.fs-bar', container), note = $('.fs-note', container);
-  const goBtn = $('.fs-go', container), out = $('.fs-out', container);
+  const goBtn = $('.fs-go', container), cancelBtn = $('.fs-cancel', container), out = $('.fs-out', container);
   /* P2-029：已选文件回显——选中即在卡内显示文件名（多选显示数量＋首名），清空回落提示文案 */
   const chosen = $('.fs-chosen', container);
   const syncChosen = () => {
@@ -3220,43 +2580,53 @@ function mountFileSend(container, opts) {
     if (sending) return;
     const f = fileIn.files && fileIn.files[0];
     out.innerHTML = '';
-    if (!f) { out.innerHTML = '<div class="note warn" style="margin:0">请先选择要发送的文件。</div>'; return; }
-    if (f.size > FILE_MAX_BYTES) { out.innerHTML = '<div class="note err" style="margin:0">该文件超过单文件上限（200 MB），无法发送。请选择更小的文件。</div>'; return; }
+    if (!f) { out.innerHTML = '<div class="note warn m-0">请先选择要发送的文件。</div>'; return; }
+    if (f.size > FILE_MAX_BYTES) { out.innerHTML = '<div class="note err m-0">该文件超过单文件上限（200 MB），无法发送。请选择更小的文件。</div>'; return; }
     const toOpt = toSel.options && toSel.selectedIndex >= 0 ? toSel.options[toSel.selectedIndex] : null;
     const toNode = toSel.value || (toOpt ? toOpt.value : '');
-    if (!toNode) { out.innerHTML = '<div class="note warn" style="margin:0">请选择目标设备。</div>'; return; }
-    if (fromSel.value && toNode === fromSel.value) { out.innerHTML = '<div class="note warn" style="margin:0">目标设备不能与来源设备相同，请选择另一台设备。</div>'; return; }
+    if (!toNode) { out.innerHTML = '<div class="note warn m-0">请选择目标设备。</div>'; return; }
+    if (fromSel.value && toNode === fromSel.value) { out.innerHTML = '<div class="note warn m-0">目标设备不能与来源设备相同，请选择另一台设备。</div>'; return; }
     sending = true; goBtn.disabled = true; barWrap.hidden = false; bar.style.width = '0%';
+    /* RC-08：新客户端一律走分片流（QF-STREAM-1）——本地算 SHA-256 → init →
+       按服务端返回的 chunkSize 切分（File.slice 流式读，不整文件 base64）→
+       chunk → commit；断网后 missing 查缺片续传；取消只在 uploading 态可用。 */
+    const tf = QFFileTransfer({});
+    cancelBtn.hidden = false;
+    cancelBtn.onclick = () => { try { tf.cancel(); } catch (e) {} };
     try {
-      note.textContent = '正在读取文件…';
-      const b64 = await readFileBase64(f, p => { bar.style.width = Math.round(p * 40) + '%'; });
-      note.textContent = '正在上传到服务器暂存…';
-      const r = await xhrSendFile({ filename: f.name, toNode, fromNode: fromSel.value || undefined, contentBase64: b64 },
-        p => { bar.style.width = (40 + Math.round(p * 60)) + '%'; });
+      note.textContent = t('files.hashing');
+      const r = await tf.upload(f, toNode, fromSel.value || undefined, (p) => {
+        bar.style.width = Math.round((p.sentBytes / Math.max(1, p.size)) * 100) + '%';
+        if (p.state === 'interrupted') note.textContent = t('files.resume');
+        else if (p.state === 'uploading') note.textContent = t('files.uploading', { r: p.received, n: p.totalChunks });
+        else if (p.state === 'committing') note.textContent = t('files.checking');
+      });
       bar.style.width = '100%';
-      if (r.json && r.json.ok) {
+      if (r.ok) {
         const toName = (nm && nm.byId.get(toNode)) || '目标设备';
-        out.innerHTML = `<div class="note ok" style="margin:0">文件已发送到「${esc(toName)}」的待接收列表，有效期至 ${esc(fmtDate(r.json.expiresAt))}。对方下载完成后，本页「我发出的」将显示已送达。</div>`;
+        out.innerHTML = `<div class="note ok m-0">文件已发送到「${esc(toName)}」的待接收列表，有效期至 ${esc(fmtDate(r.expiresAt))}。对方下载完成后，本页「我发出的」将显示已送达。</div>`;
         toast('文件已发送。', 'ok');
         fileIn.value = '';
         syncChosen();
         const cb = container.closest('#view') || document;
         const sentBox = $('#sentList', cb); if (sentBox) loadSentList(cb);
         const inboxBox = $('#inboxList', cb); if (inboxBox) loadInboxList(cb);
+      } else if (r.code === 'CANCELLED') {
+        out.innerHTML = '<div class="note warn m-0">' + esc(t('files.cancelled')) + '</div>';
+      } else if (r.code === 'CORRUPT') {
+        out.innerHTML = '<div class="note err m-0">' + esc(t('files.corrupt')) + '（CORRUPT）。</div>';
       } else {
-        out.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(r, '发送失败，请稍后再试。'))}</div>`;
+        out.innerHTML = '<div class="note err m-0">' + esc('发送失败' + (r.code ? '（' + r.code + '）' : '') + '，请稍后再试。') + '</div>';
       }
     } catch (e) {
-      out.innerHTML = `<div class="note err" style="margin:0">${esc((e && e.message) || '发送失败，请稍后再试。')}</div>`;
+      out.innerHTML = `<div class="note err m-0">${esc((e && e.message) || '发送失败，请稍后再试。')}</div>`;
     }
+    cancelBtn.hidden = true;
     note.textContent = '文件将暂存于服务器（最长 24 小时），目标设备在「我的文件 · 待接收」中下载后即完成送达。';
     sending = false; goBtn.disabled = false;
     setTimeout(() => { barWrap.hidden = true; }, 600);
   };
 }
-/* DS P2-5：邀请载荷校验未通过的文件 id——本页生命周期内按普通文件
-   展示，不再凭文件名当邀请渲染。 */
-const QF_INVITE_REJECTED = new Set();
 async function loadInboxList(root, seq) {
   const box = $('#inboxList', root); if (!box) return;
   // X-09：多步异步加载器的世代守卫——晚到回包不得写已离场的 DOM。
@@ -3284,7 +2654,7 @@ async function loadInboxList(root, seq) {
       const targetName = nm.byId.get(inv[1]) || '远程设备';
       return `<div class="dev"><span class="devic">${ic('phone')}</span><span><b>会话邀请：${esc(targetName)}</b><small>来自 ${esc(fromName)} · 发送到这台手机 · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-open-invite="${esc(f.id)}" data-inv-node="${esc(inv[1])}">打开会话</button></span></div>`;
     }
-    return `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(f.filename)}</b><small>${esc(fmtSize(f.size))} · 来自 ${esc(fromName)} · 接收到 ${esc(f._toName)} · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-dl="${esc(f.id)}" data-fn="${esc(f.filename)}">下载</button></span><div class="bar" data-dlbar="${esc(f.id)}" hidden style="flex-basis:100%"><i style="width:0%"></i></div></div>`;
+    return `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(f.filename)}</b><small>${esc(fmtSize(f.size))} · 来自 ${esc(fromName)} · 接收到 ${esc(f._toName)} · ${esc(fmtRemain(f.expiresAt))}</small></span><span class="ops"><button class="btn sm" data-dl="${esc(f.id)}" data-fn="${esc(f.filename)}">下载</button></span><div class="bar basis-full" data-dlbar="${esc(f.id)}" hidden><i style="width:0%"></i></div></div>`;
   }).join('');
   box.querySelectorAll('[data-open-invite]').forEach(btn => btn.onclick = async () => {
     const id = btn.getAttribute('data-open-invite'), nodeid = bareNodeId(btn.getAttribute('data-inv-node') || '');
@@ -3313,7 +2683,15 @@ async function loadInboxList(root, seq) {
     btn.disabled = true; btn.textContent = '下载中…';
     if (barEl) { barEl.hidden = false; }
     try {
-      await downloadStagedFile(id, fn, p => { if (barEl) barEl.firstElementChild.style.width = Math.round(p * 100) + '%'; });
+      // RC-08：下载走分片流下载器（Range 续传；服务端回 200 时按全文件处理）。
+      const tf = QFFileTransfer({});
+      const dl = await tf.download(id, (p) => { if (barEl && p.total > 0) barEl.firstElementChild.style.width = Math.round(p.received / p.total * 100) + '%'; });
+      if (!dl.ok) throw new Error(dl.code || '下载失败');
+      const url = URL.createObjectURL(dl.blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fn || 'file';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
       const ack = await api('/license/api/files/' + encodeURIComponent(id) + '/ack', { method: 'POST', json: {} });
       if (ack.json && ack.json.ok) toast('文件已下载，送达回执已确认。', 'ok');
       else toast('文件已下载，但回执确认未成功，请稍后在待接收列表核对。', 'warn');
@@ -3349,14 +2727,108 @@ Views.files = async function (view, name, seq) {
   view.innerHTML = `<h1 class="pt">我的文件</h1><p class="psub">浏览单台设备的文件请进入设备详情或远程桌面；把文件发到同账号的另一台设备，可直接在本页发送与接收。</p>
     <div class="card"><h3>选择设备进入文件管理</h3><div id="fileDevs">${devs.length ? devs.map(devRowHtml).join('') : '<div class="statebox"><b>暂无设备</b><p>设备上线后可进入文件管理。</p></div>'}</div></div>
     <div class="card"><h3>发送到我的其他设备</h3><div id="fileSendBox"></div></div>
-    <div class="card"><h3>待接收</h3><div id="inboxList"><div class="skel" style="height:52px"></div></div></div>
-    <div class="card"><h3>我发出的</h3><div id="sentList"><div class="skel" style="height:52px"></div></div></div>`;
+    <div class="card"><h3>待接收</h3><div id="inboxList"><div class="skel sk-h52"></div></div></div>
+    <div class="card"><h3>我发出的</h3><div id="sentList"><div class="skel sk-h52"></div></div></div>
+    <div class="card"><h3>${t('files.auditTitle')}</h3><div id="auditList"><div class="skel sk-h52"></div></div></div>
+    <div class="card"><h3>${t('rec.title')}</h3><div id="recList"><div class="skel sk-h52"></div></div><div id="recPlayer" hidden></div></div>`;
   bindDevRows(view);
   mountFileSend($('#fileSendBox', view));
   loadInboxList(view, seq);
   loadSentList(view, seq);
+  mountAuditList(view, seq);
+  mountRecList(view, seq);
   if (name) toast('已定位设备：' + name + '，点「文件管理」进入。', 'info');
 };
+/* RC-08 传输审计（QF-STREAM-1 §3）：只展示本人记录，result 三态着色。 */
+async function mountAuditList(root, seq) {
+  const box = $('#auditList', root); if (!box) return;
+  const stale = () => (seq != null && seq !== renderSeq) || !box.isConnected;
+  const tf = QFFileTransfer({});
+  const r = await tf.listAudit(50);
+  if (stale()) return;
+  if (!r || !r.ok || !Array.isArray(r.audit)) { box.innerHTML = '<div class="statebox"><b>传输记录暂时不可用</b><p>请稍后重新加载。</p></div>'; return; }
+  if (!r.audit.length) { box.innerHTML = '<div class="statebox"><b>' + esc(t('files.noAudit')) + '</b></div>'; return; }
+  const pill = { completed: 'ok', failed: 'err', cancelled: 'warn' };
+  const txt = { completed: t('files.auditCompleted'), failed: t('files.auditFailed'), cancelled: t('files.auditCancelled') };
+  box.innerHTML = r.audit.map(a => `<div class="dev"><span class="devic">${ic('file')}</span><span><b>${esc(a.filename || '')}</b><small>${esc(fmtSize(a.size || 0))} · ${esc(fmtDate(a.startedAt))}${a.reason ? ' · ' + esc(a.reason) : ''}</small></span><span class="ops"><span class="pill ${pill[a.result] || ''}">${esc(txt[a.result] || a.result || '')}</span></span></div>`).join('');
+}
+/* RC-10 录像列表＋回放器（QF-REC-1 §5）：列表、加载、播放、seek、变速、
+ * 边下边播、隐私提示。回放的是事件流（光标轨迹＋档位标记），不是视频画面。 */
+async function mountRecList(root, seq) {
+  const box = $('#recList', root); if (!box) return;
+  const stale = () => (seq != null && seq !== renderSeq) || !box.isConnected;
+  const rec = QFRecording({});
+  const r = await rec.list();
+  if (stale()) return;
+  if (!r || !r.ok || !Array.isArray(r.recordings)) { box.innerHTML = '<div class="statebox"><b>录像列表暂时不可用</b><p>请稍后重新加载。</p></div>'; return; }
+  if (!r.recordings.length) { box.innerHTML = '<div class="statebox"><b>' + esc(t('rec.noRecordings')) + '</b></div>'; return; }
+  box.innerHTML = r.recordings.map(v => `<div class="dev"><span class="devic">${ic('monitor')}</span><span><b>${esc(v.sessionId || '')}</b><small>${esc(v.deviceId || '')} · ${esc(v.tier || '')} · ${esc(fmtDate(v.startedAt))} · ${esc(fmtSize(v.bytes || 0))}</small></span><span class="ops"><button class="btn sm" data-rec-play="${esc(v.sessionId)}">${esc(t('rec.play'))}</button></span></div>`).join('');
+  box.querySelectorAll('[data-rec-play]').forEach(btn => btn.onclick = () => mountRecPlayer(root, btn.getAttribute('data-rec-play')));
+}
+function mountRecPlayer(root, sessionId) {
+  const wrap = $('#recPlayer', root); if (!wrap || !sessionId) return;
+  wrap.hidden = false;
+  wrap.innerHTML = `<p class="text-sub fs-13">${esc(t('rec.privacy'))}</p>
+    <canvas id="recCanvas" width="640" height="360" style="width:100%;background:var(--bg2)"></canvas>
+    <div class="flex-row mt-10"><button class="btn sm" id="recPlayBtn">${esc(t('rec.play'))}</button>
+    <input type="range" id="recSeek" min="0" max="1000" value="0" style="flex:1" aria-label="seek">
+    <select id="recSpeed" aria-label="speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option></select>
+    <span id="recTime" class="fs-13">0:00 / 0:00</span></div>
+    <p class="fs-13 text-sub" id="recStatus">${esc(t('rec.loading'))}</p>`;
+  const canvas = $('#recCanvas', wrap), playBtn = $('#recPlayBtn', wrap), seekEl = $('#recSeek', wrap),
+    speedEl = $('#recSpeed', wrap), timeEl = $('#recTime', wrap), statusEl = $('#recStatus', wrap);
+  const ctx2d = canvas.getContext('2d');
+  // 画布颜色走 token（lint-no-colors：JS 内不得出现 hex 字面量）：背景由
+  // CSS var(--bg2) 承担，前景色运行时从 token 读（F-05：取 --text-1 主文字色；
+  // 注册表无 --text，旧写法恒回空串、恒 fallback 到 'CanvasText'）。
+  const recFg = () => { try { return (getComputedStyle(document.documentElement).getPropertyValue('--text-1') || '').trim() || 'CanvasText'; } catch (e) { return 'CanvasText'; } };
+  const fmtT = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  let maxX = 1920, maxY = 1080; // 远端分辨率未知：先按 1920×1080 归一，载入后按事件最大值重算
+  const draw = (player) => {
+    if (!ctx2d) return;
+    const st = player.state();
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2d.fillStyle = recFg();
+    ctx2d.beginPath();
+    ctx2d.arc(Math.max(4, Math.min(canvas.width - 4, st.cursor.x / maxX * canvas.width)), Math.max(4, Math.min(canvas.height - 4, st.cursor.y / maxY * canvas.height)), 6, 0, Math.PI * 2);
+    ctx2d.fill();
+    ctx2d.font = '14px sans-serif';
+    ctx2d.fillText(st.tier ? ('tier: ' + st.tier) : '', 10, 20);
+    if (timeEl) timeEl.textContent = fmtT(st.playheadMs - player.startAt) + ' / ' + fmtT(st.durationMs);
+    if (seekEl && st.durationMs > 0) seekEl.value = String(Math.round((st.playheadMs - player.startAt) / st.durationMs * 1000));
+  };
+  const rec = QFRecording({});
+  let player = null, tickTimer = null;
+  const stopTick = () => { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } };
+  (async () => {
+    const idx = await rec.getIndex(sessionId);
+    if (!idx || !idx.ok) { if (statusEl) statusEl.textContent = '录像不存在或无权限查看'; return; } // 404 不区分解读（规范 §4.2）
+    const dl = await rec.downloadBytes(sessionId);
+    if (!dl || !dl.ok) { if (statusEl) statusEl.textContent = '录像不存在或无权限查看'; return; }
+    player = QFRecPlayer({ onEvent: () => draw(player) });
+    const loaded = player.load(dl.text, idx.index || null);
+    // 按事件最大值重算归一化分辨率
+    let mx = 0, my = 0;
+    player.events.forEach((ev) => { if (ev.type === 'input' && ev.kind === 'mouse') { mx = Math.max(mx, Number(ev.x) || 0); my = Math.max(my, Number(ev.y) || 0); } });
+    if (mx > 0) maxX = mx; if (my > 0) maxY = my;
+    if (statusEl) statusEl.textContent = '共 ' + loaded.events + ' 个事件';
+    draw(player);
+    playBtn.onclick = () => {
+      if (!player) return;
+      if (player.state().playing) { player.pause(); playBtn.textContent = t('rec.play'); stopTick(); }
+      else if (player.play()) {
+        playBtn.textContent = t('rec.pause');
+        tickTimer = setInterval(() => { draw(player); if (!player.state().playing) { playBtn.textContent = t('rec.play'); stopTick(); } }, 200);
+      }
+    };
+    seekEl.oninput = () => {
+      if (!player) return;
+      player.seek(Math.round(Number(seekEl.value) / 1000 * player.durationMs()));
+      draw(player);
+    };
+    speedEl.onchange = () => { if (player) player.setSpeed(parseFloat(speedEl.value)); };
+  })().catch((e) => { try { console.error('[qf-rec-player]', e); } catch (e2) {} if (statusEl) statusEl.textContent = '录像不存在或无权限查看'; });
+}
 /* ================= 远程桌面（旧跳板路由，2.4.0 起改道会话融合视图） =================
    历史链接/菜单仍可落到 #/remote/<设备名>：不再顶层跳原生页，统一改道 openSession。 */
 Views.remote = async function (view, name) {
@@ -3367,13 +2839,13 @@ Views.remote = async function (view, name) {
 let frPaintSeq = 0;   // 好友页 paint 代次，防止旧回包覆盖新渲染
 Views.friends = async function (view, param, seq) {
   view.innerHTML = `<h1 class="pt">好友</h1><p class="psub">添加好友后，可将自己的设备组共享给对方协助处理。官方客服为系统联系人，不可删除、不参与设备共享。</p>
-    <div class="card"><h3>好友申请 <span class="fr-cnt" id="frReqCnt" hidden></span></h3><div id="frReqs"><div class="skel" style="height:52px"></div></div></div>
-    <div class="grid2"><div class="card chatlist"><h3>好友列表</h3><div id="frList"><div class="skel" style="height:52px"></div></div>
-      <div class="field" style="margin-top:16px"><label>添加好友（输入对方完整账号）</label><input id="fr-q" placeholder="对方账号"></div>
-      <button class="btn sm" id="fr-add">发送好友申请</button> <span id="fr-msg" style="font-size:13px;color:var(--sub)"></span>
+    <div class="card"><h3>好友申请 <span class="fr-cnt" id="frReqCnt" hidden></span></h3><div id="frReqs"><div class="skel sk-h52"></div></div></div>
+    <div class="grid2"><div class="card chatlist"><h3>好友列表</h3><div id="frList"><div class="skel sk-h52"></div></div>
+      <div class="field mt-16"><label>添加好友（输入对方完整账号）</label><input id="fr-q" placeholder="对方账号"></div>
+      <button class="btn sm" id="fr-add">发送好友申请</button> <span class="text-sub fs-13" id="fr-msg"></span>
       <div id="frOutReq"></div></div>
-    <div class="card"><h3>共享给我的设备组</h3><div id="frIn"><div class="skel" style="height:52px"></div></div>
-      <h3 style="margin-top:18px">我共享出的</h3><div id="frOut"><div class="skel" style="height:40px"></div></div></div></div>`;
+    <div class="card"><h3>共享给我的设备组</h3><div id="frIn"><div class="skel sk-h52"></div></div>
+      <h3 class="mt-18">我共享出的</h3><div id="frOut"><div class="skel sk-h40"></div></div></div></div>`;
   ensureChatToken(false);
   const paint = async () => {
     const myPaint = ++frPaintSeq;
@@ -3403,7 +2875,7 @@ Views.friends = async function (view, param, seq) {
       // ---- 好友申请（独立整幅卡）----
       const reqBox = $('#frReqs', view);
       let rq = '';
-      j.requestsIn.forEach(q => { rq += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
+      j.requestsIn.forEach(q => { rq += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(q.from)}</b><small>请求添加您为好友</small></span><span class="ops"><button class="btn sm" data-acc="${esc(q.from)}">同意</button><button class="btn sm grey" data-rej="${esc(q.from)}">拒绝</button></span></div>`; });
       if (!reqN) rq = '<div class="statebox"><b>暂无待处理的好友申请</b><p>有新的好友申请时会显示在这里。</p></div>';
       reqBox.innerHTML = rq;
       reqBox.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => { const rr = await api('/api/friends/respond', { method: 'POST', json: { username: b.getAttribute('data-acc'), accept: true } }); if (rr.json && rr.json.ok) { toast((rr.json && rr.json.msg) || '已同意好友申请。', 'ok'); } else toast((rr.json && rr.json.msg) || '操作未成功，请稍后再试。', 'err'); paint(); });
@@ -3412,18 +2884,36 @@ Views.friends = async function (view, param, seq) {
       // ---- 好友列表（删去 requestsIn 段，其余逐字不变）----
       const list = $('#frList', view);
       let h = `<button class="row" data-support="1"><span class="tile">${ic('users')}</span><span><b>官方客服</b><small>智能客服与人工客服的统一入口</small></span><span class="tag">系统</span><span class="chev">${ic('chevR')}</span></button>`;
-      (j.friends || []).forEach(f => { h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b><small>好友</small></span><span class="ops" style="margin-left:auto;display:flex;gap:8px"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
+      (j.friends || []).forEach(f => { /* MOBILE-FIX 2026-11-14（C-04）：副文案不再写死“好友”。
+        有可用数据时显示在线态／备注／角色／最近活跃；无可用数据时直接去掉
+        副文案（后端未返这些字段时不编假信息，字段齐了自动显示）。 */
+        const fParts = [];
+        if (f.online === true) fParts.push('在线'); else if (f.online === false) fParts.push('离线');
+        if (f.remark || f.note) fParts.push(f.remark || f.note);
+        if (f.role) fParts.push(f.role);
+        const fLast = f.lastActive || f.lastSeen || f.lastActiveMs;
+        if (typeof fLast === 'number' && isFinite(fLast) && fLast > 0) fParts.push('最近活跃 ' + fmtDate(fLast < 1e12 ? fLast * 1000 : fLast));
+        const fSub = fParts.join(' · ');
+        h += `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(f.name)}</b>${fSub ? `<small>${esc(fSub)}</small>` : ''}</span><span class="ops"><button class="btn sm ghost" data-share="${esc(f.name)}">共享设备</button><button class="btn sm grey" data-del="${esc(f.name)}">删除</button></span></div>`; });
       if (!(j.friends || []).length) h += '<div class="statebox"><b>暂无好友</b><p>在下方输入对方完整账号发送申请。</p></div>';
       list.innerHTML = h;
       const sup = $('[data-support]', list); if (sup) sup.onclick = () => navigate('support');
-      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => { const r = await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } }); if (r.json && r.json.ok) { toast('已删除好友。', 'ok'); paint(); } else { toast((r.json && r.json.msg) || '删除好友未成功，请稍后再试。', 'err'); } })); // 批A-A3：查删除结果，失败如实提示且不刷新（DS 门一裁定）
+      list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+        const gen0 = S.sessGen; // 扫表 S14：确认框等待期间换账号，旧账号的好友删除不得发到新账号头上
+        confirmModal('删除好友', '删除后将同时撤销双方的设备共享，确定删除 ' + b.getAttribute('data-del') + ' 吗？', '删除', async () => {
+          if (gen0 !== S.sessGen) return;
+          const r = await api('/api/friends/remove', { method: 'POST', json: { username: b.getAttribute('data-del') } });
+          if (gen0 !== S.sessGen) return;
+          if (r.json && r.json.ok) { toast('已删除好友。', 'ok'); paint(); } else { toast((r.json && r.json.msg) || '删除好友未成功，请稍后再试。', 'err'); }
+        });
+      }); // 批A-A3：查删除结果，失败如实提示且不刷新（DS 门一裁定）
       list.querySelectorAll('[data-share]').forEach(b => b.onclick = () => {
       const groups = (j.myGroups || []);
       const opts = groups.length ? groups.map(g => `<option value="${esc(g.meshid || g.id || g)}">${esc(g.name || g.meshName || g.meshid || g)}</option>`).join('') : '<option value="">（暂无可共享分组）</option>';
       showModal('共享设备给 ' + b.getAttribute('data-share'),
         `<div class="field"><label>设备组</label><select id="sh-g">${opts}</select></div>
          <div class="field"><label>共享档位</label><select id="sh-t"><option value="B">只看</option><option value="B2">可操作</option></select></div>
-         <p style="font-size:13px;color:var(--sub)">共享方随时可撤销；完整控制档不提供共享。</p>`,
+         <p class="text-sub fs-13">共享方随时可撤销；完整控制档不提供共享。</p>`,
         [{ label: '取消' }, { label: '确认共享', primary: true, onClick: async () => {
           const r2 = await api('/api/friends/share', { method: 'POST', json: { username: b.getAttribute('data-share'), meshid: $('#sh-g').value, tier: $('#sh-t').value === 'B2' ? 'operate' : 'view' } });
           if (r2.json && r2.json.ok) { toast('已共享。', 'ok'); paint(); } else toast((r2.json && r2.json.msg) || '共享未成功，请稍后再试。', 'err');
@@ -3433,12 +2923,12 @@ Views.friends = async function (view, param, seq) {
       // ---- 我发送的申请 ----
       const outBox = $('#frOutReq', view);
       outBox.innerHTML = (Array.isArray(j.requestsOut) && j.requestsOut.length)
-        ? `<h3 style="margin-top:18px">我发送的申请</h3>` + j.requestsOut.map(o => `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(o.to || '')}</b></span><span class="tag" style="margin-left:auto">等待对方同意</span></div>`).join('')
+        ? `<h3 class="mt-18">我发送的申请</h3>` + j.requestsOut.map(o => `<div class="row"><span class="tile">${ic('user')}</span><span><b>${esc(o.to || '')}</b></span><span class="tag">等待对方同意</span></div>`).join('')
         : '';
 
       // ---- 共享给我的 / 我共享出的（逐字不变）----
       $('#frIn', view).innerHTML = (j.sharesIn || []).length ? j.sharesIn.map(s => rowInfoHtml('monitor', (s.meshName || '共享设备组') + '（来自 ' + (s.owner || '') + '）', ((s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'))).join('') : '<div class="statebox"><b>暂无共享给我的设备组</b><p>好友共享后将显示在这里。</p></div>';
-      $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
+      $('#frOut', view).innerHTML = (j.sharesOut || []).length ? j.sharesOut.map(s => `<div class="row"><span class="tile">${ic('monitor')}</span><span><b>${esc(s.meshName || '设备组')}</b><small>共享给 ${esc(s.grantee || '')} · ${(s.tier === 'operate' || s.tier === 'B2') ? '可操作' : '只看'}</small></span><span class="ops"><button class="btn sm grey" data-unshare="${esc(s.grantee || '')}|${esc(s.meshid || '')}">撤销</button></span></div>`).join('') : '<div class="statebox"><b>暂无共享出的设备组</b><p>在好友列表中点「共享设备」即可共享。</p></div>';
       view.querySelectorAll('[data-unshare]').forEach(b => b.onclick = async () => { const [g, m] = b.getAttribute('data-unshare').split('|'); const ru = await api('/api/friends/unshare', { method: 'POST', json: { username: g, meshid: m } }); if (ru.json && ru.json.ok) { toast('已撤销共享。', 'ok'); } else toast((ru.json && ru.json.msg) || '撤销未成功，请稍后再试。', 'err'); paint(); });
     } catch (e) {
       if (myPaint === frPaintSeq) failRender();
@@ -3491,7 +2981,9 @@ function ensureChatToken(force) {
     }
     if (chatTokGen === gen0) { chatTok = ''; chatTokAt = 0; }
     if (r.networkError) return { ok: false, network: true, msg: '网络连接失败，请检查网络后重试。' };
-    return { ok: false, msg: (r.json && r.json.msg) || (r.status === 403 ? '该账号不能使用聊天功能。' : '聊天登录失败，请重新登录后再试。') };
+    /* MOBILE-FIX 2026-11-14（C-03）：SSO 换票失败不再一律写“请重新登录后再试”
+       ——重登录修不好 SSO 故障；给重试／联系管理员。403 仍走专属文案。 */
+    return { ok: false, msg: (r.json && r.json.msg) || (r.status === 403 ? '该账号不能使用聊天功能。' : '聊天服务暂时不可用，请点「重新加载」重试；若一直失败，请联系管理员。') };
   })();
   chatTokFlight = flight;
   const done = () => { if (chatTokFlight === flight) chatTokFlight = null; };
@@ -3552,7 +3044,7 @@ const CH = {
   priv: '', vaultKey: '', pubCache: {}, convKeyCache: {},
   currentWith: '', lastEventSeq: 0, rendered: new Set(),
   removedIds: new Set(),   // 已撤回/已删消息 id：防其 msg 事件迟到重处理时复活（见 chHandleEvent）
-  history: {}, traces: {}, pollTimer: null, pollBusy: false,
+  history: {}, traces: {}, pollTimer: null, pollBusy: false, sendBusyFor: '',
   locked: false, pendingWith: '', shellDeviceKey: '',
   deviceMeta: [], hasSessionCopy: false, convMeta: {},
   /* C-04：全局轮询游标 lastEventSeq 只由 chPollOnce 实际消费事件后推进；
@@ -3578,8 +3070,7 @@ async function cq(method, path, body) {
   return r.json;
 }
 function chFmt(at) { const d = new Date(at); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
-const CH_AV = ['#3E6FB4', '#5B83B8', '#7A93B5', '#4E7396', '#6B8CAE'];
-function chAvatarColor(name) { let h = 0; const s = String(name || '?'); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return CH_AV[h % CH_AV.length]; }
+function chAvatarIdx(name) { let h = 0; const s = String(name || '?'); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 2; }/* 六项②：头像圆盘二档（av0/av1），颜色由 CSS 按主题取自页面已计灰阶，不另增；深色下深灰盘近乎隐形，仅靠首字母区分 */
 
 /* ---------- 设备密钥与设备包裹副本（移植独立页，语义不变） ---------- */
 function chDeviceIdFor(kind) {
@@ -3624,6 +3115,10 @@ let _chWebKeyP = null;
 function chWebDeviceKey(create) {
   if (!(window.crypto && crypto.subtle && window.indexedDB)) return Promise.resolve(null);
   if (!_chWebKeyP) {
+    // 高-2：null 决议不缓存——首次 create=false 取不到 key 时决议为 null，
+    // 必须把 _chWebKeyP 复位，否则之后 create=true 也永远拿到缓存的 null，
+    // 设备密钥永无生成之日。非 null 决议照常缓存；在飞期间并发调用仍共用
+    // 同一份 promise（单飞不变），复位只发生在决议落定之后。
     _chWebKeyP = (async () => {
       let k = null;
       try { k = await chIdbGet('deviceKey'); } catch (e) {}
@@ -3632,7 +3127,7 @@ function chWebDeviceKey(create) {
         try { await chIdbSet('deviceKey', k); } catch (e) { return null; }
       }
       return k || null;
-    })().catch(() => null);
+    })().then((k) => { if (!k) _chWebKeyP = null; return k; }, () => { _chWebKeyP = null; return null; });
   }
   return _chWebKeyP;
 }
@@ -3706,8 +3201,9 @@ async function chFetchDeviceCopy(deviceId) {
 }
 async function chTryDeviceUnlock() {
   const C = CHC();
+  const gen0 = CH.gen; // 扫表 S3：设备副本在飞期间换账号，解出的旧钥匙不得落进新账号
   if (CH.priv && CH.vaultKey) return true;
-  const adopt = (p, v) => { if (!p || !v) return false; CH.priv = p; CH.vaultKey = v; CH.locked = false; return true; };
+  const adopt = (p, v) => { if (gen0 !== CH.gen) return false; if (!p || !v) return false; CH.priv = p; CH.vaultKey = v; CH.locked = false; return true; };
   try {
     if (CH.shellDeviceKey) {
       const c = await chFetchDeviceCopy(chDeviceIdFor('shell'));
@@ -3733,22 +3229,27 @@ async function chTryDeviceUnlock() {
 
 /* ---------- 登录状态托管副本与静默解锁（主序与独立页钉死一致） ---------- */
 async function chFetchSessionCopy() {
+  const gen0 = CH.gen; // 扫表 S1：与严-2 同款——取副本在飞期间换账号，旧账号私钥不得写进新账号
   try {
     const r = await cq('GET', '/chat/api/keys/session-copy');
+    if (gen0 !== CH.gen) return false;
     if (r && r.priv && r.vault) { CH.priv = r.priv; CH.vaultKey = r.vault; CH.locked = false; CH.hasSessionCopy = true; return true; }
   } catch (e) { /* 无副本或网络问题：走下一顺位 */ }
   return false;
 }
 async function chUploadSessionCopy() {
   if (!CH.priv || !CH.vaultKey) return false;
-  try { await cq('POST', '/chat/api/keys/session-copy', { priv: CH.priv, vault: CH.vaultKey }); CH.hasSessionCopy = true; return true; }
+  const gen0 = CH.gen; // 扫表 S2：上传在飞期间换账号，不得把旧账号的 hasSessionCopy 标到新账号头上
+  try { await cq('POST', '/chat/api/keys/session-copy', { priv: CH.priv, vault: CH.vaultKey }); if (gen0 !== CH.gen) return false; CH.hasSessionCopy = true; return true; }
   catch (e) { return false; }
 }
 async function chCreateKeysSilently(password) {
+  const gen0 = CH.gen; // 严-2：建钥期间登出/换账号，旧钥匙一律不得落进新账号（CH.gen 只在 chatResetAll 自增，变了即已复位）
   const C = CHC();
   const id = C.newIdentity();
   const vaultKey = C.newVaultKey();
   const device = await chBuildFirstDeviceCopy(id.privB64, vaultKey);
+  if (gen0 !== CH.gen) return false; // 设备副本在飞期间已换账号：setup 请求根本不发，旧身份不上新账号的服务端
   const body = { pub: id.pubB64, sessionCopy: { priv: id.privB64, vault: vaultKey } };
   if (password) {
     body.wrappedPriv = C.wrapWithPassword(id.privB64, password);
@@ -3756,6 +3257,7 @@ async function chCreateKeysSilently(password) {
   }
   if (device) body.device = device;
   await cq('POST', '/chat/api/keys/setup', body);
+  if (gen0 !== CH.gen) return false; // setup 在飞期间已换账号：一个字节都不写进 CH
   CH.priv = id.privB64; CH.vaultKey = vaultKey; CH.hasSessionCopy = true; CH.locked = false;
   return true;
 }
@@ -3789,10 +3291,12 @@ async function chAttemptSilentUnlock() {
   if (await chFetchSessionCopy()) { await chFinishSilentUnlock(); return true; }
   if (await chTryDeviceUnlock()) { await chFinishSilentUnlock(); return true; }
   try {
+    const gen0 = CH.gen; // 扫表 S4：keys/me 在飞期间换账号，旧账号的设备清单不得写进新账号；建钥失败也不替新账号跑 finish
     const r = await cq('GET', '/chat/api/keys/me');
+    if (gen0 !== CH.gen) return false;
     CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
     if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
-    if (!r.keys) { await chCreateKeysSilently(''); await chFinishSilentUnlock(); return true; }
+    if (!r.keys) { const created = await chCreateKeysSilently(''); if (!created || gen0 !== CH.gen) return false; await chFinishSilentUnlock(); return true; }
   } catch (e) { /* 建钥匙失败不冒充成功，落到不可用提示 */ }
   return false;
 }
@@ -3850,7 +3354,22 @@ async function chLoadHistory() {
   const gen0 = CH.gen;
   let r;
   try {
-    r = await cq('GET', '/chat/api/vault');
+    /* S-051：保险库分页拉取（每页 100 条，cursor 循环直至 hasMore=false）；
+     * 不传 limit 的全量拉取在记录多时会超限，分页后 traces 取首页即可
+     * （服务端每页都附同一份 traces）。 */
+    const entries = [];
+    let traces = null;
+    let cursor = '';
+    let guard = 0;
+    while (guard++ < 50) {
+      const pr = await cq('GET', '/chat/api/vault?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      if (gen0 !== CH.gen) return false;
+      (pr.entries || []).forEach(e => entries.push(e));
+      if (traces === null) traces = pr.traces || {};
+      if (!pr.hasMore || !pr.nextCursor) break;
+      cursor = pr.nextCursor;
+    }
+    r = { entries, traces: traces || {} };
   } catch (e) {
     if (gen0 !== CH.gen) return false;   // 已登出/换账号：旧账号的失败不落新账号界面（N-2）
     CH.historyLoaded = false;
@@ -3943,11 +3462,20 @@ function chAppendMessageDom(m) {
   div.innerHTML = '<div class="cht-bub">' + esc(m.text) + '</div><div class="cht-meta"><span>' + chFmt(m.at) + '</span>' + act + '</div>';
   const actEl = div.querySelector('[data-recall]');
   if (actEl) actEl.onclick = () => chRecallMessage(m.id);
+  /* S-050：追加前记是否贴底，仅贴底时滚底；上翻看历史不抢滚动。 */
+  const atBottom = chIsAtBottom(box);
   box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+/* S-050：贴底判定（24px 容差，抵渲染取整与字体差异）。 */
+function chIsAtBottom(box) {
+  if (!box) return true;
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
 }
 function chRenderMessages() {
   const box = chEl('chMsgs'); if (!box) return;
+  /* S-050：重绘前记是否贴底，仅贴底时重绘后滚底（打开会话时框为空即贴底，照常见底）。 */
+  const atBottom = chIsAtBottom(box);
   box.innerHTML = '';
   CH.rendered = new Set();
   const msgs = Object.values(CH.history).filter(m => m.with === CH.currentWith).map(m => ({ at: m.at, msg: m }));
@@ -3955,7 +3483,7 @@ function chRenderMessages() {
   msgs.concat(trs).sort((a, b) => a.at - b.at).forEach(item => {
     if (item.msg) chAppendMessageDom(item.msg); else chAppendTraceDom(item.trace);
   });
-  box.scrollTop = box.scrollHeight;
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 function chShowThreadPane() {
   if (CHV && CHV.hooks && CHV.hooks.showThread) CHV.hooks.showThread();
@@ -3976,14 +3504,22 @@ function chOpenConversation(withUser) {
   const title = chEl('chWith'); if (title) title.textContent = isSupport ? '官方客服' : withUser;
   const cav = chEl('chAvatar');
   if (cav) {
-    if (isSupport) { cav.className = 'cht-av sys'; cav.textContent = '客'; cav.style.background = ''; }
-    else { cav.className = 'cht-av'; cav.textContent = withUser.slice(0, 1); cav.style.background = chAvatarColor(withUser); }
+    if (isSupport) { cav.className = 'cht-av sys'; cav.textContent = '客'; }
+    else { cav.className = 'cht-av av' + chAvatarIdx(withUser); cav.textContent = withUser.slice(0, 1); }
   }
-  const sub = chEl('chSub'); if (sub) sub.textContent = isSupport ? '已迁移至智能客服，本会话只读查看' : '内容经端到端加密';
+  const sub = chEl('chSub'); if (sub) sub.textContent = isSupport ? '已迁移至智能客服，本会话只读查看' : '内容经加密传输与保存';
   const banner = chEl('chBanner'); if (banner) banner.hidden = !isSupport;
   const input = chEl('chInput'), send = chEl('chSend');
   if (input) { input.disabled = isSupport; input.placeholder = isSupport ? '本会话保留只读，请从智能客服咨询' : '输入消息…'; }
   if (send) send.disabled = isSupport;
+  // W-10：打开会话即恢复本地草稿（断网/刷新不丢）；已有输入内容时不覆盖。
+  if (input && !isSupport) {
+    try {
+      QFLocal.load('drafts', 'chat:' + withUser).then((d) => {
+        if (d && d.text && CH.currentWith === withUser && input.isConnected && !input.value) input.value = d.text;
+      }).catch(() => {});
+    } catch (e) {}
+  }
   const rd = chEl('chRead'); if (rd) rd.textContent = '';
   /* C-04：此处不再用 convMeta.lastSeq 提升全局游标 CH.lastEventSeq——那会把
      其他会话序号更低、尚未被 poll 消费的事件永久跳过（被跳消息不入保险库）。
@@ -4012,7 +3548,7 @@ function chatResetAll() {
   chHideHistoryError();
   CH.priv = ''; CH.vaultKey = '';
   CH.pubCache = {}; CH.convKeyCache = {};
-  CH.currentWith = ''; CH.lastEventSeq = 0; CH.pollBusy = false;   // 存疑-1：旧轮在飞标志不得带进新账号
+  CH.currentWith = ''; CH.lastEventSeq = 0; CH.pollBusy = false; CH.sendBusyFor = '';   // 存疑-1：旧轮在飞标志不得带进新账号
   CH.rendered = new Set(); CH.removedIds = new Set();
   CH.history = {}; CH.traces = {};
   CH.locked = true; CH.pendingWith = '';
@@ -4042,28 +3578,45 @@ async function chSendMessage() {
   const input = chEl('chInput'); if (!input) return;
   const text = input.value.trim();
   if (!text) return;
-  input.value = '';
+  /* F-04：输入框不再提前清空——发送成功后再清，失败时文本保留在框内可直接重发，
+     不依赖 300ms 草稿兜底；同一会话在飞发送未完成时不重复投递（防重复点击双发）。 */
+  if (CH.sendBusyFor === target) return;
+  CH.sendBusyFor = target;
   const gen0 = CH.gen;
   try {
     const key = await chConvKey(target);
     if (gen0 !== CH.gen) return;   // 取钥期间已登出/换账号：不得用旧账号钥替新会话投递（N-3）
     const sealed = CHC().sealMessage(key, text);
-    const r = await cq('POST', '/chat/api/send', { to: target, nonce: sealed.nonce, cipher: sealed.cipher });
+    /* S-054：每次发送生成一个 clientMessageId 随消息提交（去重与对账用）；
+     * 服务端存索引＋按 id 查询由 C-4 的 S-086 落地，契约字段名 clientMessageId。 */
+    const clientMessageId = qfNewClientMessageId();
+    const r = await cq('POST', '/chat/api/send', { to: target, nonce: sealed.nonce, cipher: sealed.cipher, clientMessageId });
     if (gen0 !== CH.gen) return;                    // 期间已登出/换账号：迟到结果不写任何状态
-    const m = { id: r.id, with: target, dir: 'out', at: r.at, text };
+    const m = { id: r.id, with: target, dir: 'out', at: r.at, text, clientMessageId };
     await chVaultAppend(r.id, target, 'out', r.at, text);
+    // W-10：发送成功才清本地草稿（发送失败草稿保留，可重打）。
+    try { const p = QFLocal.del('drafts', 'chat:' + target); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (e) {}
+    /* F-04：发送成功才清空输入框；用户在发送在飞期间又打了字时不清空（避免误删新输入）。 */
+    if (input.value.trim() === text) input.value = '';
     /* C-04：不再用发送回执提升全局游标（会越过 poll 尚未消费的其他会话
        事件）；回执 seq 只记入本会话的已消费位与「对方已读」判定基准。 */
     if (Number(r.seq) > (CH.convSeenSeq[target] || 0)) CH.convSeenSeq[target] = Number(r.seq) || 0;
     CH.lastOutSeq[target] = Math.max(CH.lastOutSeq[target] || 0, Number(r.seq) || 0);
     if (CH.currentWith === target) { chAppendMessageDom(m); chMarkRead(); }
     chRefreshMeta().catch(() => {});
-  } catch (e) { toast(e.message, 'err'); }
+  } catch (e) { toast(e.message, 'err'); /* F-04：发送失败时文本保留在输入框内，不丢失。 */ }
+  finally { if (CH.sendBusyFor === target) CH.sendBusyFor = ''; }
 }
 async function chRecallMessage(msgId) {
+  /* 高-5：照抄邻居 chDeleteConversation——gen0 必须在打开确认框之前捕获，
+     确认框等待期间若发生登出/换账号，回调里再取到的已是新账号代次，守卫
+     形同虚设；回调开头与请求返回后各验一次，不符直接 return。 */
+  const gen0 = CH.gen;
   confirmModal('撤回消息', '撤回后，您和对方都将看不到这条消息，只会留下一条撤回提示。软件之外的副本（如截图）无法撤回。确定撤回吗？', '撤回', async () => {
+    if (gen0 !== CH.gen) return;
     try {
       const r = await cq('POST', '/chat/api/recall', { msgId });
+      if (gen0 !== CH.gen) return; // 撤回在飞期间已换账号：不得改新账号的界面与撤回留证
       const m = CH.history[msgId];
       chRemoveMessageEverywhere(msgId);
       if (m) chAddTrace(chConvKeyOf(m.with), { msgId, by: S.user || '', at: r.at, msgAt: r.msgAt });
@@ -4140,6 +3693,36 @@ async function chPollOnce() {
      此处旧轮不得再碰）。 */
   finally { if (gen0 === CH.gen) CH.pollBusy = false; }
 }
+/* S-048/S-053：gap 补齐——按 seq 从 /chat/api/catchup 拉回错过的消息密文，
+ * 解密后写入保险库与历史（与 chHandleEvent 同路：已撤回/已删的不复活），
+ * 已删 id 直接清历史；最多 10 页，单条失败不卡整批。 */
+async function chCatchUp() {
+  let since = CH.lastEventSeq;
+  let guard = 0;
+  while (guard++ < 10) {
+    const gen0 = CH.gen;
+    let r;
+    try { r = await cq('GET', '/chat/api/catchup?since=' + since + '&limit=100'); } catch (e) { return; }
+    if (gen0 !== CH.gen || !r || !r.ok) return;
+    (r.deletedIds || []).forEach(id => chRemoveMessageEverywhere(id));
+    for (const m of (r.messages || [])) {
+      if (!m || !m.id || CH.history[m.id] || CH.removedIds.has(m.id)) continue;
+      const other = m.from === (S.user || '') ? m.to : m.from;
+      try {
+        const key = await chConvKey(other);
+        if (gen0 !== CH.gen) return;
+        const text = CHC().openMessage(key, m.nonce, m.cipher);
+        if (text === null) continue;
+        const dir = m.from === (S.user || '') ? 'out' : 'in';
+        await chVaultAppend(m.id, other, dir, m.at, text);
+        if (gen0 !== CH.gen || CH.removedIds.has(m.id) || !CH.history[m.id]) continue;
+        if (CH.currentWith === other) chAppendMessageDom(CH.history[m.id]);
+      } catch (e) { /* 单条失败不卡整批补齐 */ }
+    }
+    if (typeof r.nextSince === 'number') since = Math.max(since, r.nextSince);
+    if (!r.hasMore) break;
+  }
+}
 async function chPollRound() {
   if (!CHV) return;
   const gen0 = CH.gen;
@@ -4147,12 +3730,33 @@ async function chPollRound() {
   try { r = await cq('GET', '/chat/api/poll?since=' + CH.lastEventSeq); } catch (e) { return; }
   if (gen0 !== CH.gen || !CHV) return;            // 期间登出/换账号：整批丢弃
   let sawNew = false;
-  const fresh = (r.events || []).slice();
+  /* S-048/S-053：gap=true 说明本轮事件不完整（长离线期间 inbox 已剪枝）——
+     先走 catchup 按 seq 补回错过的消息密文，再把游标推到 maxSeq，
+     不得静默跳号；补齐失败时不卡本轮事件处理，下轮再试。
+     决策走 qf-runtime 的 qfChatSyncPlanPage（S-087 纯逻辑核）。 */
+  const plan0 = qfChatSyncPlanPage(r, CH.lastEventSeq);
+  if (plan0.needCatchup) {
+    try { await chCatchUp(); } catch (e) { /* 下轮再试 */ }
+    if (gen0 !== CH.gen || !CHV) return;
+    if (plan0.catchupMaxSeq > CH.lastEventSeq) CH.lastEventSeq = plan0.catchupMaxSeq;
+  }
+  /* S-048/S-053：hasMore 时翻页取完本轮事件（每页上限由服务端定），再统一处理。 */
+  const fresh = plan0.events.slice();
+  let pageGuard = 0;
+  let plan = plan0;
+  while (plan.hasMore && pageGuard++ < 10) {
+    if (gen0 !== CH.gen || !CHV) return;
+    try { r = await cq('GET', '/chat/api/poll?since=' + plan.nextSince); } catch (e) { break; }
+    if (gen0 !== CH.gen || !CHV) return;
+    plan = qfChatSyncPlanPage(r, CH.lastEventSeq);
+    fresh.push(...plan.events);
+  }
   /* C-04：游标只在本轮「实际取到并即将处理」的位置推进一次。单条处理失败
      不再靠游标原地不动来重试（那会被一条坏事件卡死整条流），而是进
-     pendingEvents 下轮重放——消息不会因钥匙未就绪被永久跳过。 */
-  for (const ev of fresh) if (ev.seq > CH.lastEventSeq) CH.lastEventSeq = ev.seq;
-  const bucket = CH.pendingEvents.concat(fresh);
+     pendingEvents 下轮重放——消息不会因钥匙未就绪被永久跳过。
+     游标推进与 pending 合并走 qfChatSyncAdvanceCursor／qfChatSyncMergePending。 */
+  CH.lastEventSeq = qfChatSyncAdvanceCursor(fresh, CH.lastEventSeq);
+  const bucket = qfChatSyncMergePending(CH.pendingEvents, fresh).bucket;
   CH.pendingEvents = [];
   for (const ev of bucket) {
     if (gen0 !== CH.gen) return;         // 批处理期间登出/换账号：余下事件整批作废（N-3）
@@ -4162,8 +3766,7 @@ async function chPollRound() {
       /* 失败重放同样认代次（新-5）：事件在飞期间已换账号时，旧账号事件
          不得进新账号的 pendingEvents 被按新身份重放。 */
       if (gen0 === CH.gen) {
-        CH.pendingEvents.push(ev);
-        if (CH.pendingEvents.length > 200) CH.pendingEvents.shift();  // 上限防无限增长
+        CH.pendingEvents = qfChatSyncRequeue(CH.pendingEvents, ev, 200);  // 上限防无限增长（S-087）
       }
     }
   }
@@ -4233,7 +3836,28 @@ function mountChatThread(view, hooks) {
   S._chatStop = () => { chStopPolling(); CHV = null; chatBootSeq++; };
   const send = chEl('chSend'); if (send) send.onclick = chSendMessage;
   const input = chEl('chInput');
-  if (input) input.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chSendMessage(); } };
+  if (input) input.onkeydown = (e) => { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chSendMessage(); } }; // S-052：组合输入（IME）中不发送
+  // W-10：聊天草稿本地优先——输入即写 IndexedDB（防抖 300ms），发送后清；
+  // 多标签页经 QFLocal 广播同步（他页更新只在输入框为空时才接，不覆盖本页正在打的字）。
+  if (input) input.oninput = () => {
+    const target = CH.currentWith;
+    if (!target || target === 'qf-support') return;
+    clearTimeout(input._qfDraftTimer);
+    input._qfDraftTimer = setTimeout(() => {
+      const v = input.value;
+      try {
+        if (v) {
+          const stamp = { text: v, updatedAt: Date.now(), tabId: QFLocal.tabId };
+          const p = QFLocal.save('drafts', 'chat:' + target, stamp);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+          QFLocal.broadcast('draft:chat:' + target, stamp);
+        } else {
+          const p = QFLocal.del('drafts', 'chat:' + target);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (e) {}
+    }, 300);
+  };
   const del = chEl('chDel'); if (del) del.onclick = chDeleteConversation;
   const ub = chEl('chUnavailBack');
   if (ub) ub.onclick = () => { chShowUnavail(false); if (CHV && CHV.hooks && CHV.hooks.backToList) CHV.hooks.backToList(); };
@@ -4271,7 +3895,7 @@ async function chBootChat() {
   if (!t || !t.ok) {
     if (t && t.network) { netFail(box, chBootChat); return; }
     if (box) {
-      box.innerHTML = stateBox('聊天暂时不可用', (t && t.msg) || '聊天登录失败，请重新登录后再试。', true);
+      box.innerHTML = stateBox('聊天暂时不可用', (t && t.msg) || '聊天服务暂时不可用，请点「重新加载」重试。', true);
       bindRetry(box, chBootChat);
     }
     return;
@@ -4305,7 +3929,9 @@ window.qfChatState = function () {
 window.qfShellDeviceUnlock = async function (deviceKeyB64) {
   try {
     if (!chatTok || !deviceKeyB64) return false;
+    const gen0 = CH.gen; // 扫表 S5：与高-6 同款——ensureChatLibs 在飞期间换账号，旧壳钥匙不得登记到新账号
     await ensureChatLibs();
+    if (gen0 !== CH.gen) return false;
     CH.shellDeviceKey = String(deviceKeyB64);
     const ok = await chTryDeviceUnlock();
     if (!ok) return false;
@@ -4316,7 +3942,10 @@ window.qfShellDeviceUnlock = async function (deviceKeyB64) {
 window.qfShellDeviceEnroll = async function (deviceKeyB64) {
   try {
     if (!deviceKeyB64 || !(CH.priv && CH.vaultKey)) return false;
+    const gen0 = CH.gen; // 高-6：await 前捕代次与钥匙快照，await 后重验——代次变了或钥匙换了，旧壳 deviceKey 不得登记到新账号
+    const priv0 = CH.priv, vault0 = CH.vaultKey;
     await ensureChatLibs();
+    if (gen0 !== CH.gen || CH.priv !== priv0 || CH.vaultKey !== vault0 || !CH.priv || !CH.vaultKey) return false;
     CH.shellDeviceKey = String(deviceKeyB64);
     return await chEnrollDeviceCopy();
   } catch (e) { return false; }
@@ -4324,9 +3953,12 @@ window.qfShellDeviceEnroll = async function (deviceKeyB64) {
 window.qfShellUnlock = async function (password) {
   try {
     if (!chatTok || !password) return false;
+    const gen0 = CH.gen; // 扫表 S6：与高-6 同款——两处 await 后都要重验代次，旧账号解出的钥匙不得写进新账号
     await ensureChatLibs();
+    if (gen0 !== CH.gen) return false;
     const C = CHC();
     const r = await cq('GET', '/chat/api/keys/me');
+    if (gen0 !== CH.gen) return false;
     CH.deviceMeta = r.keys ? (r.keys.devices || []) : [];
     if (r.keys) CH.hasSessionCopy = !!r.keys.hasSessionCopy;
     if (!r.keys) {
@@ -4347,6 +3979,7 @@ window.qfShellUnlock = async function (password) {
         CH.priv = priv; CH.vaultKey = vaultKey;
       }
     }
+    if (gen0 !== CH.gen) return false; // rewrap/取副本在飞期间已换账号：不得把旧账号标为已解锁、不得为新账号登记设备副本
     CH.locked = false;
     chEnrollDeviceCopy().catch(() => {});
     if (!CH.hasSessionCopy) chUploadSessionCopy().catch(() => {});
@@ -4360,9 +3993,13 @@ Views.chat = async function (view) {
   /* DS-R07/S3 补修：挂载前先同步当前控制台身份（他标签切号时本页 S.user 可能尚未更新），
      把「本页尚未检出切号」的旧票窗口压到近零；同步后若已被踢/锁定则不再挂载。 */
   await checkSession(true).catch(() => {});
-  if (BanLock.active() || !S.auth) return;
+  if (BanLock.active() || !S.auth) {
+    /* F-03：提前返回前先给提示——render() 已清空视图，不写内容会留空白页。 */
+    view.innerHTML = '<h1 class="pt">聊天</h1><div class="statebox"><b>聊天暂时无法打开</b><p>请先登录账号；如账号被锁定或会话已结束，请稍后再试。</p></div>';
+    return;
+  }
   view.innerHTML = `<h1 class="pt">聊天</h1><p class="psub">好友聊天内容全程加密，钥匙由您的登录状态保管，登录了账号的设备可直接查看记录。左侧选联系人，右侧即对话，不再跳页。</p>
-    <div class="grid2 chatwrap" style="grid-template-columns:1fr 1.6fr"><div class="card chatlist chatpane-list"><h3>会话</h3><div id="chList"><div class="skel" style="height:52px"></div></div></div>
+    <div class="grid2 chatwrap chatwrap-cols"><div class="card chatlist chatpane-list"><h3>会话</h3><div id="chList"><div class="skel sk-h52"></div></div></div>
     <div class="card chatpane-thread"><button class="btn sm grey chatback" id="ch-back" type="button">${ic('chevR')} 返回会话列表</button><h3>对话</h3>
     <div id="chThread">
       <div class="cht-head"><span class="cht-av" id="chAvatar"></span><div class="cht-hmain"><b id="chWith">选择左侧联系人开始聊天</b><div class="cht-sub" id="chSub"></div></div><span class="cht-read" id="chRead"></span></div>
@@ -4371,7 +4008,7 @@ Views.chat = async function (view) {
       <div class="cht-msgs" id="chMsgs"><div class="statebox"><b>尚未选择会话</b><p>从左侧列表选择联系人即可查看对话。</p></div></div>
       <div class="cht-comp" id="chComp"><textarea id="chInput" rows="2" placeholder="输入消息…" disabled></textarea><button class="btn" id="chSend" disabled>发送</button><button class="btn grey" id="chDel">删除对话</button></div>
     </div>
-    <p style="color:var(--sub);font-size:12.5px;margin-top:8px">对话内容经端到端加密：密钥由登录状态保管，在本机静默解锁，不再有单独解锁页；修改或重置密码后，以前的聊天记录仍可正常打开。</p></div></div>`;
+    <p class="cht-e2e">对话内容经加密传输与保存：聊天钥匙由您的登录状态保管，服务器侧另以加密形式保管一份钥匙副本（由服务器主密钥保护），仅在您本人登录有效时供您的设备取回；打开聊天时在本机静默解锁，不再有单独解锁页；修改或重置密码后，以前的聊天记录仍可正常打开。</p></div></div>`;
   const wrap = view.querySelector('.chatwrap');
   const box = $('#chList', view);
   const paintList = async () => {
@@ -4398,7 +4035,12 @@ Views.chat = async function (view) {
       const net = !!r.networkError; // CS2-2：接口自身网络失败走网络文案，不落兜底句（原兜底与标题重复）
       const title = net ? '网络暂时不可用' : '会话列表加载失败';
       const why = net ? '网络连接失败，请检查网络后重试。' : (r.ssoError || apiErrText(r, '会话列表加载失败，请稍后重试。'));
-      box.innerHTML = `<div class="statebox"><b>${esc(title)}</b><p>${esc(why)}</p><p>对话区仍可正常使用。</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
+      /* MOBILE-FIX 2026-11-14（C-03）：手机单栏（≤820px）下对话区默认隐藏，
+         未选中会话时不可达，不再承诺“对话区仍可正常使用”；双栏或已选中会话
+         时才保留原句。重试入口（#ch-retry）不变。 */
+      const threadReachable = !window.matchMedia('(max-width: 820px)').matches || !!CH.currentWith;
+      const threadNote = threadReachable ? '对话区仍可正常使用。' : '对话区在手机上需先打开一个会话；请点「重新加载」重试。';
+      box.innerHTML = `<div class="statebox"><b>${esc(title)}</b><p>${esc(why)}</p><p>${threadNote}</p><button class="btn sm" id="ch-retry">重新加载</button></div>`;
       const rb = $('#ch-retry', view); if (rb) rb.onclick = () => paintList();
     }
   };
@@ -4419,12 +4061,12 @@ Views.chat = async function (view) {
 let forumBoard = null;
 Views.forum = async function (view) {
   view.innerHTML = `<h1 class="pt">论坛</h1><p class="psub">使用求助、建议与反馈、官方公告。游客可浏览，登录后发帖；公告帖可评论。</p>
-    <div class="tabs" id="foTabs"><div class="skel" style="height:34px;width:240px"></div></div>
-    <div id="foPosts"><div class="card"><div class="skel" style="height:52px"></div></div></div>
+    <div class="tabs" id="foTabs"><div class="skel sk-h34 sk-w240"></div></div>
+    <div id="foPosts"><div class="card"><div class="skel sk-h52"></div></div></div>
     <div class="card"><h3>发布新帖</h3>
       <div class="field"><label>标题</label><input id="fo-title" placeholder="请输入标题"></div>
       <div class="field"><label>内容</label><textarea id="fo-body" rows="3" placeholder="请描述您的问题或建议"></textarea></div>
-      <button class="btn sm" id="fo-pub">发布</button> <span id="fo-msg" style="font-size:13px;color:var(--sub)"></span></div>
+      <button class="btn sm" id="fo-pub">发布</button> <span class="text-sub fs-13" id="fo-msg"></span></div>
     <div class="note warn">帖子与评论先审后发。被禁言时发帖区将直接显示禁言期限与原因。</div>`;
   const boardsR = await api('/api/forum/boards');
   const tabs = $('#foTabs', view);
@@ -4437,7 +4079,11 @@ Views.forum = async function (view) {
     const box = $('#foPosts', view);
     const pr = await api('/api/forum/posts?board=' + encodeURIComponent(forumBoard || ''));
     const posts = (pr.json && (pr.json.posts || pr.json.list)) || [];
-    box.innerHTML = `<div class="card"><h3>${esc(forumBoard || '帖子')}</h3>${posts.length ? posts.map(p => `<div class="row" data-pid="${esc(p.id || '')}"><span class="tile">${ic('forum')}</span><span><b>${esc(p.title || '')}</b><small>${esc(p.authorName || p.author || p.nickname || '')} · ${esc(p.createdAt ? fmtDate(p.createdAt) : (p.time || ''))} · ${p.replyCount != null ? p.replyCount + ' 条回复' : ''}</small></span>${p.board === 'announcements' ? '<span class="tag">公告</span>' : ''}</div>`).join('') : '<div class="statebox"><b>暂无帖子</b><p>来发布第一篇帖子吧。</p></div>'}</div>`;
+    /* MOBILE-FIX 2026-11-14（C-01/C-02）：卡标题用版块 name 不用 raw id；
+       meta 各段条件拼接、过滤空值，缺 replyCount 时不留悬空“·”，0 回复照常显示。 */
+    const boardHit = boards.find(b => (b.id || b.key || b.name) === forumBoard) || {};
+    const boardName = boardHit.name || boardHit.title || forumBoard || '帖子';
+    box.innerHTML = `<div class="card"><h3>${esc(boardName)}</h3>${posts.length ? posts.map(p => { const metaParts = [(p.authorName || p.author || p.nickname || ''), (p.createdAt ? fmtDate(p.createdAt) : (p.time || ''))].filter(Boolean); if (p.replyCount != null) metaParts.push(p.replyCount + ' 条回复'); return `<div class="row" data-pid="${esc(p.id || '')}"><span class="tile">${ic('forum')}</span><span><b>${esc(p.title || '')}</b><small>${esc(metaParts.join(' · '))}</small></span>${p.board === 'announcements' ? '<span class="tag">公告</span>' : ''}</div>`; }).join('') : '<div class="statebox"><b>暂无帖子</b><p>来发布第一篇帖子吧。</p></div>'}</div>`;
     box.querySelectorAll('[data-pid]').forEach(el => el.onclick = () => { forumListMemo = { board: forumBoard, scrollY: window.scrollY }; forumMemoArmed = true; navigate('post', el.getAttribute('data-pid')); });
     if (forumMemoArmed && forumListMemo && forumListMemo.board === forumBoard) {
       const y = forumListMemo.scrollY; forumListMemo = null; forumMemoArmed = false;
@@ -4512,9 +4158,9 @@ function pfAuthor(x) {
 Views.post = async function (view, param, seq) {
   const id = String(param || '');
   view.innerHTML = `<div class="pf-backrow"><button class="btn ghost sm" id="pf-back">← 返回</button></div>
-    <div id="pfPost"><div class="card"><div class="skel" style="height:52px"></div></div></div>
+    <div id="pfPost"><div class="card"><div class="skel sk-h52"></div></div></div>
     <div id="pfReplies"></div>
-    <div id="pfComposer"><div class="card"><div class="skel" style="height:40px"></div></div></div>`;
+    <div id="pfComposer"><div class="card"><div class="skel sk-h40"></div></div></div>`;
   const backBtn = $('#pf-back', view);
   if (backBtn) backBtn.onclick = () => { if (forumListMemo) forumBoard = forumListMemo.board; navigate('forum'); };
   const alive = () => seq === renderSeq && S.route.name === 'post' && S.route.param === id;
@@ -4529,7 +4175,7 @@ Views.post = async function (view, param, seq) {
     const boardName = (boardNames && boardNames[post.board]) || post.board || '';
     $('#pfPost', view).innerHTML = `<div class="card"><h2 class="pf-title">${esc(post.title || '')} ${pfStatusTags(post)}</h2>
       <div class="pf-meta">${pfAuthor(post)} · ${esc(boardName)} · ${fmtDate(post.createdAt)} · 浏览 ${post.views || 0} · 回复 ${post.replyCount != null ? post.replyCount : (replies || []).length}</div>
-      ${post.mine && post.status === 'pending' ? '<div class="note warn" style="margin-top:10px">本帖正在审核中，审核通过后其他用户可见。</div>' : ''}
+      ${post.mine && post.status === 'pending' ? '<div class="note warn mt-10">本帖正在审核中，审核通过后其他用户可见。</div>' : ''}
       <div class="pf-body">${esc(post.body || '')}</div></div>`;
     const items = replies || [];
     $('#pfReplies', view).innerHTML = `<div class="card"><h3>回复（${items.length}）</h3>${items.length ? items.map(r => `<div class="pf-reply"><div class="pf-meta">${pfAuthor(r)} · ${fmtDate(r.createdAt)} ${pfStatusTags(r)}</div><div class="pf-rbody">${esc(r.body || '')}</div></div>`).join('') : '<div class="statebox"><b>暂无回复</b><p id="pf-empty-sub" hidden>来发表第一条回复吧。</p></div>'}</div>`;
@@ -4549,15 +4195,15 @@ Views.post = async function (view, param, seq) {
     const renderEditor = () => {
       box.innerHTML = `<div class="card"><h3>发表回复</h3>
         <div class="field"><textarea id="pf-text" rows="3" placeholder="请输入回复内容"></textarea><div class="hint">回复内容为 1 至 2000 字，提交后先审后发。</div></div>
-        <button class="btn sm" id="pf-send">发表回复</button> <span id="pf-msg" style="font-size:13px"></span></div>`;
+        <button class="btn sm" id="pf-send">发表回复</button> <span class="fs-13" id="pf-msg"></span></div>`;
       const btn = $('#pf-send', view), ta = $('#pf-text', view), msg = $('#pf-msg', view);
       let sending = false;
       btn.onclick = async () => {
         if (sending) return;
         const body = (ta.value || '').trim();
-        if (!body) { msg.textContent = '请填写回复内容，长度为 1 至 2000 字。'; msg.style.color = 'var(--err)'; return; }
+        if (!body) { msg.textContent = '请填写回复内容，长度为 1 至 2000 字。'; msg.style.color = 'var(--tx)'; return; }
         sending = true; btn.disabled = true; ta.disabled = true; msg.textContent = '';
-        const fail = (text) => { msg.textContent = text; msg.style.color = 'var(--err)'; };
+        const fail = (text) => { msg.textContent = text; msg.style.color = 'var(--tx)'; };
         try {
           let r = await forumFetch('/api/forum/posts/' + encodeURIComponent(id) + '/replies', { method: 'POST', json: { body } });
           if (r.status === 401) {
@@ -4568,22 +4214,22 @@ Views.post = async function (view, param, seq) {
           }
           if (r.status === 0) { fail('网络暂时不可用，请稍后再试。'); return; }
           const j = r.json || {};
-          if (j.ok) { msg.textContent = j.msg || '回复成功。'; msg.style.color = 'var(--ok)'; ta.value = ''; reloadPost(); }
+          if (j.ok) { msg.textContent = j.msg || '回复成功。'; msg.style.color = 'var(--tx)'; ta.value = ''; reloadPost(); }
           else fail(j.msg || '提交未成功，请稍后再试。');
         } finally { sending = false; btn.disabled = false; ta.disabled = false; }
       };
     };
     if (!sessState || sessState.state === 'open') { renderEditor(); setHint(true); return; }
-    if (sessState.state === 'notice') { box.innerHTML = `<div class="card"><div class="note warn" style="margin:0">${esc(sessState.msg || '登录后可回复。')}</div></div>`; setHint(false); return; }
+    if (sessState.state === 'notice') { box.innerHTML = `<div class="card"><div class="note warn m-0">${esc(sessState.msg || '登录后可回复。')}</div></div>`; setHint(false); return; }
     const me = sessState.me || {};
     // 状态呈现顺序与服务端门 runGatesAndReview 一致：账号冻结/封禁先于禁言（DS 实现稿偏离#1 采纳）
     if (me.accountStatus && me.accountStatus !== 'ok') {
-      box.innerHTML = `<div class="card"><div class="note err" style="margin:0">您的账号已被冻结或封禁，无法发帖。申诉请联系官方客服，或前往官网留言。</div></div>`;
+      box.innerHTML = `<div class="card"><div class="note err m-0">您的账号已被冻结或封禁，无法发帖。申诉请联系官方客服，或前往官网留言。</div></div>`;
       setHint(false); return;
     }
     if (me.muted) {
       const until = me.muted.permanent ? '永久禁言' : fmtDate(me.muted.until);
-      box.innerHTML = `<div class="card"><div class="note warn" style="margin:0">您已被论坛禁言（至 ${esc(until)}），仅限制论坛发言，账号与设备不受影响。申诉请联系官方客服，或前往官网留言。</div></div>`;
+      box.innerHTML = `<div class="card"><div class="note warn m-0">您已被论坛禁言（至 ${esc(until)}），仅限制论坛发言，账号与设备不受影响。申诉请联系官方客服，或前往官网留言。</div></div>`;
       setHint(false); return;
     }
     renderEditor(); setHint(true);
@@ -4624,12 +4270,12 @@ Views.post = async function (view, param, seq) {
 Views.support = async function (view, _p, _s, opts) {
   opts = opts || {};
   view.innerHTML = `${opts.guest ? '' : '<h1 class="pt">智能客服</h1><p class="psub">先由智能客服自动回答；解决不了可转人工。未登录、账号被冻结或封禁时也可使用本页。</p>'}
-    <div class="note blue">与智能客服的对话不使用端到端加密，内容仅用于客服处理。涉及账号状态时，客服只查询您本人的状态；办理类事项会先核验账号与密码，只核验、不登录。</div>
+    <div class="note blue">与智能客服的对话不使用与好友聊天相同的加密方式，内容仅用于客服处理。涉及账号状态时，客服只查询您本人的状态；办理类事项会先核验账号与密码，只核验、不登录。</div>
     <div class="card"><h3>智能客服 <span class="tag">AI 通道</span></h3>
-    <div id="supMsgs"><div class="skel" style="height:40px"></div></div>
-    <div id="supPicks" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"></div>
-    <div style="display:flex;gap:8px"><input id="sup-in" style="flex:1;border:1px solid var(--line);border-radius:12px;padding:12px" placeholder="请输入您的问题…"><button class="btn" id="sup-send">发送</button><button class="btn ghost" id="sup-human">转人工</button></div>
-    <p style="color:var(--sub);font-size:12.5px;margin-top:10px">AI 通道异常时自动切换为知识库问答，不会无响应。转人工后，处理进度在本页同一会话中显示。</p></div>`;
+    <div id="supMsgs"><div class="skel sk-h40"></div></div>
+    <div class="flex-row mb-10" id="supPicks"></div>
+    <div class="flex-row"><input class="sup-input" id="sup-in" placeholder="请输入您的问题…"><button class="btn" id="sup-send">发送</button><button class="btn ghost" id="sup-human">转人工</button></div>
+    <p class="text-sub fs-12x5 mt-10">AI 通道异常时自动切换为知识库问答，不会无响应。转人工后，处理进度在本页同一会话中显示。</p></div>`;
   const msgs = $('#supMsgs', view);
   let token = null;
   const addMsg = (who, text, mine) => {
@@ -4657,7 +4303,7 @@ Views.support = async function (view, _p, _s, opts) {
     if ($('#sup-verify', view)) return;
     const d = document.createElement('div');
     d.id = 'sup-verify'; d.className = 'note warn';
-    d.innerHTML = `查询账号状态前请核验身份（只核验、不登录）：<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><input id="sv-u" placeholder="账号" style="flex:1;min-width:130px;border:1px solid var(--line);border-radius:10px;padding:9px"><input id="sv-p" type="password" placeholder="密码" style="flex:1;min-width:130px;border:1px solid var(--line);border-radius:10px;padding:9px"><button class="btn sm" id="sv-b">核验并查询</button></div>`;
+    d.innerHTML = `查询账号状态前请核验身份（只核验、不登录）：<div class="flex-row mt-8"><input class="mini-input" id="sv-u" placeholder="账号"><input class="mini-input" id="sv-p" type="password" placeholder="密码"><button class="btn sm" id="sv-b">核验并查询</button></div>`;
     msgs.appendChild(d);
     $('#sv-b', d).onclick = async () => {
       const r = await api('/support/api/verify', { method: 'POST', json: { session: token, account: $('#sv-u', d).value.trim(), password: $('#sv-p', d).value } });
@@ -4695,7 +4341,7 @@ Views.support = async function (view, _p, _s, opts) {
     if (w && w.picks) setPicks(w.picks);
   } else { addMsg('cs', '客服会话建立失败，请稍后重新进入本页。', false); }
   $('#sup-send', view).onclick = () => { const v = $('#sup-in', view).value.trim(); if (v) { $('#sup-in', view).value = ''; send(v); } };
-  $('#sup-in', view).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#sup-send', view).click(); });
+  $('#sup-in', view).addEventListener('keydown', (e) => { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') $('#sup-send', view).click(); }); // S-052：组合输入（IME）中不发送
   $('#sup-human', view).onclick = () => send('转人工');
 };
 
@@ -4743,7 +4389,7 @@ Views.purchase = async function (view, param, _s, opts) {
   // 叠加语境红字提示（站长 2026-10-26 亲令，文案终版逐字）：已激活时效套餐
   // （非试用、非永久、keyExpiresMs 已落点）才显示，位置＝「我的订单」按钮正下方。
   const stackNote = (!guest && !hasPerm && S.license && S.license.keyPlan !== 'permanent' && S.license.keyExpiresMs && !/试用/.test(S.license.planName || ''))
-    ? '<p style="color:var(--err);font-size:13.5px;margin:0 0 14px">购买叠加的用户，购买后请到我的账户中兑换叠加套餐</p>' : '';
+    ? '<p class="text-navy fs-13x5 mb-14">购买叠加的用户，购买后请到我的账户中兑换叠加套餐</p>' : '';
   let expanded = null;                 // 当前展开的套餐 id（单开）
   const byPlan = {};                   // planId -> { order, pay }
   const ensureOrderFlights = {};       // 批A-W3-F1：planId -> true（建单在飞守卫，防收起再展开重复建单）
@@ -4752,7 +4398,7 @@ Views.purchase = async function (view, param, _s, opts) {
   const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
 
   view.innerHTML = `${opts.guest ? '' : '<h1 class="pt">购买密钥</h1><p class="psub">一个密钥可绑定两台电脑与一台手机；购买付费密钥后同时开通网页版。点开任一套餐即可在本页付款，付款后提交账单截图等待审核。</p>'}
-    ${guest ? '' : '<p style="margin-bottom:14px"><button class="btn sm ghost" id="pur-orders">我的订单</button></p>'}
+    ${guest ? '' : '<p class="mb-14"><button class="btn sm ghost" id="pur-orders">我的订单</button></p>'}
     ${stackNote}
     <div class="planlist" id="purList">${PLANS.map(p => {
       const dis = hasPerm && p.id === 'permanent';
@@ -4764,7 +4410,7 @@ Views.purchase = async function (view, param, _s, opts) {
         <div class="drawerpay" data-drawer="${p.id}" hidden></div>
       </div>`;
     }).join('')}</div>
-    <div class="note blue" style="margin-top:16px">待支付订单保留 15 分钟，超时自动取消；可在「我的订单」中继续支付或手动取消。提交账单截图后订单进入审核，审核通过后可在「我的订单」查看并复制密钥，粘贴激活后即可使用。</div>`;
+    <div class="note blue mt-16">待支付订单保留 15 分钟，超时自动取消；可在「我的订单」中继续支付或手动取消。提交账单截图后订单进入审核，审核通过后可在「我的订单」查看并复制密钥，粘贴激活后即可使用。</div>`;
   const ordersBtn = $('#pur-orders', view);
   if (ordersBtn) ordersBtn.onclick = () => navigate('orders');
 
@@ -4807,49 +4453,54 @@ Views.purchase = async function (view, param, _s, opts) {
       return;
     }
     const st = byPlan[planId];
-    if (!st) { dr.innerHTML = '<div class="skel" style="height:60px"></div><p style="color:var(--sub);font-size:13.5px;margin-top:10px">正在创建订单…</p>'; return; }
+    if (!st) { dr.innerHTML = '<div class="skel sk-h60"></div><p class="ordnote" style="color:var(--sub)">正在创建订单…</p>'; return; }
     if (st.error) {
-      dr.innerHTML = `<div class="note err" style="margin:0">${esc(st.error)}</div>
+      dr.innerHTML = `<div class="note err m-0">${esc(st.error)}</div>
         <div class="drawerops"><button class="btn grey" data-act="leave">取消</button></div>`;
       bindDrawerOps(planId);
       return;
     }
     const o = st.order, pay = st.pay || {};
-    const amt = String(o.amount != null ? o.amount : plan.amt);
-    const curMethod = o.method || pay.method || 'wechat';
+    // R-W19（2026-11-15）：amt/curMethod 为服务端值，进 HTML/JS 上下文前须校验——
+    // amt 只许数字与小数点（与 openQrZoom 同口径），非法时回落静态套餐价；
+    // curMethod 只许 wechat/alipay，其余一律回落 wechat（与 methodName 口径一致）。
+    // 校验后两值只含 [a-z0-9.]，下方 data-zoom 与 onerror 内插即安全。
+    const rawAmt = String(o.amount != null ? o.amount : plan.amt);
+    const amt = /^[0-9.]+$/.test(rawAmt) ? rawAmt : String(plan.amt);
+    const curMethod = (o.method || pay.method) === 'alipay' ? 'alipay' : 'wechat';
     const wxUrl = curMethod === 'wechat' ? (pay.cardUrl || payCardUrl('wechat', amt)) : (pay.otherCardUrl || payCardUrl('wechat', amt));
     const aliUrl = curMethod === 'alipay' ? (pay.cardUrl || payCardUrl('alipay', amt)) : (pay.otherCardUrl || payCardUrl('alipay', amt));
     const curUrl = curMethod === 'wechat' ? wxUrl : aliUrl;
     if (o.status === 'reviewing') {
-      dr.innerHTML = `<div class="note ok" style="margin:0 0 10px">已提交，正在审核。审核通过后，可在「我的订单」查看并复制密钥，粘贴激活后即可使用。</div>
+      dr.innerHTML = `<div class="note ok m-0-0-10">已提交，正在审核。审核通过后，可在「我的订单」查看并复制密钥，粘贴激活后即可使用。</div>
         <div class="tblwrap"><table><tr><th>本站订单</th><td>${esc(o.id)}</td></tr><tr><th>套餐</th><td>${esc(o.planName || plan.name)} · ¥${esc(amt)}</td></tr><tr><th>状态</th><td>${orderPill(o)}</td></tr></table></div>
         <div class="drawerops"><button class="btn grey" data-act="leave">收起</button><button class="btn sm ghost" data-act="orders">查看我的订单</button></div>`;
       bindDrawerOps(planId);
       return;
     }
     if (o.status !== 'pending_pay') {
-      dr.innerHTML = `<div class="note blue" style="margin:0 0 10px">该订单当前状态：${esc(o.statusText || o.status)}。</div>
+      dr.innerHTML = `<div class="note blue m-0-0-10">该订单当前状态：${esc(o.statusText || o.status)}。</div>
         <div class="drawerops"><button class="btn grey" data-act="leave">收起</button><button class="btn sm ghost" data-act="orders">查看我的订单</button></div>`;
       bindDrawerOps(planId);
       return;
     }
     const deadline = o.payDeadline || (Date.now() + (Number(o.remainingSec) || 0) * 1000);
     dr.innerHTML = `
-      <p style="font-size:13.5px;color:var(--sub);margin-bottom:4px">本站订单：${esc(o.id)} · ${orderPill(o)} · 剩余支付时间：<b data-cd="${planId}">${fmtSecText(o.remainingSec)}</b></p>
-      <p style="font-size:13.5px;color:var(--sub);margin-bottom:12px">请扫码付款 <b style="color:var(--navy)">¥${esc(amt)}</b>，金额已由收款码锁定，无需修改。在上方选择微信支付或支付宝，下方只显示对应的收款码；切换支付方式沿用原订单与剩余时间。点击二维码可放大查看。</p>
+      <p class="text-sub fs-13x5 mb-4">本站订单：${esc(o.id)} · ${orderPill(o)} · 剩余支付时间：<b data-cd="${planId}">${fmtSecText(o.remainingSec)}</b></p>
+      <p class="text-sub fs-13x5 mb-12">请扫码付款 <b class="text-navy">¥${esc(amt)}</b>，金额已由收款码锁定，无需修改。在上方选择微信支付或支付宝，下方只显示对应的收款码；切换支付方式沿用原订单与剩余时间。点击二维码可放大查看。</p>
       <div class="paytabs"><button class="paytab ${curMethod === 'wechat' ? 'on' : ''}" data-method="wechat">微信支付</button><button class="paytab ${curMethod === 'alipay' ? 'on' : ''}" data-method="alipay">支付宝</button></div>
       <div class="paycard single"><div class="qrzoom" data-zoom="${curMethod}" data-zoomurl="${esc(curUrl)}"><img src="${esc(curUrl)}" alt="${esc(methodName(curMethod))}收款码" onerror="this.onerror=null;this.src='${localPayCard(curMethod, amt)}'"><p class="qrzoom-hint">点击二维码放大</p></div><p>¥${esc(amt)} · 当前支付方式：${esc(methodName(curMethod))}</p></div>
       <div class="drawerops"><button class="btn" data-act="paid">支付成功</button><button class="btn grey" data-act="leave">取消</button></div>
       <div data-out></div>
       <div data-submit hidden>
-        <h3 style="color:var(--navy);margin:16px 0 6px">提交付款截图</h3>
-        <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">请上传付款账单详情截图。<b style="color:var(--err)">截图必须露出完整订单号</b>，并填写截图中的订单号。一个订单号只能兑换一把密钥。</p>
-        <img src="${esc(pay.exampleUrl || '/license/assets/pay-example.jpg')}" alt="账单详情截图示例" style="display:block;max-width:250px;width:100%;margin:0 auto 12px;border:1px solid var(--line);border-radius:10px" onerror="this.style.display='none'">
+        <h3 class="text-navy m-16-0-6">提交付款截图</h3>
+        <p class="text-sub fs-13x5 mb-12">请上传付款账单详情截图。<b class="text-navy">截图必须露出完整订单号</b>，并填写截图中的订单号。一个订单号只能兑换一把密钥。</p>
+        <img class="pay-example" src="${esc(pay.exampleUrl || '/license/assets/pay-example.jpg')}" alt="账单详情截图示例" onerror="this.style.display='none'">
         <div class="field"><label>订单号</label><input data-ono maxlength="64" placeholder="请填写截图中的完整订单号"></div>
-        <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png"></div>
-        <div data-ocr hidden style="margin:2px 0 10px"></div>
+        <div class="field"><label>账单详情截图（JPG / PNG，不超过 12 MB）</label><input type="file" data-shot accept="image/jpeg,image/png" class="filepick" id="payShot"><label for="payShot" class="btn sm ghost">选择截图</label></div>
+        <div class="m-2-0-10" data-ocr hidden></div>
         <button class="btn block" data-act="submit">提交审核</button>
-        <div data-subout style="margin-top:12px"></div>
+        <div class="mt-12" data-subout></div>
       </div>`;
     bindDrawerOps(planId);
     startTimer(planId, deadline);
@@ -4867,7 +4518,7 @@ Views.purchase = async function (view, param, _s, opts) {
       let ocrTimer = null;
       const OCR_TIMEOUT_MS = 14000; // 门一 D5：客户端本地超时（13–15s 档），超时置未认出文案并作废在飞响应
       const normOno = (s) => String(s == null ? '' : s).normalize('NFKC').replace(/\s+/g, ''); // 门一 S8：与服务端 A12 同口径（NFKC＋去空白）后再比较
-      const ocrHint = (t) => { ocrBox.hidden = false; ocrBox.innerHTML = `<p style="font-size:13px;color:var(--sub);margin:0">${esc(t)}</p>`; };
+      const ocrHint = (t) => { ocrBox.hidden = false; ocrBox.innerHTML = `<p class="text-sub fs-13 m-0">${esc(t)}</p>`; };
       const ocrClearTimer = () => { if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; } };
       ocrInvalidate = () => { ocrSeq++; ocrClearTimer(); ocrBox.hidden = true; ocrBox.innerHTML = ''; };
       ocrFileEl.addEventListener('change', async () => {
@@ -4900,7 +4551,7 @@ Views.purchase = async function (view, param, _s, opts) {
           else if (normOno(cur) === j.orderNo) { ocrHint('识别结果与您填写的订单号一致。'); }
           else {
             ocrBox.hidden = false;
-            ocrBox.innerHTML = `<p style="font-size:13px;color:var(--sub);margin:0 0 8px">您填写的订单号与识别结果不一致。</p><button type="button" class="btn sm ghost" data-ocruse>识别到订单号（尾号 ${esc(j.tail4 || String(j.orderNo).slice(-4))}），点击使用识别结果</button>`;
+            ocrBox.innerHTML = `<p class="text-sub fs-13 mb-8">您填写的订单号与识别结果不一致。</p><button type="button" class="btn sm ghost" data-ocruse>识别到订单号（尾号 ${esc(j.tail4 || String(j.orderNo).slice(-4))}），点击使用识别结果</button>`;
             const useBtn = ocrBox.querySelector('[data-ocruse]');
             if (useBtn) useBtn.onclick = () => { ocrOnoEl.value = j.orderNo; ocrHint('已自动识别订单号，请核对无误后提交。'); };
           }
@@ -4944,7 +4595,7 @@ Views.purchase = async function (view, param, _s, opts) {
           return;
         }
         if (act === 'paid') {
-          if (guest || S.auth !== 'in') { if (out) out.innerHTML = '<div class="note warn" style="margin-top:12px">下单前请先登录；没有账号可以先注册（注册即开通 3 天免费试用）。</div>'; return; }
+          if (guest || S.auth !== 'in') { if (out) out.innerHTML = '<div class="note warn mt-12">下单前请先登录；没有账号可以先注册（注册即开通 3 天免费试用）。</div>'; return; }
           const sub = dr.querySelector('[data-submit]');
           if (sub) { sub.hidden = false; sub.style.scrollMarginTop = '132px'; sub.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
           return;
@@ -4956,14 +4607,16 @@ Views.purchase = async function (view, param, _s, opts) {
           const fileEl = dr.querySelector('[data-shot]');
           const ono = onoEl ? onoEl.value.trim() : '';
           const f = fileEl && fileEl.files ? fileEl.files[0] : null;
-          const fail = m => { if (subout) subout.innerHTML = `<div class="note err" style="margin:0">${esc(m)}</div>`; };
+          const fail = m => { if (subout) subout.innerHTML = `<div class="note err m-0">${esc(m)}</div>`; };
           if (!ono) return fail('请填写订单号。');
           if (!f) return fail('请选择账单详情截图。');
           if (f.size > 12 * 1024 * 1024) return fail('截图文件过大，请上传不超过 12 MB 的 JPG 或 PNG 图片。');
+          /* F-06：提交前先守卫订单对象——旧写法里 st/st.order 为 undefined 时抛 TypeError，
+             会被 catch 误报成“截图读取失败”。与 :4461 另一分支的守卫同口径。 */
+          const st = byPlan[planId]; if (!st || !st.order) return fail('订单信息缺失，请重新进入。');
           el.disabled = true; el.textContent = '提交中…';
           try {
             const b64 = await readFileBase64(f);
-            const st = byPlan[planId];
             const r = await api('/license/api/pay/orders/' + encodeURIComponent(st.order.id) + '/submit', { method: 'POST', json: { orderNo: ono, imageBase64: b64 } });
             el.disabled = false; el.textContent = '提交审核';
             if (r.json && r.json.ok) { st.order = r.json.order || Object.assign({}, st.order, { status: 'reviewing', statusText: '正在审核' }); stopTimer(); renderDrawer(planId); toast('已提交，正在审核。', 'ok'); }
@@ -5016,11 +4669,12 @@ Views.purchase = async function (view, param, _s, opts) {
   }
 };
 
-Views.orders = async function (view) {
+Views.orders = async function (view, param, seq) {
   view.innerHTML = `<h1 class="pt">我的订单</h1><p class="psub">待支付订单可在 15 分钟内继续支付，超时自动取消；待审核订单不可取消或删除；已取消、已完成与审核未通过订单可以删除（仅删除您的显示，后台台账保留）。</p>
-    <div id="ordList"><div class="card"><div class="skel" style="height:52px"></div></div></div>`;
+    <div id="ordList"><div class="card"><div class="skel sk-h52"></div></div></div>`;
   const box = $('#ordList', view);
   const r = await api('/license/api/pay/orders');
+  if (seq != null && seq !== renderSeq) return; // 扫表 S8：订单列表在飞期间已切页/重渲，旧账号订单不得画进新页面
   if (r.status === 401 || r.status === 403) {
     box.innerHTML = stateBox('登录状态已失效', '请重新登录后查看我的订单。', false);
     return;
@@ -5039,27 +4693,27 @@ Views.orders = async function (view) {
   }
   box.innerHTML = orders.map(o => `
     <div class="card" data-order="${esc(o.id)}">
-      <div class="dev" style="border:none;padding:0">
+      <div class="dev dev-flat">
         <span><b>${esc(o.planName || o.plan || '')}</b><small>本站订单：${esc(o.id)} · ${esc(methodName(o.method))} · 下单时间：${o.createdAt ? fmtDate(o.createdAt) : '—'}${o.orderNo ? ' · 账单订单号：' + esc(o.orderNo) : ''}</small></span>
-        <span class="ops"><b style="color:var(--navy)">¥${esc(String(o.amount))}</b> ${orderPill(o)}</span>
+        <span class="ops"><b class="text-navy">¥${esc(String(o.amount))}</b> ${orderPill(o)}</span>
       </div>
-      ${o.status === 'pending_pay' ? `<p style="color:var(--sub);font-size:13.5px;margin-top:10px">剩余支付时间：<b>${fmtSecText(o.remainingSec)}</b>（到期自动取消）</p>` : ''}
-      ${o.status === 'reviewing' && !o.canViewKey ? '<p style="color:var(--sub);font-size:13.5px;margin-top:10px">正在审核，审核通过后可在此查看并复制密钥，粘贴激活后即可使用。待审核订单不可取消或删除。</p>' : ''}
-      ${o.status === 'reviewing' && o.canViewKey && o.keyForm !== 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">审核通过：密钥已发放到本账号。点下方「查看密钥」复制完整密钥，粘贴激活后开始使用；本站订单将在站长确认到账后转为已完成。</p>' : ''}
-      ${o.status === 'reviewing' && o.canViewKey && o.keyForm === 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">审核通过：本单为叠加购买，所购时长已并入你的密钥，无需再次激活；本站订单将在站长确认到账后转为已完成。</p>' : ''}
-      ${o.status === 'completed' && o.keyForm !== 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">已完成：密钥已发放到本账号，可在下方查看密钥，或在「我的」查看密钥状态。</p>' : ''}
-      ${o.status === 'completed' && o.keyForm === 'stacked' ? '<p style="color:var(--ok);font-size:13.5px;margin-top:10px">已完成：本单为叠加购买，所购时长已并入你的密钥。可在下方查看既有密钥，或在「我的」查看密钥状态。</p>' : ''}
-      ${o.canViewKey && o.keyForm === 'stacked' ? `<p style="color:var(--sub);font-size:13.5px;margin-top:10px">本单为叠加购买，时长已并入你的密钥${o.keyMasked ? '（' + esc(o.keyMasked) + '）' : ''}${o.keyActivated && o.keyExpiresMs ? '，并入后到期时间：' + esc(fmtDate(o.keyExpiresMs)) : ''}${o.keyActivated === false ? '，该密钥尚未激活，激活时累计时长一并起算' : ''}。</p>` : ''}
-      ${o.status === 'cancelled' ? '<p style="color:var(--sub);font-size:13.5px;margin-top:10px">订单已取消。</p>' : ''}
-      ${o.status === 'rejected' ? '<p style="color:var(--err);font-size:13.5px;margin-top:10px">审核未通过。如有疑问，请联系智能客服处理。</p>' : ''}
-      <p style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      ${o.status === 'pending_pay' ? `<p class="ordnote" style="color:var(--sub)">剩余支付时间：<b>${fmtSecText(o.remainingSec)}</b>（到期自动取消）</p>` : ''}
+      ${o.status === 'reviewing' && !o.canViewKey ? '<p class="ordnote" style="color:var(--sub)">正在审核，审核通过后可在此查看并复制密钥，粘贴激活后即可使用。待审核订单不可取消或删除。</p>' : ''}
+      ${o.status === 'reviewing' && o.canViewKey && o.keyForm !== 'stacked' ? '<p class="ordnote">审核通过：密钥已发放到本账号。点下方「查看密钥」复制完整密钥，粘贴激活后开始使用；本站订单将在站长确认到账后转为已完成。</p>' : ''}
+      ${o.status === 'reviewing' && o.canViewKey && o.keyForm === 'stacked' ? '<p class="ordnote">审核通过：本单为叠加购买，所购时长已并入你的密钥，无需再次激活；本站订单将在站长确认到账后转为已完成。</p>' : ''}
+      ${o.status === 'completed' && o.keyForm !== 'stacked' ? '<p class="ordnote">已完成：密钥已发放到本账号，可在下方查看密钥，或在「我的」查看密钥状态。</p>' : ''}
+      ${o.status === 'completed' && o.keyForm === 'stacked' ? '<p class="ordnote">已完成：本单为叠加购买，所购时长已并入你的密钥。可在下方查看既有密钥，或在「我的」查看密钥状态。</p>' : ''}
+      ${o.canViewKey && o.keyForm === 'stacked' ? `<p class="ordnote" style="color:var(--sub)">本单为叠加购买，时长已并入你的密钥${o.keyMasked ? '（' + esc(o.keyMasked) + '）' : ''}${o.keyActivated && o.keyExpiresMs ? '，并入后到期时间：' + esc(fmtDate(o.keyExpiresMs)) : ''}${o.keyActivated === false ? '，该密钥尚未激活，激活时累计时长一并起算' : ''}。</p>` : ''}
+      ${o.status === 'cancelled' ? '<p class="ordnote" style="color:var(--sub)">订单已取消。</p>' : ''}
+      ${o.status === 'rejected' ? '<p class="ordnote">审核未通过。如有疑问，请联系智能客服处理。</p>' : ''}
+      <p class="flex-row mt-12">
         ${o.canContinue ? `<button class="btn sm" data-cont="${esc(o.id)}">继续支付</button>` : ''}
         ${o.canViewKey ? `<button class="btn sm" data-viewkey="${esc(o.id)}">查看密钥</button>` : ''}
         ${o.canCancel ? `<button class="btn sm grey" data-cancel="${esc(o.id)}">取消订单</button>` : ''}
         ${o.canDelete ? `<button class="btn sm danger" data-del="${esc(o.id)}">删除</button>` : ''}
       </p>
-      ${o.canViewKey && o.keyStr && o.keyForm !== 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok" style="margin:0"><div style="font-size:13px;color:var(--sub);margin-bottom:6px">本单密钥（完整串）</div><b style="user-select:all;word-break:break-all;font-size:16px;letter-spacing:.5px">${esc(o.keyStr)}</b><p style="margin-top:10px"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p><p style="color:var(--sub);font-size:12.5px;margin-top:8px">复制后到登录激活提示或「兑换 KEY」处粘贴即可激活，激活后开始计时。</p></div></div>` : ''}
-      ${o.canViewKey && o.keyStr && o.keyForm === 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok" style="margin:0"><div style="font-size:13px;color:var(--sub);margin-bottom:6px">既有密钥（完整串）</div><b style="user-select:all;word-break:break-all;font-size:16px;letter-spacing:.5px">${esc(o.keyStr)}</b><p style="margin-top:10px"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p>${o.keyActivated ? '<p style="color:var(--sub);font-size:12.5px;margin-top:8px">该密钥已激活，正在计时，无需再次粘贴激活。</p>' : '<p style="color:var(--sub);font-size:12.5px;margin-top:8px">该密钥尚未激活。复制后到登录激活提示或「兑换 KEY」处粘贴激活，本单时长已并入，激活时一并起算。</p>'}</div></div>` : ''}
+      ${o.canViewKey && o.keyStr && o.keyForm !== 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok m-0"><div class="text-sub fs-13 mb-6">本单密钥（完整串）</div><b class="keybox">${esc(o.keyStr)}</b><p class="mt-10"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p><p class="text-sub fs-12x5 mt-8">复制后到登录激活提示或「兑换 KEY」处粘贴即可激活，激活后开始计时。</p></div></div>` : ''}
+      ${o.canViewKey && o.keyStr && o.keyForm === 'stacked' ? `<div id="ordkey-${esc(o.id)}" style="display:none"><div class="note ok m-0"><div class="text-sub fs-13 mb-6">既有密钥（完整串）</div><b class="keybox">${esc(o.keyStr)}</b><p class="mt-10"><button class="btn sm" data-copykey="${esc(o.id)}">复制密钥</button></p>${o.keyActivated ? '<p class="text-sub fs-12x5 mt-8">该密钥已激活，正在计时，无需再次粘贴激活。</p>' : '<p class="text-sub fs-12x5 mt-8">该密钥尚未激活。复制后到登录激活提示或「兑换 KEY」处粘贴激活，本单时长已并入，激活时一并起算。</p>'}</div></div>` : ''}
     </div>`).join('');
   box.querySelectorAll('[data-viewkey]').forEach(el => el.onclick = () => {
     const id = el.getAttribute('data-viewkey');
@@ -5088,16 +4742,22 @@ Views.orders = async function (view) {
   box.querySelectorAll('[data-cont]').forEach(el => el.onclick = () => navigate('purchase', el.getAttribute('data-cont')));
   box.querySelectorAll('[data-cancel]').forEach(el => el.onclick = () => {
     const id = el.getAttribute('data-cancel');
+    const gen0 = S.sessGen; // 扫表 S8：确认框等待期间换账号，旧单取消请求不得发到新账号头上（modal 不随导航关闭，见 showModal）
     confirmModal('取消订单', '确定取消该订单？取消后不能恢复，需要购买时请重新下单。', '取消订单', async () => {
+      if (gen0 !== S.sessGen) return;
       const rr = await api('/license/api/pay/orders/' + encodeURIComponent(id) + '/cancel', { method: 'POST', json: {} });
+      if (gen0 !== S.sessGen) return;
       if (rr.json && rr.json.ok) { toast('订单已取消。', 'ok'); Views.orders(view); }
       else toast(apiErrText(rr, '取消失败，请稍后再试。'), 'err');
     });
   });
   box.querySelectorAll('[data-del]').forEach(el => el.onclick = () => {
     const id = el.getAttribute('data-del');
+    const gen0 = S.sessGen; // 扫表 S8：同上，删除确认框亦然
     confirmModal('删除订单', '删除后该订单不再显示（后台台账保留）。确定删除？', '删除', async () => {
+      if (gen0 !== S.sessGen) return;
       const rr = await api('/license/api/pay/orders/' + encodeURIComponent(id) + '/delete', { method: 'POST', json: {} });
+      if (gen0 !== S.sessGen) return;
       if (rr.json && rr.json.ok) { toast('订单已删除。', 'ok'); Views.orders(view); }
       else toast(apiErrText(rr, '删除失败，请稍后再试。'), 'err');
     });
@@ -5115,7 +4775,7 @@ Views.orders = async function (view) {
      实测为 cost）；records 为扣分台账项 {at,kind,delta,balance,note}。 */
 Views.points = async function (view) {
   view.innerHTML = `<h1 class="pt">积分与福利中心</h1><p class="psub">积分由服务器计时，每日上限 10 分，账号与设备任一达到上限当日不再计分。</p>
-    <div id="ptsBody"><div class="card"><div class="skel" style="height:60px"></div></div></div>`;
+    <div id="ptsBody"><div class="card"><div class="skel sk-h60"></div></div></div>`;
   const box = $('#ptsBody', view);
   const [r, wr, kr] = [await api('/points/api/me'), await api('/points/api/welfare'), await api('/license/api/mykeys')];
   if (r.status === 401 || r.status === 403) { box.innerHTML = stateBox('登录状态已失效', '请重新登录后查看积分与福利。', false); return; }
@@ -5135,20 +4795,18 @@ Views.points = async function (view) {
   const offerName = o => (o.planName || (o.plan === 'd7' ? '7 日密钥' : '1 日密钥'));
   box.innerHTML = `
     <div class="grid2"><div class="card"><h3>我的积分</h3><div class="stat"><div><b id="pt-balance">${esc(String(balance))}</b><span>当前积分</span></div><div><b>${esc(String(hours))}</b><span>累计在线（小时）</span></div><div><b>${esc(String(todayGranted))} / ${esc(String(todayCap))}</b><span>今日已得 / 上限</span></div></div>
-      <p style="color:var(--sub);font-size:13px;margin-top:10px">${esc(j.displayText || '')}</p></div>
+      <p class="text-sub fs-13 mt-10">${esc(j.displayText || '')}</p></div>
     <div class="card"><h3>赚取积分</h3>
-      ${rowInfoHtml('award', '每日签到', checkinDone ? '今日已签到' : '每天签到得 1 分')}
-      <div style="margin:-6px 0 10px 55px"><button class="btn sm" id="pt-sign" ${checkinDone ? 'disabled' : ''}>${checkinDone ? '今日已签到' : '签到'}</button></div>
-      ${rowInfoHtml('refresh', '使用软件计时', '软件与服务器保持在线满 1 小时得 1 分' + (earn.nextPointInSec != null ? '（距下一分约 ' + Math.ceil(Number(earn.nextPointInSec) / 60) + ' 分钟）' : ''))}
-      <div id="pt-out" style="margin-top:10px"></div>
+      ${rowActHtml('award', '每日签到', checkinDone ? '今日已签到' : '每天签到得 1 分', `<button class="btn sm" id="pt-sign" ${checkinDone ? 'disabled' : ''}>${checkinDone ? '今日已签到' : '签到'}</button>`)}
+      ${rowActHtml('refresh', '使用软件计时', '软件与服务器保持在线满 1 小时得 1 分', earn.nextPointInSec != null ? `<span class="tag">距下一分约 ${Math.ceil(Number(earn.nextPointInSec) / 60)} 分钟</span>` : '')}
+      <div class="mt-10" id="pt-out"></div>
     </div></div>
     <div class="card"><h3>福利中心 · 兑换密钥</h3>
-      ${offers.map(o => `${rowInfoHtml('key', offerName(o), offerCost(o) + ' 分兑换 · 兑换后进入下方待兑换列表')}
-      <div style="margin:-6px 0 10px 55px"><button class="btn sm ghost" data-redeem="${esc(o.plan)}" data-cost="${esc(String(offerCost(o)))}">兑换${o.plan === 'd7' ? ' 7 日' : ' 1 日'}密钥</button></div>`).join('')}
-      <div class="note warn" style="margin-top:12px">积分兑换的密钥为免费来源，不开通网页版；兑换所得为未激活密钥，自兑换激活时刻起计时。</div>
-      <div id="wf-out" style="margin-top:10px"></div></div>
+      ${offers.map(o => rowActHtml('key', offerName(o), offerCost(o) + ' 分兑换 · 兑换后进入下方待兑换列表', `<button class="btn sm" data-redeem="${esc(o.plan)}" data-cost="${esc(String(offerCost(o)))}">兑换${o.plan === 'd7' ? ' 7 日' : ' 1 日'}密钥</button>`)).join('')}
+      <div class="note warn mt-12">积分兑换的密钥为免费来源，不开通网页版；兑换所得为未激活密钥，自兑换激活时刻起计时。</div>
+      <div class="mt-10" id="wf-out"></div></div>
     <div class="card"><h3>待兑换列表</h3><div id="pt-pending">
-      ${pendingKeys.length ? pendingKeys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.planName || '密钥')}</b><small>${esc(k.masked || '')} · 来源：${esc(k.sourceLabel || '')} · ${esc(k.expiresText || '未激活，激活后起算')}</small></span><span class="ops" style="margin-left:auto"><button class="btn sm" data-keyredeem="${esc(k.keyId)}">兑换并激活</button></span></div>`).join('') : '<div class="statebox"><b>暂无待兑换密钥</b><p>用积分兑换的密钥将显示在这里，兑换并激活后开始计时。</p></div>'}
+      ${pendingKeys.length ? pendingKeys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.planName || '密钥')}</b><small>${esc(k.masked || '')} · 来源：${esc(k.sourceLabel || '')} · ${esc(k.expiresText || '未激活，激活后起算')}</small></span><span class="ops"><button class="btn sm" data-keyredeem="${esc(k.keyId)}">兑换并激活</button></span></div>`).join('') : '<div class="statebox"><b>暂无待兑换密钥</b><p>用积分兑换的密钥将显示在这里，兑换并激活后开始计时。</p></div>'}
     </div></div>
     <div class="card"><h3>兑换记录</h3>
       ${records.length ? '<div class="tblwrap"><table><tr><th>项目</th><th>积分变化</th><th>时间</th></tr>' + records.map(x => `<tr><td>${esc(x.note || '福利兑换')}</td><td>${esc(String(x.delta != null ? x.delta : ''))}</td><td>${x.at ? fmtDate(x.at) : ''}</td></tr>`).join('') + '</table></div>' : '<div class="statebox"><b>暂无兑换记录</b><p>在福利中心兑换密钥后，记录将显示在这里。</p></div>'}
@@ -5161,7 +4819,7 @@ Views.points = async function (view) {
     if (rr.json && rr.json.ok) { toast('签到成功，+1 分。', 'ok'); Views.points(view); }
     else {
       signBtn.disabled = false; signBtn.textContent = '签到';
-      if (ptOut) ptOut.innerHTML = `<div class="note ${rr.json && rr.json.code === 'ALREADY_CHECKED_IN' ? 'blue' : 'err'}" style="margin:0">${esc(apiErrText(rr, '签到失败，请稍后再试。'))}</div>`;
+      if (ptOut) ptOut.innerHTML = `<div class="note ${rr.json && rr.json.code === 'ALREADY_CHECKED_IN' ? 'blue' : 'err'} m-0">${esc(apiErrText(rr, '签到失败，请稍后再试。'))}</div>`;
       if (rr.json && rr.json.code === 'ALREADY_CHECKED_IN') Views.points(view);
     }
   };
@@ -5169,11 +4827,14 @@ Views.points = async function (view) {
     b.onclick = () => {
       const plan = b.getAttribute('data-redeem');
       const cost = b.getAttribute('data-cost');
+      const gen0 = S.sessGen; // 扫表 S12：确认框等待期间换账号，旧账号的积分兑换不得扣到新账号头上
       confirmModal('兑换密钥', '确认使用 ' + cost + ' 分兑换' + (plan === 'd7' ? ' 7 日' : ' 1 日') + '密钥？兑换后密钥进入待兑换列表。', '确认兑换', async () => {
+        if (gen0 !== S.sessGen) return;
         const rr = await api('/points/api/welfare/redeem', { method: 'POST', json: { plan } });
+        if (gen0 !== S.sessGen) return;
         const wfOut = $('#wf-out', box);
         if (rr.json && rr.json.ok) { toast(rr.json.msg || '兑换成功。', 'ok'); Views.points(view); }
-        else if (wfOut) wfOut.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(rr, '兑换失败，请稍后再试。'))}</div>`;
+        else if (wfOut) wfOut.innerHTML = `<div class="note err m-0">${esc(apiErrText(rr, '兑换失败，请稍后再试。'))}</div>`;
       });
     };
   });
@@ -5198,7 +4859,7 @@ Views.points = async function (view) {
  * 安卓另在原生「我的」页加同名入口（见 android-app/lib/ui/me_page.dart）。 */
 Views.apikeys = async function (view) {
   view.innerHTML = `<h1 class="pt">API 密钥</h1><p class="psub">API 密钥是 Muse 操作本机设备的凭证。密钥必须由你手动生成——生成就是一次显式授权；吊销后密钥立即失效，Muse 再调用会被拒绝。</p>
-    <div id="akBody"><div class="card"><div class="skel" style="height:60px"></div></div></div>`;
+    <div id="akBody"><div class="card"><div class="skel sk-h60"></div></div></div>`;
   const box = $('#akBody', view);
   const r = await api('/api/lea/v1/keys');
   if (r.status === 401 || r.status === 403) { box.innerHTML = stateBox('登录状态已失效', '请重新登录后查看 API 密钥。', false); return; }
@@ -5209,24 +4870,25 @@ Views.apikeys = async function (view) {
   const statusText = (s) => ({ active: '使用中', revoked: '已吊销', revoked_by_rebind: '换绑后吊销', expired: '已过期' }[s] || s || '未知');
   const renderList = (keys) => {
     if (!keys.length) return '<div class="statebox"><b>暂无 API 密钥</b><p>还没有生成过密钥。生成后把密钥复制给 Muse，它才能操作你的设备。</p></div>';
-    return keys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.prefix || k.key_id)}</b><small>${esc(k.key_id)} · ${esc(statusText(k.status))} · 生成于 ${k.created_at ? fmtDate(k.created_at) : '—'} · ${k.last_used_at ? '最后使用 ' + fmtDate(k.last_used_at) : '未使用过'}${k.device_scope ? ' · 仅限设备 ' + esc(String(k.device_scope).slice(0, 20)) + '…' : ''}</small></span>${k.status === 'active' ? `<span class="ops" style="margin-left:auto"><button class="btn sm" data-revoke="${esc(k.key_id)}">撤销</button></span>` : ''}</div>`).join('');
+    return keys.map(k => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.prefix || k.key_id)}</b><small>${esc(k.key_id)} · ${esc(statusText(k.status))} · 生成于 ${k.created_at ? fmtDate(k.created_at) : '—'} · ${k.last_used_at ? '最后使用 ' + fmtDate(k.last_used_at) : '未使用过'}${k.device_scope ? ' · 仅限设备 ' + esc(String(k.device_scope).slice(0, 20)) + '…' : ''}${k.self_bind ? ' · 自助链接' : ''}${k.device_name ? ' · ' + esc(k.device_name) : ''}${k.platform ? '（' + esc(k.platform) + '）' : ''}${k.expires_at ? ' · 到期 ' + fmtDate(k.expires_at) : ''}</small></span>${k.status === 'active' ? `<span class="ops"><button class="btn sm" data-revoke="${esc(k.key_id)}"${k.self_bind ? ' data-selfbind="1"' : ''}${k.device_scope ? ` data-scope="${esc(k.device_scope)}"` : ''}>撤销</button></span>` : ''}</div>`).join('');
   };
   const keys = Array.isArray(r.json.keys) ? r.json.keys : [];
   box.innerHTML = `
     <div class="card"><h3>生成 API 密钥</h3>
-      <p style="color:var(--sub);font-size:13px;margin:6px 0 10px">点“生成”即手动授权 Muse 使用你的设备。生成须重新输入账号密码作二次确认；密钥明文只显示一次，请立即复制保存，关闭后不再明文展示。</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input id="ak-pw" type="password" placeholder="账号密码（二次确认）" autocomplete="current-password" style="flex:1;min-width:200px;height:38px;border:1px solid var(--btn-line);border-radius:10px;padding:0 12px;font-size:14px;background:var(--card);color:var(--fg)">
+      <p class="text-sub fs-13 m-6-0-10">点“生成”即手动授权 Muse 使用你的设备。生成须重新输入账号密码作二次确认；密钥明文只显示一次，请立即复制保存，关闭后不再明文展示。</p>
+      <div class="flex-row">
+        <input class="mini-input2" id="ak-pw" type="password" placeholder="账号密码（二次确认）" autocomplete="current-password">
         <button class="btn" id="ak-gen">生成 API 密钥</button>
       </div>
-      <div id="ak-new" style="margin-top:12px"></div>
-      <div id="ak-out" style="margin-top:10px"></div>
+      <div class="mt-12" id="ak-new"></div>
+      <div class="mt-10" id="ak-out"></div>
     </div>
     <div class="card"><h3>我的密钥</h3><div id="ak-list">${renderList(keys)}</div></div>
     <div class="card"><h3>吊销全部密钥</h3>
-      <p style="color:var(--sub);font-size:13px;margin:6px 0 10px">怀疑密钥泄露时点这里：该账号全部密钥立即吊销，Muse 再调用一律被拒绝。吊销不可恢复，需要时重新生成。</p>
-      <button class="btn red" id="ak-revoke-all">吊销全部密钥</button>
-      <div id="ak-all-out" style="margin-top:10px"></div>
+      <p class="text-sub fs-13 m-6-0-10">怀疑密钥泄露时点这里：该账号全部密钥立即吊销，Muse 再调用一律被拒绝。吊销不可恢复，需要时重新生成。</p>
+      <button class="btn danger" id="ak-revoke-all">吊销全部密钥</button>
+      <button class="btn sm ghost" id="ak-revoke-all-selfbind">只吊销自助链接的密钥（无需密码）</button>
+      <div class="mt-10" id="ak-all-out"></div>
     </div>`;
   const pwEl = $('#ak-pw', box);
   const outEl = $('#ak-out', box);
@@ -5236,13 +4898,36 @@ Views.apikeys = async function (view) {
     scope.querySelectorAll('[data-revoke]').forEach(b => {
       b.onclick = () => {
         const keyId = b.getAttribute('data-revoke');
+        const isSelfBind = b.getAttribute('data-selfbind') === '1';
+        const keyScope = b.getAttribute('data-scope') || '';
+        const gen0 = S.sessGen; // 扫表 S13：确认框等待期间换账号，旧账号的密钥吊销不得发到新账号头上
         confirmModal('撤销密钥', '确定吊销该密钥吗？吊销后它立即失效，Muse 再用它调用会被拒绝。', '撤销', async () => {
-          // T30：单 Key 吊销与吊销全部同口径，须密码二次确认（复用上方
-          // #ak-pw 密码框，与吊销全部同一写法；服务端无密码即 400）。
-          const pw = pwEl ? pwEl.value : '';
-          if (!pw) { toast('撤销密钥须先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
-          const rr = await api('/api/lea/v1/keys/' + encodeURIComponent(keyId) + '/revoke', { method: 'POST', json: { password: pw } });
-          if (rr.json && rr.json.ok) { toast('密钥已吊销，立即失效。', 'ok'); Views.apikeys(view); }
+          if (gen0 !== S.sessGen) return;
+          // C1：自助链接的 Key 走无密码吊销接口（控制台会话即够）；
+          // 控制台生成的 Key 仍须密码二次确认（T30 不动）。
+          let rr;
+          if (isSelfBind) {
+            rr = await api('/api/lea/v1/self-bind/revoke/' + encodeURIComponent(keyId), { method: 'POST' });
+          } else {
+            const pw = pwEl ? pwEl.value : '';
+            if (!pw) { toast('撤销密钥须先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
+            rr = await api('/api/lea/v1/keys/' + encodeURIComponent(keyId) + '/revoke', { method: 'POST', json: { password: pw } });
+          }
+          if (gen0 !== S.sessGen) return;
+          if (rr.json && rr.json.ok) {
+            // C1：吊销的是本机自助 Key 时，清本机凭据（USH 内 DPAPI 文件），
+            // 否则本机仍拿着一把已吊销的 Key（下次链接会先清掉，但立即清更干净）。
+            if (isSelfBind && window.qfLea && keyScope) {
+              try {
+                const di = await window.qfLea.deviceInfo();
+                const bare = (s) => String(s || '').replace(/^node\/\//, '');
+                if (di && di.device_id && bare(di.device_id) === bare(keyScope)) {
+                  await window.qfLea.clearCredential();
+                }
+              } catch (e) { /* best-effort：清凭据失败不影响吊销结果 */ }
+            }
+            toast('密钥已吊销，立即失效。', 'ok'); Views.apikeys(view);
+          }
           else toast(apiErrText(rr, '吊销失败，请稍后再试。'), 'err');
         });
       };
@@ -5265,8 +4950,8 @@ Views.apikeys = async function (view) {
     if (pwEl) pwEl.value = '';
     if (rr.json && rr.json.ok && rr.json.key) {
       const plain = rr.json.key;
-      newEl.innerHTML = `<div class="note warn" style="margin:0">请立即复制保存：关闭后不再明文展示。</div>
-        <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><input id="ak-plain" type="text" readonly value="${esc(plain)}" style="flex:1;min-width:0;height:38px;border:1px solid var(--btn-line);border-radius:10px;padding:0 12px;font-size:13px;background:var(--card);color:var(--fg)"><button class="btn sm" id="ak-copy">复制</button></div>`;
+      newEl.innerHTML = `<div class="note warn m-0">请立即复制保存：关闭后不再明文展示。</div>
+        <div class="flex-row mt-8"><input class="mini-input2-sm" id="ak-plain" type="text" readonly value="${esc(plain)}"><button class="btn sm" id="ak-copy">复制</button></div>`;
       const copyBtn = $('#ak-copy', box);
       if (copyBtn) copyBtn.onclick = async () => {
         try { await navigator.clipboard.writeText(plain); toast('已复制。', 'ok'); }
@@ -5280,18 +4965,38 @@ Views.apikeys = async function (view) {
       // 只刷新列表，不重建整页——明文只显示一次，不能被刷新冲掉。
       refreshList();
     } else if (outEl) {
-      outEl.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(rr, '生成失败，请稍后再试。'))}</div>`;
+      outEl.innerHTML = `<div class="note err m-0">${esc(apiErrText(rr, '生成失败，请稍后再试。'))}</div>`;
     }
   };
   const allBtn = $('#ak-revoke-all', box);
   if (allBtn) allBtn.onclick = () => {
+    const gen0 = S.sessGen; // 扫表 S13：同上，吊销全部是不可恢复操作，更不得错账号执行
     confirmModal('吊销全部密钥', '确定吊销该账号全部 API 密钥吗？全部密钥立即失效，Muse 立即失权，不可恢复。', '吊销全部', async () => {
+      if (gen0 !== S.sessGen) return;
       const pw = pwEl ? pwEl.value : '';
       if (!pw) { toast('吊销全部须先输入账号密码作二次确认。', 'err'); if (pwEl) pwEl.focus(); return; }
       const rr = await api('/api/lea/v1/keys/revoke-all', { method: 'POST', json: { password: pw } });
+      if (gen0 !== S.sessGen) return;
       const allOut = $('#ak-all-out', box);
       if (rr.json && rr.json.ok) { toast('全部密钥已吊销（' + (rr.json.revoked_count || 0) + ' 个），Muse 立即失权。', 'ok'); Views.apikeys(view); }
-      else if (allOut) allOut.innerHTML = `<div class="note err" style="margin:0">${esc(apiErrText(rr, '吊销失败，请稍后再试。'))}</div>`;
+      else if (allOut) allOut.innerHTML = `<div class="note err m-0">${esc(apiErrText(rr, '吊销失败，请稍后再试。'))}</div>`;
+    });
+  };
+  // C1：只吊销自助链接的密钥（控制台会话即够，无需密码）。桌面端吊销
+  // 本机那把后，顺带清本机凭据（device_scope 与本机一致时）。
+  const allSbBtn = $('#ak-revoke-all-selfbind', box);
+  if (allSbBtn) allSbBtn.onclick = () => {
+    const gen0 = S.sessGen;
+    confirmModal('吊销自助链接密钥', '确定吊销该账号全部自助链接的 API 密钥吗？控制台手动生成的密钥不受影响。吊销后 Muse 立即失权，不可恢复。', '吊销', async () => {
+      if (gen0 !== S.sessGen) return;
+      const rr = await api('/api/lea/v1/self-bind/revoke-all', { method: 'POST' });
+      if (gen0 !== S.sessGen) return;
+      const allOut = $('#ak-all-out', box);
+      if (rr.json && rr.json.ok) {
+        if (window.qfLea) { try { await window.qfLea.clearCredential(); } catch (e) { /* best-effort */ } }
+        toast('自助链接密钥已吊销（' + (rr.json.revoked_count || 0) + ' 个）。', 'ok'); Views.apikeys(view);
+      }
+      else if (allOut) allOut.innerHTML = `<div class="note err m-0">${esc(apiErrText(rr, '吊销失败，请稍后再试。'))}</div>`;
     });
   };
 };
@@ -5299,43 +5004,68 @@ Views.apikeys = async function (view) {
 /* ================= 我的（我的账户） ================= */
 Views.profile = async function (view) {
   const lic = S.license || {};
+  /* F-W4 返工（C §2.4，按安卓 license_section 同款）：状态 chip／有效期／席位合计；机器码／许可 ID／最后校验／硬件指纹／排障日志进折叠区，缺失字段显示 —，不编假数字 */
+  const licExpiryMs = lic.keyExpiresMs || lic.trialExpiresMs || null;
+  const licStatusCls = /过期|失效|封禁|冻结/.test(lic.displayStatus || '') ? 'err' : ((/试用/.test(lic.displayStatus || '') || /试用/.test(lic.planName || '')) ? 'warn' : (lic.hasKey ? 'ok' : 'off'));
+  const licDotCls = licStatusCls === 'err' ? 'dot6 off' : (licStatusCls === 'warn' ? 'dot6 warn' : 'dot6');
+  const licPc = lic.slots ? (lic.slots.pc || 0) : 0, licPcMax = (lic.slots && lic.slots.pcMax) || 2;
+  const licMo = lic.slots ? (lic.slots.mobile || 0) : 0, licMoMax = (lic.slots && lic.slots.mobileMax) || 1;
   view.innerHTML = `<h1 class="pt">我的</h1><p class="psub">账号、密钥与安全设置集中在本页，每项功能只有一个入口。</p>
-    <div class="card"><div class="dev" style="border:none;padding:0"><span data-my-avatar="52">${myAvatarHtml(52)}</span><span><b style="font-size:17px" data-my-nick>${esc(myEffectiveNickname())}</b><small style="display:block;color:var(--sub)">${esc(lic.displayStatus || '账号状态正常')}</small></span><span class="ops"><button class="btn sm ghost" id="pf-edit">编辑资料</button></span></div></div>
+    <div class="card"><div class="dev dev-flat"><span data-my-avatar="52">${myAvatarHtml(52)}</span><span><b class="fs-17" data-my-nick>${esc(myEffectiveNickname())}</b><small class="text-sub d-block">${esc(lic.displayStatus || '账号状态正常')}</small></span><span class="ops"><button class="btn sm ghost" id="pf-edit">编辑资料</button></span></div></div>
     ${profileCardHtml(MyProfile || { username: S.user, effectiveNickname: S.displayName, defaultNickname: S.user })}
-    <div class="card"><a class="row" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><span class="tile">${ic('globe')}</span><span><b>官方网站</b><small>打开 QFRemote 官网（软件下载与版本公告）</small></span><span class="chev">${ic('chevR')}</span></a></div>
+    <div class="card"><a class="row row-link" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener"><span class="tile">${ic('globe')}</span><span><b>官方网站</b><small>打开 QFRemote 官网（软件下载与版本公告）</small></span><span class="chev">${ic('chevR')}</span></a></div>
     ${S.isAdmin ? `<div class="card"><button class="row" id="pf-admin"><span class="tile">${ic('gear')}</span><span><b>站长管理</b><small>待办、审核与账号管理（仅站长账号可见）</small></span><span class="chev">${ic('chevR')}</span></button></div>` : ''}
     <div class="grid2">
     <div class="card"><h3>兑换 KEY</h3>
       <div class="field"><label>输入密钥</label><input id="pf-key" placeholder="粘贴完整密钥串"><p class="hint">他人出售的一手未激活密钥、转赠密钥、积分兑换密钥都在这里兑换；兑换即完成归属转移并激活。</p></div>
-      <button class="btn block" id="pf-claim">兑换并激活</button><div id="pf-claim-out" style="margin-top:10px"></div>
-      <h3 style="margin-top:20px">待领取的转赠</h3><div id="pf-transfers"><div class="skel" style="height:40px"></div></div></div>
-    <div class="card"><h3>我的密钥（查询密钥）</h3><div class="tblwrap"><table>
+      <button class="btn block" id="pf-claim">兑换并激活</button><div class="mt-10" id="pf-claim-out"></div>
+      <h4 class="subh">待领取的转赠</h4><div id="pf-transfers"><div class="skel sk-h40"></div></div></div>
+    <div class="card"><h3>我的密钥（查询密钥）</h3><div class="tblwrap fit"><table>
       <tr><th>套餐</th><td>${esc(lic.planName || '尚未激活')}</td></tr>
-      <tr><th>密钥</th><td><span id="pf-masked">${esc(lic.maskedKey || '—')}</span> <a id="pf-reveal" style="color:var(--brand);font-weight:600;cursor:pointer">查看完整密钥（输密码核验）</a></td></tr>
-      <tr><th>状态</th><td>${esc(lic.displayStatus || '—')}${lic.remainText ? ' · ' + esc(lic.remainText) : (lic.keyExpiresMs ? ' · 到期：' + fmtDate(lic.keyExpiresMs) : '')}</td></tr>
-      <tr><th>设备名额</th><td>电脑 ${lic.slots ? lic.slots.pc : 0} / ${lic.slots && lic.slots.pcMax ? lic.slots.pcMax : 2} · 手机 ${lic.slots ? lic.slots.mobile : 0} / ${lic.slots && lic.slots.mobileMax ? lic.slots.mobileMax : 1}</td></tr>
+      <tr><th>密钥</th><td><span id="pf-masked">${esc(lic.maskedKey || '—')}</span> <a class="text-brand fw-600 cursor-pointer" id="pf-reveal">查看完整密钥（输密码核验）</a></td></tr>
+      <tr><th>状态</th><td><span class="pill ${licStatusCls}"><span class="${licDotCls}"></span>${esc(lic.displayStatus || '—')}</span>${lic.remainText ? ' · ' + esc(lic.remainText) : ''}</td></tr>
+      <tr><th>有效期</th><td>${licExpiryMs ? esc(fmtDate(licExpiryMs)) + '（CST）' : '—'}</td></tr>
+      <tr><th>设备名额</th><td>电脑 ${licPc} / ${licPcMax} · 手机 ${licMo} / ${licMoMax}</td></tr>
+      <tr><th>席位（合计）</th><td>${licPc + licMo} / ${licPcMax + licMoMax}</td></tr>
       <tr><th>网页版</th><td>${lic.webEnabled ? '已开通' : '购买付费密钥后开通'}</td></tr>
       ${lic.everBanned ? '<tr><th>标记</th><td>该密钥曾被封禁（申诉恢复后保留此标记，不影响使用）</td></tr>' : ''}
       </table></div>
-      ${rowInfoHtml('key', '转赠密钥', '付费密钥可转赠一次；对方在查询密钥处复制密钥串后，登录时粘贴领取')}
-      <div style="margin:-6px 0 10px 55px"><button class="btn sm ghost" id="pf-gift">发起转赠</button> <button class="btn sm grey" id="pf-gift-cancel">撤销待领取转赠</button></div>
-      ${rowInfoHtml('refresh', '申诉换绑设备', '在新设备上提交，审核通过后替换同类旧设备')}
-      <div style="margin:-6px 0 4px 55px"><button class="btn sm ghost" id="pf-rebind">提交换绑申诉</button></div>
+      <details class="lic-diag"><summary>排障与硬件信息</summary>
+      <div class="tblwrap fit"><table>
+      <tr><th>机器码</th><td>—（网页端无机器码接口，不编造）</td></tr>
+      <tr><th>许可 ID</th><td><span class="ev-code">${esc(lic.keyId || '—')}</span></td></tr>
+      <tr><th>最后校验时间</th><td>—（无校验记录接口）</td></tr>
+      <tr><th>硬件指纹</th><td>—（默认折叠，未提供）</td></tr>
+      <tr><th>排障日志</th><td>校验时间 — · 接口结果 — · 错误码 —</td></tr>
+      </table></div>
+      <p class="ev-meta">诊断信息只含本页已显示的真实字段；缺失项显示 —，不编造。</p>
+      <button class="btn sm ghost" id="pf-lic-diag">复制诊断信息</button></details>
+      ${rowActHtml('key', '转赠密钥', '付费密钥可转赠一次；对方在查询密钥处复制密钥串后，登录时粘贴领取', `<button class="btn sm ghost" id="pf-gift">发起转赠</button><button class="btn sm grey" id="pf-gift-cancel">撤销待领取转赠</button>`)}
+      ${rowActHtml('refresh', '申诉换绑设备', '在新设备上提交，审核通过后替换同类旧设备', `<button class="btn sm ghost" id="pf-rebind">提交换绑申诉</button>`)}
     </div></div>
     <div class="card"><h3>账号与安全</h3><div id="pfSec">
-      ${rowHtml('lock', '更改密码', '修改密码不会使其他设备立即退出登录')}
-      ${rowHtml('file', '查看以前的登录', '最近登录：' + (S.stats && S.stats.lastLoginMs ? fmtDate(S.stats.lastLoginMs) : '—'))}
-      ${rowHtml('headset', '我的申诉与进度', '封禁申诉、换绑申诉都在这里查进度')}
-      ${rowHtml('forum', '意见反馈', '提交后进入处理队列')}
-      ${rowHtml('refresh', '检查更新', '查看当前版本与更新说明')}
-      ${rowHtml('user', '退出登录', '')}
-      ${rowHtml('user', '删除账户', '删除后数据按规则清除，此操作不可恢复')}
-    </div></div>`;
+      ${rowActHtml('moon', '深色模式', '浅色／深色切换，重启后仍保持', `<button class="qf-switch" id="pf-theme-toggle" type="button" role="switch" aria-checked="false" aria-label="深色模式"></button><span id="pf-theme-shell-note" hidden>由桌面端主题控制，请用工具栏切换。</span>`)}
+      ${rowHtml('lock', '更改密码', '修改密码不会使其他设备立即退出登录', null, null, 'change-password')}
+      ${rowHtml('file', '查看以前的登录', '最近登录：' + (S.stats && S.stats.lastLoginMs ? fmtDate(S.stats.lastLoginMs) : '—'), null, null, 'login-history')}
+      ${rowHtml('headset', '我的申诉与进度', '封禁申诉、换绑申诉都在这里查进度', null, null, 'appeals')}
+      ${rowHtml('forum', '意见反馈', '提交后进入处理队列', null, null, 'feedback')}
+      ${rowHtml('refresh', '检查更新', '查看当前版本与更新说明', null, null, 'check-update')}
+      ${rowHtml('user', '退出登录', '', null, null, 'logout')}
+      ${rowHtml('user', '删除账户', '删除后数据按规则清除，此操作不可恢复', null, null, 'delete-account')}
+    </div></div>
+    <div class="card" id="pf-lea"><h3>本机助手（API 密钥）</h3><div id="pf-lea-body"><div class="skel sk-h40"></div></div></div>`;
   const pfEditBtn = $('#pf-edit', view); if (pfEditBtn) pfEditBtn.onclick = () => { const c = $('#pfProfileCard', view); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  /* F-W4 返工：复制诊断信息（只含真实字段，缺失项为 —，与安卓 _copyDiagnostics 同口径） */
+  const pfDiagBtn = $('#pf-lic-diag', view);
+  if (pfDiagBtn) pfDiagBtn.onclick = async () => {
+    const txt = ['许可状态：' + (lic.displayStatus || '—'), '当前套餐：' + (lic.planName || '—'), '密钥：' + (lic.maskedKey || '—'), '有效期：' + (licExpiryMs ? fmtDate(licExpiryMs) + '（CST）' : '—'), '剩余时长：' + (lic.remainText || '—'), '设备名额：电脑 ' + licPc + ' / ' + licPcMax + ' · 手机 ' + licMo + ' / ' + licMoMax + ' · 合计 ' + (licPc + licMo) + ' / ' + (licPcMax + licMoMax), '机器码：—', '许可 ID：' + (lic.keyId || '—'), '最后校验时间：—'].join('\n');
+    try { await navigator.clipboard.writeText(txt); toast('诊断信息已复制，包含许可状态与密钥掩码。', 'ok'); } catch (e) { toast('复制失败，请手动记录。', 'err'); }
+  };
   /* ---- 个人资料（2.3.2）：统一档案展示、昵称/头像提交、审核记录与申诉 ---- */
   const pfRender = (p) => {
     if (!p) return;
-    const slot = $('#pfAvatarSlot', view); if (slot) slot.innerHTML = profileAvatarHtml(p, 76);
+    /* MOBILE-FIX 2026-11-14（V-07c）：个人资料卡不再放重复大头像，
+       头像只在页顶卡一处主展示（52px，paintIdentity 同步更新）。 */
     const en = $('#pfEffNick', view); if (en) en.textContent = p.effectiveNickname || '';
     const dn = $('#pfDefaultNick', view); if (dn) dn.textContent = '默认昵称：' + (p.defaultNickname || p.username || '');
     const ln = $('#pfLoginName', view); if (ln) ln.textContent = p.username || '';
@@ -5392,6 +5122,8 @@ Views.profile = async function (view) {
   const nickClearBtn = $('#pf-nick-clear', view);
   if (nickClearBtn) nickClearBtn.onclick = async () => { await submitProfileField({ nickname: '' }, $('#pfNickOut', view), 'nickname'); };
   const avatarUpBtn = $('#pf-avatar-upload', view);
+  const avatarFileInput = $('#pfAvatarFile', view); // r13：选图即回显文件名（原原生控件的「No file chosen」回显随控件隐藏而消失）
+  if (avatarFileInput) avatarFileInput.addEventListener('change', () => { const n = $('#pfAvatarName', view); if (n) n.textContent = avatarFileInput.files[0] ? ('已选择：' + avatarFileInput.files[0].name) : '尚未选择图片'; });
   if (avatarUpBtn) avatarUpBtn.onclick = async () => {
     const out = $('#pfAvatarOut', view); const f = $('#pfAvatarFile', view).files[0];
     if (!f) { out.innerHTML = '<div class="note warn">请先选择图片文件。</div>'; return; }
@@ -5408,6 +5140,10 @@ Views.profile = async function (view) {
   refreshMyProfile().then(me => pfRender(me));
   loadPfRecords();
   if (S.isAdmin) { const pa = $('#pf-admin', view); if (pa) pa.onclick = () => navigate('admin'); }
+  /* G8 深色切换绑定：开关点按即翻 theme，aria-checked 由 applyTheme 全局同步；
+     P0-2 遗留双入口收敛：初绘按有效主题（壳手动优先）＋同步开关只读态。 */
+  const pfThemeBtn = $('#pf-theme-toggle', view);
+  if (pfThemeBtn) { applyEffectiveTheme(); syncPfThemeControl(); pfThemeBtn.onclick = () => { const t = toggleTheme(); toast(t === 'dark' ? '已切换到深色模式。' : '已切换到浅色模式。', 'ok'); }; }
   $('#pf-claim', view).onclick = async () => {
     const key = $('#pf-key', view).value.trim(); const out = $('#pf-claim-out', view);
     if (!key) { out.innerHTML = '<div class="note warn">请先粘贴密钥。</div>'; return; }
@@ -5424,7 +5160,7 @@ Views.profile = async function (view) {
     tbox.innerHTML = pend.length ? pend.map(t => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(t.planName || '转赠密钥')}</b><small>来自 ${esc(t.from || t.giver || '')} · 在上方输入框粘贴密钥串即可领取</small></span></div>`).join('') : '<div class="statebox"><b>暂无待领取的转赠</b><p>收到转赠时，对方密钥串会显示在查询结果中，复制后在上方粘贴领取。</p></div>';
   } else tbox.innerHTML = '<div class="statebox"><b>转赠列表暂时不可用</b><p>请稍后重新加载本页。</p></div>';
   $('#pf-gift', view).onclick = () => {
-    showModal('发起转赠', `<div class="field"><label>对方账号</label><input id="gf-to" placeholder="请输入对方完整账号"></div><p style="font-size:13px;color:var(--sub)">转赠发起后，密钥在对方领取前仍归您使用，您可随时撤销；对方领取的那一刻，您的全部会话将被退出登录。待领取有效期 3 天。</p>`,
+    showModal('发起转赠', `<div class="field"><label>对方账号</label><input id="gf-to" placeholder="请输入对方完整账号"></div><p class="text-sub fs-13">转赠发起后，密钥在对方领取前仍归您使用，您可随时撤销；对方领取的那一刻，您的全部会话将被退出登录。待领取有效期 3 天。</p>`,
       [{ label: '取消' }, { label: '发起转赠', primary: true, onClick: async () => {
         const to = $('#gf-to').value.trim();
         const tr = await api('/license/api/transfers');
@@ -5459,17 +5195,119 @@ Views.profile = async function (view) {
         else toast((r.json && r.json.msg) || '核验失败。', 'err');
       } }]);
   };
-  const secRows = $('#pfSec', view).querySelectorAll('.row');
-  const acts = [
-    () => toast('更改密码将在新控制台账户安全接口开通后在本页办理；当前可在软件端修改。', 'warn'),
-    () => toast('登录记录以本页与首页显示的最近登录为准。', 'info'),
-    () => navigate('appeal'),
-    () => navigate('forum'),
-    async () => { const r = await api('/release.json'); toast(r.json ? ('当前控制台版本信息：' + (r.json.version || r.json.latest || '已是最新')) : '暂时无法获取版本信息。', 'info'); },
-    () => doLogout(),
-    () => showModal('删除账户', '<p>删除账户为不可恢复操作。如需办理，请通过智能客服转人工提交申请，核验身份后按规则清除数据。</p>', [{ label: '知道了' }, { label: '联系客服', primary: true, onClick: () => navigate('support') }])
-  ];
-  secRows.forEach((row, i) => { if (acts[i]) row.onclick = acts[i]; });
+  /* MOBILE-FIX 2026-11-14（F-01 P0）：#pfSec 8 行按行身份绑定，不用下标。
+     深色模式行是开关行（rowActHtml 的 div，无 data-action），完全排除在
+     操作行集合之外；7 个 button 行各按 data-action 精确绑定，删除账户行
+     有独立处理。旧写法 acts[7] 按下标绑到 8 行上，致 7 行全错位、删除账户死钮。 */
+  const pfSecActions = {
+    'change-password': () => toast('更改密码将在新控制台账户安全接口开通后在本页办理；当前可在软件端修改。', 'warn'),
+    'login-history': () => toast('登录记录以本页与首页显示的最近登录为准。', 'info'),
+    'appeals': () => navigate('appeal'),
+    'feedback': () => navigate('forum'),
+    'check-update': async () => { const r = await api('/release.json'); toast(r.json ? ('当前控制台版本信息：' + (r.json.version || r.json.latest || '已是最新')) : '暂时无法获取版本信息。', 'info'); },
+    'logout': () => doLogout(),
+    'delete-account': () => showModal('删除账户', '<p>删除账户为不可恢复操作。如需办理，请通过智能客服转人工提交申请，核验身份后按规则清除数据。</p>', [{ label: '知道了' }, { label: '联系客服', primary: true, onClick: () => navigate('support') }])
+  };
+  $('#pfSec', view).querySelectorAll('.row[data-action]').forEach((row) => { const fn = pfSecActions[row.getAttribute('data-action')]; if (fn) row.onclick = fn; });
+  /* C1：本机助手（API 密钥）卡。桌面端（window.qfLea 在）显示本机链接
+   * 态＋一键链接／吊销；纯浏览器显示下载桌面助手＋本账号自助链接列表。
+   * 链接流程：issue 票据 → 桥交 USH → USH 设备签名调 complete 换凭据
+   * （明文只进 USH）；成功后轮询 status 确认。吊销后清本机凭据。
+   * 5 秒状态轮询（D7）：本页打开且已链接时，每 5 秒查一次 status；
+   * 别处吊销导致 revoked 时立即清本机凭据并刷新卡片；切出本页即停。 */
+  const leaBox = $('#pf-lea-body', view);
+  const leaIsDesktop = !!(window.qfLea && window.qfLea.deviceInfo);
+  let leaPollTimer = null;
+  const leaStopPoll = () => { if (leaPollTimer) { clearTimeout(leaPollTimer); leaPollTimer = null; } };
+  const leaNonce = () => {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[x % 64]).join('');
+  };
+  const leaLink = async (btn) => {
+    btn.disabled = true; btn.textContent = '链接中…';
+    try {
+      const info = await window.qfLea.deviceInfo();
+      if (!info || !info.device_id) { toast('无法读取本机设备信息，请重启桌面软件后重试。', 'err'); return; }
+      const ush = await window.qfLea.ushStatus();
+      if (!ush || ush.ok !== true) { toast('本机助手未运行，请重启桌面软件后重试。', 'err'); return; }
+      const nonce = leaNonce();
+      const iss = await api('/api/lea/v1/self-bind/issue', { method: 'POST', json: { device_id: info.device_id, device_name: info.device_name || '', platform: 'windows', nonce } });
+      if (!iss.json || !iss.json.ok || !iss.json.ticket) { toast(apiErrText(iss, '签发绑定票据失败，请稍后再试。'), 'err'); return; }
+      const res = await window.qfLea.deliverTicket({ ticket: iss.json.ticket, challenge: iss.json.challenge, account_id: S.user, device_id: info.device_id, nonce, device_name: info.device_name || '', platform: 'windows', expires_at: iss.json.expires_at, server_base: window.location.origin });
+      if (!res || res.ok !== true) { toast('链接失败：' + ((res && (res.code || res.detail)) || '本机助手无响应'), 'err'); return; }
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const st = await api('/api/lea/v1/self-bind/status?device_id=' + encodeURIComponent(info.device_id));
+        if (st.json && st.json.ok && st.json.status === 'active') { toast('已链接：本机助手可以远程控制这台电脑了。', 'ok'); leaRender(); return; }
+        if (st.json && st.json.ok && st.json.status === 'revoked') break;
+      }
+      toast('链接已提交，正在确认，请稍后刷新本页查看。', 'info'); leaRender();
+    } catch (e) { toast('链接失败，请稍后再试。', 'err'); }
+    finally { btn.disabled = false; btn.textContent = '链接这台电脑'; }
+  };
+  const leaRevoke = async (btn, keyId) => {
+    btn.disabled = true;
+    const rr = await api('/api/lea/v1/self-bind/revoke/' + encodeURIComponent(keyId), { method: 'POST' });
+    if (rr.json && rr.json.ok) {
+      try { await window.qfLea.clearCredential(); } catch (e) { /* best-effort */ }
+      toast('本机链接已吊销。', 'ok'); leaRender();
+    } else toast(apiErrText(rr, '吊销失败，请稍后再试。'), 'err');
+    btn.disabled = false;
+  };
+  const leaRender = async () => {
+    leaStopPoll();
+    if (!leaBox || !leaBox.isConnected) return;
+    if (!leaIsDesktop) {
+      const kr = await api('/api/lea/v1/keys');
+      const sb = (kr.json && Array.isArray(kr.json.keys)) ? kr.json.keys.filter((k) => k.self_bind) : [];
+      leaBox.innerHTML = `<p class="text-sub fs-13 m-6-0-10">一键链接只在桌面软件里可用：先下载安装桌面助手，登录后在本页点“链接这台电脑”，1 分钟内完成，无需任何手动命令。</p>
+        <a class="btn" href="${QF_WEBSITE_URL}" target="_blank" rel="noopener">前往官网下载桌面助手</a>
+        <p class="hint lea-mob-note">手机无法安装桌面助手，请在电脑上打开官网下载。</p>
+        <h4 class="subh">已链接的设备</h4>${sb.length ? sb.map((k) => `<div class="row"><span class="tile">${ic('key')}</span><span><b>${esc(k.device_name || k.key_id)}</b><small>${esc(k.platform || '')} · ${esc(({ active: '使用中', revoked: '已吊销', expired: '已过期' }[k.status] || k.status || ''))} · 到期 ${k.expires_at ? fmtDate(k.expires_at) : '—'}</small></span></div>`).join('') : '<div class="statebox"><b>暂无已链接的设备</b><p>在桌面软件里链接后，设备会出现在这里。</p></div>'}`;
+      return;
+    }
+    let info = null;
+    try { info = await window.qfLea.deviceInfo(); } catch (e) { info = null; }
+    if (!info || !info.device_id) {
+      leaBox.innerHTML = '<div class="statebox"><b>无法读取本机设备信息</b><p>请重启桌面软件后重新打开本页。</p></div>';
+      return;
+    }
+    const st = await api('/api/lea/v1/self-bind/status?device_id=' + encodeURIComponent(info.device_id));
+    if (!st.json || !st.json.ok) {
+      leaBox.innerHTML = `<div class="statebox"><b>本机助手服务暂时不可用</b><p>请稍后重新加载本页。</p></div><button class="btn sm" id="pf-lea-retry">重新加载</button>`;
+      const rb = $('#pf-lea-retry', leaBox);
+      if (rb) rb.onclick = () => leaRender();
+      return;
+    }
+    const s = st.json;
+    if (s.status === 'active') {
+      leaBox.innerHTML = `<div class="row"><span class="tile">${ic('key')}</span><span><b>已链接：${esc(s.device_name || info.device_name || '本机')}</b><small>本机助手可以远程控制这台电脑 · 到期 ${s.expires_at ? fmtDate(s.expires_at) : '—'} · 到期前 7 天内自动续期</small></span><span class="ops"><button class="btn sm" id="pf-lea-revoke">吊销本机链接</button></span></div>`;
+      const rb = $('#pf-lea-revoke', leaBox);
+      if (rb) rb.onclick = () => leaRevoke(rb, s.key_id);
+      leaPollTimer = setTimeout(async () => {
+        if (!leaBox.isConnected) return;
+        try {
+          const st2 = await api('/api/lea/v1/self-bind/status?device_id=' + encodeURIComponent(info.device_id));
+          if (st2.json && st2.json.ok && st2.json.status === 'revoked') {
+            try { await window.qfLea.clearCredential(); } catch (e) { /* best-effort */ }
+            toast('本机链接已在别处吊销，已清除本机凭据。', 'info');
+            leaRender();
+          } else leaRender();
+        } catch (e) { leaRender(); }
+      }, 5000);
+    } else if (s.status === 'revoked') {
+      try { await window.qfLea.clearCredential(); } catch (e) { /* best-effort */ }
+      leaBox.innerHTML = `<div class="row"><span class="tile">${ic('key')}</span><span><b>本机链接已吊销</b><small>凭据已清除。重新链接后，本机助手才能远程控制这台电脑。</small></span><span class="ops"><button class="btn sm" id="pf-lea-link">重新链接</button></span></div>`;
+      const lb = $('#pf-lea-link', leaBox);
+      if (lb) lb.onclick = () => leaLink(lb);
+    } else {
+      leaBox.innerHTML = `<div class="row"><span class="tile">${ic('key')}</span><span><b>本机尚未链接</b><small>点一下即可链接：本机助手自动申请 API 密钥并完成绑定，全程约 1 分钟，无需任何手动命令。</small></span><span class="ops"><button class="btn sm" id="pf-lea-link">链接这台电脑</button></span></div>`;
+      const lb = $('#pf-lea-link', leaBox);
+      if (lb) lb.onclick = () => leaLink(lb);
+    }
+  };
+  leaRender();
 };
 
 /* ================= 申诉（C1 收编二期·变基重建） =================
@@ -5491,18 +5329,6 @@ function extractAppealResult(pageHtml) {
   } catch (e) { /* 解析失败按无结果处理，调用方给正式提示 */ }
   return '';
 }
-/* 申诉结果块白名单净化（C-01）：垫片返回整页 HTML，组件只取结果块再入 DOM，
-   入 DOM 前一律经此净化——标签/属性白名单＋站内链接白名单，杜绝把组件安全
-   寄托于垫片一侧的转义纪律：
-   · 丢弃子树的高危标签（脚本/样式/框架/表单/媒体/foreign content）；
-   · 非白名单标签拆壳保内容，避免信息静默丢失；
-   · 仅保留 /appeal/status 与 /appeal/reset 两类站内链接，且强制 rel="noreferrer"；
-   · 其余属性（on* 事件、style、id、data-*、src 等）一律不复制。 */
-const APPEAL_OK_TAGS = new Set(['DIV', 'P', 'SPAN', 'B', 'STRONG', 'EM', 'I', 'U', 'SMALL', 'BR', 'HR',
-  'UL', 'OL', 'LI', 'A', 'H3', 'H4', 'H5', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'CODE', 'PRE']);
-const APPEAL_DROP_TAGS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'FRAME', 'FRAMESET', 'OBJECT', 'EMBED',
-  'LINK', 'META', 'BASE', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'OPTION', 'SVG', 'MATH',
-  'IMG', 'VIDEO', 'AUDIO', 'SOURCE', 'CANVAS', 'TEMPLATE', 'NOSCRIPT']);
 function appealSafeHref(href) {
   const raw = String(href == null ? '' : href).trim();
   if (!raw || raw.charAt(0) !== '/') return '';          // 只认站内绝对路径（同时挡掉 javascript:/data:）
@@ -5564,9 +5390,9 @@ function sanitizeAppealHtml(html) {
 }
 function renderAppeal(box, opts) {
   opts = opts || {};
-  box.innerHTML = `<div class="card" style="margin-top:16px"><h3>账号申诉</h3>
-    <p style="color:var(--sub);font-size:13.5px;margin-bottom:12px">账号被冻结或封禁时可在此提交申诉。身份核验仅使用账号与密码，核验不会登录账号；核验不通过时不会透露具体原因。申诉次数上限：永久封禁 2 次、其他情形 3 次（同一事项）。</p>
-    <div class="tabs" style="margin-bottom:14px"><button type="button" class="on" id="ap-tab-new">提交申诉</button><button type="button" id="ap-tab-q">申诉进度</button></div>
+  box.innerHTML = `<div class="card mt-16"><h3>账号申诉</h3>
+    <p class="text-sub fs-13x5 mb-12">账号被冻结或封禁时可在此提交申诉。身份核验仅使用账号与密码，核验不会登录账号；核验不通过时不会透露具体原因。申诉次数上限：永久封禁 2 次、其他情形 3 次（同一事项）。</p>
+    <div class="tabs mb-14"><button type="button" class="on" id="ap-tab-new">提交申诉</button><button type="button" id="ap-tab-q">申诉进度</button></div>
     <div id="ap-new">
       <div class="field"><label>账号</label><input id="ap-user" autocomplete="username" placeholder="请输入账号"></div>
       <div class="field"><label>账号密码（仅用于核验身份）</label><input id="ap-pass" type="password" autocomplete="current-password" placeholder="请输入密码"></div>
@@ -5574,12 +5400,12 @@ function renderAppeal(box, opts) {
       <div class="field"><label>情况说明</label><textarea id="ap-desc" rows="3" placeholder="请说明账号被冻结或封禁的情况"></textarea></div>
       <div class="field"><label>新的证据或补充说明（再次申诉时必填，首次申诉可留空）</label><textarea id="ap-newev" rows="2"></textarea></div>
       <button class="btn block" id="ap-btn" type="button">提交申诉</button>
-      <div id="ap-out" style="margin-top:12px"></div>
+      <div class="mt-12" id="ap-out"></div>
     </div>
     <div id="ap-q" hidden>
       <div class="field"><label>账号</label><input id="apq-user" placeholder="请输入账号"></div>
       <button class="btn block" id="apq-btn" type="button">查询进度</button>
-      <div id="apq-out" style="margin-top:12px"></div>
+      <div class="mt-12" id="apq-out"></div>
     </div>
   </div>`;
   const tabNew = $('#ap-tab-new', box), tabQ = $('#ap-tab-q', box);
@@ -5653,12 +5479,22 @@ Views.admin = async function (view) {
     view.innerHTML = `<h1 class="pt">站长管理</h1><div class="card"><div class="statebox"><b>无权访问</b><p>本页仅站长账号可见。当前账号没有站长权限，相关入口不会出现在导航中。</p></div></div>`;
     return;
   }
-  view.innerHTML = `<h1 class="pt">站长管理</h1><p class="psub">仅站长账号可见。本页汇总全部待办，不再分散到多个后台。</p><div id="admBody"><div class="card"><div class="skel" style="height:60px"></div></div></div>`;
+  view.innerHTML = `<h1 class="pt">站长管理</h1><p class="psub">仅站长账号可见。本页汇总全部待办，不再分散到多个后台。</p><div id="admBody"><div class="card"><div class="skel sk-h60"></div></div></div>`;
   /* P2-022 修复：原接线按不存在的字段读数（overview.pendingOrders 等、appeals.appeals），
      且从未调用 /admin/api/assistant，导致统计恒显「—」、申诉恒空、API 卡误报未开通。
      现按服务端真实返回对齐：overview={keys,bans,orders,deviceReviews}、appeals={pending,recent}、
      assistant={token,counts,recentDone}、users={users}、orders={orders,enabled}。 */
-  const [ov, ap, as, us, od] = [await api('/admin/api/license/overview'), await api('/admin/api/appeals'), await api('/admin/api/assistant'), await api('/admin/api/users'), await api('/admin/api/orders')];
+  /* 2026-11-13 修：原 5 个接口串行 await，GET 各带 30 秒超时×2 次重试，
+     最坏 5×60 秒骨架屏才渲染，与 /admin 页「正在加载…」卡死同族。现并行
+     拉取、单次尝试（retry:false），最坏 30 秒出结果；api() 本身永不抛，
+     下游已按 json 缺失兜底，Promise.all 安全。 */
+  const [ov, ap, as, us, od] = await Promise.all([
+    api('/admin/api/license/overview', { retry: false }),
+    api('/admin/api/appeals', { retry: false }),
+    api('/admin/api/assistant', { retry: false }),
+    api('/admin/api/users', { retry: false }),
+    api('/admin/api/orders', { retry: false }),
+  ]);
   const box = $('#admBody', view);
   const oj = ov.json || {};
   const appeals = (ap.json && ap.json.pending) || [];
@@ -5674,14 +5510,14 @@ Views.admin = async function (view) {
   const tokText = tok.status === 'active' ? '已启用' : (tok.status === 'revoked' ? '已吊销' : '未生成');
   const cntNames = { order: '付款订单', appeal: '申诉', rebind: '换绑申请', device_review: '设备异常', forum: '论坛待审', support: '客服工单' };
   const cntLine = Object.keys(cntNames).map(k => cntNames[k] + ' ' + (counts[k] || 0)).join(' · ');
-  const doneHtml = recentDone.slice(0, 5).map(e => `<div style="font-size:13px;color:var(--sub);margin-top:6px">${esc(cntNames[e.type] || e.type || '')} · ${esc(e.refId || '')} · ${esc(e.handledBy || '')} · ${esc(e.result || '')}${e.handledAt ? ' · ' + fmtDate(e.handledAt) : ''}</div>`).join('');
+  const doneHtml = recentDone.slice(0, 5).map(e => `<div class="text-sub fs-13 mt-6">${esc(cntNames[e.type] || e.type || '')} · ${esc(e.refId || '')} · ${esc(e.handledBy || '')} · ${esc(e.result || '')}${e.handledAt ? ' · ' + fmtDate(e.handledAt) : ''}</div>`).join('');
   box.innerHTML = `
     <div class="grid3">
       <div class="card"><h3>待处理</h3><div class="stat"><div><b>${esc(String(pendReview))}</b><span>新订单待一审</span></div><div><b>${esc(String(appeals.length))}</b><span>申诉待裁定</span></div><div><b>${esc(String(counts.support || 0))}</b><span>客服求助</span></div></div></div>
       <div class="card"><h3>今日概览</h3><div class="stat"><div><b>${esc(String(userCount))}</b><span>注册账号</span></div><div><b>${esc(String(todayOrders))}</b><span>今日订单</span></div><div><b>${esc(String(pendAnomaly))}</b><span>异常登录待复核</span></div></div></div>
-      <div class="card"><h3>站长 API</h3><p style="color:var(--sub);font-size:13.5px">助手事件接口：新订单、新申诉、异常登录、客服求助、换绑与论坛待审统一入队，助手经接口先审，疑难上交站长。</p><div style="margin-top:10px;font-size:13.5px">令牌状态：<b>${esc(tokText)}</b>${tok.createdAt ? ' · 生成于 ' + fmtDate(tok.createdAt) : ''}${tok.lastUsedAt ? ' · 最近调用 ' + fmtDate(tok.lastUsedAt) : ' · 尚无调用'}</div><div style="font-size:13.5px;margin-top:6px">待处理：${esc(cntLine)}</div>${doneHtml}</div>
+      <div class="card"><h3>站长 API</h3><p class="text-sub fs-13x5">助手事件接口：新订单、新申诉、异常登录、客服求助、换绑与论坛待审统一入队，助手经接口先审，疑难上交站长。</p><div class="mt-10 fs-13x5">令牌状态：<b>${esc(tokText)}</b>${tok.createdAt ? ' · 生成于 ' + fmtDate(tok.createdAt) : ''}${tok.lastUsedAt ? ' · 最近调用 ' + fmtDate(tok.lastUsedAt) : ' · 尚无调用'}</div><div class="fs-13x5 mt-6">待处理：${esc(cntLine)}</div>${doneHtml}</div>
     </div>
-    <div class="card"><h3>待办队列（申诉）</h3>${appeals.length ? '<div class="tblwrap"><table><tr><th>类型</th><th>账号</th><th>内容</th><th>时间</th></tr>' + appeals.slice(0, 10).map(a => `<tr data-go="__admin" data-anchor="appeals" style="cursor:pointer"><td><span class="tag">${esc(a.type === 'rebind' ? '换绑设备' : (a.type || '申诉'))}</span></td><td>${esc(a.username || a.user || '')}</td><td>${esc(a.desc || a.reason || '')}</td><td>${a.createdAt ? fmtDate(a.createdAt) : ''}</td></tr>`).join('') + '</table></div>' : '<div class="statebox"><b>暂无待办申诉</b><p>新的申诉、换绑与异常登录复核将汇总到这里，并同步进入站长 API 事件队列。</p></div>'}</div>
+    <div class="card"><h3>待办队列（申诉）</h3>${appeals.length ? '<div class="tblwrap"><table><tr><th>类型</th><th>账号</th><th>内容</th><th>时间</th></tr>' + appeals.slice(0, 10).map(a => `<tr class="cursor-pointer" data-go="__admin" data-anchor="appeals"><td><span class="tag">${esc(a.type === 'rebind' ? '换绑设备' : (a.type || '申诉'))}</span></td><td>${esc(a.username || a.user || '')}</td><td>${esc(a.desc || a.reason || '')}</td><td>${a.createdAt ? fmtDate(a.createdAt) : ''}</td></tr>`).join('') + '</table></div>' : '<div class="statebox"><b>暂无待办申诉</b><p>新的申诉、换绑与异常登录复核将汇总到这里，并同步进入站长 API 事件队列。</p></div>'}</div>
     <div class="grid2"><div class="card"><h3>账号管理</h3>
       ${rowHtml('users', '用户列表与搜索', '改名、改密、冻结、封禁（危险操作均需二次确认并留痕）', '__admin', 'users')}
       ${rowHtml('users', '创建账号', '站长手动开户：填账号与初始密码，创建即发 3 天试用', '__admin', 'create')}
@@ -5701,9 +5537,23 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
 
 /* ================= 启动 ================= */
 (function boot() {
+  /* W-05：注册晚绑定钩子（早层经 QFHooks 调应用壳函数，见 qf-schema.js）。 */
+  QFHooks.toast = toast; QFHooks.showShell = showShell; QFHooks.showAuth = showAuth;
+  QFHooks.sessionDied = sessionDied; QFHooks.forceGate = forceGate; QFHooks.doLogout = doLogout;
+  QFHooks.checkSessionInner = checkSessionInner; QFHooks.teardownSession = teardownSession;
+  QFHooks.invalidateNodeMap = invalidateNodeMap;
+  QFHooks.chatResetAll = () => { try { if (typeof chatResetAll === 'function') chatResetAll(); } catch (e) {} };
+  QFHooks.renderAppeal = (box, opts) => { if (typeof renderAppeal === 'function') renderAppeal(box, opts); };
+  QFHooks.showSupportGuest = (box) => { if (Views && typeof Views.support === 'function') Views.support(box, null, 0, { guest: true }); };
+  QFHooks.navigate = navigate;
+  applyEffectiveTheme(); // P0-2（2026-11-17）：接管后按有效主题落 theme（壳手动优先，见 qf-runtime.js）；旧 applyTheme(getTheme()) 绕过壳手动，登录瞬间会把工具栏已切的手动主题闪回本机偏好，须等 getThemeState 异步纠正。首屏防闪白另由 index.html 内联脚本负责。
+  // P0-2：壳内运行时向主进程取一次初始主题并订阅推送（工具栏手动模式须立即同步内容页；
+  // 纯浏览器下 window.qfLea 不存在，走偏好/系统两层，不受影响）
+  try { if (window.qfLea && typeof window.qfLea.onTheme === 'function') { window.qfLea.onTheme((resolved, mode) => onShellTheme(resolved, mode)); } } catch (e) {}
+  try { if (window.qfLea && typeof window.qfLea.getThemeState === 'function') { window.qfLea.getThemeState().then((s) => { if (s) onShellTheme(s.resolved, s.mode); }).catch(() => {}); } } catch (e) {}
   $('#burgerBtn').innerHTML = ic('menu');
   $('#bellBtn').innerHTML = ic('bell');
-  $('#topSearch').innerHTML = ic('search') + '<input id="topSearchIn" placeholder="搜索功能或关键词…">';
+  $('#topSearch').innerHTML = ic('search') + '<input id="topSearchIn" placeholder="搜索功能">'; // r13：手机 390px 下搜索框实测仅 111px、原占位「搜索功能或关键词…」需 204px 被夹断；16px 字号不可缩（iOS 聚焦放大），改短占位＋CSS 隐藏 .grow 后搜索框约 212px、占位完整显示
   $('#burgerBtn').addEventListener('click', () => setDrawer(!drawerOpen));
   $('#bellBtn').addEventListener('click', () => toast('暂无新的通知。版本公告将在论坛官方公告中发布。', 'info'));
   $('#acctChip').addEventListener('click', () => $('#acctMenu').classList.toggle('open'));
@@ -5713,6 +5563,36 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
     const hit = MENU34.concat(FUNC).concat(S.isAdmin ? [{ icon: 'gear', label: '站长管理', route: 'admin' }] : []).find(i => i.label.includes(q) || q.includes(i.label));
     if (hit) navigate(hit.route); else toast('未找到相关功能，请从主菜单进入。', 'info');
   });
+  // W-04：首屏 boot data——服务端在 index.html 里注入 window.__QF_BOOT__
+  //（用户/设备列表/在线状态/主题偏好）时直接播种 store，首屏不再多轮请求
+  // 才渲染；无注入时 qfApplyBootData() 返回 null，原有缓存＋校验流程不变。
+  // 注入点在服务端渲染 index.html 的一侧（nginx 静态根目录 /opt/qfremote-webapp
+  // 目前为纯静态文件，注入须由发版/部署线加渲染步）。
+  const bootData = qfApplyBootData();
+  // W-10：启动时先读 IndexedDB 设备快照播种 store（离线先放行），联网后
+  // Views.devices 回填新数据；跨标签页的 docs/草稿更新经 QFLocal 广播同步
+  // （只接更新的、输入框为空的草稿，不覆盖本页正在打的字）。W-04 的
+  // QFNotifier（ETag 条件轮询）同时启动。
+  try {
+    QFLocal.load('docs', 'devices').then((snap) => {
+      if (snap && Array.isArray(snap.value) && snap.value.length && !bootData) QFStore.seedDocs({ devices: snap.value });
+    }).catch(() => {});
+    QFLocal.onBroadcast((m) => {
+      if (!m || typeof m.type !== 'string' || !m.payload) return;
+      if (m.type === 'docs:devices' && Array.isArray(m.payload.value)) {
+        if ((m.payload.updatedAt || 0) > (QFStore._devicesAt || 0)) {
+          QFStore._devicesAt = m.payload.updatedAt;
+          QFStore.seedDocs({ devices: m.payload.value });
+          try { const p = QFLocal.save('docs', 'devices', m.payload); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (e) {}
+        }
+      } else if (m.type.indexOf('draft:chat:') === 0) {
+        const peer = m.type.slice('draft:chat:'.length);
+        const input = document.getElementById('chInput');
+        if (peer && CH && CH.currentWith === peer && input && !input.value && m.payload.text) input.value = m.payload.text;
+      }
+    });
+    QFNotifier.start();
+  } catch (e) {}
   const cache = Cache.load();
   if (ManualLogout.is()) {
     // P1-4a（2026-11-11）：上次是手动登出（持久标记在）——页面可能在登出
@@ -5723,8 +5603,15 @@ window.__qf = { toast, navigate, setDrawer: (o) => setDrawer(o), state: () => ({
     showAuth('login', { notice: '您已退出登录。' });
   } else if (cache && cache.user) {
     // 进门不挡：先按缓存渲染壳，校验在后台进行；冷进入恒落首页，不再恢复上次视图（2026-10-26 站长令）
-    S.auth = 'in'; S.user = cache.user; S.displayName = cache.displayName || cache.user;
-    S.isAdmin = !!cache.isAdmin; S.license = cache.license; S.points = cache.points;
+    S.auth = 'in'; S.user = cache.user;
+    // W-04 服务端注入：boot data 比缓存新——注入带了的字段不许缓存回填盖掉。
+    // 原写法 S.license = cache.license 在缓存无 license 时会把 qfApplyBootData
+    // 刚播种的 boot 快照清成 undefined（isAdmin 同理被 !!cache.isAdmin 清成
+    // false）；注入没带的字段才回填。S.user 不动（换账号判定归 checkSession）。
+    S.displayName = (bootData && bootData.displayName) ? bootData.displayName : (cache.displayName || cache.user);
+    S.isAdmin = (bootData && typeof bootData.isAdmin === 'boolean') ? bootData.isAdmin : !!cache.isAdmin;
+    if (!bootData || !bootData.license) S.license = cache.license;
+    S.points = cache.points;
     location.hash = '#home';
     showShell();
     checkSession(true, { noDied: true }).then(ok => {

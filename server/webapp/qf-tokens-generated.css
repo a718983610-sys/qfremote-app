@@ -1,0 +1,44 @@
+/* 由 design-tokens/generate.dart 从 design-tokens/tokens.json 生成，
+   不要手工改本文件。S-029：设计 token 单一来源的 CSS 侧产物。
+   只含已对齐 token；分歧 token（brand／textPrimary／textSecondary 等）
+   不在此生成、不覆盖任何一边，统一等 S-132 方案裁决。*/
+:root{
+--success:#16a34a;
+--danger:#dc2626;
+--warning:#ea580c;
+--info:#3f3f46;
+--surface-0:#ffffff;
+--fs11:11px;
+--fs12:12px;
+--fs13:13px;
+--fs14:14px;
+--fs15:15px;
+--fs16:16px;
+--fs18:18px;
+--fs20:20px;
+--fs22:22px;
+--fs24:24px;
+--fs26:26px;
+--fs29:29px;
+--sp1:4px;
+--sp10:64px;
+--sp2:8px;
+--sp3:12px;
+--sp4:16px;
+--sp5:20px;
+--sp6:24px;
+--sp7:32px;
+--sp8:40px;
+--sp9:48px;
+--rCard:12px;
+--rPill:999px;
+--rSmall:8px;
+--radiusLg:16px;
+}
+[data-theme="dark"]{
+--success:#22c55e;
+--danger:#f87171;
+--warning:#fb923c;
+--info:#d4d4d8;
+--surface-0:#08090a;
+}
