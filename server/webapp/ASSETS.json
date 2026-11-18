@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-18T19:56:16.973Z",
+  "generatedAt": "2026-11-18T21:14:40.459Z",
   "files": {
     "qf-schema.js": "qf-schema-0c938b14.js",
     "qf-runtime.js": "qf-runtime-68ae46b6.js",
     "qf-ui.js": "qf-ui-b3cfa410.js",
-    "app.js": "app-57927eee.js",
+    "app.js": "app-417c329f.js",
     "qf-tokens.css": "qf-tokens-dfccb65a.css",
     "app.css": "app-9a9df23b.css",
     "session.css": "session-7938edee.css",

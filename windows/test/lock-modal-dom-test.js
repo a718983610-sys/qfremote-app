@@ -39,14 +39,18 @@ const qfLockStub = {
     calls.devices++;
     return { ok: true, devices: [Object.assign({}, device, { revision: deviceRevision })] };
   },
-  challenge: async (id, op) => {
+  challenge: async (id, op, opId) => {
     challengeSeq++;
-    calls.challenge.push({ id, op, n: challengeSeq });
+    calls.challenge.push({ id, op, opId, n: challengeSeq });
     return { ok: true, challenge: 'ch-' + challengeSeq, expiresAt: Date.now() + 5 * 60 * 1000, op, deviceId: id };
   },
   disable: async (id, opts) => {
     calls.disable.push({ id, opts: Object.assign({}, opts) });
     if (disableBehavior === 'timeout') return { ok: false, error: '暂时无法连接这台电脑，请确认设备在线后重试。' };
+    // P3-03：未带登录密码的高风险解锁须升级认证；带了即放行（桩内只验有无，不验真密码）。
+    if (disableBehavior === 'step-up' && !opts.loginPassword) {
+      return { ok: false, code: 'step-up-required', error: '本次解锁风险较高，请重新输入登录密码完成验证后再试。' };
+    }
     if (disableBehavior === 'stale-once' && !staleUsed) {
       staleUsed = true;
       return { ok: false, code: 'revision-stale', error: '设备状态已变化，请重新打开确认窗口核对后再提交。' };
@@ -143,6 +147,7 @@ function tick(n) {
   t('M9 提交载荷含挑战＋操作编号＋冻结 revision 3', sent.opts.challenge === 'ch-1'
     && typeof sent.opts.operationId === 'string' && sent.opts.operationId.length > 0
     && sent.opts.revision === 3);
+  t('M9b 取挑战时带上了本次操作编号（挑战与操作编号绑定）', calls.challenge[0].opId === sent.opts.operationId);
   t('M10 成功后弹窗关闭、面板提示已关闭', modal.hidden === true && doc.getElementById('msg').textContent.includes('已关闭'));
 
   // ---- 4. revision-stale：弹窗不消失，刷新快照＋取新挑战后可重新确认 ----
@@ -182,6 +187,29 @@ function tick(n) {
     && q('#lockConfirmErr').textContent.includes('暂时无法连接')
     && doc.querySelector('.dstat').textContent === '已锁定'
     && calls.disable.length === disBefore2 + 1);
+
+  // ---- 5b. step-up-required：弹窗不消失，填登录密码后可重新确认（P3-03） ----
+  const escPre = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
+  doc.dispatchEvent(escPre);
+  await tick(4);
+  t('M16b 超时弹窗可 Esc 关闭', modal.hidden === true);
+  disableBehavior = 'step-up';
+  deviceRevision = 5;
+  const offBtn4 = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent === '关闭隐私锁');
+  offBtn4.click();
+  await tick(10);
+  t('M16c step-up 场景弹窗打开', modal.hidden === false);
+  const disBefore3 = calls.disable.length;
+  q('#lockConfirmGo').click();
+  await tick(10);
+  t('M16d 未带密码的高风险解锁被拒、弹窗仍在、提示升级认证', modal.hidden === false
+    && q('#lockConfirmErr').textContent.includes('风险较高')
+    && calls.disable.length === disBefore3 + 1);
+  q('#lockConfirmLoginPw').value = 'correct-pw';
+  q('#lockConfirmGo').click();
+  await tick(10);
+  t('M16e 填登录密码后重新确认成功、弹窗关闭', modal.hidden === true
+    && calls.disable[calls.disable.length - 1].opts.loginPassword === 'correct-pw');
 
   // ---- 6. Esc 只关弹窗 ----
   const esc = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true });

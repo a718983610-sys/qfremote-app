@@ -2445,7 +2445,9 @@ function webLockConfirmModalAlive(token) {
   return !!webLockConfirm && webLockConfirm.token === token && !!document.querySelector('#modalRoot .modal');
 }
 async function webLockFetchChallenge(s) {
-  const r = await lockApi('GET', '/challenge?id=' + encodeURIComponent(s.dev.id) + '&op=disarm');
+  // P3-03：把弹窗打开时生成的操作编号随取挑战请求带上（opId），服务端把
+  // 挑战与该编号绑定，提交时编号不符即拒绝（防挑战被挪用到另一操作）。
+  const r = await lockApi('GET', '/challenge?id=' + encodeURIComponent(s.dev.id) + '&op=disarm&opId=' + encodeURIComponent(s.operationId));
   if (r.json && r.json.ok && r.json.challenge) return { ok: true, challenge: r.json.challenge, expiresAt: r.json.expiresAt };
   return { ok: false, error: apiErrText(r, '操作确认信息获取失败，请重新打开确认窗口。') };
 }
@@ -2555,6 +2557,14 @@ async function webLockConfirmSubmit() {
       if (goBtn) { goBtn.disabled = false; goBtn.textContent = '重新获取'; }
       s.challenge = null;
     }
+    return;
+  }
+  if (r.json && r.json.code === 'step-up-required') {
+    // P3-03：高风险／增强保护须升级认证——弹窗不消失，提示用户在上方密码栏
+    // 输入登录密码后重新确认，绝不降级为普通确认。
+    webLockConfirmErr(apiErrText(r, '本次解锁风险较高，请重新输入登录密码。'));
+    if (pwEl) pwEl.focus();
+    if (goBtn) goBtn.disabled = false;
     return;
   }
   // 超时／掉线／拒绝：留在弹窗里显示准确错误，不改写成“未锁定”，不自动关闭。

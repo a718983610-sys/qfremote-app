@@ -51,6 +51,9 @@ const ERR = {
   challengeMismatch: '操作确认信息与本次操作不符，请重新打开确认窗口。',
   revisionStale: '设备状态已变化，请重新打开确认窗口核对后再提交。',
   stateConflict: '这台电脑的锁状态存在冲突，须先完成状态恢复再操作。',
+  stepUpRequired: '本次解锁风险较高，请重新输入登录密码完成验证后再试。',
+  agentGrantInvalid: 'AI 代理解锁授权无效或已过期，请由设备所有者重新签发授权。',
+  repairNotAvailable: '受控修复发布路径尚未启用，锁组件更新仍处于暂停中。',
 };
 const RECONCILE_MS = 30000;
 const UPDATE_RECONCILE_MS = 240000; // 下载+替换+重启服务+回滚余量
@@ -332,6 +335,13 @@ function createLockBridge(deps) {
   const challengeStore = lockState.createChallengeStore();
   const opStore = lockState.createOperationStore();
   const unlockAuthLimiter = createResetPwLimiter();
+  // P3-03：增强保护（用户自选，运维文件登记；缺省关闭）与 AI 代理解锁
+  // 独立授权（内存表，服务重启即失效—— fail-closed，见 lock-state.js）。
+  const enhancedAuthStore = lockState.createEnhancedAuthStore({
+    filePath: deps.enhancedAuthPath || '/opt/qfremote-lock/enhanced-auth.json',
+    log: (tag, msg) => log('lock', msg),
+  });
+  const agentGrantStore = lockState.createAgentGrantStore();
 
   // 读路径对账（确认式）：只有拿到新鲜设备 status 才并入记录；读不到（null）
   // 不动记录（不因一次瞬时失败把 LOCKED 翻成 UNKNOWN，避免轮询抖动冲掉
@@ -742,6 +752,12 @@ function createLockBridge(deps) {
   }
 
   async function deliverEnvelope(nodeId, env) {
+    // P3-01 第二道拦截（GPT 三项定夺 §1）：即使某条未来代码路径绕过了 HTTP
+    // 层的暂停守卫，arm/update 信封也到不了设备。disable/reset 不受影响。
+    // 抛错后由 handle 外层 catch 转 503，不产生任何安装副作用。
+    if (env && (env.op === 'arm' || env.op === 'update') && lockState.isLockRemediationPaused()) {
+      throw new Error('lock-remediation-paused');
+    }
     const b64 = Buffer.from(JSON.stringify(env), 'utf8').toString('base64');
     await runCommand(nodeId, psWriteInbox(env.id + '.json', b64));
     try { await runCommand(nodeId, CMD_APPLY); } catch (e) { /* 组件有 inbox 轮询兜底 */ }
@@ -759,6 +775,14 @@ function createLockBridge(deps) {
       if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
     }
     return out;
+  }
+  // P3-03 会话指纹（GPT 三项定夺 §3.3）：操作挑战绑定“已认证会话”。
+  // 取请求 Cookie 头的 SHA-256（只存哈希、只比哈希，绝不记原文）：
+  // qfr_frd 会话签发／退出登录／xid 变化都会改变指纹，旧挑战即失效。
+  // 鉴权层只返回账号名、无独立会话 id，指纹是本层可用的最强会话绑定。
+  function sessionKeyForRequest(req) {
+    const raw = (req && req.headers && typeof req.headers.cookie === 'string') ? req.headers.cookie : '';
+    return crypto.createHash('sha256').update(raw).digest('hex');
   }
   async function authUser(req) {
     try {
@@ -1015,16 +1039,69 @@ function createLockBridge(deps) {
         if (!id || op !== 'disarm') { fail(res, 400, ERR.badReq); return true; }
         const got = await getDeviceOrFail(res, id, me);
         if (!got) return true;
-        const issued = challengeStore.issue({ account: me, deviceId: got.node._id, op });
+        // P3-03：挑战绑定锁实例＋状态版本＋操作编号＋已认证会话。
+        // 先经 reconcileFromRead 建／取服务端锁记录（读路径同款，无新副作用），
+        // 再签发；opId 由确认弹窗在打开时生成并随取挑战请求带来（不带则不绑
+        // 定该字段，旧客户端兼容）。签发值只回给本次请求的机主，日志不记其值。
+        const opIdParam = u.searchParams.get('opId') || '';
+        const recForChallenge = reconcileFromRead(got.node._id, got.status).record;
+        const issued = challengeStore.issue({
+          account: me, deviceId: got.node._id, op,
+          lockId: recForChallenge ? recForChallenge.lock_id : null,
+          revision: recForChallenge ? recForChallenge.revision : 0,
+          operationId: opIdParam || null,
+          sessionKey: sessionKeyForRequest(req),
+        });
         if (!issued) { fail(res, 503, ERR.notReady); return true; }
         log('lock', '操作挑战已签发：' + got.node.name + ' by ' + me + '（op=' + op + '，5 分钟有效）');
-        sendJson(res, 200, { ok: true, challenge: issued.challenge, expiresAt: issued.expiresAt, op, deviceId: got.node._id });
+        sendJson(res, 200, { ok: true, challenge: issued.challenge, expiresAt: issued.expiresAt, op, deviceId: got.node._id, lockId: recForChallenge ? recForChallenge.lock_id : null, revision: recForChallenge ? recForChallenge.revision : 0 });
         return true;
+      }
+      // P3-01 暂停审计（GPT 三项定夺 §1.2：统一错误标识＋结构化审计）。
+      // 只记日志，不放行、不改判；拒绝本身仍由下方阶段 1 四行守卫（enable）
+      // 与新增 update 守卫执行。顺序在鉴权＋封禁之后：未登录先 401，
+      // 不因暂停机制向未授权请求泄露设备存在与否。
+      if (req.method === 'POST' && (p === '/lock/enable' || p === '/lock/update')) {
+        log('lock', 'lock-remediation-paused op=' + p + ' account=' + me + ' code=lock-remediation-paused');
       }
       // LOCK-P0 pause (2026-11-19, GPT lock-bug ruling s1.1): new privacy-lock activations paused for maintenance.
       // Only /lock/enable is stopped; /lock/disable, /lock/reset, /lock/devices and normal remote control are unaffected.
       // Rollback: delete this block, then restart qfremote-friends.service.
       if (req.method === 'POST' && p === '/lock/enable') { fail(res, 503, '隐私锁功能正在维护，暂时无法开启新的锁定。已锁定的设备仍可正常关闭。'); return true; }
+      // P3-01：/lock/update 与 /lock/enable 同步冻结（GPT 三项定夺 §1，同款语义）。
+      // 无白名单例外：站长账号、API 调用者一律拒绝；只读诊断、紧急停止、
+      // 受控安全恢复不受影响（它们不走本分支）；受控修复走独立的
+      // /lock/repair 占位，绝不经此放开通用 /lock/update。
+      if (req.method === 'POST' && p === '/lock/update') { failCode(res, 503, '隐私锁组件更新正在维护暂停，暂时无法更新锁组件。已锁定的设备仍可正常关闭。', 'lock-remediation-paused'); return true; }
+      // P3-01 受控修复发布路径占位（GPT 三项定夺 §1.3）：只留接口，不实现放行逻辑。
+      // 正式路径须另行实现组件签名、版本与哈希核验、严格授权、审计、回滚方案与
+      // 目标设备范围；未启用前一律 503，绝不经此放开通用 /lock/update。
+      if (req.method === 'POST' && p === '/lock/repair') {
+        log('lock', 'lock-repair-not-available account=' + me + ' code=lock-repair-not-available');
+        failCode(res, 503, ERR.repairNotAvailable, 'lock-repair-not-available'); return true;
+      }
+      // P3-03 AI 代理解锁独立授权（GPT 三项定夺 §3.3）：签发与撤销只认设备所有者本人。
+      // 授权单设备、仅 disarm、15 分钟内单次有效、可撤销；grantId 是凭证，
+      // 日志只记设备与账号，绝不记 grantId 原文。
+      if (req.method === 'POST' && p === '/lock/agent-grant') {
+        const grantBody = await readJsonBody(req);
+        if (!grantBody || typeof grantBody.id !== 'string') { fail(res, 400, ERR.badReq); return true; }
+        const got = await getDeviceOrFail(res, grantBody.id, me);
+        if (!got) return true;
+        const g = agentGrantStore.issue({ account: me, deviceId: got.node._id, op: 'disarm', by: me });
+        if (!g) { fail(res, 503, ERR.notReady); return true; }
+        log('lock', 'agent-grant 已签发：' + got.node.name + ' by ' + me + '（单次、15 分钟有效，仅 disarm）');
+        sendJson(res, 200, { ok: true, grantId: g.grantId, deviceId: got.node._id, op: 'disarm', expiresAt: g.expiresAt });
+        return true;
+      }
+      if (req.method === 'POST' && p === '/lock/agent-grant/revoke') {
+        const revokeBody = await readJsonBody(req);
+        const gid = revokeBody && typeof revokeBody.grantId === 'string' ? revokeBody.grantId : '';
+        const revoked = gid ? agentGrantStore.revokeForCaller(gid, me) : false;
+        if (revoked) log('lock', 'agent-grant 已撤销：account=' + me);
+        sendJson(res, 200, { ok: true, revoked: !!revoked });
+        return true;
+      }
       if (req.method === 'POST' && (p === '/lock/enable' || p === '/lock/disable' || p === '/lock/reset' || p === '/lock/update')) {
         const body = await readJsonBody(req);
         if (!body || typeof body.id !== 'string') { fail(res, 400, ERR.badReq); return true; }
@@ -1037,6 +1114,7 @@ function createLockBridge(deps) {
         //    可选的登录密码重新认证（见 disable 分支）。
         // 失败不缓存 operationId：超时／拒绝后同一编号可重试真操作（须取新挑战）。
         let disableOpId = null;
+        let agentGrantUsed = false; // P3-03：本请求是否出示并验过 AI 代理解锁授权（供成功审计用）
         if (p === '/lock/disable') {
           if (typeof body.operationId !== 'string' || !body.operationId) {
             failCode(res, 409, ERR.challengeRequired, 'operation-required'); return true;
@@ -1051,12 +1129,30 @@ function createLockBridge(deps) {
           if (typeof body.challenge !== 'string' || !body.challenge) {
             failCode(res, 409, ERR.challengeRequired, 'challenge-required'); return true;
           }
-          const chk = challengeStore.verify({ challenge: body.challenge, account: me, deviceId: body.id, op: 'disarm' });
+          // P3-03：挑战全绑定校验（账号＋设备＋操作＋锁实例＋revision＋操作编号
+          // ＋已认证会话；revision 不一致单独映射为 revision-stale，前端刷新快照）。
+          // 校验在设备读取之前：记录只读内存表，无设备副作用；绑定失败不消费挑战。
+          const rec0pre = lockRecordStore.get(body.id);
+          const chk = challengeStore.verify({
+            challenge: body.challenge, account: me, deviceId: body.id, op: 'disarm',
+            lockId: rec0pre ? rec0pre.lock_id : null,
+            revision: rec0pre ? rec0pre.revision : 0,
+            operationId: disableOpId, sessionKey: sessionKeyForRequest(req),
+          });
           if (!chk.ok) {
             const text = chk.reason === 'challenge-expired' ? ERR.challengeExpired
+              : chk.reason === 'challenge-revision-mismatch' ? ERR.revisionStale
               : chk.reason === 'challenge-binding-mismatch' ? ERR.challengeMismatch
               : ERR.challengeInvalid;
-            failCode(res, 409, text, chk.reason); return true;
+            const code = chk.reason === 'challenge-revision-mismatch' ? 'revision-stale' : chk.reason;
+            failCode(res, 409, text, code); return true;
+          }
+          // P3-03：AI 代理解锁独立授权——出示时须另验（单次、15 分钟、单设备、
+          // 仅 disarm）；不出示走正常用户路径。授权验过即消费，失败不继续。
+          if (typeof body.agentGrantId === 'string' && body.agentGrantId) {
+            const g = agentGrantStore.verify({ grantId: body.agentGrantId, account: me, deviceId: body.id, op: 'disarm' });
+            if (!g.ok) { failCode(res, 409, ERR.agentGrantInvalid, g.reason || 'agent-grant-invalid'); return true; }
+            agentGrantUsed = true;
           }
         }
         const got = await getDeviceOrFail(res, body.id, me);
@@ -1109,11 +1205,24 @@ function createLockBridge(deps) {
           if (rec0 && body.revision !== rec0.revision) {
             failCode(res, 409, ERR.revisionStale, 'revision-stale'); return true;
           }
+          // P3-03 分级重新认证（GPT 三项定夺 §3.2／§3.3）：风险分级在 revision
+          // 校验之后、密码验密之前判定。
+          //   normal：会话＋挑战＋操作编号＋revision 四重校验即可，免重复输密码；
+          //   enhanced（用户自选增强保护）／high（锁记录 UNKNOWN／RECOVERY_REQUIRED
+          //   等）：必须完成登录密码升级认证，否则拒绝，绝不降级为普通确认。
+          //   特别：UNKNOWN 记录不许经正常路径直接清状态——重新认证只证明
+          //   操作者身份，不证明设备实际锁状态；放行仍须设备侧强证据对账。
+          const risk = lockState.classifyUnlockRisk({ record: rec0, enhancedProtection: enhancedAuthStore.isEnhanced(me) });
+          const hasLoginPw = typeof body.loginPassword === 'string' && body.loginPassword;
+          if (risk.requiresStepUp && !hasLoginPw) {
+            log('lock', 'disarm 升级认证缺失：' + node.name + ' by ' + me + '（risk=' + risk.level + '，reasons=' + risk.reasons.join(',') + '）');
+            failCode(res, 403, ERR.stepUpRequired, 'step-up-required'); return true;
+          }
           // 可选的短时重新认证（定夺 §4.4“敏感解锁建议增加短时重新认证”）：
           // 前端确认弹窗提供登录密码栏；填了就验（走 mcConnect 真登录，
           // 独立限流 5 次／15 分钟），不填则走“会话＋挑战＋操作编号＋revision”
           // 四重校验。验密失败记限流、不消耗挑战之外的任何东西。
-          if (typeof body.loginPassword === 'string' && body.loginPassword) {
+          if (hasLoginPw) {
             const lk = unlockAuthLimiter.check(me);
             if (lk.locked) { fail(res, 429, ERR.tooManyAttempts); return true; }
             if (!unlockAuthLimiter.tryBegin(me)) { fail(res, 429, ERR.tooManyAttempts); return true; }
@@ -1138,7 +1247,7 @@ function createLockBridge(deps) {
             if (r0.decision === 'to-unlocked' && r0.evidence === 'strong') {
               const out = { lockState: 'UNLOCKED', revision: r0.record.revision, alreadyUnlocked: true };
               opStore.store(disableOpId, out);
-              log('lock', 'disarm 幂等：设备已确认解锁（' + r0.reason + '），op=' + disableOpId + ' by ' + me);
+              log('lock', 'disarm 幂等：设备已确认解锁（' + r0.reason + '），op=' + disableOpId + ' by ' + me + '（risk=' + risk.level + '，agentGrant=' + (agentGrantUsed ? 'yes' : 'no') + '）');
               sendJson(res, 200, Object.assign({ ok: true }, out));
               return true;
             }
@@ -1183,7 +1292,7 @@ function createLockBridge(deps) {
           const finalRec = fin.ok ? lockRecordStore.upsert(fin.record) : cur;
           const out = { lockState: 'UNLOCKED', revision: finalRec.revision };
           opStore.store(disableOpId, out);
-          log('lock', 'disarm 成功：' + node.name + ' by ' + me + '（op=' + disableOpId + '）');
+          log('lock', 'disarm 成功：' + node.name + ' by ' + me + '（op=' + disableOpId + '，risk=' + risk.level + '，stepUp=' + (hasLoginPw ? 'yes' : 'no') + '，agentGrant=' + (agentGrantUsed ? 'yes' : 'no') + '）');
           sendJson(res, 200, Object.assign({ ok: true }, out));
           return true;
         }
@@ -1268,10 +1377,16 @@ function createLockBridge(deps) {
     for (const [k, v] of xidCache) {
       if (v && String(v.user || '').trim().toLowerCase() === target) { xidCache.delete(k); n += 1; }
     }
+    // P3-03：会话撤销／封禁联动／退出登录时，未使用的操作挑战与 AI 解锁授权
+    // 必须立即失效（GPT 三项定夺 §3.3）。已缓存的成功操作结果不吊销：
+    // 它只能原样返回首次成功结果，不产生新的真实操作，且重放仍须先过鉴权。
+    const chRevoked = challengeStore.revokeForAccount(target);
+    const grRevoked = agentGrantStore.revokeForAccount(target);
+    if (chRevoked || grRevoked) log('lock', 'purgeUser 已吊销未用挑战 ' + chRevoked + ' 个、AI 解锁授权 ' + grRevoked + ' 个：' + target);
     return n;
   }
 
-  return { handle, purgeUser };
+  return { handle, purgeUser, _stores: { challengeStore, opStore, lockRecordStore, agentGrantStore } };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, extractStatusPayload, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, extractStatusPayload, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey, LOCK_PAUSE_CODE: lockState.LOCK_REMEDIATION_PAUSE.code, isLockRemediationPaused: lockState.isLockRemediationPaused } };

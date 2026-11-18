@@ -1,7 +1,7 @@
 # QFRemote 隐私锁 · 服务端状态对账与远程解除锁定协议契约 v1（C 线）
 
-- 版本：v1（2026-11-19）
-- 依据：定夺 `~/workspace/qfremote/gpt-a16s2-lockbug-ruling-20261119.md` §4.2／§4.3／§4.4／§6.2／§8；设备端契约 `~/workspace/qfremote/privacy-lock-impl/CONTRACT.md` v1（§2／§3／§6）。
+- 版本：v1（2026-11-19）＋P3-01／P3-03 增补（2026-11-19，见 §7／§11；B/C 统一版本号待 P3-04 闭合 8 问后按兼容性审查确定，不机械改名）
+- 依据：定夺 `~/workspace/qfremote/gpt-a16s2-lockbug-ruling-20261119.md` §4.2／§4.3／§4.4／§4.6；GPT 三项定夺 `~/workspace/qfremote/gpt-a16s2-lockfix-3items-ruling-20261119.md` §1（P3-01）／§3（P3-03）／§4；设备端契约 `~/workspace/qfremote/privacy-lock-impl/CONTRACT.md` v1（§2／§3／§6）。
 - 实现：`server/friends/lock-state.js`（状态机＋对账＋修正＋挑战＋幂等）、`server/friends/lock-bridge.js`（HTTP 接线）；前端 `windows/lock.html`／`windows/lock.js`（Electron）、`server/webapp/app-*.js`（网页控制台）。
 - 基线：`049d876`（正式 RC 源码起点）；分支 `a16s2-lockfix-c`。
 - 状态：服务端侧 v1 已实现＋沙箱单测全过；与 B 线逐项对齐见 §9（B 线 CONTRACT.md 截至 2026-11-19 03:xx 在 `wt-b` 未见，待 B 线提交后复核）。
@@ -78,9 +78,10 @@
 - **会话鉴权**：`qfr_frd` 会话优先，否则 `xid` 会话 cookie 经 `mcConnectCookie` 校验；未登录一律 401。`xid` 缓存 30 秒；封禁联动 purge 会清缓存。
 - **机主核对（写路径强制）**：每次写操作都 fresh 实读 `status.json`，核对 `ownerUsername`（＋别名表＋设备 pin；pin 失配判非机主；公钥 pin 失配时 arm/reset 拒绝加密）。非机主 403；读不到设备回 503（`unreachable`），**不得回 403**（离线被误报成非机主会误导用户）。
 - **封禁门**：鉴权后校验 `isBanLinked`，命中 403。
-- **操作挑战**：`GET /lock/challenge?id=&op=disarm`，登录＋机主核对后签发；5 分钟有效、单次消费、绑定账号＋设备＋操作；日志不记挑战值。先查表再判过期（过期不误报为无效）。
-- **操作编号幂等**：`POST /lock/disable` 须带 `operationId`；只缓存**成功**结果 24 小时，失败不缓存、同一编号可重试；重复提交返回首次成功结果，不产生第二次真实操作。
-- **冻结 revision**：弹窗打开时冻结 `device_id / lockId / revision`；提交时服务端校验冻结 `revision`，不一致回 409 `revision-stale`（弹窗不消失，刷新快照＋取新挑战，等用户重新确认）。
+- **操作挑战**：`GET /lock/challenge?id=&op=disarm`，登录＋机主核对后签发；5 分钟有效、单次消费；绑定账号＋设备＋操作＋**锁实例 lock_id＋状态版本 revision＋操作编号 operationId＋已认证会话 sessionKey**（P3-03，§11）；日志不记挑战值。先查表再判过期（过期不误报为无效）；绑定失败不消费挑战。退出登录／会话撤销／封禁联动时未用挑战立即失效（`purgeUser`，登出分支亦联动）。
+- **操作编号幂等**：`POST /lock/disable` 须带 `operationId`；只缓存**成功**结果 24 小时，失败不缓存、同一编号可重试；重复提交返回首次成功结果，不产生第二次真实操作。操作编号与挑战绑定（取挑战时由弹窗带上 `opId`，两端前端均已实现）。
+- **分级重新认证**（P3-03，§11）：正常所有者免重复输密码；用户自选增强保护与高风险（锁记录 UNKNOWN／RECOVERY_REQUIRED 等）必须完成登录密码升级认证，否则拒绝、绝不降级；AI 代理解锁须独立授权（`POST /lock/agent-grant`），不得借用 UI 会话权限。
+- **冻结 revision**：弹窗打开时冻结 `device_id / lockId / revision`；提交时服务端校验冻结 `revision`，不一致回 409 `revision-stale`（弹窗不消失，刷新快照＋取新挑战，等用户重新确认）。挑战本身也绑定签发时 revision，期间 revision 变化即挑战失效（同码 `revision-stale`）。
 - **短时重新认证（可选）**：`disable` 可带 `loginPassword`，填了即走 `mcConnect` 真登录，独立限流 5 次／15 分钟；不填则走“会话＋挑战＋操作编号＋revision”四重校验。`reset` 已有登录密码真验证＋同款限流＋并发单飞。
 - **信封**：Ed25519 签名；`disarm`／`update` TTL 30 分钟，`arm`／`reset` TTL 10 分钟；随机 nonce；设备端验签＋过期拒绝（`E_ENVELOPE_EXPIRED`／`E_ENVELOPE_REPLAY`，设备契约 §4）。
 - **失败码**：新路径失败回 `{error, code}`（机器可读：`revision-stale`／`state-conflict`／`alreadyOff`／`challenge-invalid` 等）；旧路径保持只含 `error` 的原格式。
@@ -95,7 +96,7 @@
 - **Esc**：只关弹窗，不关整个窗口。
 - **成功路径**：先刷新设备列表再写“已关闭”提示（不被 `load()` 清掉）。
 
-## §7 暂停守卫（阶段 1，LOCK-P0）
+## §7 暂停守卫（阶段 1，LOCK-P0；P3-01 同步冻结，GPT 三项定夺 §1）
 
 `server/friends/lock-bridge.js` 内以下 4 行原样保留，不得绕过或删除：
 
@@ -106,20 +107,33 @@
 if (req.method === 'POST' && p === '/lock/enable') { fail(res, 503, '隐私锁功能正在维护，暂时无法开启新的锁定。已锁定的设备仍可正常关闭。'); return true; }
 ```
 
-擅自解除暂停不允许；解除只在新组件通过验收后由协调人决定。`/lock/enable` 成功路径的记录落盘（`lock_id`＝本次信封 id）只在解除暂停后生效。`/lock/update` 是否同步冻结见 REPORT.md §6（建议冻结，待协调人定夺；本线未改代码）。
+擅自解除暂停不允许；解除只在阶段 3 集成、阶段 4 真机安全验收以及独立放行审核完成后，由协调人按统一受控流程决定。`/lock/enable` 成功路径的记录落盘（`lock_id`＝本次信封 id）只在解除暂停后生效。
+
+### P3-01：`/lock/update` 与 `/lock/enable` 同步冻结（2026-11-19 落实）
+
+- 策略名 `LOCK_REMEDIATION_PAUSE`（`lock-state.js`，`isLockRemediationPaused()`）；统一错误标识 `lock-remediation-paused`；暂停是**写死在代码里的常量守卫，不是运行时开关**——服务重启、进程重建、配置重载都不能清除它。
+- 暂停范围：`POST /lock/enable`（阶段 1 四行守卫，响应保持原样：503＋原维护文案，无 code 字段——刻意保留以兼容既有客户端与测试）、`POST /lock/update`（新增守卫，503＋`code: lock-remediation-paused`＋更新专用文案）。**无白名单例外**：站长账号、API 调用者一律拒绝。
+- 间接入口：本仓库内**无独立的锁更新后台任务／重试队列**（全仓 grep 核实：唯一能构造 update 信封并投递的路径就是桥内 `/lock/update` 分支；重试只能以新的 HTTP 请求重进 `handle()`，必撞守卫）。第二道拦截在 `deliverEnvelope()`：`arm`／`update` 信封在暂停期直接抛错到不了设备。
+- 顺序：鉴权＋封禁在先、暂停在后——未登录先 401，不因暂停机制向未授权请求泄露设备存在与否；已登录的拒绝记结构化审计（`lock-remediation-paused op=<路径> account=<账号> code=lock-remediation-paused`，不含秘密）。
+- 挂起事务：暂停是部署时即生效的代码守卫，不存在“暂停生效瞬间正在执行”的跨部署队列；请求内对账循环只在投递成功后运行，暂停期投递永不发生，故无半安装状态。
+- 例外（继续可用，保留原有鉴权与审计）：只读状态查询及诊断取证（`GET /lock/devices`、`GET /lock/owner-check`）；已有的紧急停止和受控安全恢复（`/lock/disable`、`/lock/reset` 走正常校验，不被暂停拦截）；经实际设备状态核实的安全解锁；专用的受控修复／回滚流程——以 `POST /lock/repair` **占位**实现（未启用前一律 503 `lock-repair-not-available`，不实现放行逻辑；正式路径须另行实现组件签名、版本与哈希核验、严格授权、审计、回滚方案与明确目标设备范围）。
+- 解除规则：与 enable 同步解除，只在阶段 3 集成、阶段 4 真机验收、独立放行审核完成后按统一受控流程解除，任何单线不得自行解禁。
 
 ## §8 API 契约
 
 | 接口 | 变化 |
 |---|---|
-| `GET /lock/challenge?id=&op=disarm` | **新增**。须登录＋机主核对；回 `{ok, challenge, expiresAt, op, deviceId}`；日志不记挑战值。 |
+| `GET /lock/challenge?id=&op=disarm[&opId=]` | **P3-03 扩展**。须登录＋机主核对；签发前经读路径对账建／取锁记录；回 `{ok, challenge, expiresAt, op, deviceId, lockId, revision}`；`opId`（弹窗打开时生成的操作编号）有则绑定；日志不记挑战值。 |
 | `GET /lock/devices` | 扩展返回 `lockState, lockId, revision, lastHeartbeat, degraded`；旧字段 `locked, component, version` 不变。 |
-| `POST /lock/disable` | **新流程**（顺序重要）：①幂等重放先查（命中直接返首次成功结果）；②校验操作挑战（缺／伪造／过期／错绑均 409，带 `code`）；③设备实读＋机主核对；④校验冻结 `revision`（不一致 409 `revision-stale`）；⑤可选登录密码短时重认证（独立限流 5 次／15 分钟）；⑥设备已报 `Off` 且有强证据 → 幂等成功；无证明 → 409 `state-conflict`；无记录时仍回 409 `alreadyOff`；⑦成功：记录落 `UNLOCKED`（两步审计），缓存成功结果；超时：记录翻 `UNKNOWN`，不缓存，可重试；拒绝：记录进 `RECOVERY_REQUIRED`。 |
-| `POST /lock/enable` | 行为不变（暂停守卫在前）；成功路径加记录落盘。 |
+| `POST /lock/disable` | **新流程**（顺序重要）：①幂等重放先查（命中直接返首次成功结果）；②校验操作挑战（缺／伪造／过期／错绑均 409，带 `code`；revision 绑定不一致映射为 `revision-stale`）；③AI 授权（出示 `agentGrantId` 时另验，单次、15 分钟、单设备、仅 disarm，失败 409 `agent-grant-*`）；④设备实读＋机主核对；⑤校验冻结 `revision`（不一致 409 `revision-stale`）；⑥**分级重新认证**（§11）：normal 免输密码；enhanced／high 无登录密码即 403 `step-up-required`，有则验密（独立限流 5 次／15 分钟）；⑦设备已报 `Off` 且有强证据 → 幂等成功；无证明 → 409 `state-conflict`；无记录时仍回 409 `alreadyOff`；⑧成功：记录落 `UNLOCKED`（两步审计），缓存成功结果；超时：记录翻 `UNKNOWN`，不缓存，可重试；拒绝：记录进 `RECOVERY_REQUIRED`。成功审计含 `risk=<等级> stepUp=<yes/no> agentGrant=<yes/no>`（不含秘密）。 |
+| `POST /lock/enable` | 行为不变（暂停守卫在前，503 原维护文案）；成功路径加记录落盘。 |
 | `POST /lock/reset` | 成功后加审计＋`revision+1`（`appendAudit`，不改状态，用于让进行中的确认重新校验）。 |
-| `POST /lock/update` | 行为未改（见 REPORT.md §6 定夺建议）。 |
+| `POST /lock/update` | **P3-01 已同步冻结**：一律 503 `lock-remediation-paused`，0 更新副作用（§7）。 |
+| `POST /lock/repair` | **P3-01 新增占位**：受控修复发布路径未启用，一律 503 `lock-repair-not-available`；不实现放行逻辑，绝不经此放开通用 `/lock/update`。 |
+| `POST /lock/agent-grant` | **P3-03 新增**。须登录＋机主核对；签发 AI 解锁授权，单设备、仅 disarm、15 分钟内单次有效；回 `{ok, grantId, deviceId, op, expiresAt}`；日志不记 grantId 原文。 |
+| `POST /lock/agent-grant/revoke` | **P3-03 新增**。须登录；仅本人可撤销自己的授权；回 `{ok, revoked}`（不存在／非本人亦回 `revoked: false`，不泄露授权存在与否）。 |
 
-错误码（新路径）：`challenge-invalid`（缺／伪造／过期／错绑）、`revision-stale`、`state-conflict`、`alreadyOff`、`operation-id-required`；设备不可达 503 `unreachable`；未登录 401；非机主 403；封禁 403。
+错误码（新路径）：`challenge-invalid`（缺／伪造／过期／错绑）、`challenge-revision-mismatch`（内部原因，桥映射为 `revision-stale`）、`revision-stale`、`state-conflict`、`alreadyOff`、`operation-required`；`step-up-required`（高风险／增强保护缺升级认证，403）；`agent-grant-invalid`／`agent-grant-expired`／`agent-grant-binding-mismatch`（409）；`lock-remediation-paused`（503，enable／update）；`lock-repair-not-available`（503，受控修复占位）；设备不可达 503 `unreachable`；未登录 401；非机主 403；封禁 403。
 
 ## §9 与 B 线（设备端新组件）逐项对齐
 
@@ -138,6 +152,44 @@ if (req.method === 'POST' && p === '/lock/enable') { fail(res, 503, '隐私锁�
 | 9 | `captureExclusion=failed-degraded` 时面板提示“保护降级” | 服务端已下发 `degraded` 字段，两端面板已显示；**请 B 线确认**该字段的写入时机与 `unknown` 的语义 |
 | 10 | 旧 `QFLockUI.exe` 本地手动运行路径 | 服务端封不住（见 REPORT.md §6）；**请 B 线确认**新组件安装时删除／替换旧程序的方案 |
 | 11 | B 线 CONTRACT.md | `wt-b` 目录截至 2026-11-19 03:xx 未见；本文件为服务端侧 v1，B 线提交后逐项复核 |
+
+### §9 补记（C 侧已实现回填，P3-03；8 问本身待 P3-04 由 B 线先答、C 线复核）
+
+- **上报接收端点**：设备端不直接 POST 上报；服务端接收点是 `lock-bridge.js` 的 `readStatus()`——经 MeshCentral runcommands 通道下发 `PS_READ_STATUS`，取回 `status.json` 的 Base64 回包（`extractStatusPayload` 逐候选解码验 `{state}`）；写路径一律 fresh 实读，读路径走预算并发＋分级 TTL。收到的上报进入 `reconcileRecord`／`reconcileFromRead` 对账（§3），再进 `GET /lock/devices` 下发。信封投递走同一通道反向（`deliverEnvelope` 写 inbox＋`qf-lockctl apply`）。
+- **控制台降级文案**：`degraded` 由服务端 `reconcileRecord` 按 `captureExclusion` 刷新（`failed-degraded`／`unknown` → `DEGRADED`），经 `GET /lock/devices` 下发；两端面板在状态文案后追加“（保护降级）”——Electron `windows/lock.html` 的 `lockStateText()`、网页 `server/webapp/app-*.js` 的 `webLockStateText()`；降级设备不得当正常 `LOCKED` 展示（§1）。
+- **二次确认弹窗实现**：Electron `windows/lock.html`（`#lockConfirmModal`，`body` 直接子节点，在列表／视图重渲染范围之外，无自动过期定时器）与网页 `#modalRoot` 应用级弹窗层；打开时冻结 `device_id／lockId／revision`＋操作挑战＋操作编号，取挑战后才启用确认按钮，提交中禁用；`revision-stale` 留弹窗刷新快照＋取新挑战；超时／掉线只显示准确错误；Esc 只关弹窗；P3-03 新增 `step-up-required` 分支——弹窗不消失，提示在密码栏输入登录密码后重新确认，并聚焦密码栏。
+
+## §11 分级重新认证契约（P3-03，GPT 三项定夺 §3）
+
+### 三类解锁场景
+
+| 场景 | 认证要求 | 实现位置 |
+|---|---|---|
+| 已登录、权限有效、风险正常的设备所有者 | 服务端权限校验＋挑战＋revision＋明确确认，**无需每次重新输密码** | `lock-bridge.js` disable 链；`classifyUnlockRisk` → `normal` |
+| 用户自行开启增强保护选项 | 在原有校验上增加登录密码升级认证（走 `mcConnect` 真登录，独立限流 5 次／15 分钟） | 登记文件 `/opt/qfremote-lock/enhanced-auth.json`（`{"accounts": [...]}`，运维维护；缺失＝无人开启，损坏＝保留上次好表）；`createEnhancedAuthStore`；`classifyUnlockRisk` → `enhanced` |
+| 身份异常、权限变化、状态冲突或高风险远程解锁 | **必须升级认证或进入受控恢复流程**，无密码／密码错误一律拒绝，绝不降级为普通确认 | `classifyUnlockRisk` → `high`（当前可判定信号：锁记录 `UNKNOWN`／`RECOVERY_REQUIRED`）；`step-up-required`（403） |
+
+### 请求链约束（逐项实现位置）
+
+- 有效账号会话＋服务端设备归属与权限校验：`authUser`（`qfr_frd`／`xid`）→封禁门→`getDeviceOrFail`（fresh 实读 `status.json` 机主核对＋pin）；所有者与解锁权限由服务端权威记录判断，不信前端传来的角色字段（前端不传角色）。
+- 服务端生成一次性操作挑战：`createChallengeStore`，5 分钟有效、单次消费、防重放；绑定 `account_id／device_id／lock_id／revision／操作类型／operationId／已认证会话 sessionKey`，不得跨账号／跨设备／跨锁实例／跨 revision／跨操作／跨会话复用；绑定失败不消费挑战；revision 不一致单独报 `challenge-revision-mismatch`（桥映射为 `revision-stale`，前端刷新快照）。
+- 会话绑定：`sessionKey`＝请求 Cookie 头的 SHA-256（只存哈希、不记原文）；`qfr_frd` 签发／退出／`xid` 变化都会改变指纹，旧挑战即失效。
+- 退出登录／会话撤销／权限变化后未使用挑战必须失效：`purgeUser()` 吊销该账号未用挑战与 AI 授权；`server/friends/server.js` 登出分支联动调用 `lockBridge.purgeUser(me)`；封禁联动（`/internal/ban-purge`）同款入口。权限变化另由每次提交时的 fresh 机主核对与 revision 校验兜底。
+- 幂等操作编号与挑战绑定：弹窗打开时生成 `operationId`，取挑战时经 `opId` 参数带上、服务端绑定；提交时编号不符即拒绝。
+- 登录密码绝不由 QFLockUI 或控制台自定义窗口采集、记录或传递：升级认证只走已有可信账号认证体系——弹窗密码栏经 `mcConnect` 真登录验证（`loginPassword` 只进内存、不记日志、不落盘）；QFLockUI 不参与。
+- Web 会话 CSRF、Cookie、安全来源与重放防护：现状——`qfr_frd` 会话 Cookie 为 `HttpOnly＋SameSite=Lax＋Secure`（`server/friends/server.js` `issueSession`）；锁路由无独立 CSRF token，跨站防护依赖 SameSite＋单次挑战＋revision＋操作编号；重放防护由挑战单次消费＋操作编号成功缓存＋信封 nonce／TTL 承担。**残留**：无独立 CSRF token 是既有姿态，本线未新增；如安全评审要求，须另线加。
+- 远程解锁可审计记录（不含秘密）：成功／拒绝审计含 `risk／stepUp／agentGrant／op`（`lock-bridge.js` disable 成功与拒绝日志）；日志绝不含密码、临时验证码、挑战值、grantId 原文。
+- 连续快速点击：提交中按钮禁用＋操作编号幂等＋挑战单次消费，实际操作最多执行一次，结果可凭同一编号查询（`replayed: true`）。
+
+### AI 直控与 dangerous 权限的自动化请求
+
+- 不得因网页用户选择“免重复输密码”就自动授予代理解锁权限：UI 会话权限与 AI 授权分离，自动化调用方须出示独立授权——`POST /lock/agent-grant`（机主签发，单设备、仅 disarm、15 分钟内单次有效、可撤销）＋提交时 `agentGrantId` 另验；`POST /lock/agent-grant/revoke`（仅本人可撤销自己的授权）；`purgeUser` 按账号吊销。
+- **残留（诚实说明）**：当前 HTTP 层没有调用方类型信号，服务端无法从请求本身区分“用户本人”与“AI 代理”；硬性防线是挑战的 `sessionKey` 绑定（UI 会话签发的挑战换个会话即失效，P03-12a 实测）＋授权机制的独立凭证与审计；调用方类型识别须 P3-04／P3-06 在集成层补齐（调用方认证），本线不虚报已实现。
+- 特别：对 UNKNOWN 设备，不能因用户重新输入登录密码就直接改成 UNLOCKED——重新认证只证明操作者身份，不证明设备实际锁状态；放行仍须设备侧强证据对账（`disarm` 事件／`boot_id` 变化／`boot-recovered`），见 §3／§10。
+
+### 会话可信度信号残留
+
+- `classifyUnlockRisk` 接受 `sessionTrustLow` 输入，但桥当前鉴权层只返回账号名、无独立会话可信度评分，故桥内恒传 false；“会话疑似被盗用”的实际防护由挑战 sessionKey 绑定＋purgeUser 吊销承担。独立会话可信度评分（如设备指纹／异地登录）须另线在鉴权层补齐，本线不虚构信号。
 
 ## §10 D39ABOL 旧状态修正程序（定夺 §4.3，当前状态）
 

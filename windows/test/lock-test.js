@@ -68,6 +68,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   const state = { locked: false };
   let authed = false;
   let seenDisableBody = null;
+  let seenChallengeUrl = '';
   const server = https.createServer(
     { key: fs.readFileSync(path.join(tmp, 'k.pem')), cert: fs.readFileSync(path.join(tmp, 'c.pem')) },
     (req, res) => {
@@ -80,6 +81,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
           send(200, { devices: [{ id: 'pc-9', name: '测试机', owner: true, locked: state.locked, component: true }] });
         } else if (req.url.startsWith('/lock/challenge')) {
           // C 线：假服务签发挑战（与服务端新契约同形）。
+          seenChallengeUrl = req.url;
           send(200, { ok: true, challenge: 'fake-ch-1', expiresAt: Date.now() + 5 * 60 * 1000, op: 'disarm', deviceId: 'pc-9' });
         } else if (req.url === '/lock/enable') {
           const b = JSON.parse(body || '{}');
@@ -112,6 +114,9 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   // C 线：真桥先取挑战，再带挑战＋操作编号＋revision 关锁；假服务收到完整载荷。
   const chC = await bridge.challenge('pc-9', 'disarm');
   ok('C6a_challenge_shape', chC && chC.ok === true && chC.challenge === 'fake-ch-1' && chC.op === 'disarm');
+  // P3-03：取挑战时把操作编号带上（opId），服务端把挑战与该编号绑定。
+  await bridge.challenge('pc-9', 'disarm', 'op-c6c');
+  ok('C6c_challenge_carries_opid', seenChallengeUrl.includes('opId=op-c6c'), { seenChallengeUrl });
   await bridge.disable('pc-9', { challenge: chC.challenge, operationId: 'op-c6', revision: 0 });
   ok('C6_disable', (await bridge.listDevices())[0].locked === false
     && seenDisableBody && seenDisableBody.challenge === 'fake-ch-1'

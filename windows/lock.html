@@ -255,7 +255,7 @@
     modalEl.hidden = false;
     modalGoEl.focus();
     let ch;
-    try { ch = await qfLock.challenge(d.id, 'disarm'); } catch (e) { ch = { ok: false, error: String(e && e.message || e) }; }
+    try { ch = await qfLock.challenge(d.id, 'disarm', confirmSession.operationId); } catch (e) { ch = { ok: false, error: String(e && e.message || e) }; }
     if (!confirmSession || confirmSession.device.id !== d.id) return; // 期间已取消
     if (ch && ch.ok && ch.challenge) {
       confirmSession.challenge = ch.challenge;
@@ -290,7 +290,7 @@
     const lp = modalLoginPwEl.value;
     if (lp) payload.loginPassword = lp;
     let r;
-    try { r = await qfLock.disable(confirmSession.device.id, payload); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+    try { r = await qfLock.disable(confirmSession.device.id, payload); } catch (e) { r = { ok: false, error: String(e && e.message || e), code: (e && e.code) || null }; }
     modalLoginPwEl.value = '';
     confirmBusy = false; modalGoEl.disabled = false;
     if (r && r.ok) {
@@ -316,7 +316,7 @@
         modalStateEl.textContent = modalStateText(confirmSession);
       }
       let ch = null;
-      try { ch = await qfLock.challenge(confirmSession.device.id, 'disarm'); } catch (e) { ch = null; }
+      try { ch = await qfLock.challenge(confirmSession.device.id, 'disarm', confirmSession.operationId); } catch (e) { ch = null; }
       if (ch && ch.ok && ch.challenge) {
         confirmSession.challenge = ch.challenge;
         confirmSession.expiresAt = ch.expiresAt;
@@ -331,6 +331,13 @@
         modalGoEl.textContent = '重新获取';
         confirmSession.challenge = null;
       }
+      return;
+    }
+    if (r && r.code === 'step-up-required') {
+      // P3-03：高风险／增强保护须升级认证——弹窗不消失，提示用户在上方
+      // 密码栏输入登录密码后重新确认，绝不降级为普通确认。
+      showModalErr((r && r.error) || '本次解锁风险较高，请重新输入登录密码完成验证后再试。');
+      if (modalLoginPwEl) modalLoginPwEl.focus();
       return;
     }
     // 超时／掉线／拒绝：留在弹窗里显示准确错误，不改写成“未锁定”，不自动关闭。

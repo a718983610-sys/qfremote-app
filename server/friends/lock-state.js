@@ -16,6 +16,21 @@
  * D39ABOL 旧状态修正走 applyCorrection（带操作编号、留审计），绝不删记录文件。
  */
 const crypto = require('crypto');
+const fs = require('fs');
+
+// ---------- P3-01：锁修复暂停（LOCK_REMEDIATION_PAUSE，GPT 三项定夺 §1） ----------
+// 暂停是写死在代码里的常量守卫，不是运行时开关：服务重启、进程重建、
+// 配置重载都不能清除它；只有改代码＋重新部署＋协调人按统一受控流程
+// （阶段 3 集成＋阶段 4 真机验收＋独立放行审核）放行才能解除。
+// 覆盖：POST /lock/enable、POST /lock/update，以及任何经后台任务／重试
+// 队列间接触发的等效锁组件更新（桥内 deliverEnvelope 对 arm/update
+// 信封做第二道拦截；本仓库内无独立的锁更新后台任务／重试队列，见 REPORT）。
+const LOCK_REMEDIATION_PAUSE = Object.freeze({
+  code: 'lock-remediation-paused',
+  enabled: true,
+  scope: Object.freeze(['POST /lock/enable', 'POST /lock/update']),
+});
+function isLockRemediationPaused() { return LOCK_REMEDIATION_PAUSE.enabled === true; }
 
 // ---------- 状态 ----------
 const STATES = Object.freeze(['UNLOCKED', 'LOCKING', 'LOCKED', 'UNLOCKING', 'UNKNOWN', 'RECOVERY_REQUIRED']);
@@ -343,7 +358,13 @@ function applyCorrection(record, correction) {
   if (!c.op_id || typeof c.op_id !== 'string') return { ok: false, reason: 'op-id-required' };
   if (!c.reason || typeof c.reason !== 'string') return { ok: false, reason: 'reason-required' };
   if (STATES.indexOf(c.to_state) < 0) return { ok: false, reason: 'unknown-state' };
-  if (record.history.some((h) => h.op_id === c.op_id)) {
+  // P3-03 修正：重放检查只认“修正”动作（action 以 'correction:' 开头）。
+  // 旧检查认所有同 op_id 的审计条目，与 /lock/disable 的正常流程冲突：
+  // disable 先以同一 operationId 记一条 'disarm:start' 迁移（LOCKED→UNLOCKING），
+  // 成功后再以同一编号调 applyCorrection 落 UNLOCKED——旧检查会把前者
+  // 误判为“修正已执行”而拒绝，导致记录永久卡在 UNLOCKING（阶段 3 实测）。
+  // 修正动作只由 applyCorrection 产生，收紧后 D39ABOL 修正重放仍被拒绝。
+  if (record.history.some((h) => h.op_id === c.op_id && typeof h.action === 'string' && h.action.indexOf('correction:') === 0)) {
     return { ok: false, reason: 'op-id-replayed', record };
   }
   const leavesLocked = c.to_state === 'UNLOCKED' && wasLocked(record);
@@ -404,15 +425,29 @@ function createOperationStore(opts) {
 }
 
 // ---------- 短期操作挑战 ----------
-// issue({account, deviceId, op}) → {challenge, expiresAt}；
-// verify({challenge, account, deviceId, op}) → {ok} / {ok:false, reason}。
-// 单次有效（验过即消费）、5 分钟过期、绑定账号＋设备＋操作；不含任何密码与密钥。
+// issue({account, deviceId, op, lockId?, revision?, operationId?, sessionKey?})
+//   → {challenge, expiresAt}；
+// verify({challenge, account, deviceId, op, lockId?, revision?, operationId?, sessionKey?})
+//   → {ok, binding} / {ok:false, reason}。
+// 单次有效（验过即消费）、5 分钟过期；绑定账号＋设备＋操作＋锁实例＋
+// 状态版本＋操作编号＋已认证会话（P3-03，GPT 三项定夺 §3.3）：
+// 挑战不得跨账号／跨设备／跨锁实例／跨 revision／跨操作／跨会话复用。
+// 可选绑定字段的语义：调用方传了才校验（旧调用方不传即不校验，保持兼容）；
+// 调用方传了、签发时也绑了，两边不一致即拒绝，且绑定失败不消费挑战
+// （原挑战仍可用，见阶段 2 单测 E7）；revision 不一致单独报
+// 'challenge-revision-mismatch'，供桥映射为 revision-stale（前端刷新快照）。
+// 锁实例绑定：lockId 为 null 表示签发时服务端尚无锁记录（基线未建）；
+// 签发后记录新建／lock_id 变化，旧挑战即失效，须重新取挑战。
+// 会话绑定：sessionKey 由桥按请求 Cookie 指纹计算（只存哈希，不存原文）；
+// 退出登录／重新登录／会话撤销后 sessionKey 变化，旧挑战即失效。
+// 撤销：revokeForAccount / revokeForSession 供 purgeUser（封禁联动／退出
+// 登录）调用，未使用挑战立即失效。日志绝不记挑战值。
 function createChallengeStore(opts) {
   const o = opts || {};
   const nowFn = typeof o.now === 'function' ? o.now : Date.now;
   const ttlMs = o.ttlMs != null ? o.ttlMs : 5 * 60 * 1000;
   const random = typeof o.randomBytes === 'function' ? o.randomBytes : (n) => crypto.randomBytes(n);
-  const table = new Map(); // challenge -> { account, deviceId, op, expiresAt }
+  const table = new Map(); // challenge -> { account, deviceId, op, lockId, lockIdBound, revision, revisionBound, operationId, operationIdBound, sessionKey, sessionKeyBound, expiresAt }
   function prune() {
     const now = nowFn();
     for (const [k, v] of table) { if (now >= v.expiresAt) table.delete(k); }
@@ -425,7 +460,20 @@ function createChallengeStore(opts) {
       prune();
       const challenge = 'ch-' + random(16).toString('hex');
       const expiresAt = nowFn() + ttlMs;
-      table.set(challenge, { account: String(i.account).toLowerCase(), deviceId: String(i.deviceId), op: String(i.op), expiresAt });
+      table.set(challenge, {
+        account: String(i.account).toLowerCase(),
+        deviceId: String(i.deviceId),
+        op: String(i.op),
+        lockId: i.lockId === undefined ? null : (i.lockId === null ? null : String(i.lockId)),
+        lockIdBound: i.lockId !== undefined,
+        revision: typeof i.revision === 'number' ? i.revision : null,
+        revisionBound: typeof i.revision === 'number',
+        operationId: typeof i.operationId === 'string' && i.operationId ? i.operationId : null,
+        operationIdBound: typeof i.operationId === 'string' && !!i.operationId,
+        sessionKey: typeof i.sessionKey === 'string' && i.sessionKey ? i.sessionKey : null,
+        sessionKeyBound: typeof i.sessionKey === 'string' && !!i.sessionKey,
+        expiresAt,
+      });
       return { challenge, expiresAt };
     },
     verify(input) {
@@ -437,8 +485,189 @@ function createChallengeStore(opts) {
       if (rec.account !== String(i.account || '').toLowerCase() || rec.deviceId !== String(i.deviceId || '') || rec.op !== String(i.op || '')) {
         return { ok: false, reason: 'challenge-binding-mismatch' };
       }
+      if (rec.sessionKeyBound && i.sessionKey !== rec.sessionKey) {
+        return { ok: false, reason: 'challenge-binding-mismatch' };
+      }
+      if (rec.operationIdBound && i.operationId !== rec.operationId) {
+        return { ok: false, reason: 'challenge-binding-mismatch' };
+      }
+      if (rec.lockIdBound) {
+        const gotLockId = i.lockId === undefined ? null : (i.lockId === null ? null : String(i.lockId));
+        if (gotLockId !== rec.lockId) return { ok: false, reason: 'challenge-binding-mismatch' };
+      }
+      if (rec.revisionBound) {
+        if (typeof i.revision !== 'number') return { ok: false, reason: 'challenge-binding-mismatch' };
+        if (i.revision !== rec.revision) return { ok: false, reason: 'challenge-revision-mismatch' };
+      }
       table.delete(i.challenge); // 单次有效：验过即消费，重放同一挑战无效
+      return {
+        ok: true,
+        binding: { lockId: rec.lockId, revision: rec.revision, operationId: rec.operationId, sessionKey: rec.sessionKey },
+      };
+    },
+    revokeForAccount(account) {
+      const a = String(account || '').toLowerCase();
+      let n = 0;
+      for (const [k, v] of table) { if (v.account === a) { table.delete(k); n++; } }
+      return n;
+    },
+    revokeForSession(sessionKey) {
+      let n = 0;
+      for (const [k, v] of table) { if (v.sessionKeyBound && v.sessionKey === sessionKey) { table.delete(k); n++; } }
+      return n;
+    },
+    size() { prune(); return table.size; },
+  };
+}
+
+// ---------- P3-03：解锁风险分级（GPT 三项定夺 §3.2／§3.3） ----------
+// classifyUnlockRisk({record, enhancedProtection, sessionTrustLow})
+//   → {level: 'normal'|'enhanced'|'high', reasons[], requiresStepUp}。
+//   - normal：已登录、权限有效、风险正常的设备所有者——服务端权限校验＋
+//     挑战＋revision＋明确确认即可，无需每次重新输密码。
+//   - enhanced：用户自行开启增强保护——在原有校验上增加登录密码升级认证。
+//   - high：身份异常／权限变化／状态冲突／高风险远程解锁——必须升级认证
+//     或进入受控恢复流程，绝不降级为普通确认。当前可判定的 high 信号：
+//     服务端锁记录为 UNKNOWN 或 RECOVERY_REQUIRED（状态未核实，重新认证
+//     只证明操作者身份，不证明设备实际锁状态，故不许经正常路径直接清状态）。
+//   - sessionTrustLow：调用方提供的会话可信度信号（桥当前鉴权层只返回账号名、
+//     无独立会话可信度评分，故桥内恒传 false；会话被盗用的实际防护由挑战的
+//     sessionKey 绑定＋purgeUser 吊销承担，见 CONTRACT §11 残留说明）。
+function classifyUnlockRisk(input) {
+  const i = input || {};
+  const rec = i.record || null;
+  const reasons = [];
+  let level = 'normal';
+  if (rec && (rec.actual_state === 'UNKNOWN' || rec.actual_state === 'RECOVERY_REQUIRED')) {
+    level = 'high';
+    reasons.push(rec.actual_state === 'UNKNOWN' ? 'record-unknown' : 'record-recovery-required');
+  }
+  if (i.sessionTrustLow) {
+    reasons.push('session-trust-low');
+    level = 'high';
+  }
+  if (i.enhancedProtection) {
+    reasons.push('enhanced-protection-opt-in');
+    if (level === 'normal') level = 'enhanced';
+  }
+  return { level, reasons, requiresStepUp: level !== 'normal' };
+}
+
+// ---------- P3-03：增强保护选项（用户自选，运维文件登记） ----------
+// 文件 /opt/qfremote-lock/enhanced-auth.json（运维维护，与 owner-alias.json
+// 同款口径）：{"accounts": ["<账号>", ...]}，缺失＝无人开启，损坏＝保留
+// 上次好表＋记日志、不抛错；30 秒重载。开启后该账号每次远程解锁都须完成
+// 登录密码升级认证（classifyUnlockRisk → enhanced）。控制台开关 UI 未做，
+// 本线只落实服务端契约与文件登记口径（见 CONTRACT §11）。
+function createEnhancedAuthStore(opts) {
+  const o = opts || {};
+  const filePath = o.filePath || '/opt/qfremote-lock/enhanced-auth.json';
+  const readFile = o.readFile || ((p) => fs.readFileSync(p, 'utf8'));
+  const statFile = o.statFile || ((p) => fs.statSync(p));
+  const logFn = o.log || (() => {});
+  const nowFn = typeof o.now === 'function' ? o.now : Date.now;
+  const RELOAD_MS = 30000;
+  let accounts = new Set();
+  let mtimeMs = -1;
+  let lastCheck = 0;
+  function load(force) {
+    const now = nowFn();
+    if (!force && (now - lastCheck) < RELOAD_MS) return;
+    lastCheck = now;
+    let st;
+    try { st = statFile(filePath); } catch (e) {
+      if (mtimeMs !== -1) { accounts = new Set(); mtimeMs = -1; }
+      return;
+    }
+    if (!force && mtimeMs === st.mtimeMs) return;
+    try {
+      const raw = JSON.parse(readFile(filePath));
+      const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.accounts) ? raw.accounts : (raw && Array.isArray(raw.enhanced) ? raw.enhanced : null));
+      if (!Array.isArray(list)) throw new Error('增强保护文件格式须为 {"accounts": [...]}');
+      const next = new Set();
+      for (const a of list) { if (typeof a === 'string' && a.trim()) next.add(a.trim().toLowerCase()); }
+      accounts = next;
+      mtimeMs = st.mtimeMs;
+    } catch (e) {
+      logFn('enhanced-auth-bad', '增强保护文件读取失败（保留上次好表继续服务）：' + (e && e.message));
+    }
+  }
+  return {
+    isEnhanced(account) {
+      load(false);
+      return typeof account === 'string' && !!account.trim() && accounts.has(account.trim().toLowerCase());
+    },
+    reload() { load(true); },
+    size() { load(false); return accounts.size; },
+  };
+}
+
+// ---------- P3-03：AI 代理解锁独立授权（GPT 三项定夺 §3.3） ----------
+// 与网页用户界面权限分离的独立、受限、可撤销授权：单设备、仅 disarm、
+// 默认 15 分钟内单次有效（TTL 可配但封顶 15 分钟），验过即消费，过期／
+// 撤销／用过即失效。签发只认设备所有者本人（桥内经 getDeviceOrFail 机主
+// 核对）。授权标识（grantId）是凭证：日志绝不记其原文，只记签发／使用／
+// 撤销的设备与账号。注意：当前 HTTP 层没有调用方类型信号，服务端无法从
+// 请求本身区分“用户本人”与“AI 代理”——硬性防线是挑战的 sessionKey 绑定
+// （UI 会话签发的挑战换个会话即失效），授权机制是自动化调用方必须出示
+// 的独立凭证＋审计；调用方类型识别残留见 CONTRACT §11。
+function createAgentGrantStore(opts) {
+  const o = opts || {};
+  const nowFn = typeof o.now === 'function' ? o.now : Date.now;
+  const defaultTtlMs = o.ttlMs != null ? o.ttlMs : 15 * 60 * 1000;
+  const maxTtlMs = o.maxTtlMs != null ? o.maxTtlMs : 15 * 60 * 1000;
+  const random = typeof o.randomBytes === 'function' ? o.randomBytes : (n) => crypto.randomBytes(n);
+  const table = new Map(); // grantId -> { account, deviceId, op, expiresAt, by }
+  function prune() {
+    const now = nowFn();
+    for (const [k, v] of table) { if (now >= v.expiresAt) table.delete(k); }
+  }
+  return {
+    ttlMs: defaultTtlMs,
+    issue(input) {
+      const i = input || {};
+      if (!i.account || !i.deviceId) return null;
+      prune();
+      const ttl = Math.min(Math.max(typeof i.ttlMs === 'number' ? i.ttlMs : defaultTtlMs, 60 * 1000), maxTtlMs);
+      const grantId = 'ag-' + random(16).toString('hex');
+      const expiresAt = nowFn() + ttl;
+      table.set(grantId, {
+        account: String(i.account).toLowerCase(),
+        deviceId: String(i.deviceId),
+        op: String(i.op || 'disarm'),
+        expiresAt,
+        by: i.by ? String(i.by) : null,
+      });
+      return { grantId, expiresAt };
+    },
+    verify(input) {
+      const i = input || {};
+      if (typeof i.grantId !== 'string' || !i.grantId) return { ok: false, reason: 'agent-grant-invalid' };
+      const rec = table.get(i.grantId);
+      if (!rec) { prune(); return { ok: false, reason: 'agent-grant-invalid' }; }
+      if (nowFn() >= rec.expiresAt) { table.delete(i.grantId); return { ok: false, reason: 'agent-grant-expired' }; }
+      if (rec.account !== String(i.account || '').toLowerCase() || rec.deviceId !== String(i.deviceId || '') || rec.op !== String(i.op || 'disarm')) {
+        return { ok: false, reason: 'agent-grant-binding-mismatch' };
+      }
+      table.delete(i.grantId); // 单次有效：验过即消费
       return { ok: true };
+    },
+    revoke(grantId) {
+      if (typeof grantId !== 'string' || !grantId) return false;
+      return table.delete(grantId);
+    },
+    revokeForCaller(grantId, account) {
+      if (typeof grantId !== 'string' || !grantId) return false;
+      const rec = table.get(grantId);
+      if (!rec || rec.account !== String(account || '').toLowerCase()) return false;
+      table.delete(grantId);
+      return true;
+    },
+    revokeForAccount(account) {
+      const a = String(account || '').toLowerCase();
+      let n = 0;
+      for (const [k, v] of table) { if (v.account === a) { table.delete(k); n++; } }
+      return n;
     },
     size() { prune(); return table.size; },
   };
@@ -502,7 +731,9 @@ function createLockRecordStore(opts) {
 
 module.exports = {
   STATES, DEGRADED_REASONS, TRANSITIONS, HEARTBEAT_FRESH_MS,
+  LOCK_REMEDIATION_PAUSE, isLockRemediationPaused,
   mapLegacyState, newLockId, newOpId, wasLocked,
   createLockRecord, transition, classifyDeviceStatus, reconcileRecord, applyCorrection, appendAudit,
   createOperationStore, createChallengeStore, createLockRecordStore,
+  classifyUnlockRisk, createEnhancedAuthStore, createAgentGrantStore,
 };

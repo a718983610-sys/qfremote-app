@@ -83,6 +83,10 @@ async function loadPage() {
             staleUsed = true;
             return json(409, { error: '设备状态已变化，请重新打开确认窗口核对后再提交。', code: 'revision-stale' });
           }
+          // P3-03：未带登录密码的高风险解锁须升级认证；带了即放行。
+          if (behavior.disable === 'step-up' && !body.loginPassword) {
+            return json(409, { error: '本次解锁风险较高，请重新输入登录密码完成验证后再试。', code: 'step-up-required' });
+          }
           return json(200, { ok: true, lockState: 'UNLOCKED', revision: deviceRevision + 1 });
         }
         if (u.startsWith('/lock/')) return json(200, { ok: true });
@@ -163,6 +167,7 @@ test('网页端关闭确认弹窗：60 秒＋刷新存活、重复提交一次�
   assert.equal(typeof sent.operationId, 'string');
   assert.ok(sent.operationId.length > 0);
   assert.equal(sent.revision, 3);
+  assert.equal(new URL(pg.calls.challenge[0].url, 'https://app.qfremote.top').searchParams.get('opId'), sent.operationId, '取挑战时带上本次操作编号（挑战与操作编号绑定）');
   assert.equal(doc.querySelector('#modalRoot .modal'), null, '成功后弹窗关闭');
   assert.match(doc.body.textContent, /屏幕锁已关闭/, '成功后 toast 提示');
 
@@ -204,6 +209,20 @@ test('网页端关闭确认弹窗：60 秒＋刷新存活、重复提交一次�
   assert.match(doc.querySelector('#lk-cf-err').textContent, /暂时无法连接/);
   assert.match(doc.querySelector('#lockBody').textContent, /已锁定/, '面板仍显示已锁定');
   assert.equal(pg.calls.disable.length, disBefore3 + 1);
+
+  // 5b. step-up-required：弹窗不消失，填登录密码后可重新确认（P3-03）
+  pg.behavior.disable = 'step-up';
+  const disBefore4 = pg.calls.disable.length;
+  doc.querySelector('#lk-cf-go').click();
+  await tick(12);
+  assert.ok(doc.querySelector('#modalRoot .modal'), 'step-up 拒绝后弹窗仍在');
+  assert.match(doc.querySelector('#lk-cf-err').textContent, /风险较高/);
+  assert.equal(pg.calls.disable.length, disBefore4 + 1);
+  doc.querySelector('#lk-cf-pw').value = 'correct-pw';
+  doc.querySelector('#lk-cf-go').click();
+  await tick(12);
+  assert.equal(doc.querySelector('#modalRoot .modal'), null, '填登录密码后重新确认成功、弹窗关闭');
+  assert.equal(pg.calls.disable[pg.calls.disable.length - 1].loginPassword, 'correct-pw');
 
   // 6. Esc 关闭弹窗（全局 keydown → closeModal；退出动画 130ms，假时钟须推进）
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));

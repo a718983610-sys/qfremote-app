@@ -237,8 +237,12 @@ function createLockBridge(getSession, opts) {
       })).filter(d => d.id);
     },
     // C 线：关闭确认弹窗打开时取短期操作挑战（5 分钟、单次、绑定设备）。
-    async challenge(id, op) {
-      const r = await request('GET', '/challenge?id=' + encodeURIComponent(id) + '&op=' + encodeURIComponent(op || 'disarm'));
+    // P3-03：把弹窗打开时生成的操作编号随取挑战请求带上（opId），服务端
+    // 把挑战与该编号绑定，提交时编号不符即拒绝（防挑战被挪用到另一操作）。
+    async challenge(id, op, operationId) {
+      let q = '/challenge?id=' + encodeURIComponent(id) + '&op=' + encodeURIComponent(op || 'disarm');
+      if (typeof operationId === 'string' && operationId) q += '&opId=' + encodeURIComponent(operationId);
+      const r = await request('GET', q);
       return { ok: true, challenge: r.challenge, expiresAt: r.expiresAt, op: r.op, deviceId: r.deviceId };
     },
     async enable(id, password) {
