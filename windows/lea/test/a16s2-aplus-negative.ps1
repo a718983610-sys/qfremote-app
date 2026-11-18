@@ -43,11 +43,22 @@
     v2 探针改用 session.login_changed 是按 GPT 定夺的无副作用探针，
     不是因为 lea.status 不可用。
   日志核对（GPT 定夺问题 4 第四项）：按阶段核对，不用全局白名单。
-    N4 期间生产日志／审计必须零增量；N5 期间生产只允许本次探针的
-    预期拒绝事件（诊断行＋REJECT 行各 1，时间在 N5 窗口内、命令与
-    拒绝原因与实际调用身份一致、无 TEST 相关行、无绑定／吊销／
-    改状态行）。其余与探针无关的生产并发日志行只记 INFO，不强行
-    归因于测试；但任何含绑定／吊销／改状态标记的新行一律 FAIL。
+    N4 期间生产日志／审计必须零增量。N5 期间生产只允许本次探针的
+    预期拒绝事件；TEST 侧与生产侧的期望按各自二进制世代分开核对
+    （见“世代钉死”）。其余与探针无关的生产并发日志行只记 INFO，
+    不强行归因于测试；但任何含绑定／吊销／改状态标记的新行一律 FAIL。
+  世代钉死（审核线 v2→v3 退回发现；生产侧期望错世代会预定误判）：
+    - TEST 侧钉 A+ 合并树构建 ac01bca：一次准入拒绝写 2 行服务日志
+      （internal-allow: reject 九字段诊断行＋REJECT internal 行）＋1 条
+      admit-reject 审计（detail 为 8 个统一原因之一，细原因经映射核对）。
+    - 生产侧钉 2026-11-17 21:30:22 部署的冻结树二进制（SHA
+      68CB03E30B298AC88B82A45A34AE6C8B9A6C697CA8FD96514C4102635FEFA741，
+      部署世代 e3eefd4，A16-S2 期间从未重部署）：一次准入拒绝
+      只写 1 行服务日志（REJECT internal cmd=session.login_changed
+      caller-not-allowed）＋1 条 admit-reject 审计（detail 固定值
+      internal-caller-not-allowed），不写诊断行。活体证据：阶段 1
+      终端输出 6 次准入拒绝全为单行 REJECT，internal-allow 行 0 条。
+    - 生产若重部署，必须先按新二进制重钉生产侧期望再跑本脚本。
   本文件须以带 UTF-8 BOM 版传到真机（PS 5.1 读无 BOM 的中文脚本会报假
   语法错）；跑之前先在真机上 Parser::ParseFile 校验 0 错再执行。
 .PARAMETER TestInstallDir
@@ -294,15 +305,20 @@ function Test-TimestampInWindow {
 
 function Test-RejectLogLines {
     param([string[]]$NewLines, [string]$ExpectedClientPath, [datetime]$WinStart, [datetime]$WinEnd,
-        [string]$ExpectedUnifiedReason)
-    # 核对一次预期准入拒绝产生的两行服务日志：
-    # ① internal-allow: reject 诊断行（含 client_image 与细原因）；
-    # ② REJECT internal cmd=session.login_changed caller-not-allowed 行。
-    # 两行时间均须在探针窗口内；细原因经映射须与审计 detail（统一原因）一致；
-    # 任何含绑定／吊销／改状态／TEST 标记的新行一律不合格；
+        [string]$ExpectedUnifiedReason, [bool]$RequireDiagLine = $true)
+    # 核对一次预期准入拒绝产生的服务日志。
+    # TEST 侧（RequireDiagLine=$true，A+ 合并树 ac01bca）：诊断行＋REJECT 行
+    # 各 1；诊断行含 client_image 与细原因，细原因经映射须与审计 detail
+    # （统一原因）一致；两行时间均须在探针窗口内。
+    # 生产侧（RequireDiagLine=$false，冻结树已部署二进制 e3eefd4）：恰好
+    # 1 行 REJECT internal 行，时间在探针窗口内；不写诊断行，出现诊断行
+    # 即 FAIL（说明生产已重部署、世代钉死已失效，须先重钉期望再跑）。
+    # 两侧共同：任何含绑定／吊销／改状态／TEST 标记的新行一律不合格；
     # 其余与探针无关的行返回为 ExtraLines（只记 INFO，不强行归因）。
     $diag = $null
     $reject = $null
+    $rejectCount = 0
+    $unexpectedDiag = @()
     $stateLines = @()
     $extra = @()
     foreach ($ln in $NewLines) {
@@ -312,17 +328,25 @@ function Test-RejectLogLines {
         # 注意：image-mismatch／session-mismatch 两条拒绝路径除九字段
         # 诊断行外，还会在 collect 内多写一行内联诊断行（无 reason=，
         # 见 QFRLEA.c）；它不是状态行，归入 ExtraLines 只记 INFO，
-        # 行数差异由 N7 总增量断言捕获（预期 2 行，实际 3 行即 FAIL）。
+        # 行数差异由 N7 总增量断言捕获（TEST 侧预期 2 行，实际 3 行即 FAIL）。
         if ($ln -match 'internal-allow: reject reason=(\S+)') { $diag = $ln }
-        elseif ($ln -match 'REJECT internal cmd=session\.login_changed caller-not-allowed') { $reject = $ln }
-        elseif ($ln -match 'internal-allow: reject') { $extra += $ln }
+        elseif ($ln -match 'REJECT internal cmd=session\.login_changed caller-not-allowed') { $reject = $ln; $rejectCount++ }
+        elseif ($ln -match 'internal-allow: reject') {
+            if ($RequireDiagLine) { $extra += $ln } else { $unexpectedDiag += $ln }
+        }
         elseif ($ln -match $StateMarkerPattern) { $stateLines += $ln }
         else { $extra += $ln }
     }
     $why = @()
-    if (-not $diag) { $why += 'missing-diag-line' }
-    if (-not $reject) { $why += 'missing-reject-line' }
-    if ($diag) {
+    if ($RequireDiagLine) {
+        if (-not $diag) { $why += 'missing-diag-line' }
+    } else {
+        if ($diag) { $why += 'unexpected-diag-line (frozen deployed binary writes no diag line; re-pin expectations before running)' }
+        if ($unexpectedDiag.Count -gt 0) { $why += ('unexpected-diag-lines: ' + ($unexpectedDiag -join ' | ')) }
+        if ($rejectCount -gt 1) { $why += "reject-line-count=$rejectCount (want exactly 1)" }
+    }
+    if ($rejectCount -eq 0) { $why += 'missing-reject-line' }
+    if ($diag -and $RequireDiagLine) {
         if ($diag -notmatch 'client_image="([^"]*)"') { $why += 'diag-no-client-image' }
         elseif ($Matches[1] -ine $ExpectedClientPath) { $why += "diag-client-image=$($Matches[1]) (want $ExpectedClientPath)" }
         if ($diag -match 'internal-allow: reject reason=(\S+)') {
@@ -340,9 +364,11 @@ function Test-RejectLogLines {
 }
 
 function Test-AdmitRejectAudit {
-    param([int]$Before, [int]$After, [string]$AuditPath)
+    param([int]$Before, [int]$After, [string]$AuditPath, [string]$ExpectedDetail = '')
     # 预期：审计恰增 1 条；末条 event=admit-reject、command=session.login_changed、
-    # result=rejected、detail 为 8 个统一原因之一。返回 detail 供日志核对。
+    # result=rejected、detail 为 8 个统一原因之一；若传 ExpectedDetail，则
+    # detail 必须精确等于该值（生产侧冻结树已部署二进制固定值
+    # internal-caller-not-allowed）。返回 detail 供日志核对。
     if (($After - $Before) -ne 1) { return @{ Ok = $false; Detail = "audit-delta=$($After - $Before) (want 1)"; UnifiedReason = '' } }
     $last = Get-LastAuditEvent $AuditPath
     if (-not $last.ParseOk) { return @{ Ok = $false; Detail = "audit-last-line-not-json raw=$($last.Raw)"; UnifiedReason = '' } }
@@ -351,7 +377,9 @@ function Test-AdmitRejectAudit {
     if ($ev.event -ne 'admit-reject') { $why += "event=$($ev.event) (want admit-reject)" }
     if ($ev.command -ne 'session.login_changed') { $why += "command=$($ev.command) (want session.login_changed)" }
     if ($ev.result -ne 'rejected') { $why += "result=$($ev.result) (want rejected)" }
-    if ($ev.detail -notin $UnifiedReasons) { $why += "detail=$($ev.detail) (not a unified reason)" }
+    if ($ExpectedDetail) {
+        if ($ev.detail -ne $ExpectedDetail) { $why += "detail=$($ev.detail) (want exact $ExpectedDetail)" }
+    } elseif ($ev.detail -notin $UnifiedReasons) { $why += "detail=$($ev.detail) (not a unified reason)" }
     return @{ Ok = ($why.Count -eq 0); Detail = ($why -join '; '); UnifiedReason = $ev.detail }
 }
 
@@ -470,8 +498,9 @@ Assert-True ((Get-FileLineCount $prodAudit) -eq $n4ProdAudit0) 'N4-prod-audit-un
 # ---------- N5：生产客户端探针只到生产服务（B 路线：生产服务在跑时才做） ----------
 # 原理：生产客户端若误入 TEST，TEST 准入必拒且 TEST 审计会多一条；
 # 故 TEST 审计行数不变即证明请求没进 TEST。生产侧预期：管道服务端
-# PID＝生产 PID；响应为预期准入拒绝；生产审计恰增 1 条 admit-reject；
-# 生产日志新增诊断＋REJECT 两行（时间在 N5 窗口内、命令与拒绝原因与
+# PID＝生产 PID；响应为预期准入拒绝；生产审计恰增 1 条 admit-reject
+# （detail 固定值 internal-caller-not-allowed）；生产日志只新增 1 行
+# REJECT 行（冻结树已部署二进制不写诊断行；时间在 N5 窗口内、命令与
 # 实际调用身份一致、无 TEST 相关行、无绑定／吊销／改状态行）。
 if ($ProdClientPath -and (Test-Path -LiteralPath $ProdClientPath)) {
     $script:N5Ran = $true
@@ -496,11 +525,11 @@ if ($ProdClientPath -and (Test-Path -LiteralPath $ProdClientPath)) {
     Assert-True ((Get-FileLineCount $testAudit) -eq $n5TestAudit0) 'N5-test-audit-unchanged'
     Assert-True ((Get-FileLineCount $testLog) -eq $n5TestLog0) 'N5-test-svclog-unchanged'
     $n5ProdAudit1 = Get-FileLineCount $prodAudit
-    $audit5 = Test-AdmitRejectAudit $n5ProdAudit0 $n5ProdAudit1 $prodAudit
+    $audit5 = Test-AdmitRejectAudit $n5ProdAudit0 $n5ProdAudit1 $prodAudit 'internal-caller-not-allowed'
     Assert-True $audit5.Ok 'N5-prod-audit-one-admit-reject' $audit5.Detail
     $n5ProdLog1 = Get-FileLineCount $prodSvcLog
     $newLines5 = Get-NewLines $prodSvcLog ($n5ProdLog1 - $n5ProdLog0)
-    $log5 = Test-RejectLogLines $newLines5 $ProdClientPath $n5Start $n5End $audit5.UnifiedReason
+    $log5 = Test-RejectLogLines $newLines5 $ProdClientPath $n5Start $n5End $audit5.UnifiedReason $false
     Assert-True $log5.Ok 'N5-prod-svclog-expected-reject' $log5.Detail
     foreach ($ln in $log5.ExtraLines) { Write-Output "INFO N5-prod-svclog-extra-line: $ln" }
 } else {
@@ -541,8 +570,9 @@ foreach ($k in $prodSnapAfter.Keys) {
     if (-not $prodSnap.ContainsKey($k)) { $changed += "NEW $k" }
 }
 # 当日审计 JSONL 与服务日志是追加型日志：N5 的生产客户端探针会在其中
-# 留下恰好 1 条审计记录与恰好 2 行拒绝诊断（诊断行＋REJECT 行，已在
-# N5 按阶段逐行核对过），故这两个文件不参与严格哈希比对，但其总增量
+# 留下恰好 1 条审计记录与恰好 1 行 REJECT 日志（冻结树已部署二进制
+# 不写诊断行，已在 N5 按阶段逐行核对过），故这两个文件不参与严格哈希
+# 比对，但其总增量
 # 须与 N5 预期一致（见下面两项断言）；其余文件一字节都不许变。
 $prodAuditAfter = Get-FileLineCount $prodAudit
 $prodSvcLogAfter = Get-FileLineCount $prodSvcLog
@@ -559,7 +589,7 @@ if ($prodExists) {
     Assert-True ($prodAclAfter -eq $prodAclBefore) 'N7-prod-acl-unchanged'
 }
 $wantAuditDelta = if ($script:N5Ran) { 1 } else { 0 }
-$wantSvcDelta = if ($script:N5Ran) { 2 } else { 0 }
+$wantSvcDelta = if ($script:N5Ran) { 1 } else { 0 }
 Assert-True (($prodAuditAfter - $prodAuditBefore) -eq $wantAuditDelta) 'N7-prod-audit-total-delta-expected' "delta=$($prodAuditAfter - $prodAuditBefore) want=$wantAuditDelta"
 Assert-True (($prodSvcLogAfter - $prodSvcLogBefore) -eq $wantSvcDelta) 'N7-prod-svclog-total-delta-expected' "delta=$($prodSvcLogAfter - $prodSvcLogBefore) want=$wantSvcDelta"
 Write-Output "INFO prod-audit-lines before=$prodAuditBefore after=$prodAuditAfter prod-svclog-lines before=$prodSvcLogBefore after=$prodSvcLogAfter"
