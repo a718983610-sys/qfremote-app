@@ -9,7 +9,9 @@
     "dist": "electron-builder --win nsis",
     "start": "electron .",
     "test": "node test/run-all.js",
-    "check-safety": "node tools/check-electron-safety.js"
+    "check-safety": "node tools/check-electron-safety.js",
+    "predist": "node tools/check-build-flavor.js --flavor production",
+    "build:test-main": "node scripts/build-test-main.js"
   },
   "devDependencies": {
     "electron": "^45.0.0",
@@ -23,6 +25,8 @@
     },
     "files": [
       "main.js",
+      "build-flavor.js",
+      "test-policy.js",
       "ipc-trust.js",
       "view-registry.js",
       "permission-policy.js",

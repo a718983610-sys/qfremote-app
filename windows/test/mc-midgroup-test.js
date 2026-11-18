@@ -136,6 +136,7 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
         : sh;
       const sandbox = {
         __dirname: tmp,
+        IS_TEST: false, // A16-S2：main.js 模块级 TEST 身份镜像（生产模式；抽取函数引用它）。
         process: { platform: 'win32', env: { ProgramFiles: PF, ProgramData: PD }, resourcesPath: '', execPath: 'C:\\QFRemote\\QFRemote.exe' },
         app: { isPackaged: false, getVersion: () => o.appVersion },
         settings: { systemServicesTriedVersion: o.prevVersion },

@@ -61,7 +61,10 @@ function makeSandbox() {
     if (state.getPathThrows) throw new Error('no app');
     return n === 'userData' ? USERDATA : '';
   } };
-  const sandbox = { fs: fakeFs, os: fakeOs, path, app: fakeApp, console };
+  // A16-S2：bootLog 改走 testPolicy.bootLogFileName()；沙箱镜像生产值
+  //（抽取函数引用它，断言仍按生产文件名 qfremote-boot.log）。
+  const sandbox = { fs: fakeFs, os: fakeOs, path, app: fakeApp, console,
+    testPolicy: { bootLogFileName: () => 'qfremote-boot.log' } };
   const prelude = 'let bootLogLastPath = \'\';\nlet bootLogFallbackNoted = false;\n';
   const code = prelude + extractFunction(MAIN_SRC, 'bootLog') + '\n' + extractFunction(MAIN_SRC, 'bootLogPath');
   vm.createContext(sandbox);

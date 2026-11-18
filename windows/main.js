@@ -34,6 +34,17 @@ const qfProtocolMod = require('./qf-protocol'); // RC-03/07/08/09/10 画面与�
 let BUILD_INFO = { buildDate: '' };
 try { BUILD_INFO = require('./build-info.json'); } catch (e) { /* 开发环境缺失时用空值，关于面板显示 — */ }
 
+// ---------- TEST 隔离（A16-S2，GPT 2026-11-18 定夺 §1） ----------
+// 身份唯一源是构建期常量 test-policy.BUILD_FLAVOR（build-flavor.js，
+// 由打包脚本在 staging 时写入）；任何环境变量都不能改变 TEST 身份。
+// IS_TEST 为真时：全部本地状态走 TEST 独立目录、全部生产组件入口拒绝，
+// 校验失败即拒绝进入登录流程、绝不降级为生产模式。
+const testPolicy = require('./test-policy');
+const IS_TEST = testPolicy.isTestBuild();
+// TEST 启动校验结果（true 仅当 validateTestEnvironment 全过）；
+// notifyLeaLogin 在 TEST 下须此标志为真才执行。
+let testIsolationValidated = false;
+
 // ---------- 启动日志 bootLog（W-08，2.4.5；r10 fallback） ----------
 // 启动全程留痕：%TEMP%\qfremote-boot.log，本地时间戳＋节点＋分类码，
 // 只写时间戳与节点，绝不写账号、密码、令牌、cookie。写盘失败静默，
@@ -56,7 +67,7 @@ function bootLog(tag, detail) {
       p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
     const line = ts + ' ' + tag + (detail ? ' ' + String(detail).replace(/[\r\n]+/g, ' ') : '') + '\n';
     try {
-      const primary = path.join(os.tmpdir(), 'qfremote-boot.log');
+      const primary = path.join(os.tmpdir(), testPolicy.bootLogFileName());
       fs.appendFileSync(primary, line);
       bootLogLastPath = primary;
       return;
@@ -64,7 +75,7 @@ function bootLog(tag, detail) {
     try {
       const dir = path.join(app.getPath('userData'), 'logs');
       try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
-      const fb = path.join(dir, 'qfremote-boot.log');
+      const fb = path.join(dir, testPolicy.bootLogFileName());
       if (!bootLogFallbackNoted) {
         try { fs.appendFileSync(fb, ts + ' bootlog-fallback primary-tmpdir-unwritable\n'); } catch (e) { /* ignore */ }
         bootLogFallbackNoted = true;
@@ -74,7 +85,7 @@ function bootLog(tag, detail) {
     } catch (e2) { /* ignore */ }
   } catch (e) { /* ignore */ }
 }
-function bootLogPath() { try { if (bootLogLastPath) return bootLogLastPath; return path.join(os.tmpdir(), 'qfremote-boot.log'); } catch (e) { return ''; } }
+function bootLogPath() { try { if (bootLogLastPath) return bootLogLastPath; return path.join(os.tmpdir(), testPolicy.bootLogFileName()); } catch (e) { return ''; } }
 
 // ---------- 全局异常处理（W-16，2.4.5） ----------
 // 主进程任意未捕获异常/未处理拒绝：记 bootLog、弹原生人话提示、干净退出，
@@ -128,7 +139,10 @@ const ALLOWED_HOST = 'app.qfremote.top';
 // certificate-error 处理：正式域名是公共 CA 证书，不放行任何证书错误）。
 const ALLOWED_PORTS = ['443', ''];
 const TOOLBAR_HEIGHT = 52; // 重做 A §3.2：工具栏 52px（原 48px）
-const PREVIEW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
+const PREVIEW_RAW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
+// TEST 隔离：QFREMOTE_PREVIEW=main 只能辅助 UI 预览，绝不能作为 TEST
+// 执行模式；TEST 构建下 PREVIEW 恒为空，预览流程一律不走。
+const PREVIEW = IS_TEST ? '' : PREVIEW_RAW;
 const PREVIEW_DIR = process.env.QFREMOTE_PREVIEW_DIR || '';
 const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'light' | 'dark'（旧 'blue' 为历史键名，读兼容归一化为 'light'）
 // 仅预览自检：探活目标可经环境变量改指（与生产相同的探活代码、仅路由不同）；
@@ -158,13 +172,31 @@ app.on('web-contents-created', (e, wc) => {
 // 2.3.2 互联窗第一步：把运行时版本注入统一版本头模块（各请求出口共用，
 // 服务端本版只记录观察；见 client-version.js 文件头口径）。
 try { clientVersion.setClientVersion(app.getVersion()); } catch (e) { /* 回落 package.json 版本 */ }
-if (process.platform === 'win32') app.setAppUserModelId('com.qfremote.desktop');
+if (process.platform === 'win32') app.setAppUserModelId(testPolicy.appUserModelId());
 if (process.getuid && process.getuid() === 0) {
   app.commandLine.appendSwitch('no-sandbox');
   app.commandLine.appendSwitch('disable-gpu');
 }
 if (PREVIEW && process.env.QFREMOTE_PREVIEW_USERDATA) {
   try { app.setPath('userData', process.env.QFREMOTE_PREVIEW_USERDATA); } catch (e) { /* ignore */ }
+}
+// TEST 隔离：userData/sessionData 须在 Electron ready 前配置，且必须在
+// loadSettings()/credStore 等捕获 userData 之前（模块作用域 :237 起）
+// 完成——故放在此处、单实例锁之前。TEST 下：
+//   · userData 强制为 %APPDATA%\QFRemote-TEST（与生产隔离）；
+//   · 运行时强制校验（运行文件／重解析点／TEST 客户端 SHA／LEA 目录），
+//     任一条件不满足即记日志＋弹框＋app.exit(1)，绝不降级为生产模式；
+//   · 校验通过后 testIsolationValidated=true，notifyLeaLogin 才可执行。
+if (IS_TEST) {
+  try { app.setPath('userData', testPolicy.testUserDataDir(app)); } catch (e) { /* 下面校验会拦下 */ }
+  const testCheck = testPolicy.validateTestEnvironment(process.execPath);
+  if (!testCheck.ok) {
+    bootLog('test-isolation.fail', testCheck.failures.join(' | '));
+    try { dialog.showMessageBoxSync(null, { type: 'error', title: 'QFRemote TEST', message: 'TEST 隔离校验未通过，拒绝启动。\n' + testCheck.failures.join('\n') }); } catch (e) { /* ignore */ }
+    app.exit(1);
+  }
+  testIsolationValidated = true;
+  bootLog('test-isolation.ok', 'TEST 模式已校验：' + testPolicy.testExePath());
 }
 
 // 证书处理：2.4.2 起全部自家页面走正式域名（公共 CA 签发，证书链正常），
@@ -349,7 +381,7 @@ function safeLoad(wc, url) {
   } catch (e) { /* ignore */ }
 }
 let pendingManualClear = false; // 已命中退出、等回到登录页时把会话 cookie 清干净
-function authSession() { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }
+function authSession() { const s = session.fromPartition(testPolicy.consolePartition()); permissionPolicy.installPermissionPolicy(s); return s; }
 let cookieFlushTimer = null;
 function flushConsoleCookies() {
   try {
@@ -836,6 +868,7 @@ function saveSettings() {
   } catch (e) { /* ignore */ }
 }
 function applyAutoLaunchDefault() {
+  if (IS_TEST) return; // TEST 隔离：不注册 Windows 自启动。
   if (!app.isPackaged || PREVIEW) return;
   if (settings.autoLaunchConfigured !== true) {
     // W-23：setLoginItemSettings 失败记 bootLog，不再静默吞掉。
@@ -1443,7 +1476,7 @@ function createWindow() {
   win.contentView.addChildView(toolbarView);
   viewRegistry.register('toolbar', toolbarView, { parent: win.contentView }); // S-001
 
-  const ses = session.fromPartition('persist:qfremote');
+  const ses = session.fromPartition(testPolicy.consolePartition());
   permissionPolicy.installPermissionPolicy(ses); // S-003：新 session 创建时自动安装
   consoleSes = ses;
   // 会话 cookie 有变动就及时刷盘：崩溃/强退也不丢登录态（自动恢复第一顺位）
@@ -1830,7 +1863,7 @@ function startProbeLoop() {
 // ---------- 扩展服务（积分 / 站长管理，v2.2.0） ----------
 // 会话 cookie 取自控制台所在的 persist 会话分区（控制台页就跑在这个分区里）；
 // 请求只发往 svc-urls 解析出的自家服务地址，失败一律安静忽略，不弹窗不打断。
-function consoleSession() { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }
+function consoleSession() { const s = session.fromPartition(testPolicy.consolePartition()); permissionPolicy.installPermissionPolicy(s); return s; }
 // DS-4（M-C 中组，DS-REVIEW §3.4）：只发目标 URL 域/路径下有效的 cookie——
 // 整罐不分域发给白名单子域会绕过同源边界。过滤逻辑在 svc-urls.js
 // （filterCookiesForUrl，纯函数可单测），此处只传目标地址。
@@ -2955,9 +2988,11 @@ trustedOn('qf-win', (event, action) => {
 });
 
 trustedHandle('qf-autolaunch-get', () => {
+  if (IS_TEST) return false; // TEST 隔离：不注册 Windows 自启动。
   try { return app.getLoginItemSettings().openAtLogin; } catch (e) { return false; }
 });
 trustedOn('qf-autolaunch-set', (event, on) => {
+  if (IS_TEST) return; // TEST 隔离：不注册 Windows 自启动。
   try { app.setLoginItemSettings({ openAtLogin: !!on }); } catch (e) { bootLog('autolaunch.set-failed', e && e.message || String(e)); }
 });
 
@@ -3182,6 +3217,7 @@ function broadcastUpdate() {
 }
 let forceSnoozed = false; // W-12③：强更放行后，本会话内不再重复弹强更提醒
 async function runUpdateCheck(timeoutMs, opts) {
+  if (IS_TEST) return updateState; // TEST 隔离：禁用实际更新检查。
   if (updateChecking) return updateState;
   if (forceSnoozed) return updateState;
   const auto = !!(opts && opts.auto);
@@ -3239,6 +3275,7 @@ trustedHandle('qf-update-settings-set', (event, patch) => {
   return updateSettings();
 });
 trustedOn('qf-update-download', async (event, opts) => {
+  if (IS_TEST) return; // TEST 隔离：禁用实际下载。
   if (updateDownloading || !updateState.manifest) return;
   updateDownloading = true;
   // D-03：会话中不下载（update.js downloadUpdate 里另有同一道门）。
@@ -3281,6 +3318,7 @@ trustedOn('qf-update-download', async (event, opts) => {
 // 静默直装回当前文件夹——不弹向导、不出现目录页（站长 2026-10-25 10:16 口径，
 // 细节见 installer-launch.js 文件头）。只有网页下载的安装包双击时才走向导。
 function launchDownloadedInstaller(file) {
+  if (IS_TEST) return false; // TEST 隔离：禁用安装器执行。
   return installerLaunch.launchInstallerSilent(file, { execPath: process.execPath });
 }
 // W-27：更新交接退出——先销毁窗口再立即 app.exit(0)，不再用 800ms 拍脑袋
@@ -3291,6 +3329,7 @@ function quitForInstaller() {
   try { app.exit(0); } catch (e) { try { app.quit(); } catch (e2) { /* ignore */ } }
 }
 trustedOn('qf-update-open', () => {
+  if (IS_TEST) return; // TEST 隔离：禁用更新安装。
   if (!updateState.download || !updateState.download.file) return;
   // D-03：会话中不安装（装了要退应用，会断会话）。
   if (hasActiveSession()) {
@@ -3431,6 +3470,7 @@ trustedOn('qf-force-open', () => {
 trustedOn('qf-force-release', () => { releaseForceWindow(); });
 // 启动门：返回 true 表示强更页已接管（不要再建主窗口）
 async function startupUpdateGate() {
+  if (IS_TEST) { bootLog('startupUpdateGate.test-skip'); return false; } // TEST 隔离：禁用强制更新门。
   bootLog('startupUpdateGate.begin');
   dropStalePending(); // 新版装好后首启：待更版本已 <= 本机版本，自动清除
   // （须在 D-05 跳过之前：清过期待更只是本地状态清理，不取清单、不检查。）
@@ -3486,6 +3526,7 @@ async function startupUpdateGate() {
 // 不可用时回落 runas UAC。opts.manual=true 时绕过每日 3 次封顶
 // （关于面板/锁面板的手动「重新尝试修复」，W-14）。
 async function runStartupAgentHeal(opts) {
+  if (IS_TEST) return { outcome: 'skipped', code: 'test-mode-denied', rounds: 0 }; // TEST 隔离：禁用实际生产 agent 自愈。
   if (process.platform !== 'win32') return { outcome: 'skipped', code: 'non-windows', rounds: 0 };
   const manual = !!(opts && opts.manual);
   try {
@@ -3668,6 +3709,7 @@ function lockComponentSourceDir() {
   return path.join(__dirname, 'privacy-lock');
 }
 function lockServiceInstalled() {
+  if (IS_TEST) return false; // TEST 隔离：TEST 下不认生产锁组件（锁组件根本不存在）。
   try {
     const pf = process.env.ProgramFiles || '';
     if (pf && fs.existsSync(path.join(pf, 'QFRemote', 'Lock', 'device.json'))) return true;
@@ -3763,7 +3805,83 @@ function sha256File(p) {
 // 版本对齐是正确行为（强制对齐：旧应用未必理解新 LEA 协议）。
 // 三文件约 600KB 级，哈希毫秒级，每启一次不构成负担。LEA_DEGRADED
 // 标记与服务注册检查保留不动。
+// ---------- TEST 专用 LEA 检查（A16-S2，GPT 2026-11-18 定夺 §1） ----------
+// 与生产版一一对应，但全部指向 TEST 身份（QFRLEA-TEST 服务、
+// C:\QFRLEA-TEST\LEA、%ProgramData%\QFR\LEA-TEST、TEST 注册表键）。
+// 关键差异：TEST 注册表很可能没有 version（服务经 sc.exe 创建、未跑
+// --install-service 写注册表），故注册表版本只作信息记录、绝不作通过
+// 条件；TEST 客户端 SHA 必须等于构建期期望值，否则判未装。
+function testLeaRegistryValue(name) {
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync(sysPrograms.regPath(), ['query', testPolicy.testRegKey(), '/v', name], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
+    if (!r || r.status !== 0 || !r.stdout) return '';
+    const m = String(r.stdout).match(/REG_SZ\s+(.+?)\s*$/m);
+    return m ? m[1].trim() : '';
+  } catch (e) { return ''; }
+}
+function testLeaServiceState() {
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync(sysPrograms.scPath(), ['query', testPolicy.testServiceName()], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
+    if (!r || r.status !== 0 || !r.stdout) return '';
+    const m = String(r.stdout).match(/STATE\s*:\s*\d+\s+(\w+)/);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+function testLeaServiceInstalled(quiet) {
+  try {
+    const dir = testPolicy.testLeaDir();
+    for (const name of ['QFRLEA.exe', 'qf-lea-client.exe', 'version.json']) {
+      if (!fs.existsSync(path.join(dir, name))) {
+        if (!quiet) bootLog('test-lea.missing', name);
+        return false;
+      }
+    }
+    const pd = process.env.ProgramData || '';
+    if (pd && fs.existsSync(path.join(pd, 'QFR', testPolicy.testDataLeaf(), 'LEA_DEGRADED'))) return false;
+    try {
+      const cp = require('child_process');
+      const r = cp.spawnSync(sysPrograms.scPath(), ['query', testPolicy.testServiceName()], { windowsHide: true, cwd: sysPrograms.safeCwd(), timeout: 10000, encoding: 'utf8' });
+      if (!r || r.status !== 0) return false;
+    } catch (e) { return false; }
+    if (!testPolicy.testClientShaOk()) {
+      if (!quiet) bootLog('test-lea.client-sha-mismatch', '');
+      return false;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+function testLeaHealthCheck() {
+  const reasons = [];
+  let registryVersion = '';
+  let packagedVersion = '';
+  try {
+    registryVersion = testLeaRegistryValue('version');
+    const installState = testLeaRegistryValue('installState');
+    if (installState === 'PendingRepair') reasons.push('pending-repair');
+    const pd = process.env.ProgramData || '';
+    if (pd && fs.existsSync(path.join(pd, 'QFR', testPolicy.testDataLeaf(), 'LEA_DEGRADED'))) reasons.push('degraded-marker');
+    const state = testLeaServiceState();
+    if (!state) reasons.push('service-not-registered');
+    else if (state !== 'RUNNING') reasons.push('service-not-running:' + state);
+    try {
+      const raw = String(fs.readFileSync(path.join(testPolicy.testLeaDir(), 'version.json'), 'utf8'));
+      try { const vj = JSON.parse(raw); packagedVersion = (vj && typeof vj.version === 'string') ? vj.version : raw.split(/\r?\n/)[0].trim(); }
+      catch (e) { packagedVersion = raw.split(/\r?\n/)[0].trim(); }
+    } catch (e) { packagedVersion = ''; }
+    // TEST 注册表无 version 是已知常态（见本节文件头），只记信息行、不判错。
+    if (!registryVersion) bootLog('test-lea-health.reg-version-missing', 'info-only');
+    if (!testLeaServiceInstalled(true)) reasons.push('files-or-registration');
+  } catch (e) { reasons.push('check-throw:' + (e && e.message || String(e))); }
+  return {
+    healthy: reasons.length === 0,
+    pendingRepair: reasons.indexOf('pending-repair') >= 0 || reasons.indexOf('degraded-marker') >= 0,
+    reasons, registryVersion, packagedVersion
+  };
+}
 function leaServiceInstalled(quiet) {
+  if (IS_TEST) return testLeaServiceInstalled(quiet); // TEST 隔离：不查生产安装目录／生产服务。
   try {
     const pf = process.env.ProgramFiles || '';
     if (!pf) return false;
@@ -3868,6 +3986,7 @@ async function showLeaRepairFailure() {
   showHealFailure('本地代理服务修复失败：请重新运行安装包，或稍后重试；远程控制暂不可用。', shownKey);
 }
 async function repairLeaService() {
+  if (IS_TEST) { bootLog('lea-repair.test-denied', ''); return { ok: false, reason: 'test-mode-denied' }; } // TEST 隔离：禁用修复行为（不健康只记日志，永不修复）。
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   if (leaRepairRunning) return { ok: false, reason: 'already-running' };
   leaRepairRunning = true;
@@ -3943,6 +4062,14 @@ async function repairLeaService() {
 // A1 登录健康检查入口（console 分支登录成功后调用，非阻塞）：
 // 健康即什么都不做；不健康才走一次修复（repairLeaService）。
 async function maybeCheckLeaHealth() {
+  if (IS_TEST) {
+    // TEST 专用健康检查：不健康只记日志，永不修复（repairLeaService 在 TEST 下禁用）。
+    let h;
+    try { h = testLeaHealthCheck(); } catch (e) { bootLog('lea-health.throw', e && e.message || String(e)); return { ok: false, reason: 'throw' }; }
+    if (h.healthy) { bootLog('test-lea-health.ok', h.packagedVersion || ''); return { ok: true, reason: 'healthy' }; }
+    bootLog('test-lea-health.unhealthy', h.reasons.join(';'));
+    return { ok: false, reason: 'test-unhealthy-no-repair' };
+  }
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   let h;
   try { h = leaHealthCheck(); } catch (e) { bootLog('lea-health.throw', e && e.message || String(e)); return { ok: false, reason: 'throw' }; }
@@ -3965,6 +4092,13 @@ async function maybeCheckLeaHealth() {
 // 存在性检查与返回逻辑不变；旧目录独存时仍能兜底找到。
 let leaLastNotifiedAccount = '';
 function leaClientExePath() {
+  if (IS_TEST) {
+    // TEST 隔离：只认经 SHA 核验的 TEST 客户端，不存在／SHA 不符即返回
+    // null，绝不回退生产路径（__dirname\lea／%ProgramFiles%\QFR\LEA）。
+    const c = testPolicy.testClientExePath();
+    if (fs.existsSync(c) && testPolicy.testClientShaOk()) return c;
+    return null;
+  }
   try {
     const pf = process.env.ProgramFiles || '';
     const cands = [];
@@ -4153,6 +4287,7 @@ async function syncEmergencyStop(knownStatus) {
   } catch (e) { return { ok: false, reason: 'throw' }; }
 }
 async function notifyLeaLogin(account) {
+  if (IS_TEST && !testIsolationValidated) { bootLog('lea.login-notify-test-denied', 'isolation-not-validated'); return { ok: false, reason: 'test-isolation-not-validated' }; } // TEST 隔离：未通过启动校验绝不进入登录流程。
   try {
     if (!account || account === leaLastNotifiedAccount) return { ok: false, reason: 'skip' };
     let deviceId = null;
@@ -4349,6 +4484,7 @@ function lockDeviceJsonPaths() {
   return out;
 }
 async function syncLockOwner(account) {
+  if (IS_TEST) return { ok: false, reason: 'test-mode-denied' }; // TEST 隔离：完全跳过生产锁 owner 同步（含 notifyLeaLogin 成功后的调用路径）。
   if (!account) return { ok: false, reason: 'no-account' };
   let changed = false;
   const needUac = [];
@@ -4465,6 +4601,7 @@ function scheduleLeaBackfillRecheck(intervalMs, maxAttempts) {
 }
 
 async function maybeInstallSystemServices(force) {
+  if (IS_TEST) { bootLog('system-services.test-skip', ''); return { ok: false, reason: 'test-mode-denied' }; } // TEST 隔离：完全跳过（不装 LEA、不装锁组件、不拉 UAC）。
   if (process.platform !== 'win32') return { ok: false, reason: 'non-windows' };
   if (systemServicesInstallTried && !force) return { ok: false, reason: 'already-tried' };
   systemServicesInstallTried = true;
@@ -4700,7 +4837,7 @@ trustedHandle('qf-diagnostics-copy', () => {
 // 口径写死：手动开关、默认关、开锁必须先设密码、非机主不显示开关（服务端判
 // owner、面板只呈现）。壳不存任何密码，密码只在提交瞬间过桥。
 const lockBridge = lockBridgeMod.createLockBridge(
-  () => { const s = session.fromPartition('persist:qfremote'); permissionPolicy.installPermissionPolicy(s); return s; }, // S-003
+  () => { const s = session.fromPartition(testPolicy.consolePartition()); permissionPolicy.installPermissionPolicy(s); return s; }, // S-003
   { mock: PREVIEW === 'lock' || process.env.QFREMOTE_LOCK_MOCK === '1', clientVersion: () => clientVersion.getClientVersion() }
 );
 let lockWin = null;
@@ -4747,6 +4884,7 @@ async function lockCall(fn) {
   catch (e) { return { ok: false, code: (e && e.code) || null, error: (e && e.message) || '操作失败，请稍后再试。' }; }
 }
 trustedHandle('qf-lock-devices', async () => {
+  if (IS_TEST) return testPolicy.testDenied('qf-lock-devices'); // TEST 隔离：禁用生产锁操作。
   try {
     const devices = await lockBridge.listDevices();
     // W-11：每台设备附 presence 在线态（online true/false/null=未知）与
@@ -4801,9 +4939,9 @@ trustedHandle('qf-heal-retry', async () => {
     return { ok: true, outcome: (r && r.outcome) || 'unknown', code: (r && r.code) || null };
   } catch (e) { return { ok: false, outcome: 'unknown' }; }
 });
-trustedHandle('qf-lock-enable', (e, id, password) => lockCall(() => lockBridge.enable(id, password)));
-trustedHandle('qf-lock-disable', (e, id) => lockCall(() => lockBridge.disable(id)));
-trustedHandle('qf-lock-reset', (e, id, loginPassword, newPassword) => lockCall(() => lockBridge.reset(id, loginPassword, newPassword)));
+trustedHandle('qf-lock-enable', (e, id, password) => IS_TEST ? testPolicy.testDenied('qf-lock-enable') : lockCall(() => lockBridge.enable(id, password))); // TEST 隔离：禁用生产锁操作。
+trustedHandle('qf-lock-disable', (e, id) => IS_TEST ? testPolicy.testDenied('qf-lock-disable') : lockCall(() => lockBridge.disable(id))); // TEST 隔离：禁用生产锁操作。
+trustedHandle('qf-lock-reset', (e, id, loginPassword, newPassword) => IS_TEST ? testPolicy.testDenied('qf-lock-reset') : lockCall(() => lockBridge.reset(id, loginPassword, newPassword))); // TEST 隔离：禁用生产锁操作。
 trustedOn('qf-lock-open', () => openLockWindow());
 trustedOn('qf-lock-close', (event) => {
   const w = BrowserWindow.fromWebContents(event.sender);

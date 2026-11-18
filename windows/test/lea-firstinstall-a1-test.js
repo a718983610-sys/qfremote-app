@@ -170,6 +170,7 @@ const FNS = ['lockComponentSourceDir', 'lockServiceInstalled', 'leaServiceInstal
       };
       const sandbox = {
         __dirname: tmp,
+        IS_TEST: false, // A16-S2：main.js 模块级 TEST 身份镜像（生产模式；抽取函数引用它）。
         process: { platform: o.platform, env: { ProgramFiles: (o.envPf !== undefined ? o.envPf : PF), ProgramData: PD }, resourcesPath: '', execPath: 'C:\\QFRemote\\QFRemote.exe' },
         app: { isPackaged: false, getVersion: () => '3.0.0' },
         settings: {},

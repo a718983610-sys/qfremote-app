@@ -56,9 +56,12 @@ function ask(s, permission, url, gesture) {
   ok('C6_install_throw_false', installPermissionPolicy(bad, {}) === false);
 }
 {
-  // D. 静态：main.js 在全部 persist:qfremote 会话取用点安装策略。
+  // D. 静态：main.js 在全部会话取用点安装策略。分区名由
+  // testPolicy.consolePartition() 集中给出（A16-S2：生产
+  // 'persist:qfremote'／TEST 'persist:qfremote-test'），故按调用点
+  // 计数、不按字面量计数；每个取用点后须紧跟一次安装。
   const main = fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
-  const sites = (main.match(/session\.fromPartition\('persist:qfremote'\)/g) || []).length;
+  const sites = (main.match(/session\.fromPartition\(/g) || []).length;
   const installs = (main.match(/installPermissionPolicy\(/g) || []).length;
   ok('D1_all_partition_sites_covered', sites >= 4 && installs >= sites, { sites, installs });
   ok('D2_main_requires_policy', /require\('\.\/permission-policy'\)/.test(main));

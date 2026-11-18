@@ -111,6 +111,7 @@ function checkRendererFiles(root, violations) {
       'device-key.js', 'license.js', 'device-code.js', 'devices.js', 'client-version.js',
       'ext-retry.js', 'ipc-trust.js', 'lock.js', 'sys-programs.js', 'crash-handler.js',
       'settings-store.js', 'startup-stages.js', 'reconnect-policy.js', 'reconnect-ticket.js', 'tray-manager.js',
+      'test-policy.js', // A16-S2：TEST 隔离策略模块，主进程侧（仅被 main.js require，永不进渲染进程）
       'qf-fec.js', 'qf-idr.js', 'qf-relay.js', 'qf-transfer.js', 'qf-quality.js', 'qf-recording.js', 'qf-protocol.js'].indexOf(name) >= 0;
     if (name.endsWith('.html')) {
       let text = '';
