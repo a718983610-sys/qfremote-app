@@ -1088,11 +1088,14 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     }
     out->has_logon_sid = token_logon_sid_bytes(hCaller, out->caller_logon_sid,
                                                &out->caller_logon_sid_len);
-    /* 父进程：快照只用来发现父 PID；打开后全部核对都从该句柄上做。 */
+    /* 父进程：快照只用来发现父 PID；打开后全部核对都从该句柄上做。
+     * A16-S2 收口：父 PID 查不到（parent-not-found，统一理由
+     * identity-query-failed）与父镜像非法（parent-check-failed，统一
+     * 理由 parent-image-invalid）须分开，审计不得混为一谈。 */
     parent = caller_parent_pid(pid);
     if (!parent) {
         out->win32_error = GetLastError();
-        if (reason) snprintf(reason, reason_size, "%s", "parent-check-failed");
+        if (reason) snprintf(reason, reason_size, "%s", "parent-not-found");
         CloseHandle(hCaller);
         return 0;
     }
@@ -1176,7 +1179,14 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     return ok;
 }
 
-static int internal_caller_allowed(HANDLE pipe, lea_caller_identity_t *ident_out) {
+/* A16-S2 收口（GPT 2026-11-18 裁决问题 2）：返回 1=放行；返回 0=拒
+ * 绝，同时把同一次准入判定的统一理由（8 值枚举，见
+ * lea_unified_reject_reason）写进 reason_out（调用方直接用于审计
+ * JSONL detail，不得为写审计重判一次）。放行时 reason_out 写 "ok"。
+ * 对外回包仍用通用码（调用方负责），不泄露细分原因；结构化诊断行
+ * 仍记细原因 reason（比统一值更细，两者同源于同一次判定）。 */
+static int internal_caller_allowed(HANDLE pipe, lea_caller_identity_t *ident_out,
+                                   char *reason_out, size_t reason_out_size) {
     lea_caller_identity_t ident;
     char reason[64] = { 0 };
     if (!lea_collect_caller_identity(pipe, &ident, reason, sizeof(reason))) {
@@ -1198,9 +1208,13 @@ static int internal_caller_allowed(HANDLE pipe, lea_caller_identity_t *ident_out
         diag.win32_error = ident.win32_error;
         (void)lea_format_caller_diag(line, sizeof(line), &diag);
         svc_log("%s", line);
+        if (reason_out)
+            snprintf(reason_out, reason_out_size, "%s",
+                     lea_unified_reject_reason(reason));
         return 0;
     }
     if (ident_out) *ident_out = ident;
+    if (reason_out) snprintf(reason_out, reason_out_size, "%s", "ok");
     return 1;
 }
 
@@ -1218,111 +1232,353 @@ static DWORD pipe_client_session(HANDLE pipe) {
 
 /* ---------- emergency_stop 专用 admission（GPT 2026-11-18 裁决问题 1） ----------
  * 与 H01 内部命令面严格隔离：lea.emergency-stop／lea.emergency-stop-sync
- * 不进 handle_internal（S-021 五命令在那里拒绝），只走本函数。
- * 与 H01 的区别只有一个：会话谓词不同——H01（v3＋A16-S2）要求调用方
- * 会话＝父进程会话且该会话为 WTSActive（断开 RDP 拒绝，见
- * lea_collect_caller_identity），不要求控制台会话；紧急停控必须在
- * RDP 会话里也能用（用户正在 RDP 里发现异常才要停），故此处只要求
- * 调用方会话＝父进程会话（任意交互会话），不要求控制台会话、也不查
- * 会话连接态（A16-S2 未决：emergency-stop 是否同样须限 WTSActive，
- * 待裁决，不在本 commit 自决）。
- * 四项全过才放行，任一步取不到信息即拒绝（fail-closed）：
- * ①调用方镜像全路径＝安装目录 qf-lea-client.exe；
- * ②父进程镜像名＝QFRemote.exe 或 electron.exe；
- * ③调用方会话 id＝父进程会话 id；
- * ④调用方 token 用户 SID＝父进程 token 用户 SID。 */
-static DWORD emergency_stop_parent_pid(DWORD pid) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32W pe;
-    pe.dwSize = sizeof(pe);
-    DWORD parent = 0;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (pe.th32ProcessID == pid) { parent = pe.th32ParentProcessID; break; }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-    return parent;
-}
+ * 不进 handle_internal（S-021 五命令在那里拒绝），只走本函数；本函数
+ * 的放行结果只用于派发 handle_emergency_stop／handle_emergency_stop_sync，
+ * 绝不用于恢复控制、签发授权、换绑或执行普通命令（恢复只走已签名专用
+ * 票据 emergency_stop.recover，见下；停控标记的清除入口全树只有那一处）。
+ *
+ * 会话谓词（裁决问题 1）：不以 WTSActive 为停控前置条件。紧急停控是
+ * 安全终止操作——RDP 断开时恰恰可能需要立即停控。会话连接态只查询、
+ * 只记录进诊断（WTSActive／WTSDisconnected／…／未知），绝不用于决定
+ * 放行；连会话态查询本身失败也只记 unknown＋win32_error，不阻断已认
+ * 证的停控（诊断失败不得阻止停控，见下）。
+ *
+ * 可信身份（两个分支，任一全过才放行；不得仅凭命令名、不得仅凭
+ * SYSTEM、不得仅凭可执行文件名、不得仅凭用户提供的 source 字段——
+ * 管道协议里根本没有 source 字段，source_type 由已鉴权的身份分支
+ * 决定）：
+ *  分支 A local-client（交互会话里的合法调用方，WTSActive 与
+ *  WTSDisconnected 均可停控）：
+ *   ①调用方镜像全路径＝安装目录 qf-lea-client.exe；
+ *   ②父进程镜像全路径＝安装根目录 QFRemote.exe（parent_image_is_main_app，
+ *     与 H01 同款；开发构建另接受 electron.exe，见该函数）；
+ *   ③调用方会话 id＝父进程会话 id，且调用方会话非 0；
+ *   ④调用方 token 用户 SID（二进制 EqualSid）＝父进程 token 用户 SID；
+ *   ⑤调用方登录 LUID＝父进程登录 LUID；
+ *   ⑥父进程创建时间不晚于调用方（防 PID 复用）。
+ *  分支 B system-service（合法 SYSTEM 安全服务，Session 0）：
+ *   ①同分支 A（调用方镜像全路径＝安装目录 qf-lea-client.exe）；
+ *   ②调用方 token 用户 SID＝SYSTEM（S-1-5-18，well-known SID 二进制比对）；
+ *   ③调用方会话 id＝0；
+ *   ④父进程镜像全路径＝%SystemRoot%\System32\services.exe（SCM）或
+ *     安装目录 QFRLEA.exe（服务本体自发停控），二者之外一律拒绝；
+ *   ⑤父进程 token 用户 SID＝SYSTEM；
+ *   ⑥父子登录 LUID 相等；⑦父进程创建时间不晚于调用方。
+ * 任一步取不到必要认证数据即拒绝（fail-closed）。只有已认证的调用方
+ * 才能触发停止；停止本身只写 emergency-stop.json 持久化标记（见
+ * handle_emergency_stop），恢复须走独立且更严格的签名票据流程。
+ *
+ * 诊断（裁决问题 1 九字段＋扩展字段）：放行与拒绝都记一行
+ * emergency-stop-allow（lea_format_emergency_stop_diag），含九字段＋
+ * admission_type=emergency-stop、source_type、decision、reason、stop_id。
+ * svc_log 是 best-effort（写失败静默返回，见 svc_log），诊断行写出与
+ * 否绝不影响本次准入判定——诊断日志写入失败不得阻止已经认证成功的
+ * 紧急停控。stop_id 为判定时刻已活动的停控事件 id；无活动停控记 none；
+ * 标记文件不可读（损坏）记 null。注意：新停控的事件 id 由
+ * handle_emergency_stop 在准入之后生成，见其 "emergency-stop ok
+ * event=" 行，本行不预编 id。 */
+typedef struct {
+    int allowed;
+    char reason[64];       /* 细原因，放行时为 "ok" */
+    char unified[64];      /* 统一审计理由（8 值枚举），放行时为 "ok" */
+    char source_type[32];  /* "local-client" / "system-service" / "unknown" */
+    DWORD client_pid;
+    DWORD parent_pid;
+    DWORD client_session;  /* LEA_DIAG_UNKNOWN_ID = 未查到 */
+    DWORD parent_session;  /* LEA_DIAG_UNKNOWN_ID = 未查到 */
+    char client_image[MAX_PATH];
+    char parent_image[MAX_PATH];
+    DWORD session_state;   /* WTS_CONNECTSTATE_CLASS，UNKNOWN = 未查到 */
+    DWORD win32_error;
+    char stop_id[128];     /* 活动停控事件 id / "none" / ""（不可读→null） */
+    int stop_id_known;     /* 0 = 标记不可读，诊断记 null */
+} lea_emergency_admission_t;
 
-static int token_user_sid_string(HANDLE h, char *out, size_t out_size) {
-    HANDLE tok = NULL;
-    if (!OpenProcessToken(h, TOKEN_QUERY, &tok)) return 0;
-    DWORD len = 0;
-    GetTokenInformation(tok, TokenUser, NULL, 0, &len);
-    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) {
-        CloseHandle(tok);
-        return 0;
-    }
-    TOKEN_USER *tu = (TOKEN_USER *)malloc(len);
-    if (!tu) {
-        CloseHandle(tok);
-        return 0;
-    }
-    int ok = 0;
-    if (GetTokenInformation(tok, TokenUser, tu, len, &len)) {
-        LPSTR s = NULL;
-        if (ConvertSidToStringSidA(tu->User.Sid, &s) && s) {
-            snprintf(out, out_size, "%s", s);
-            LocalFree(s);
-            ok = 1;
-        }
-    }
-    free(tu);
-    CloseHandle(tok);
-    return ok;
-}
-
-static int emergency_stop_caller_allowed(HANDLE pipe) {
-    DWORD pid = 0;
-    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h) return 0;
-    /* ① 调用方镜像全路径。 */
-    WCHAR img[MAX_PATH];
-    DWORD n = MAX_PATH;
-    int ok = 0;
-    if (QueryFullProcessImageNameW(h, 0, img, &n) && n > 0) {
-        char img_u8[MAX_PATH];
-        utf16_to_utf8(img, img_u8, sizeof(img_u8));
-        char expect[MAX_PATH];
-        snprintf(expect, sizeof(expect), "%s\\qf-lea-client.exe", g_install_dir);
-        for (char *p = img_u8; *p; p++) if (*p == '/') *p = '\\';
-        for (char *p = expect; *p; p++) if (*p == '/') *p = '\\';
-        ok = (_stricmp(img_u8, expect) == 0);
-    }
-    /* ③ 调用方会话（先取，④ 要用同一句柄的 token）。 */
-    DWORD caller_session = 0;
-    if (ok && !ProcessIdToSessionId(pid, &caller_session)) ok = 0;
-    char caller_sid[256] = { 0 };
-    if (ok && !token_user_sid_string(h, caller_sid, sizeof(caller_sid))) ok = 0;
-    CloseHandle(h);
-    if (!ok) return 0;
-    /* ② 父进程镜像名。 */
-    DWORD parent = emergency_stop_parent_pid(pid);
-    if (!parent) return 0;
-    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
-    if (!ph) return 0;
+/* SYSTEM 安全服务分支的父进程准入：全路径须为 SCM 或服务本体。
+ * image_out 收父进程全路径（供诊断复用，不二次打开）。 */
+static int emergency_stop_system_parent_ok(HANDLE hParent,
+                                           char *image_out, size_t image_out_size) {
     WCHAR pimg[MAX_PATH];
     DWORD pn = MAX_PATH;
-    int pok = 0;
-    if (QueryFullProcessImageNameW(ph, 0, pimg, &pn) && pn > 0) {
-        WCHAR *base = pimg;
-        for (WCHAR *p = pimg; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
-        pok = (_wcsicmp(base, L"QFRemote.exe") == 0 ||
-               _wcsicmp(base, L"electron.exe") == 0);
+    WCHAR sysdir[MAX_PATH];
+    char pimg_u8[MAX_PATH];
+    char expect_scm[MAX_PATH];
+    char expect_svc[MAX_PATH];
+    char *p;
+    if (!QueryFullProcessImageNameW(hParent, 0, pimg, &pn) || pn == 0) return 0;
+    utf16_to_utf8(pimg, pimg_u8, sizeof(pimg_u8));
+    if (image_out) snprintf(image_out, image_out_size, "%s", pimg_u8);
+    if (!GetSystemDirectoryW(sysdir, MAX_PATH)) return 0;
+    {
+        char sysdir_u8[MAX_PATH];
+        utf16_to_utf8(sysdir, sysdir_u8, sizeof(sysdir_u8));
+        snprintf(expect_scm, sizeof(expect_scm), "%s\\services.exe", sysdir_u8);
     }
-    /* ③ 父进程会话＝调用方会话。 */
-    DWORD parent_session = 0;
-    if (pok && !ProcessIdToSessionId(parent, &parent_session)) pok = 0;
-    if (pok && parent_session != caller_session) pok = 0;
-    /* ④ 父进程 token 用户 SID＝调用方 token 用户 SID。 */
-    char parent_sid[256] = { 0 };
-    if (pok && !token_user_sid_string(ph, parent_sid, sizeof(parent_sid))) pok = 0;
-    if (pok && strcmp(parent_sid, caller_sid) != 0) pok = 0;
-    CloseHandle(ph);
-    return pok;
+    snprintf(expect_svc, sizeof(expect_svc), "%s\\QFRLEA.exe", g_install_dir);
+    for (p = pimg_u8; *p; p++) if (*p == '/') *p = '\\';
+    for (p = expect_scm; *p; p++) if (*p == '/') *p = '\\';
+    for (p = expect_svc; *p; p++) if (*p == '/') *p = '\\';
+    return (_stricmp(pimg_u8, expect_scm) == 0 ||
+            _stricmp(pimg_u8, expect_svc) == 0);
+}
+
+/* 判定时刻的活动停控 id（只读，不改状态）：有活动停控填其事件 id；
+ * 无活动停控填 "none"；标记文件损坏／不可读填 "" 且 stop_id_known=0。 */
+static void emergency_stop_fill_stop_id(lea_emergency_admission_t *out) {
+    lea_emergency_stop_t m;
+    int rc = lea_local_emergency_stop_read(g_base_dir, &m);
+    if (rc == 1 && m.stopped) {
+        snprintf(out->stop_id, sizeof(out->stop_id), "%s", m.stop_event_id);
+        out->stop_id_known = 1;
+    } else if (rc == 0 || (rc == 1 && !m.stopped)) {
+        snprintf(out->stop_id, sizeof(out->stop_id), "%s", "none");
+        out->stop_id_known = 1;
+    } else {
+        out->stop_id[0] = '\0';
+        out->stop_id_known = 0;
+    }
+}
+
+/* 记一行 emergency-stop 诊断（best-effort：svc_log 写失败不返回错误，
+ * 调用方不得据此改变准入判定）。 */
+static void emergency_stop_log_diag(const lea_emergency_admission_t *adm) {
+    lea_emergency_stop_diag_t d;
+    char line[1408];
+    memset(&d, 0, sizeof(d));
+    d.decision = adm->allowed ? "allow" : "reject";
+    d.reason = adm->reason;
+    d.source_type = adm->source_type;
+    d.client_pid = adm->client_pid;
+    d.parent_pid = adm->parent_pid;
+    d.client_image = adm->client_image;
+    d.parent_image = adm->parent_image;
+    d.client_session_id = adm->client_session;
+    d.parent_session_id = adm->parent_session;
+    d.session_state = adm->session_state;
+    d.win32_error = adm->win32_error;
+    d.stop_id = adm->stop_id_known ? adm->stop_id : NULL;
+    (void)lea_format_emergency_stop_diag(line, sizeof(line), &d);
+    svc_log("%s", line);
+}
+
+static int emergency_stop_caller_allowed(HANDLE pipe, lea_emergency_admission_t *out) {
+    DWORD pid = 0;
+    HANDLE h = NULL;
+    HANDLE ph = NULL;
+    DWORD parent = 0;
+    ULONGLONG caller_ct = 0, parent_ct = 0;
+    BYTE caller_sid[SECURITY_MAX_SID_SIZE];
+    BYTE parent_sid[SECURITY_MAX_SID_SIZE];
+    LUID caller_logon, parent_logon;
+    BYTE sys_sid[SECURITY_MAX_SID_SIZE];
+    DWORD sys_sid_len = sizeof(sys_sid);
+    int is_system = 0;
+    int branch_b = 0; /* 1 = SYSTEM 安全服务分支，0 = 交互客户端分支 */
+    DWORD state_err = 0; /* 会话态查询失败只记诊断，不阻断判定 */
+    const char *fail = NULL;
+    memset(out, 0, sizeof(*out));
+    out->client_session = LEA_DIAG_UNKNOWN_ID;
+    out->parent_session = LEA_DIAG_UNKNOWN_ID;
+    out->session_state = LEA_DIAG_UNKNOWN_ID;
+    snprintf(out->reason, sizeof(out->reason), "%s", "no-client-pid");
+    snprintf(out->source_type, sizeof(out->source_type), "%s", "unknown");
+    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) {
+        out->win32_error = GetLastError();
+        fail = "no-client-pid";
+        goto done;
+    }
+    out->client_pid = pid;
+    h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) {
+        out->win32_error = GetLastError();
+        fail = "open-process-failed";
+        goto done;
+    }
+    /* ① 调用方镜像全路径＝安装目录 qf-lea-client.exe。 */
+    {
+        WCHAR img[MAX_PATH];
+        DWORD n = MAX_PATH;
+        char img_u8[MAX_PATH];
+        char expect[MAX_PATH];
+        char *p;
+        if (!QueryFullProcessImageNameW(h, 0, img, &n) || n == 0) {
+            out->win32_error = GetLastError();
+            fail = "image-query-failed";
+            goto done;
+        }
+        utf16_to_utf8(img, img_u8, sizeof(img_u8));
+        snprintf(expect, sizeof(expect), "%s\\qf-lea-client.exe", g_install_dir);
+        for (p = img_u8; *p; p++) if (*p == '/') *p = '\\';
+        for (p = expect; *p; p++) if (*p == '/') *p = '\\';
+        snprintf(out->client_image, sizeof(out->client_image), "%s", img_u8);
+        if (_stricmp(img_u8, expect) != 0) {
+            fail = "image-mismatch";
+            goto done;
+        }
+    }
+    /* 调用方会话 id（取不到即拒绝）；会话连接态只查只记，不参与放行。 */
+    if (!ProcessIdToSessionId(pid, &out->client_session)) {
+        out->client_session = LEA_DIAG_UNKNOWN_ID;
+        out->win32_error = GetLastError();
+        fail = "caller-session-query-failed";
+        goto done;
+    }
+    {
+        WTS_CONNECTSTATE_CLASS *pstate = NULL;
+        DWORD bytes = 0;
+        if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
+                                         out->client_session,
+                                         WTSConnectState,
+                                         (LPWSTR *)&pstate, &bytes) ||
+            !pstate || bytes < sizeof(DWORD)) {
+            if (pstate) WTSFreeMemory(pstate);
+            state_err = GetLastError();
+            out->session_state = LEA_DIAG_UNKNOWN_ID;
+        } else {
+            out->session_state = (DWORD)*pstate;
+            WTSFreeMemory(pstate);
+        }
+    }
+    /* 调用方令牌：用户 SID（二进制）＋登录 LUID；缺失即拒绝。 */
+    if (!token_user_sid_bytes(h, caller_sid) ||
+        !token_logon_luid(h, &caller_logon)) {
+        out->win32_error = GetLastError();
+        fail = "caller-token-failed";
+        goto done;
+    }
+    /* 分支判定：SYSTEM 且会话 0 → 安全服务分支；其余走交互客户端分支。
+     * 仅凭 SYSTEM 或仅凭会话 0 都不够——分支 B 的父进程／LUID／创建时间
+     * 关在后面逐项核对，任一不过即拒绝。 */
+    if (CreateWellKnownSid(WinLocalSystemSid, NULL, sys_sid, &sys_sid_len) &&
+        IsValidSid((PSID)caller_sid) &&
+        EqualSid((PSID)caller_sid, (PSID)sys_sid))
+        is_system = 1;
+    branch_b = (is_system && out->client_session == 0);
+    snprintf(out->source_type, sizeof(out->source_type), "%s",
+             branch_b ? "system-service" : "local-client");
+    if (!branch_b && out->client_session == 0) {
+        fail = "caller-session-0";
+        goto done;
+    }
+    if (!proc_create_time(h, &caller_ct)) {
+        out->win32_error = GetLastError();
+        fail = "caller-time-query-failed";
+        goto done;
+    }
+    /* 父进程：快照只用来发现父 PID；打开后全部核对都从该句柄上做。 */
+    parent = caller_parent_pid(pid);
+    if (!parent) {
+        out->win32_error = GetLastError();
+        fail = "parent-not-found";
+        goto done;
+    }
+    out->parent_pid = parent;
+    ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
+    if (!ph) {
+        out->win32_error = GetLastError();
+        fail = "parent-open-failed";
+        goto done;
+    }
+    /* 父进程镜像全路径：分支 A 须为安装根目录 QFRemote.exe（H01 同款，
+     * 旧实现只比 basename、任意目录的 QFRemote.exe 都能过，已堵上）；
+     * 分支 B 须为 System32\services.exe 或安装目录 QFRLEA.exe。 */
+    if (branch_b) {
+        if (!emergency_stop_system_parent_ok(ph, out->parent_image,
+                                             sizeof(out->parent_image))) {
+            /* 区分“查不到镜像”（取证失败）与“查到了但不是可信父进程”。 */
+            if (out->parent_image[0] == '\0') {
+                out->win32_error = GetLastError();
+                fail = "parent-image-query-failed";
+            } else {
+                fail = "system-parent-invalid";
+            }
+            goto done;
+        }
+    } else {
+        WCHAR pimg[MAX_PATH];
+        DWORD pn = MAX_PATH;
+        if (QueryFullProcessImageNameW(ph, 0, pimg, &pn) && pn > 0) {
+            char pimg_u8[MAX_PATH];
+            char *p;
+            utf16_to_utf8(pimg, pimg_u8, sizeof(pimg_u8));
+            for (p = pimg_u8; *p; p++) if (*p == '/') *p = '\\';
+            snprintf(out->parent_image, sizeof(out->parent_image), "%s", pimg_u8);
+        }
+        if (!parent_image_is_main_app(ph)) {
+            fail = "parent-check-failed";
+            goto done;
+        }
+    }
+    /* 父进程创建时间须不晚于调用方（真父进程必先于子进程创建；晚于即
+     * PID 复用信号，拒绝）。 */
+    if (!proc_create_time(ph, &parent_ct) || parent_ct > caller_ct) {
+        fail = "parent-create-time-after-caller";
+        goto done;
+    }
+    /* 分支 A：父进程会话须等于调用方会话且非 0（跨会话注入到此为止）。
+     * 分支 B 不设此关：安全服务本就无交互会话，父进程（SCM／服务本体）
+     * 与调用方同在会话 0 是其定义的一部分，已由 SID＋LUID 关覆盖。 */
+    if (!branch_b) {
+        if (!ProcessIdToSessionId(parent, &out->parent_session) ||
+            out->parent_session == 0 ||
+            out->parent_session != out->client_session) {
+            if (out->parent_session == LEA_DIAG_UNKNOWN_ID)
+                fail = "parent-session-query-failed";
+            else
+                fail = "session-mismatch";
+            goto done;
+        }
+    } else {
+        if (!ProcessIdToSessionId(parent, &out->parent_session))
+            out->parent_session = LEA_DIAG_UNKNOWN_ID;
+    }
+    /* 父进程令牌：用户 SID 与登录 LUID 须与调用方一致。分支 B 的父进
+     * 程还须是 SYSTEM（SCM／服务本体本应如此，单独核对、单独记因）。 */
+    if (!token_user_sid_bytes(ph, parent_sid) ||
+        !token_logon_luid(ph, &parent_logon)) {
+        out->win32_error = GetLastError();
+        fail = "parent-token-failed";
+        goto done;
+    }
+    if (branch_b) {
+        if (!IsValidSid((PSID)parent_sid) ||
+            !EqualSid((PSID)parent_sid, (PSID)sys_sid)) {
+            fail = "system-sid-mismatch";
+            goto done;
+        }
+        if (parent_logon.HighPart != caller_logon.HighPart ||
+            parent_logon.LowPart != caller_logon.LowPart) {
+            fail = "system-logon-mismatch";
+            goto done;
+        }
+    } else {
+        if (!EqualSid((PSID)caller_sid, (PSID)parent_sid)) {
+            fail = "sid-mismatch";
+            goto done;
+        }
+        if (caller_logon.HighPart != parent_logon.HighPart ||
+            caller_logon.LowPart != parent_logon.LowPart) {
+            fail = "logon-mismatch";
+            goto done;
+        }
+    }
+    out->allowed = 1;
+done:
+    if (ph) CloseHandle(ph);
+    if (h) CloseHandle(h);
+    if (fail) {
+        snprintf(out->reason, sizeof(out->reason), "%s", fail);
+        snprintf(out->unified, sizeof(out->unified), "%s",
+                 lea_unified_reject_reason(fail));
+    } else {
+        snprintf(out->reason, sizeof(out->reason), "%s", "ok");
+        snprintf(out->unified, sizeof(out->unified), "%s", "ok");
+    }
+    /* 会话态查询失败只进诊断：无其他 API 错误时才把它的错误码带上，
+     * 绝不掩盖真正导致拒绝的那一步的错误码。 */
+    if (out->win32_error == 0) out->win32_error = state_err;
+    emergency_stop_fill_stop_id(out);
+    return out->allowed;
 }
 
 /* ---------- USH 鉴权 token（H03） ---------- */
@@ -6052,41 +6308,61 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
         char cmd[64] = { 0 };
         if (lea_json_top_level_string(buf, "cmd", cmd, sizeof(cmd)) && cmd[0]) {
             /* emergency_stop：与 S-021 五命令严格隔离——不停控入口不进
-             * handle_internal，走专用 admission（全路径＋父进程＋同会
-             * 话＋同用户 SID；有意不要求控制台会话，RDP 会话里同样要
-             * 能紧急停控）。 */
+             * handle_internal，走专用 admission（双分支：交互客户端全路
+             * 径＋父进程＋同会话＋同 SID＋同 LUID；SYSTEM 安全服务会话 0
+             * 经 SCM／服务本体父进程＋SYSTEM SID＋LUID 鉴权；会话连接态
+             * 只记不判，RDP 断开仍可停控，见 emergency_stop_caller_allowed）。
+             * 准入放行只派发停控／同步回执，绝不恢复控制或执行普通命令。 */
             lea_caller_identity_t ident;
             memset(&ident, 0, sizeof(ident));
+            char admit_reason[64] = { 0 };
             if (strcmp(cmd, "lea.emergency-stop") == 0 ||
                 strcmp(cmd, "lea.emergency-stop-sync") == 0) {
-                if (!emergency_stop_caller_allowed(pipe)) {
+                lea_emergency_admission_t adm;
+                memset(&adm, 0, sizeof(adm));
+                if (!emergency_stop_caller_allowed(pipe, &adm)) {
+                    /* 诊断行在准入判定之后记（best-effort，判定不依赖它）；
+                     * 审计 detail 带同一次判定的统一理由；对外回包仍通用。 */
+                    emergency_stop_log_diag(&adm);
                     svc_log("REJECT emergency-stop cmd=%s caller-not-allowed", cmd);
                     lea_audit_event_t ev;
                     memset(&ev, 0, sizeof(ev));
                     ev.event = "emergency-stop";
                     ev.command = cmd;
                     ev.result = "rejected";
-                    ev.detail = "emergency-stop-caller-not-allowed";
-                    audit_event(&ev);
+                    {
+                        char detail[128];
+                        snprintf(detail, sizeof(detail), "emergency-stop-%s",
+                                 adm.unified);
+                        ev.detail = detail;
+                        audit_event(&ev);
+                    }
                     build_resp(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
                                        "emergency-stop-caller-not-allowed", NULL);
                 } else if (strcmp(cmd, "lea.emergency-stop") == 0) {
+                    emergency_stop_log_diag(&adm);
                     handle_emergency_stop(buf, resp, sizeof(resp));
                 } else {
+                    emergency_stop_log_diag(&adm);
                     handle_emergency_stop_sync(buf, resp, sizeof(resp));
                 }
-            } else if (!internal_caller_allowed(pipe, &ident)) {
+            } else if (!internal_caller_allowed(pipe, &ident, admit_reason,
+                                                sizeof(admit_reason))) {
                 /* H01：内部命令先验调用方身份——不是已安装的客户端一律拒绝，
                  * 含 session.logout 这类可废掉绑定的命令。v3：核对通过的调用
                  * 方身份透传给 handle_internal（login_changed 审计＋证明核对
-                 * 时的已验证身份，见 lea_caller_identity_t）。 */
+                 * 时的已验证身份，见 lea_caller_identity_t）。
+                 * 裁决问题 2：日志诊断行（internal_caller_allowed 内记）、
+                 * 本处审计 JSONL detail、本处对外回包，三者取自同一次准入
+                 * 判定（admit_reason），不得为写审计重判一次；回包消息仍
+                 * 为通用串，不泄露细分原因。 */
                 svc_log("REJECT internal cmd=%s caller-not-allowed", cmd);
                 lea_audit_event_t ev;
                 memset(&ev, 0, sizeof(ev));
                 ev.event = "admit-reject";
                 ev.command = cmd;
                 ev.result = "rejected";
-                ev.detail = "internal-caller-not-allowed";
+                ev.detail = admit_reason;
                 audit_event(&ev);
                 build_resp(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
                                    "internal-caller-not-allowed", NULL);

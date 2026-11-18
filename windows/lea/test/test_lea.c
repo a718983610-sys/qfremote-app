@@ -4774,6 +4774,226 @@ int main(void) {
         }
     }
 
+    /* ---- A16-S2 收口：统一拒绝理由枚举（裁决问题 2）＋ emergency-stop
+     * 诊断行（裁决问题 1） ----
+     * 覆盖纯 C 层：细原因→统一理由全映射表（8 个统一值全覆盖；保底值
+     * 不覆盖已确定的细分原因；NULL／空串／未知细原因落保底）／
+     * emergency-stop 诊断行十四字段齐全／未知字段记 null 不编造／
+     * WTSDisconnected 只记不判（行内出现状态名，decision 由调用方定）／
+     * 会话 0 是真实值（system-service 分支照实记 0，不记 null）／小缓冲
+     * 截断仍 NUL 结尾。QFRLEA.c 内逻辑（双分支 admission、一次判定三处
+     * 共用、停控持久化与恢复票据）不在单测覆盖内，须 Windows 真机按
+     * test/a16s2-emergency-stop-vectors.ps1 的 6 场景补验。 */
+    {
+        /* 统一理由：8 个值逐一命中。 */
+        CHECK_STR_EQ(lea_unified_reject_reason("image-mismatch"),
+                     "client-path-mismatch", "unified-image-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-check-failed"),
+                     "parent-image-invalid", "unified-parent-check-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("system-parent-invalid"),
+                     "parent-image-invalid", "unified-system-parent-invalid");
+        CHECK_STR_EQ(lea_unified_reject_reason("session-mismatch"),
+                     "session-mismatch", "unified-session-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("session-disconnected"),
+                     "session-disconnected", "unified-session-disconnected");
+        CHECK_STR_EQ(lea_unified_reject_reason("session-not-active"),
+                     "session-not-active", "unified-session-not-active");
+        CHECK_STR_EQ(lea_unified_reject_reason("sid-mismatch"),
+                     "user-sid-mismatch", "unified-sid-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("logon-mismatch"),
+                     "user-sid-mismatch", "unified-logon-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("system-sid-mismatch"),
+                     "user-sid-mismatch", "unified-system-sid-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("system-logon-mismatch"),
+                     "user-sid-mismatch", "unified-system-logon-mismatch");
+        CHECK_STR_EQ(lea_unified_reject_reason("no-client-pid"),
+                     "identity-query-failed", "unified-no-client-pid");
+        CHECK_STR_EQ(lea_unified_reject_reason("open-process-failed"),
+                     "identity-query-failed", "unified-open-process-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("image-query-failed"),
+                     "identity-query-failed", "unified-image-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("caller-session-query-failed"),
+                     "identity-query-failed", "unified-caller-session-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("caller-session-0"),
+                     "identity-query-failed", "unified-caller-session-0");
+        CHECK_STR_EQ(lea_unified_reject_reason("caller-time-query-failed"),
+                     "identity-query-failed", "unified-caller-time-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("caller-token-failed"),
+                     "identity-query-failed", "unified-caller-token-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-not-found"),
+                     "identity-query-failed", "unified-parent-not-found");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-open-failed"),
+                     "identity-query-failed", "unified-parent-open-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-token-failed"),
+                     "identity-query-failed", "unified-parent-token-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-session-query-failed"),
+                     "identity-query-failed", "unified-parent-session-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-image-query-failed"),
+                     "identity-query-failed", "unified-parent-image-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("session-state-query-failed"),
+                     "identity-query-failed", "unified-session-state-query-failed");
+        CHECK_STR_EQ(lea_unified_reject_reason("parent-create-time-after-caller"),
+                     "identity-query-failed", "unified-parent-create-time-after-caller");
+        /* 保底值：NULL／空串／未知细原因／"ok" 一律落保底，绝不反写细分。 */
+        CHECK_STR_EQ(lea_unified_reject_reason(NULL),
+                     "internal-caller-not-allowed", "unified-null-fallback");
+        CHECK_STR_EQ(lea_unified_reject_reason(""),
+                     "internal-caller-not-allowed", "unified-empty-fallback");
+        CHECK_STR_EQ(lea_unified_reject_reason("bogus-reason-xyz"),
+                     "internal-caller-not-allowed", "unified-unknown-fallback");
+        CHECK_STR_EQ(lea_unified_reject_reason("ok"),
+                     "internal-caller-not-allowed", "unified-ok-fallback");
+        /* emergency-stop 诊断：放行行（local-client，WTSActive，无活动停控）。 */
+        {
+            lea_emergency_stop_diag_t d;
+            char line[1408];
+            memset(&d, 0, sizeof(d));
+            d.decision = "allow";
+            d.reason = "ok";
+            d.source_type = "local-client";
+            d.client_pid = 5032;
+            d.parent_pid = 1148;
+            d.client_image = "C:\\\\QFRemote\\\\LEA\\\\qf-lea-client.exe";
+            d.parent_image = "C:\\\\QFRemote\\\\QFRemote.exe";
+            d.client_session_id = 2;
+            d.parent_session_id = 2;
+            d.session_state = 0; /* WTSActive */
+            d.win32_error = 0;
+            d.stop_id = "none";
+            CHECK(lea_format_emergency_stop_diag(line, sizeof(line), &d),
+                  "emerg-allow-formatted");
+            CHECK(strstr(line, "emergency-stop-allow: decision=allow") == line,
+                  "emerg-allow-prefix");
+            CHECK(strstr(line, "admission_type=emergency-stop") != NULL,
+                  "emerg-allow-admission-type");
+            CHECK(strstr(line, "source_type=local-client") != NULL,
+                  "emerg-allow-source-type");
+            CHECK(strstr(line, "reason=ok") != NULL, "emerg-allow-reason");
+            CHECK(strstr(line, "client_pid=5032") != NULL, "emerg-allow-cpid");
+            CHECK(strstr(line, "parent_pid=1148") != NULL, "emerg-allow-ppid");
+            CHECK(strstr(line, "client_session_id=2") != NULL, "emerg-allow-csess");
+            CHECK(strstr(line, "parent_session_id=2") != NULL, "emerg-allow-psess");
+            CHECK(strstr(line, "session_state=WTSActive") != NULL,
+                  "emerg-allow-state");
+            CHECK(strstr(line, "win32_error=0") != NULL, "emerg-allow-winerr");
+            CHECK(strstr(line, "stop_id=none") != NULL, "emerg-allow-stopid");
+        }
+        /* emergency-stop 诊断：拒绝行（WTSDisconnected 只记不判——状态名
+         * 出现在行里，但 decision=reject 的原因是 image-mismatch；另记
+         * 已活动的停控事件 id）。 */
+        {
+            lea_emergency_stop_diag_t d;
+            char line[1408];
+            memset(&d, 0, sizeof(d));
+            d.decision = "reject";
+            d.reason = "image-mismatch";
+            d.source_type = "local-client";
+            d.client_pid = 6000;
+            d.parent_pid = 5032;
+            d.client_image = "C:\\\\Temp\\\\evil.exe";
+            d.parent_image = "C:\\\\QFRemote\\\\QFRemote.exe";
+            d.client_session_id = 2;
+            d.parent_session_id = 2;
+            d.session_state = 4; /* WTSDisconnected */
+            d.win32_error = 0;
+            d.stop_id = "estop-3-1763412000";
+            CHECK(lea_format_emergency_stop_diag(line, sizeof(line), &d),
+                  "emerg-reject-formatted");
+            CHECK(strstr(line, "decision=reject") != NULL, "emerg-reject-decision");
+            CHECK(strstr(line, "reason=image-mismatch") != NULL,
+                  "emerg-reject-reason");
+            CHECK(strstr(line, "reject_stage=image-mismatch") != NULL,
+                  "emerg-reject-stage");
+            CHECK(strstr(line, "session_state=WTSDisconnected") != NULL,
+                  "emerg-reject-state-recorded");
+            CHECK(strstr(line, "stop_id=estop-3-1763412000") != NULL,
+                  "emerg-reject-stopid");
+            CHECK(strstr(line, "client_image=\"C:\\\\Temp\\\\evil.exe\"") != NULL,
+                  "emerg-reject-cimage");
+        }
+        /* emergency-stop 诊断：未知字段记 null，不编造（父进程发现前即拒）。 */
+        {
+            lea_emergency_stop_diag_t d;
+            char line[1408];
+            memset(&d, 0, sizeof(d));
+            d.decision = "reject";
+            d.reason = "no-client-pid";
+            d.source_type = "unknown";
+            d.client_pid = 0;
+            d.parent_pid = 0;
+            d.client_image = NULL;
+            d.parent_image = NULL;
+            d.client_session_id = LEA_DIAG_UNKNOWN_ID;
+            d.parent_session_id = LEA_DIAG_UNKNOWN_ID;
+            d.session_state = LEA_DIAG_UNKNOWN_ID;
+            d.win32_error = 5;
+            d.stop_id = NULL;
+            CHECK(lea_format_emergency_stop_diag(line, sizeof(line), &d),
+                  "emerg-null-formatted");
+            CHECK(strstr(line, "client_pid=null") != NULL, "emerg-null-cpid");
+            CHECK(strstr(line, "parent_pid=null") != NULL, "emerg-null-ppid");
+            CHECK(strstr(line, "client_image=null") != NULL, "emerg-null-cimage");
+            CHECK(strstr(line, "parent_image=null") != NULL, "emerg-null-pimage");
+            CHECK(strstr(line, "client_session_id=null") != NULL, "emerg-null-csess");
+            CHECK(strstr(line, "parent_session_id=null") != NULL, "emerg-null-psess");
+            CHECK(strstr(line, "session_state=null") != NULL, "emerg-null-state");
+            CHECK(strstr(line, "win32_error=5") != NULL, "emerg-null-winerr");
+            CHECK(strstr(line, "stop_id=null") != NULL, "emerg-null-stopid");
+            CHECK(strstr(line, "client_session_id=0") == NULL,
+                  "emerg-null-no-fake-session0");
+        }
+        /* emergency-stop 诊断：system-service 分支——会话 0 是真实值，照实记 0。 */
+        {
+            lea_emergency_stop_diag_t d;
+            char line[1408];
+            memset(&d, 0, sizeof(d));
+            d.decision = "allow";
+            d.reason = "ok";
+            d.source_type = "system-service";
+            d.client_pid = 1234;
+            d.parent_pid = 700;
+            d.client_image = "C:\\\\QFRemote\\\\LEA\\\\qf-lea-client.exe";
+            d.parent_image = "C:\\\\Windows\\\\System32\\\\services.exe";
+            d.client_session_id = 0;
+            d.parent_session_id = 0;
+            d.session_state = 0; /* WTSActive */
+            d.win32_error = 0;
+            d.stop_id = "none";
+            CHECK(lea_format_emergency_stop_diag(line, sizeof(line), &d),
+                  "emerg-sys-formatted");
+            CHECK(strstr(line, "source_type=system-service") != NULL,
+                  "emerg-sys-source-type");
+            CHECK(strstr(line, "client_session_id=0") != NULL,
+                  "emerg-sys-csess-zero-real");
+            CHECK(strstr(line, "parent_session_id=0") != NULL,
+                  "emerg-sys-psess-zero-real");
+            CHECK(strstr(line, "parent_image=\"C:\\\\Windows\\\\System32\\\\services.exe\"") != NULL,
+                  "emerg-sys-pimage");
+        }
+        /* emergency-stop 诊断：小缓冲截断仍 NUL 结尾；NULL／0 长缓冲 fail-closed。 */
+        {
+            lea_emergency_stop_diag_t d;
+            char line[1408];
+            char tiny[16];
+            memset(&d, 0, sizeof(d));
+            d.decision = "reject";
+            d.reason = "image-mismatch";
+            d.source_type = "local-client";
+            d.client_pid = 6000;
+            CHECK(lea_format_emergency_stop_diag(line, sizeof(line), &d),
+                  "emerg-full-buffer-ok");
+            CHECK(!lea_format_emergency_stop_diag(tiny, sizeof(tiny), &d) &&
+                  tiny[sizeof(tiny) - 1] == '\0',
+                  "emerg-tiny-buffer-truncated-nul");
+            CHECK(!lea_format_emergency_stop_diag(NULL, sizeof(line), &d),
+                  "emerg-null-out-rejected");
+            CHECK(!lea_format_emergency_stop_diag(line, 0, &d),
+                  "emerg-zero-size-rejected");
+            CHECK(!lea_format_emergency_stop_diag(line, sizeof(line), NULL),
+                  "emerg-null-diag-rejected");
+        }
+    }
+
     /* ---------- emergency_stop：离线紧急停控（GPT 2026-11-18 裁决问题 1、3、六节） ----------
      * 覆盖纯 C 层：恢复票据规范串（与 lea-core.js recoveryTicketSigningBytes
      * 逐行一致）／严格解析／同步回执规范串／停控状态 JSON 往返／标记文件
