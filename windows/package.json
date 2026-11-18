@@ -48,6 +48,7 @@
       "installer-launch.js",
       "client-version.js",
       "lea-status.js",
+      "lea-login-retry.js",
       "svc-urls.js",
       "views.js",
       "update.js",

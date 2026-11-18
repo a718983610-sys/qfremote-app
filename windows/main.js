@@ -26,6 +26,7 @@ const permissionPolicy = require('./permission-policy'); // S-003：权限 deny-
 const sysPrograms = require('./sys-programs'); // D-09：系统程序一律绝对路径
 const crashHandler = require('./crash-handler'); // D-06：崩溃处理（OBS 全套）
 const leaStatus = require('./lea-status'); // S-021：LEA 本机状态查询解析层
+const leaLoginRetry = require('./lea-login-retry'); // V2a 登录通知自动重试（GPT 2026-11-18 定夺问题 2）
 const settingsStore = require('./settings-store'); // D-10：设置分层＋冲突可见＋快照回滚
 const startupStages = require('./startup-stages'); // D-08：分阶段初始化
 const trayManager = require('./tray-manager'); // D-07：托盘专项
@@ -402,6 +403,10 @@ function scheduleCookieFlush() {
 // 分支同函数、同会话），不再押在一次可能永不发生的页面事件上。
 function handleManualLogout() {
   viewMgr.noteLogout();
+  // V2a：登出即作废在途登录重试（切换账号／退出登录时取消；窗口退出
+  // 另由 before-quit 取消。取消后在途事件不再发包）。
+  try { if (leaLoginRetryInstance) leaLoginRetryInstance.cancel('identity-changed'); } catch (e) { /* ignore */ }
+  leaLoginRetryInstance = null;
   // H07：登出通知 LEA，撤销当前绑定（best-effort，不阻塞登出）。
   notifyLeaLogout().catch(() => {});
   // RC-04 票据层：登出即作废内存票据与会话 id（不跨账号、不跨登录会话复用）。
@@ -4092,6 +4097,15 @@ async function maybeCheckLeaHealth() {
 // （QFRLEA 只认安装目录下的客户端），本地绑定激活不了。只调顺序，
 // 存在性检查与返回逻辑不变；旧目录独存时仍能兜底找到。
 let leaLastNotifiedAccount = '';
+/* V2a 登录通知自动重试（GPT 2026-11-18 定夺问题 2）：在途重试实例与
+ * 登录世代。generation 每次 begin 递增——旧事件在新登录开始时作废；
+ * sessionId／SID 进程生命周期内不变，查到后缓存（查不到即 null，
+ * 模块按 unknown fail-closed，不进等待）。 */
+let leaLoginRetryInstance = null;
+let leaLoginGeneration = 0;
+let leaLoginDeviceIdCache = '';
+let leaLoginSessionCache = null;
+let leaLoginSidCache = null;
 function leaClientExePath() {
   if (IS_TEST) {
     // TEST 隔离：只认经 SHA 核验的 TEST 客户端，不存在／SHA 不符即返回
@@ -4287,41 +4301,221 @@ async function syncEmergencyStop(knownStatus) {
     return r;
   } catch (e) { return { ok: false, reason: 'throw' }; }
 }
+/* V2a 登录通知自动重试的 main.js 侧接线（GPT 2026-11-18 定夺问题 2）。
+ * 会话态读取：正式 RC 应优先用 Windows WTS API（需原生绑定，当前
+ * Electron 主进程无 Node 绑定可用）；本实现用 qwinsta 解析作调度
+ * 依据——只决定客户端“等不等”，绝不作为授权依据：每一次发送仍
+ * 由 QFRLEA 服务端用 WTS API 独立鉴权。qwinsta 不可用／解析失败
+ * 即 unknown，模块 fail-closed 不进等待。
+ * 本进程会话 id 的取法：子进程与父进程同会话，故用 PowerShell 读
+ * 其自身进程的 SessionId 即等于本进程会话 id；再用 qwinsta 按 ID
+ * 查 STATE 列。两个子进程均异步 spawn、5 秒超时、失败即 unknown。 */
+function spawnCapture(exe, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let child = null;
+    try {
+      const cp = require('child_process');
+      child = cp.spawn(exe, args, { windowsHide: true });
+    } catch (e) { finish({ ok: false, stdout: '' }); return; }
+    let out = '';
+    const timer = setTimeout(() => { try { child.kill(); } catch (e) { /* ignore */ } finish({ ok: false, stdout: out }); }, timeoutMs);
+    child.stdout.on('data', (d) => { out += String(d); if (out.length > 1024 * 1024) { try { child.kill(); } catch (e) { /* ignore */ } } });
+    child.stderr.on('data', () => { /* 不读 stderr */ });
+    child.on('error', () => { clearTimeout(timer); finish({ ok: false, stdout: out }); });
+    child.on('close', () => { clearTimeout(timer); finish({ ok: true, stdout: out }); });
+  });
+}
+function windowsSystemExe(name) {
+  try {
+    const root = process.env.SystemRoot || 'C:\\Windows';
+    const p = path.join(root, 'System32', name);
+    if (fs.existsSync(p)) return p;
+  } catch (e) { /* ignore */ }
+  return name;
+}
+async function queryLeaUserSid() {
+  if (leaLoginSidCache) return leaLoginSidCache;
+  try {
+    const ps = windowsSystemExe(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe'));
+    const r = await spawnCapture(ps, ['-NoProfile', '-NonInteractive', '-Command', '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], 5000);
+    const sid = String((r && r.stdout) || '').trim();
+    if (/^S-1-5-[0-9-]+$/.test(sid)) { leaLoginSidCache = sid; return sid; }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+async function queryLeaSessionState() {
+  try {
+    const ps = windowsSystemExe(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe'));
+    const r = await spawnCapture(ps, ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.Process]::GetCurrentProcess().SessionId'], 5000);
+    const sid = parseInt(String((r && r.stdout) || '').trim(), 10);
+    if (!Number.isSafeInteger(sid)) return { sessionId: leaLoginSessionCache, state: 'unknown', stateName: '', source: 'qwinsta' };
+    leaLoginSessionCache = sid;
+    const qw = windowsSystemExe('qwinsta.exe');
+    const q = await spawnCapture(qw, [], 5000);
+    if (!q || q.ok !== true) return { sessionId: sid, state: 'unknown', stateName: '', source: 'qwinsta' };
+    const parsed = leaLoginRetry.parseQwinstaSessionState(String(q.stdout || ''), sid);
+    return { sessionId: sid, state: parsed.state, stateName: parsed.stateName, source: 'qwinsta' };
+  } catch (e) { return { sessionId: leaLoginSessionCache, state: 'unknown', stateName: '', source: 'qwinsta' }; }
+}
+async function getLeaCurrentIdentityForRetry() {
+  return {
+    accountId: (typeof currentGateUsername === 'function' ? currentGateUsername() : '') || '',
+    deviceId: leaLoginDeviceIdCache || '',
+    windowsSessionId: leaLoginSessionCache,
+    windowsUserSid: leaLoginSidCache,
+    loginGeneration: leaLoginGeneration,
+  };
+}
+/* 每次合法重发都重新取新鲜证明（attestation 证明 TTL 120 秒，重试
+ * TTL 180 秒，复用旧证明可能已过期）。证明原文只经局部变量进
+ * sendLoginAttempt，永不记日志、不落盘。取不到即 { ok:false }。 */
+async function fetchLeaLoginProofFor(deviceId) {
+  if (!deviceId) { bootLog('lea.login-proof-unavailable', 'no-device-id'); return { ok: false, reason: 'login-proof-unavailable' }; }
+  try {
+    const at = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/login-attestation', { device_id: String(deviceId) });
+    if (at && at.status === 200 && at.json && typeof at.json.signature === 'string' && at.json.signature &&
+        typeof at.json.key_id === 'string' && at.json.key_id &&
+        typeof at.json.version === 'string' && at.json.version &&
+        typeof at.json.account_id === 'string' && at.json.account_id &&
+        typeof at.json.device_id === 'string' && at.json.device_id &&
+        Number.isSafeInteger(at.json.issued_at) && Number.isSafeInteger(at.json.expires_at)) {
+      const proof = JSON.stringify({ version: at.json.version, key_id: at.json.key_id,
+        account_id: at.json.account_id, device_id: at.json.device_id,
+        issued_at: at.json.issued_at, expires_at: at.json.expires_at, signature: at.json.signature });
+      return { ok: true, proof: proof };
+    }
+    bootLog('lea.login-proof-unavailable', at ? String(at.status) : 'no-response');
+    return { ok: false, reason: 'login-proof-unavailable' };
+  } catch (e) { bootLog('lea.login-proof-unavailable', 'throw'); return { ok: false, reason: 'login-proof-unavailable' }; }
+}
+/* 竞态 B 的确认查询（获授权的 lea.status 只读查询）：只有当服务端
+ * 最后一条本地命令确为本次尝试之后记下的 session.login_changed 且
+ * 结果为 ok 时，才算超时那次发送其实已生效。确认不上即 unknown，
+ * 绝不重发。last_result 语义见 QFRLEA.c lea_refresh_local_status：
+ * 成功记 "ok"，拒绝记错误码；last_command_at 为 unix 秒。 */
+async function confirmLeaLoginOutcomeFor(args) {
+  try {
+    const a = (args && typeof args === 'object') ? args : {};
+    const raw = await leaNotifyInternalAsync(leaStatus.buildLeaStatusRequest(), 10000);
+    const st = leaStatus.parseLeaStatusResponse(raw);
+    if (!st || st.ok !== true) return { confirmed: false, reason: 'status-unavailable' };
+    if (st.last_command !== 'session.login_changed') return { confirmed: false, reason: 'last-command-mismatch' };
+    if (st.last_result !== 'ok') return { confirmed: false, reason: 'last-result-not-ok' };
+    if (typeof a.attemptStartedAtUnix === 'number' && st.last_command_at < a.attemptStartedAtUnix) {
+      return { confirmed: false, reason: 'last-command-before-attempt' };
+    }
+    if (a.deviceId && st.device_id && st.device_id !== a.deviceId) return { confirmed: false, reason: 'device-mismatch' };
+    return { confirmed: true };
+  } catch (e) { return { confirmed: false, reason: 'throw' }; }
+}
+function createLeaLoginRetryFor(account, deviceId) {
+  return leaLoginRetry.createLeaLoginRetry({
+    getSessionState: () => queryLeaSessionState(),
+    getCurrentIdentity: () => getLeaCurrentIdentityForRetry(),
+    fetchLoginProof: () => fetchLeaLoginProofFor(deviceId),
+    sendLoginAttempt: async (args) => {
+      const obj = { cmd: 'session.login_changed', account_id: String(args.accountId), device_id: String(args.deviceId || '') };
+      if (args.loginProof) obj.login_proof = args.loginProof;
+      const r = await leaNotifyInternalAsync(obj, leaLoginRetry.ATTEMPT_TIMEOUT_MS);
+      if (!r || typeof r !== 'object') return { ok: false, reason: 'bad-response' };
+      return r;
+    },
+    confirmOutcome: (args) => confirmLeaLoginOutcomeFor(args),
+    onAccepted: (info) => { bootLog('lea.login-retry-accepted', 'attempts=' + String(info.attempts) + ' retries=' + String(info.retriesUsed)); },
+    onTerminalFailure: (info) => { bootLog('lea.login-retry-terminal', String(info.reason || 'unknown')); },
+    logEvent: (event, detail) => {
+      try { bootLog('lea.login-retry-' + String(event), JSON.stringify(detail || {}).slice(0, 200)); } catch (e) { /* ignore */ }
+    },
+  });
+}
+/* 绑定确认阶段（只在 login_changed 已确认成功后跑一次）：rebind 取票
+ * 据 → keys.sync-revoked 写吊销快照 → binding.confirm。失败只记
+ * 日志、绑定留 PENDING（fail-closed），绝不回头重发登录通知。
+ * 随后 syncLockOwner（H25）与 maybeRenewSelfBind（C1 静默续期）。 */
+async function finalizeLeaBinding(account, deviceId, epoch, loginResult) {
+  if (deviceId && Number.isSafeInteger(epoch)) {
+    const rb = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/devices/' + encodeURIComponent(deviceId) + '/rebind', { account_id: String(account), binding_epoch: epoch });
+    if (rb && rb.status === 200 && rb.json && rb.json.ticket) {
+      const snap = rb.json.revocations;
+      const fullIds = (snap && Array.isArray(snap.revoked_key_ids)) ? snap.revoked_key_ids : null;
+      if (fullIds && fullIds.every((x) => typeof x === 'string' && x)) {
+        const hasSnapGen = snap && snap.generation !== undefined;
+        const genRaw = hasSnapGen ? snap.generation : rb.json.revocation_generation;
+        let gen = null;
+        let genBad = false;
+        if (genRaw !== undefined) {
+          if (typeof genRaw === 'number' && Number.isSafeInteger(genRaw) && genRaw >= 0) gen = genRaw;
+          else genBad = true;
+        }
+        const sigRaw = snap && typeof snap.sync_signature === 'string' ? snap.sync_signature : null;
+        if (genBad) {
+          bootLog('lea.sync-revoked-bad-generation', JSON.stringify(genRaw));
+        } else if (gen === null) {
+          bootLog('lea.sync-revoked-no-generation');
+        } else if (!sigRaw) {
+          bootLog('lea.sync-revoked-no-signature');
+        } else {
+          const syncObj = { cmd: 'keys.sync-revoked', key_ids: fullIds, generation: gen, sync_signature: sigRaw };
+          const sr = leaNotifyInternal(syncObj);
+          if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
+        }
+      } else {
+        bootLog('lea.sync-revoked-no-snapshot', snap === undefined ? 'missing' : 'invalid');
+      }
+      const cf = leaNotifyInternal(Object.assign({ cmd: 'binding.confirm' }, rb.json.ticket));
+      if (!cf || cf.ok !== true) bootLog('lea.binding-confirm-failed', (cf && (cf.code || cf.reason)) || 'unknown');
+    } else {
+      bootLog('lea.rebind-failed', rb ? String(rb.status) : 'no-response');
+    }
+  } else if (deviceId) {
+    // 有 deviceId 但 LEA 响应里没有 binding_epoch：rebind/confirm 全
+    // 跳过，绑定留 PENDING。正常不应发生（C 端 login_changed 的
+    // result 格式由 lea_binding_login_result 锁死并单测覆盖），只记
+    // 日志不静默（result 无秘密，只有 binding_epoch 等回包字段）。
+    bootLog('lea.login-no-epoch', JSON.stringify(loginResult || null));
+  }
+  // H25：锁组件 device.json 跟随新账号（见 syncLockOwner）。
+  try { await syncLockOwner(String(account)); } catch (e) { /* ignore */ }
+  // C1：登录成功后静默续期检查（best-effort，不阻塞登录返回）。
+  try { await maybeRenewSelfBind(); } catch (e) { /* ignore */ }
+}
 async function notifyLeaLogin(account) {
   if (IS_TEST && !testIsolationValidated) { bootLog('lea.login-notify-test-denied', 'isolation-not-validated'); return { ok: false, reason: 'test-isolation-not-validated' }; } // TEST 隔离：未通过启动校验绝不进入登录流程。
   try {
     if (!account || account === leaLastNotifiedAccount) return { ok: false, reason: 'skip' };
+    /* V2a 行为⑨（跨调用单飞）：同一账号的前一次登录通知仍在途时不
+     * 另起一轮——旧实例的 begin 仍在跑，新实例会重复发包。终态
+     * （DONE/CANCELLED/EXPIRED/UNKNOWN_OUTCOME/FAILED）才放行。 */
+    if (leaLoginRetryInstance) {
+      const st = leaLoginRetryInstance.getState();
+      if (st !== 'DONE' && st !== 'CANCELLED' && st !== 'EXPIRED' && st !== 'UNKNOWN_OUTCOME' && st !== 'FAILED') {
+        return { ok: false, reason: 'already-in-flight' };
+      }
+    }
     let deviceId = null;
     try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
-    /* v3 P0-4 第二层（B3 主方案）：login_changed 须附服务端签发的登录
-     * 证明。证明取自控制台会话（extRequest 带控制台会话 cookie＋https＋
-     * 主机白名单＋8 秒超时，见 extRequest）；取不到时仍发送（不静默），
-     * 服务以 login-proof-missing 明确拒绝并记 bootLog。证明只在内存里
-     * 过一遍，不落盘、不记日志内容。服务端回包字段原样 JSON 序列化进
-     * login_proof——账号／设备以服务端签发的为准，与本地登录事件不符
-     * 时 C 侧以 login-proof-mismatch 拒绝，不由 JS 替服务端改写。 */
-    let loginProof = null;
-    if (deviceId) {
-      try {
-        const at = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/login-attestation', { device_id: String(deviceId) });
-        if (at && at.status === 200 && at.json && typeof at.json.signature === 'string' && at.json.signature &&
-            typeof at.json.key_id === 'string' && at.json.key_id &&
-            typeof at.json.version === 'string' && at.json.version &&
-            typeof at.json.account_id === 'string' && at.json.account_id &&
-            typeof at.json.device_id === 'string' && at.json.device_id &&
-            Number.isSafeInteger(at.json.issued_at) && Number.isSafeInteger(at.json.expires_at)) {
-          loginProof = JSON.stringify({ version: at.json.version, key_id: at.json.key_id,
-            account_id: at.json.account_id, device_id: at.json.device_id,
-            issued_at: at.json.issued_at, expires_at: at.json.expires_at, signature: at.json.signature });
-        } else bootLog('lea.login-proof-unavailable', at ? String(at.status) : 'no-response');
-      } catch (e) { bootLog('lea.login-proof-unavailable', 'throw'); }
-    } else {
-      bootLog('lea.login-proof-unavailable', 'no-device-id');
+    leaLoginDeviceIdCache = deviceId || '';
+    /* 会话／SID 预取（best-effort，失败即 null、模块按 unknown
+     * fail-closed；不阻塞首次发送——暂态判定只在被拒后才需要）。 */
+    try { await queryLeaSessionState(); } catch (e) { /* ignore */ }
+    try { await queryLeaUserSid(); } catch (e) { /* ignore */ }
+    const generation = ++leaLoginGeneration;
+    const retry = createLeaLoginRetryFor(String(account), deviceId || '');
+    leaLoginRetryInstance = retry;
+    /* V2a：登录通知走自动重试（1 次初发＋最多 2 次补发，TTL 180 秒，
+     * 单发 30 秒兜底）。重试只覆盖 login_changed 未确认阶段；接受
+     * 后才推进绑定确认，绑定失败不回头发登录通知。 */
+    const outcome = await retry.begin({
+      accountId: String(account), deviceId: deviceId || '',
+      windowsSessionId: leaLoginSessionCache, windowsUserSid: leaLoginSidCache,
+      loginGeneration: generation,
+    });
+    if (!outcome.accepted) {
+      bootLog('lea.login-notify-failed', String(outcome.reason || 'retry-terminal') + ' exe=' + String(leaClientExePath() || ''));
+      return { ok: false, reason: outcome.reason || 'retry-terminal' };
     }
-    const loginObj = { cmd: 'session.login_changed', account_id: String(account), device_id: deviceId || '' };
-    if (loginProof) loginObj.login_proof = loginProof;
-    const r = leaNotifyInternal(loginObj);
-    if (!r || r.ok !== true) { bootLog('lea.login-notify-failed', ((r && (r.code || r.reason)) || 'unknown') + ' exe=' + String(leaClientExePath() || '')); return { ok: false, reason: 'notify-failed' }; }
     leaLastNotifiedAccount = String(account);
     // r8 副项（2026-11-11）：成功路径 boot log 只记失败项，登录成功在 boot log
     // 里无行可查（r7 实证：17:25 之后零新行，尽管其间 6 次 LEA 事件）。此处
@@ -4331,71 +4525,11 @@ async function notifyLeaLogin(account) {
     // DS 第二轮 #1：result.binding_epoch 正常是 JSON number（C 端 %lld 裸整数），
     // 但 stdout 万一被重序列化成字符串也不静默跳过——归一化后再验 isSafeInteger。
     // 缺失／非数字时 Number 得 NaN，仍走下面的 lea.login-no-epoch 分支。
-    const rawEpoch = r.result && r.result.binding_epoch;
+    const rawEpoch = outcome.result && outcome.result.binding_epoch;
     const epoch = (typeof rawEpoch === 'number' || typeof rawEpoch === 'string') ? Number(rawEpoch) : NaN;
-    if (deviceId && Number.isSafeInteger(epoch)) {
-      // 取服务端票据并确认绑定（H07 全流程）：rebind 带回客户端 epoch，
-      // 只许向前；票据原样送 binding.confirm（字段在顶层）。
-      const rb = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/devices/' + encodeURIComponent(deviceId) + '/rebind', { account_id: String(account), binding_epoch: epoch });
-      if (rb && rb.status === 200 && rb.json && rb.json.ticket) {
-        // #17：rebind 后把服务端吊销全集快照写入本机吊销表（C 侧第二写入方，
-        // keys.sync-revoked 经 lea_revoked_merge 并集合并写入——陈旧快照／
-        // 空集至多无操作、永不缩表；服务端 H21 下发前推送仍是主路径）。
-        // （lea-routes handleRebind 带的 H21 快照，recordBinding 刚把本次
-        // 吊销并入 revocations.json 全集后取的）；只发本次增量
-        // rb.json.revoked_key_ids 会缩表（全量替换语义下增量≠全集），故
-        // 不用它。快照缺失／非数组／元素非字符串时不发（H21 下次下发会
-        // 重推），不拿增量凑合。空全集照发——并集合并下空集即无操作。
-        const snap = rb.json.revocations;
-        const fullIds = (snap && Array.isArray(snap.revoked_key_ids)) ? snap.revoked_key_ids : null;
-        if (fullIds && fullIds.every((x) => typeof x === 'string' && x)) {
-          // #1 版本化＋A7-whitelist：只认 generation 字段（新版服务端字段；
-          // 顶层 revocation_generation 与 revocations.generation 同值），
-          // 另须 revocations.sync_signature（服务端签发的快照签名）。
-          // 缺失代次／缺失签名一律不发 sync（记 bootLog，等下次下发重推），
-          // C 端同样缺一即拒绝；存在但非法（非安全整数／负数）→ 不发 sync，
-          // 绝不降级成无版本／无签名合并。
-          const hasSnapGen = snap && snap.generation !== undefined;
-          const genRaw = hasSnapGen ? snap.generation : rb.json.revocation_generation;
-          let gen = null;
-          let genBad = false;
-          if (genRaw !== undefined) {
-            if (typeof genRaw === 'number' && Number.isSafeInteger(genRaw) && genRaw >= 0) gen = genRaw;
-            else genBad = true;
-          }
-          const sigRaw = snap && typeof snap.sync_signature === 'string' ? snap.sync_signature : null;
-          if (genBad) {
-            bootLog('lea.sync-revoked-bad-generation', JSON.stringify(genRaw));
-          } else if (gen === null) {
-            bootLog('lea.sync-revoked-no-generation');
-          } else if (!sigRaw) {
-            bootLog('lea.sync-revoked-no-signature');
-          } else {
-            const syncObj = { cmd: 'keys.sync-revoked', key_ids: fullIds, generation: gen, sync_signature: sigRaw };
-            const sr = leaNotifyInternal(syncObj);
-            if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
-          }
-        } else {
-          bootLog('lea.sync-revoked-no-snapshot', snap === undefined ? 'missing' : 'invalid');
-        }
-        const cf = leaNotifyInternal(Object.assign({ cmd: 'binding.confirm' }, rb.json.ticket));
-        if (!cf || cf.ok !== true) bootLog('lea.binding-confirm-failed', (cf && (cf.code || cf.reason)) || 'unknown');
-      } else {
-        // rebind 失败（如他人已绑设备上非站长换号 → 403）：只记日志，
-        // 绑定留 PENDING（fail-closed），等站长授权或下次登录。
-        bootLog('lea.rebind-failed', rb ? String(rb.status) : 'no-response');
-      }
-    } else if (deviceId) {
-      // 有 deviceId 但 LEA 响应里没有 binding_epoch：rebind/confirm 全
-      // 跳过，绑定留 PENDING。正常不应发生（C 端 login_changed 的
-      // result 格式由 lea_binding_login_result 锁死并单测覆盖），只记
-      // 日志不静默。
-      bootLog('lea.login-no-epoch', JSON.stringify(r && r.result));
-    }
-    // H25：锁组件 device.json 跟随新账号（见 syncLockOwner）。
-    try { await syncLockOwner(String(account)); } catch (e) { /* ignore */ }
-    // C1：登录成功后静默续期检查（best-effort，不阻塞登录返回）。
-    try { await maybeRenewSelfBind(); } catch (e) { /* ignore */ }
+    retry.markBindingFinalize();
+    await finalizeLeaBinding(String(account), deviceId, epoch, outcome.result);
+    retry.markBindingDone();
     return { ok: true };
   } catch (e) { bootLog('lea.login-notify-throw', (e && e.message) || String(e)); return { ok: false, reason: 'throw' }; }
 }
@@ -5170,6 +5304,9 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   appQuitting = true;
   flushConsoleCookies();
+  // V2a：窗口退出即作废在途登录重试（不再发包）。
+  try { if (leaLoginRetryInstance) leaLoginRetryInstance.cancel('identity-changed'); } catch (e) { /* ignore */ }
+  leaLoginRetryInstance = null;
   // D-06：干净退出拆哨兵（app.exit 的崩溃路径不走这里，哨兵残留）；
   // D-07：退出时销毁托盘图标，不留幽灵图标。
   try { if (!PREVIEW) crashHandler.markCleanShutdown(app.getPath('userData')); } catch (e) { /* ignore */ }
