@@ -5,8 +5,13 @@
  *  B. Mock 桥状态机：列表含 owner/component 标记、enable->locked、
  *     disable->unlocked、reset 保持 locked、非机主 enable 被拒、
  *     未装组件 enable 被拒、短密码被拒；
+ *     C 线：Mock disable 须带挑战＋操作编号＋revision（与服务端新契约同语义），
+ *     同一 operationId 重复提交返回首次结果（replayed，不产生第二次操作），
+ *     无挑战／无编号直接拒绝；
  *  C. 真桥对本地假服务（自签 HTTPS，语义同生产）：devices 解析、
  *     enable/disable/reset 走通、401 -> NEED_LOGIN、服务端 error 原样带回。
+ *     C 线：真桥 challenge 取值＋disable 载荷（challenge／operationId／revision）
+ *     走通，假服务收到完整载荷。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  */
 const https = require('https');
@@ -37,8 +42,18 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   ok('B3_enable_locks', (await mock.listDevices()).find(d => d.id === 'mock-pc-1').locked === true);
   await mock.reset('mock-pc-1', 'loginpw', 'newpass1');
   ok('B4_reset_keeps_locked', (await mock.listDevices()).find(d => d.id === 'mock-pc-1').locked === true);
-  await mock.disable('mock-pc-1');
+  // C 线：Mock disable 走新契约——先取挑战，再带挑战＋操作编号＋revision 提交。
+  const chB = await mock.challenge('mock-pc-1');
+  ok('B5a_mock_challenge_shape', chB && typeof chB.challenge === 'string' && chB.op === 'disarm');
+  await mock.disable('mock-pc-1', { challenge: chB.challenge, operationId: 'op-b5', revision: 0 });
   ok('B5_disable_unlocks', (await mock.listDevices()).find(d => d.id === 'mock-pc-1').locked === false);
+  // 同一 operationId 重复提交：返回首次结果（replayed），不产生第二次真实操作。
+  const replayB = await mock.disable('mock-pc-1', { challenge: chB.challenge, operationId: 'op-b5', revision: 0 });
+  ok('B5b_mock_replay_returns_first_result', replayB && replayB.replayed === true && replayB.ok === true);
+  let noChallengeRejected = 0;
+  try { await mock.disable('mock-pc-1', { operationId: 'op-b5x', revision: 0 }); } catch (e) { noChallengeRejected++; }
+  try { await mock.disable('mock-pc-1', { challenge: chB.challenge, revision: 0 }); } catch (e) { noChallengeRejected++; }
+  ok('B5c_mock_disable_without_challenge_or_opid_rejected', noChallengeRejected === 2, { noChallengeRejected });
   let rejected = 0;
   try { await mock.enable('mock-pc-4', 'pass1234'); } catch (e) { rejected++; }
   try { await mock.enable('mock-pc-3', 'pass1234'); } catch (e) { rejected++; }
@@ -52,6 +67,7 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
     { stdio: 'pipe' });
   const state = { locked: false };
   let authed = false;
+  let seenDisableBody = null;
   const server = https.createServer(
     { key: fs.readFileSync(path.join(tmp, 'k.pem')), cert: fs.readFileSync(path.join(tmp, 'c.pem')) },
     (req, res) => {
@@ -62,12 +78,17 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
         if (!authed) { send(401, { error: '未登录' }); return; }
         if (req.url === '/lock/devices') {
           send(200, { devices: [{ id: 'pc-9', name: '测试机', owner: true, locked: state.locked, component: true }] });
+        } else if (req.url.startsWith('/lock/challenge')) {
+          // C 线：假服务签发挑战（与服务端新契约同形）。
+          send(200, { ok: true, challenge: 'fake-ch-1', expiresAt: Date.now() + 5 * 60 * 1000, op: 'disarm', deviceId: 'pc-9' });
         } else if (req.url === '/lock/enable') {
           const b = JSON.parse(body || '{}');
           if (b.password === 'badpass') { send(400, { error: '服务端拒绝示例' }); return; }
           state.locked = true; send(200, { ok: true });
-        } else if (req.url === '/lock/disable') { state.locked = false; send(200, { ok: true }); }
-        else if (req.url === '/lock/reset') { send(200, { ok: true }); }
+        } else if (req.url === '/lock/disable') {
+          seenDisableBody = JSON.parse(body || '{}');
+          state.locked = false; send(200, { ok: true });
+        } else if (req.url === '/lock/reset') { send(200, { ok: true }); }
         else send(404, { error: '没有这个接口' });
       });
     });
@@ -88,8 +109,16 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   ok('C4_error_passthrough', passthrough);
   await bridge.reset('pc-9', 'loginpw', 'newpass1');
   ok('C5_reset_keeps_locked', (await bridge.listDevices())[0].locked === true);
-  await bridge.disable('pc-9');
-  ok('C6_disable', (await bridge.listDevices())[0].locked === false);
+  // C 线：真桥先取挑战，再带挑战＋操作编号＋revision 关锁；假服务收到完整载荷。
+  const chC = await bridge.challenge('pc-9', 'disarm');
+  ok('C6a_challenge_shape', chC && chC.ok === true && chC.challenge === 'fake-ch-1' && chC.op === 'disarm');
+  await bridge.disable('pc-9', { challenge: chC.challenge, operationId: 'op-c6', revision: 0 });
+  ok('C6_disable', (await bridge.listDevices())[0].locked === false
+    && seenDisableBody && seenDisableBody.challenge === 'fake-ch-1'
+    && seenDisableBody.operationId === 'op-c6' && seenDisableBody.revision === 0, { seenDisableBody });
+  // 同一操作编号再次提交：客户端原样重发同一载荷（服务端幂等层负责去重，见服务端单测）。
+  await bridge.disable('pc-9', { challenge: chC.challenge, operationId: 'op-c6', revision: 0 });
+  ok('C6b_disable_replay_same_payload', seenDisableBody && seenDisableBody.operationId === 'op-c6' && seenDisableBody.challenge === 'fake-ch-1');
   server.close();
 
   // D（2.4.5 W-29/W-11③）：cookie 按名取、component 缺失为 null、http 回环
