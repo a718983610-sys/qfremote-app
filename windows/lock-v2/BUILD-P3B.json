@@ -1,0 +1,20 @@
+{
+  "component": "qfremote-privacy-lock-v2-p3b",
+  "version": "2.0.0",
+  "baseline": "5734d69",
+  "branch": "a16s2-lockfix-p3-b",
+  "generated_at": "2026-11-18T20:54:42.941Z",
+  "files": {
+    "windows/lock-v2/status-report.js": "feef75759ca536a2ddacfe27e6d10c16b6bfb0c9a5226d5f397d06a5a24a305e",
+    "windows/lock-v2/envelope-replay.js": "14bb4483f5a7e98c90088e131505e440f31e89dfbc0c15aba408353a973de151",
+    "windows/lock-v2/legacy-retirement.js": "ffcf8ce260d180136ffc5c18ebd2e7e0244958825a6af830a0e9c6d4d72450d1",
+    "windows/lock-v2/lock-state.js": "84f9269359bd27194de1819f12465abc6a72cde5445c3a3f7587d895db2103df",
+    "windows/lock-v2/lock-coordinator.js": "e55cf571294f712c771501be89c8ffe8c02f605c893a2bf52f86c82dca4a2e9d",
+    "windows/lock-v2/index.js": "749d77df390194096c18e1f139dd156bc78e390ea9933760e9c2d983ac8a7103",
+    "windows/test/lock-v2-8q-test.js": "9b6187b2c5869450921cf3b6a7e613f0b275fc40fb237df309d5bafc9e28d749",
+    "windows/test/lock-v2-retirement-test.js": "ede988c82e9be395659028cb2bc4d5a78a55fae81264a77fa49232e21da91372",
+    "CONTRACT.md": "f3489882e30c321c04518df4be73de91c622f011e7d973179c78c035aae78ae6",
+    "ANSWERS-8Q.md": "84cfe8329a1ea315d253d21e1e87eb222ad55682d17743b76ba6209779a5ccbb"
+  },
+  "package_sha256": "9efe19ad4fdc031630a405c6741f7f6a51457265f9c3eda477b0464f41381723"
+}

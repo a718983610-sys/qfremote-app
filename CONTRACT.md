@@ -1,7 +1,7 @@
 # QFRemote 隐私锁 v2 · 协议契约（B 线设备端 × C 线服务端）
 
-- 版本：v2.0.0（草案，待 C 线逐项对齐确认）
-- 依据：GPT 锁 bug 定夺 `~/workspace/qfremote/gpt-a16s2-lockbug-ruling-20261119.md` §4.2（状态机一字不改）、§3（六条工程约束＋熄屏硬门）、§5（远程输入隔离与恢复）
+- 版本：v2.0.0（草案，待 C 线逐项对齐确认；阶段 3 P3-02/P3-04 已更新，见 §10/§11）
+- 依据：GPT 锁 bug 定夺 `~/workspace/qfremote/gpt-a16s2-lockbug-ruling-20261119.md` §4.2（状态机一字不改）、§3（六条工程约束＋熄屏硬门）、§5（远程输入隔离与恢复）；GPT 三项定夺 `~/workspace/qfremote/gpt-a16s2-lockfix-3items-ruling-20261119.md` §2（旧程序退役）、§4.1（八问闭合）
 - 设备端实现：`windows/lock-v2/`（本分支 `a16s2-lockfix-b`）
 - 服务端实现：C 线（本文件只写设备端承诺与双方接口，服务端字段由 C 线落盘后回填确认）
 - 控制台业务入口不变：`POST /lock/enable|disable|reset`；设备端信封 `op:'arm'/'disarm'` 不变（见 `server/friends/lock-envelope.js`，Ed25519 签名域不变）。
@@ -166,4 +166,36 @@
 - [x] §6 密码规则（设备端已实现；二次确认弹窗与短期挑战待 C 线）
 - [x] §7 FAILSAFE 流程（设备端已实现）
 - [x] §8 熄屏调用（设备端已实现；硬件实测 BLOCKED）
-- [ ] C 线服务端确认回填：上报接收端点、控制台降级文案、二次确认弹窗实现
+- [x] §10 旧程序退役与安全迁移方案（设备端已实现为可执行逻辑＋测试；真机执行 BLOCKED）
+- [x] §11 八问 B 线回答（`ANSWERS-8Q.md`，8/8 已答；C 线确认待回填）
+- [ ] C 线服务端确认回填：上报接收端点、控制台降级文案、二次确认弹窗实现、八问 C 线确认栏
+
+## §10 旧程序退役与安全迁移（P3-02，裁决 §2）
+
+实现：`windows/lock-v2/legacy-retirement.js`（纯逻辑＋注入式 ops；沙箱实跑，真机执行 BLOCKED）。
+
+- 暂停期：四个旧二进制 SHA 已清点（`LEGACY_SHA256`，与本树 `windows/privacy-lock/app/` 副本实测一致）；启动入口 10 条已清单化（安装器 SEC_LOCK、QFLockSvc 服务、`install.ps1`、`install-upgrade.ps1`、客户端自愈、`sys-helper install-lock`、`update` 信封、卸载脚本、手动运行副本、Run 键／计划任务——本树内未发现，须真机扫描补入）；产品侧入口均被暂停覆盖（`/lock/enable` 503＋`/lock/update` 冻结）。
+- 控制台提示文案（裁决原文，一字不改）：「当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。」——风险告知，不是安全控制的替代品；拦不住用户双击自有副本。
+- 接管期七步（`planMigration`）：验身份 → 保全证据 → 查锁状态 → 清启动引用 → 签名新组件替换 → 按清单退役 → 验安装与回滚。退役 = 移入证据隔离区（**非删除**），彻底删除须另行批准；新组件启动失败绝不静默回退旧程序；任一步失败即回滚。
+- 前置检查（`checkMigrationPreconditions`，任一不满足即拒绝）：新组件未过集成审核、签名／哈希未过、锁状态 UNKNOWN（D39ABOL）或 RECOVERY_REQUIRED、存在未处理活动保护、转移中、证据不可保存、身份不符、状态文件损坏、要求删状态文件、要求强行改 UNLOCKED。
+- D39ABOL：UNKNOWN 保持不变；不删状态文件；不因锁 UI 进程曾被关闭推断已解锁；不通过安装新组件强行覆盖未知状态；不在该笔记本上再次主动启动旧锁程序测试。设备重新上线后先只读核查与安全恢复，再讨论迁移。
+
+## §11 status.json v2 字段（P3-04 八问决议，待 C 线确认）
+
+`StatusReporter.buildStatus()` 产出的 status.json v2（v1 字段全保留）：
+
+| 字段 | 来源与语义 |
+|---|---|
+| `state` | v1 兼容：只有设备确认的 `LOCKED` 才报 `Locked`，其余报 `Off`（`LOCKING` 报 `Off` 是有意的：送达 ≠ 成功） |
+| `actual_state` | 六态真相；服务端对账必须优先读它，不读 `state` |
+| `boot_id` / `session_id` / `sid` | 本次启动标识／数字会话号／Windows 用户 SID（`sid` 与 `session_id` 不是同一个东西） |
+| `revision` | 每次真实状态变更 +1；同态转移不 +1；旧 `revision` 的 ACK 拒收 |
+| `armedAt` | 最近一次进入 `LOCKED` 的 ISO 时间；离开 `LOCKED` 即清空 |
+| `captureExclusion` | `active` / `failed-degraded` / `unknown`；只在会话组件回报时改写；`LOCKED` 下非 `active` 按 `DEGRADED` 对待 |
+| `lastEvents` | 最近 10 条 `{ts, ev, fields}`；`ts` 均为 ISO UTC |
+| `disarm` 事件 | `fields` 必含 `lockId`（与 `arm` 的 `armId` 对称） |
+| `unlock-ok` 事件 | `ts` 为 ISO UTC，与 `arm` 可比；`fields` 含 `lockId` |
+| `boot-recovered` 事件 | `recoverAfterRestart()` 在 `boot_id` 变化且旧态为 `LOCKED`/`LOCKING` 时必写，且只写一次 |
+| 信封去重 | 重复 `disarm` 信封必拒（`E_ENVELOPE_REPLAY`），不执行副作用；只有成功后才记信封 id |
+
+冲突记录（统一契约以 v2 为准，详见 `ANSWERS-8Q.md`）：#5 旧 Go 只在 fail-limit 重启时写 `boot-recovered`，与 C 的“重启恢复必写”假设不符——过渡期 C 对旧设备保留时间窗口兜底；#3/#4 旧 Go 的 `disarm`/`unlock-ok` 无 `lockId`，v2 已补，过渡期同上；#9 `unknown` 的降级映射限定在 `LOCKED`/`LOCKING` 下。

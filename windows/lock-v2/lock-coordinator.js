@@ -22,6 +22,8 @@ const { AsyncIpcClient, IpcError, MemoryTransport } = require('./lock-ipc');
 const { OneTimePasswordVault } = require('./password-vault');
 const { InputHealthMonitor } = require('./input-health');
 const { decideFailsafe, FAILSAFE_HEARTBEAT_TIMEOUT_MS } = require('./failsafe');
+const { StatusReporter } = require('./status-report');
+const { EnvelopeReplayGuard, CODE_REPLAY } = require('./envelope-replay');
 const displayPower = require('./display-power');
 
 const ACK_TIMEOUT_MS = 8000;
@@ -51,6 +53,12 @@ class LockCoordinator {
     // serverReport(event): 上报 ACK/心跳/故障事件给服务端（生产走 lock-bridge 信封通道；
     // 未注入时只记本地 outbox，绝不假装已上报）。
     this.serverReport = o.serverReport || null;
+    // P3-04：status.json 上报器（可选注入；未注入时不写 lastEvents，
+    // 协调层其余行为不变，保证阶段 2 既有测试不受影响）。
+    this.statusReporter = o.statusReporter || null;
+    // P3-04 #8：信封去重守卫（可选注入；未注入时不做信封级去重，
+    // 状态机本身的幂等分支仍在）。
+    this.envelopeReplay = o.envelopeReplay || null;
     this.outbox = []; // 未发出的上报（断网时排队，恢复后补发；状态本身不因断网翻转）
     this.networkUp = true;
     this.heartbeatIntervalMs = o.heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS;
@@ -158,6 +166,11 @@ class LockCoordinator {
     const transport = await this.sessionProvider.spawnSessionAgent(session);
     this.ipc = new AsyncIpcClient(transport, { timeoutMs: this.ackTimeoutMs });
     this.session = session;
+    // P3-04 #6：已核验的会话身份写进状态机（session_id=数字会话号，
+    // userSid=Windows 用户 SID），status.json 的三身份字段才有真值；
+    // 此前 arm 成功后 session_id 仍为 null（8Q 测试 C1 抓获）。
+    this.machine.sessionId = session.sessionId;
+    this.machine.userSid = session.userSid;
     this.lastComponentHeartbeat = Date.now();
     return this.ipc;
   }
@@ -188,12 +201,16 @@ class LockCoordinator {
       if (ack.display_power_ok === false) {
         this.machine.markDegraded('DEGRADED', '会话组件熄屏调用未确认，显示电源状态未知');
       }
+      // P3-04 #9：会话组件回报的防截取状态（有则采纳；无则保持 unknown）。
+      if (ack.capture_exclusion) this.setCaptureExclusion(ack.capture_exclusion);
       this.vault.set(o.password);
       const rev = this.machine.revision + 1;
       this.machine.applyAck({ lock_id: lockId, revision: rev, actual_state: 'LOCKED', note: 'session agent ack' });
       this.machine.markHeartbeat(new Date().toISOString());
       this._persist();
       this._startHeartbeat();
+      // P3-04 #3/#4：arm 事件写入 lastEvents（fields 含 armId＋lockId）。
+      if (this.statusReporter) this.statusReporter.recordArm(lockId, o.caller);
       await this._report({ type: 'lock_ack', lock_id: lockId, actual_state: 'LOCKED', effective_state: this.machine.effectiveState(), revision: this.machine.revision });
       return { ok: true, lock_id: lockId, actual_state: 'LOCKED', effective_state: this.machine.effectiveState(), revision: this.machine.revision };
     } catch (e) {
@@ -209,8 +226,20 @@ class LockCoordinator {
   async disarm(opts) {
     const o = opts || {};
     if (!o.caller) throw new CoordinatorError('disarm 须带调用者身份', 'NO_CALLER');
+    // P3-04 #8：信封级去重先查。重复信封必拒，不执行任何副作用，
+    // 不改状态、不升 revision；失败的信封不记 id，可重试。
+    const envId = o.envelopeId || null;
+    if (envId && this.envelopeReplay) {
+      const chk = this.envelopeReplay.check(envId);
+      if (chk.replay) {
+        if (this.statusReporter) this.statusReporter.recordEnvelopeRejected('replay', envId);
+        await this._report({ type: 'envelope-rejected', reason: 'replay', id: envId });
+        throw new CoordinatorError('重复 disarm 信封已拒绝（重放）', CODE_REPLAY);
+      }
+    }
     if (this.machine.actualState === 'UNLOCKED') {
       // 幂等：已解锁时重复请求返回可审计的幂等结果，不当故障（定夺 §4.4）。
+      if (envId && this.envelopeReplay) this.envelopeReplay.remember(envId);
       await this._report({ type: 'disarm_idempotent', lock_id: this.machine.lockId, actual_state: 'UNLOCKED', revision: this.machine.revision });
       return { ok: true, idempotent: true, actual_state: 'UNLOCKED', revision: this.machine.revision };
     }
@@ -234,6 +263,10 @@ class LockCoordinator {
       if (this.display && this.display.setDisplayPower) {
         await this.display.setDisplayPower('on').catch(() => {});
       }
+      // P3-04 #3：disarm 事件写入 lastEvents（fields 含 lockId，与 arm 对称）。
+      // P3-04 #8：只有成功后才记信封 id；失败不记，同一 id 可重试。
+      if (this.statusReporter) this.statusReporter.recordDisarm(o.caller, lockId);
+      if (envId && this.envelopeReplay) this.envelopeReplay.remember(envId);
       await this._report({ type: 'disarm_ack', lock_id: lockId, actual_state: 'UNLOCKED', revision: this.machine.revision });
       return { ok: true, actual_state: 'UNLOCKED', revision: this.machine.revision };
     } catch (e) {
@@ -257,6 +290,10 @@ class LockCoordinator {
       }
       return { ok: false, code: r.code, message: r.message, attempts: r.attempts, remaining: r.remaining };
     }
+    // P3-04 #4：本地输密码解锁成功，先写 unlock-ok 事件（ts 为 ISO 时间，
+    // fields 含 lockId），再走 disarm（写 disarm 事件）。两事件同属一次解锁，
+    // 服务端凭 lockId 对账，不再只靠时间窗口。
+    if (this.statusReporter) this.statusReporter.recordUnlockOk(this.machine.lockId, 'local-unlock');
     return this.disarm({ caller: 'local-unlock', lockId: this.machine.lockId });
   }
 
@@ -313,8 +350,20 @@ class LockCoordinator {
     if (!loaded.exists) return { ok: true, actual_state: 'UNLOCKED', note: '无历史锁状态' };
     this.machine = loaded.machine;
     if (this.machine.bootId && this.machine.bootId !== this.bootId) {
+      // P3-04 #5：重启后恢复锁状态时必写 boot-recovered——仅当 boot_id
+      // 变化且旧态为 LOCKED/LOCKING 时写（本分支）。构造期的 boot 变化
+      // 只置 UNKNOWN，不写事件：写事件的责任在 recoverAfterRestart，
+      // 避免“还没重核就先宣称重启恢复”的假证明。
+      const prevState = this.machine.actualState;
+      const prevLockId = this.machine.lockId;
       this.machine.actualState = 'UNKNOWN';
       this.machine.lastError = { code: 'BOOT_CHANGED', message: '重启后旧锁状态待重核', at: new Date().toISOString() };
+      if ((prevState === 'LOCKED' || prevState === 'LOCKING') && this.statusReporter) {
+        this.statusReporter.recordBootRecovered({ bootId: this.bootId, previousLockId: prevLockId, previousState: prevState });
+      }
+      // 更新为当前 bootId 并落盘：否则下次 recoverAfterRestart 会再次
+      // 判定 boot 变化、重复写 boot-recovered（P3-04 #5 只写一次）。
+      this.machine.bootId = this.bootId;
       this._persist();
     }
     if (this.machine.actualState === 'LOCKED' || this.machine.actualState === 'LOCKING') {
@@ -370,6 +419,26 @@ class LockCoordinator {
     snap.network_up = this.networkUp;
     snap.outbox_depth = this.outbox.length;
     return snap;
+  }
+
+  // P3-04 #9：防截取状态写入。LOCKED 下非 active 即记 DEGRADED
+  // （与 C 线 CONTRACT §1 映射一致）；非法值直接抛错。
+  setCaptureExclusion(value) {
+    if (!this.statusReporter) throw new CoordinatorError('未注入 statusReporter，无法记录 captureExclusion', 'NO_STATUS_REPORTER');
+    this.statusReporter.setCaptureExclusion(value);
+    if ((this.machine.actualState === 'LOCKED' || this.machine.actualState === 'LOCKING') && value !== 'active') {
+      this.machine.markDegraded('DEGRADED', '防截取未完全生效（captureExclusion=' + value + '），保护降级');
+    }
+    return value;
+  }
+
+  // P3-04 #6/#7：status.json v2 快照（boot_id/session_id/sid/revision/
+  // lastEvents）。未注入 statusReporter 时返回 null，不伪造。
+  statusJson(meta) {
+    if (!this.statusReporter) return null;
+    return this.statusReporter.buildStatus(this.machine.snapshot(), Object.assign({
+      nodeId: this.deviceId, bootId: this.bootId
+    }, meta || {}));
   }
 
   stop() { this._stopHeartbeat(); this._disconnectIpc(); if (this.inputHealth) this.inputHealth.stop(); }

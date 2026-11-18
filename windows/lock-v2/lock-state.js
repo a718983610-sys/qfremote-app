@@ -70,6 +70,9 @@ class LockStateMachine {
     // degradation: null | { kind: 'DEGRADED'|'FAILSAFE', reason, at }
     this.degradation = o.degradation || null;
     this.history = Array.isArray(o.history) ? o.history : [];
+    // armedAt：最近一次进入 LOCKED 的 ISO 时间；离开 LOCKED 即清空。
+    // 供 status.json 的 armedAt 与 unlock-ok/arm 时间比较用（P3-04 #4）。
+    this.armedAt = o.armedAt || null;
   }
 
   snapshot() {
@@ -79,6 +82,8 @@ class LockStateMachine {
       boot_id: this.bootId,
       session_id: this.sessionId,
       user_sid: this.userSid,
+      sid: this.userSid, // P3-04 #6：status.json 的 sid 与 user_sid 同值（Windows 用户 SID）
+      armed_at: this.armedAt,
       revision: this.revision,
       desired_state: this.desiredState,
       actual_state: this.actualState,
@@ -118,6 +123,8 @@ class LockStateMachine {
     }
     this.actualState = target;
     this.revision = (typeof o.revision === 'number') ? o.revision : this.revision + 1;
+    if (target === 'LOCKED') this.armedAt = nowIso();
+    if (target === 'UNLOCKED') this.armedAt = null;
     if (o.degradation !== undefined) this.degradation = o.degradation;
     if (target === 'UNLOCKED') this.degradation = null;
     if (o.error) this.lastError = o.error;
@@ -217,7 +224,7 @@ class LockStateStore {
       userSid: data.user_sid, lockId: data.lock_id, revision: data.revision,
       desiredState: data.desired_state, actualState: data.actual_state,
       lastHeartbeat: data.last_heartbeat, lastError: data.last_error,
-      degradation: data.degradation, history: data.history
+      degradation: data.degradation, history: data.history, armedAt: data.armed_at
     });
     return { ok: true, exists: true, machine: m };
   }

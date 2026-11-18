@@ -10,5 +10,8 @@ module.exports = {
   inputHealth: require('./input-health'),
   failsafe: require('./failsafe'),
   displayPower: require('./display-power'),
-  coordinator: require('./lock-coordinator')
+  coordinator: require('./lock-coordinator'),
+  statusReport: require('./status-report'),
+  envelopeReplay: require('./envelope-replay'),
+  legacyRetirement: require('./legacy-retirement')
 };
