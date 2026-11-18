@@ -1,0 +1,33 @@
+{
+  "evaluated_at": "2026-11-19T03:05:00+08:00",
+  "source_file": "lockfix-phase1/evidence/lock-records-20261119.jsonl",
+  "source_lines": 298,
+  "arm_success_total": 4,
+  "disarm_success_total": 1,
+  "arm_success_list": [
+    "2026-11-15T16:40:38.283Z",
+    "2026-11-15T16:44:38.404Z",
+    "2026-11-15T16:45:33.418Z",
+    "2026-11-18T17:11:58.053Z"
+  ],
+  "disarm_success_list": [
+    "2026-11-15T16:46:11.980Z"
+  ],
+  "last_arm_at": "2026-11-18T17:11:58.053Z",
+  "disarm_after_last_arm": 0,
+  "step1_unreachable_reconcile": {
+    "actual_state": "UNKNOWN",
+    "decision": "to-unknown",
+    "reason": "device-unreachable"
+  },
+  "step2_weak_correction_to_unlocked": {
+    "ok": false,
+    "reason": "evidence-insufficient"
+  },
+  "step3_off_without_proof_reconcile": {
+    "actual_state": "RECOVERY_REQUIRED",
+    "decision": "to-recovery",
+    "reason": "off-without-proof"
+  },
+  "conclusion": "服务端仍持有过期 LOCKED；设备不可达时定为 UNKNOWN，弱证据修正被拒；设备报 Off 无证明时定为 RECOVERY_REQUIRED。修正须等笔记本回线、设备端确认无活跃锁并给出强证据（disarm 事件或 boot 变化）后，带操作编号执行。"
+}

@@ -5075,7 +5075,8 @@ trustedHandle('qf-heal-retry', async () => {
   } catch (e) { return { ok: false, outcome: 'unknown' }; }
 });
 trustedHandle('qf-lock-enable', (e, id, password) => IS_TEST ? testPolicy.testDenied('qf-lock-enable') : lockCall(() => lockBridge.enable(id, password))); // TEST 隔离：禁用生产锁操作。
-trustedHandle('qf-lock-disable', (e, id) => IS_TEST ? testPolicy.testDenied('qf-lock-disable') : lockCall(() => lockBridge.disable(id))); // TEST 隔离：禁用生产锁操作。
+trustedHandle('qf-lock-disable', (e, id, opts) => IS_TEST ? testPolicy.testDenied('qf-lock-disable') : lockCall(() => lockBridge.disable(id, opts))); // TEST 隔离：禁用生产锁操作。
+trustedHandle('qf-lock-challenge', (e, id, op) => IS_TEST ? testPolicy.testDenied('qf-lock-challenge') : lockCall(() => lockBridge.challenge(id, op))); // TEST 隔离：禁用生产锁操作。
 trustedHandle('qf-lock-reset', (e, id, loginPassword, newPassword) => IS_TEST ? testPolicy.testDenied('qf-lock-reset') : lockCall(() => lockBridge.reset(id, loginPassword, newPassword))); // TEST 隔离：禁用生产锁操作。
 trustedOn('qf-lock-open', () => openLockWindow());
 trustedOn('qf-lock-close', (event) => {
