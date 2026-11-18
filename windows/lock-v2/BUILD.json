@@ -1,0 +1,29 @@
+{
+  "component": "qfremote-privacy-lock-v2",
+  "version": "2.0.0",
+  "baseline": "049d876",
+  "branch": "a16s2-lockfix-b",
+  "generated_at": "2026-11-18T19:21:19.576Z",
+  "files": {
+    "windows/lock-v2/display-power.js": "cc3898a437fae07226bf4cd9597183373e0a95b0fbda691059ff117878f09ef6",
+    "windows/lock-v2/display-power.ps1": "8b0e7d9a3bd4ba0026236dd4b922e697be28bc5136a88b12e938dfef78e9b591",
+    "windows/lock-v2/failsafe.js": "f15b77eff6bdc8a9fe6079886dbb3d9552cd93f00d73251f4087197401d4e4d0",
+    "windows/lock-v2/index.js": "7803d7a5c270c3506725a587fb186f40333f631386b83779ddc220fe9d746af9",
+    "windows/lock-v2/input-health.js": "69bc11eed71c11ee85c066007da65070faffd9418bf254b9813eed62d91d706e",
+    "windows/lock-v2/lock-coordinator.js": "09be7239e334a3add48169416768e1ec844ccd80b092129b1fa6618388988342",
+    "windows/lock-v2/lock-ipc.js": "0e88f5929a5fb12b3d80beff73cbc08da537655931f0de58f4bbe48d0abe2f8c",
+    "windows/lock-v2/lock-state.js": "3bfd11224cb2a91864c694f3eed83f45307ef4b60e9822ec28c237c1af7a5e30",
+    "windows/lock-v2/password-vault.js": "1fabeb01497edebcfad6cbf491e539702605977eea5976be936ab605b08384ac",
+    "windows/lock-v2/session-agent.ps1": "5842603982be6350f4f06fb8fc21261dbf9a81921c0a1b606be0ee00140a3404",
+    "windows/lock-v2/README.md": "04baa633b3f614043f5e0053999149dd1a99a495305e39a61f02d35d067bd632"
+  },
+  "tests": {
+    "windows/test/lock-v2-state-test.js": "65ed375542c4b3265ce6c1faf1c14b8312f36d18a995672d88664f3f9e540dde",
+    "windows/test/lock-v2-ipc-test.js": "358b4adfc46c45285151eccb48fa19084f931e12827f8d0de73a087a9408d93e",
+    "windows/test/lock-v2-input-health-test.js": "eef76a2007d3d0ff1dc1945e3d229f45a389c2b12de84d0f425f303e9e513feb",
+    "windows/test/lock-v2-password-test.js": "7dc30c602838ee0a345bd4c9112d36e1404c336ba53cbaa231b73d3c1b8b4110",
+    "windows/test/lock-v2-coordinator-test.js": "3aa20e05a6296162277a021709cb41c7eaf84287840630934d80abdfab4737c1",
+    "windows/test/lock-v2-fault-injection-test.js": "3ccf3aaf2826559af06989c052851cf013efcfc8fe243e53c0f0412090d37cf4"
+  },
+  "package_sha256": "c6d098f99bfe5db646cedd21c5ab6fb2f64ba3b4707a029e8a9bbd0598c11a59"
+}

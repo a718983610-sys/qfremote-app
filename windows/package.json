@@ -72,6 +72,7 @@
       "ext-bar-preload.js",
       "lock.html",
       "lock-preload.js",
+      "lock-v2/**/*",
       "toolbar.html",
       "toolbar-preload.js",
       "about.html",
