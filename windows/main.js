@@ -3434,6 +3434,7 @@ function releaseForceWindow() {
 }
 trustedHandle('qf-force-get', () => forceState);
 trustedOn('qf-force-download', async () => {
+  if (IS_TEST) return; // TEST 隔离：禁用强制更新下载。
   if (forceDownloading || !forceState.manifest) return;
   forceDownloading = true;
   forceState = Object.assign({}, forceState, { phase: 'downloading', error: null, percent: 0 });
