@@ -31,14 +31,8 @@
 const crypto = require('crypto');
 
 // 严禁进事件的键（小写比对；命中即整键丢弃，不留值、不留掩码占位以外的信息）。
-const FORBIDDEN_KEYS = new Set([
-  'password', 'passwd', 'pwd', 'cookie', 'cookies', 'api_key', 'apikey',
-  'api-key', 'secret', 'private_key', 'privatekey', 'private-key',
-  'authorization', 'token', 'access_token', 'refresh_token', 'id_token',
-  'input', 'content', 'plaintext', 'plain_text', 'cipher', 'ciphertext',
-  'sessioncopy', 'session_copy', 'wrappedpriv', 'wrappedvault',
-  'credit_card', 'card_number', 'ssn', 'idcard',
-]);
+// 唯一正本：server/ext/lea/forbidden-keys.js（U6；lea-core.js 回退路径共用同一份）。
+const FORBIDDEN_KEYS = new Set(require('./lea/forbidden-keys').FORBIDDEN_KEYS);
 
 // 允许进事件的键白名单（P2-05 字段＋审计常用身份引用）。白名单之外
 // 的键一律丢弃——默认拒绝，未知字段不得借诊断通道外泄。

@@ -126,7 +126,7 @@ function gatePageHtml(username, d) {
   const transferGuide = isGate
     ? '<p class="note" style="margin-top:10px">如有他人向您转赠密钥：先在登录页点击「查询密钥」，凭账号和密码核验后查看并复制完整密钥串，再回到本页粘贴到下方输入框领取；领取成功后即可正常登录使用，无需购买。</p>' : '';
   const claimBox = isGate
-    ? '<div style="margin-top:14px;border:1px solid #DFE7F2;border-radius:10px;padding:14px">'
+    ? '<div style="margin-top:14px;border:1px solid #E4E4E7;border-radius:10px;padding:14px">'
     + '<label for="qfClaimKey" style="margin-top:0">请输入 QFRemote 激活密钥</label>'
     + '<input id="qfClaimKey" type="text" maxlength="40" autocomplete="off" placeholder="粘贴完整密钥串">'
     + '<label for="qfClaimPw">账号密码（再次核验）</label>'
@@ -270,11 +270,11 @@ function logAttempt(user, ok, ip, blocked) {
 // —— 冻结弹窗（注入登录页 </body> 前） ——
 function freezePopupHtml(username) {
   const link = '/appeal?u=' + encodeURIComponent(username || '');
-  return '<div id="qfFreezePopup" style="position:fixed;inset:0;background:rgba(8,18,38,.5);z-index:99999;display:flex;align-items:center;justify-content:center">'
-    + '<div style="background:#fff;border-radius:14px;max-width:88vw;width:430px;padding:24px 22px;box-shadow:0 14px 44px rgba(0,0,0,.3);font-size:15px;line-height:1.8;color:#1c2733;text-align:center">'
+  return '<div id="qfFreezePopup" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center">'
+    + '<div style="background:#fff;border-radius:14px;max-width:88vw;width:430px;padding:24px 22px;box-shadow:0 14px 44px rgba(0,0,0,.3);font-size:15px;line-height:1.8;color:#09090B;text-align:center">'
     + '<div>' + FREEZE_TEXT_PRE + '<a href="' + link + '" style="color:#d40000;text-decoration:none;font-weight:700">' + FREEZE_LINK_TEXT + '</a></div>'
-    + '<div style="margin-top:8px">也可以先咨询<a href="/support" style="color:#2470e0;text-decoration:none;font-weight:700">智能客服</a>，或在客服中申请转人工。</div>'
-    + '<button type="button" onclick="document.getElementById(\'qfFreezePopup\').remove()" style="margin-top:16px;border:0;border-radius:8px;background:#2470e0;color:#fff;font-size:14px;padding:8px 26px;cursor:pointer">知道了</button>'
+    + '<div style="margin-top:8px">也可以先咨询<a href="/support" style="color:#09090B;text-decoration:none;font-weight:700">智能客服</a>，或在客服中申请转人工。</div>'
+    + '<button type="button" onclick="document.getElementById(\'qfFreezePopup\').remove()" style="margin-top:16px;border:0;border-radius:8px;background:#000000;color:#fff;font-size:14px;padding:8px 26px;cursor:pointer">知道了</button>'
     + '</div></div>';
 }
 function injectPopup(html, username) {
@@ -780,20 +780,20 @@ function pageShell(title, inner) {
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<title>' + esc(title) + ' · QFRemote</title>'
     + '<style>'
-    + 'body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#eef3fa;color:#1c2733}'
+    + 'body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F7F7F8;color:#09090B}'
     + '.wrap{max-width:430px;margin:0 auto;padding:26px 16px 40px}'
-    + '.brand{font-size:20px;font-weight:700;color:#1450b4;margin:8px 2px 4px}'
-    + '.sub{font-size:13px;color:#5b6b7d;margin:0 2px 18px}'
-    + '.card{background:#fff;border-radius:14px;padding:22px 20px;box-shadow:0 6px 24px rgba(20,60,140,.08)}'
-    + 'label{display:block;font-size:13px;color:#43536a;margin:14px 0 6px}'
-    + 'input,textarea{box-sizing:border-box;width:100%;border:1px solid #c9d6e8;border-radius:8px;padding:10px;font-size:15px;background:#fff}'
+    + '.brand{font-size:20px;font-weight:700;color:#000000;margin:8px 2px 4px}'
+    + '.sub{font-size:13px;color:#52525B;margin:0 2px 18px}'
+    + '.card{background:#fff;border-radius:14px;padding:22px 20px;box-shadow:0 6px 24px rgba(0,0,0,.08)}'
+    + 'label{display:block;font-size:13px;color:#52525B;margin:14px 0 6px}'
+    + 'input,textarea{box-sizing:border-box;width:100%;border:1px solid #E4E4E7;border-radius:8px;padding:10px;font-size:15px;background:#fff}'
     + 'textarea{min-height:96px;resize:vertical}'
-    + '.btn{display:block;width:100%;box-sizing:border-box;text-align:center;border:0;border-radius:9px;background:linear-gradient(135deg,#3f8cff,#2470e0);color:#fff;font-size:16px;padding:12px;margin-top:20px;cursor:pointer;text-decoration:none}'
-    + '.note{font-size:13px;color:#5b6b7d;line-height:1.7}'
+    + '.btn{display:block;width:100%;box-sizing:border-box;text-align:center;border:0;border-radius:9px;background:#000000;color:#fff;font-size:16px;padding:12px;margin-top:20px;cursor:pointer;text-decoration:none}'
+    + '.note{font-size:13px;color:#52525B;line-height:1.7}'
     + '.err{background:#fdf0f0;border:1px solid #f3c2c2;color:#a40000;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7}'
     + '.ok{background:#eefaf0;border:1px solid #bfe6c8;color:#14632a;border-radius:9px;padding:10px 12px;font-size:14px;line-height:1.7}'
     + '.status{font-size:19px;font-weight:700;margin:4px 0 8px}'
-    + 'a{color:#2470e0}'
+    + 'a{color:#09090B}'
     + '</style></head><body><div class="wrap">'
     + '<div class="brand">QFRemote</div>'
     + '<p class="sub">' + esc(title) + '</p>'

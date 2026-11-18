@@ -3,7 +3,7 @@
 // S-029：设计 token 单一来源的 Dart 侧产物。
 import 'package:flutter/material.dart';
 
-/// 设计 token 单一来源（tokens.json v1）的 Dart 常量。
+/// 设计 token 单一来源（tokens.json v2）的 Dart 常量。
 /// QfPalette／QfScale 须与此逐值对齐（test/design_tokens_test.dart 锁死）。
 abstract final class QfDesignTokens {
   static const Color brandLight = Color(0xFF000000);

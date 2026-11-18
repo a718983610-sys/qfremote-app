@@ -166,8 +166,11 @@ wine64 下执行；断言管道收到的原文 == 原信封 JSON，含 dispatch�
    完整 `installer.nsi` 编译亦未在沙箱跑通：`Nsis7z` 插件未在沙箱暂存，
    在 `Nsis7z::Extract` 处停下（部署打包环境的既有前置条件，与本线无关）；
    SEC_LEA 本身的 NSIS 语法已用最小 harness 编译通过。
-5. **MFA 未接**：Key 生成的二次确认目前只走密码（`verifyPassword`）。
-   本站暂无 MFA 校验入口；若 MFA 上线，须把 `verifyMfa` 注入 `lea-routes` 的 deps。
+5. **MFA（恢复票据已接，Key 操作仍只走密码）**：emergency_stop 恢复票据
+   签发已全员强制 MFA（GPT 2026-11-18 裁决 §三；实现见 `mfa-core.js`，
+   TOTP 第二因素，server.js 已注入 `deps.mfa`）。Key 生成／吊销的二次确认
+   仍只走密码（`verifyPassword`），按裁决边界不强制 MFA；`verifyMfa`
+   仍为 null（仅 Key 管理入口的 passwordConfirm 在注入时才调用，本站未注入）。
 6. **main.js 白名单已覆盖 `install-lea.ps1`（H20，已解决）**：`maybeInstallSystemServices`
    拉起前按 `whitelist.json`（5 件）验 `install-lea.ps1` 的 SHA-256，路径取
    helperExe 旁的 `LEA/install-lea.ps1`（与将被执行的那一份一致）；白名单加载

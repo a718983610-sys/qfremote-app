@@ -96,6 +96,8 @@ extern "C" {
 #define LEA_ERR_NOT_CANCELLABLE "QFR_LEA_NOT_CANCELLABLE" /* S-022：命令不可取消（危险命令／已在执行） */
 #define LEA_ERR_NOT_FOUND "QFR_LEA_NOT_FOUND" /* S-022：job.query／job.cancel 查无此 job */
 #define LEA_ERR_PAUSED "QFR_LEA_PAUSED" /* S-021：本机已暂停（lea.pause），业务命令一律拒绝，直至 lea.resume */
+#define LEA_ERR_EMERGENCY_STOPPED "QFR_LEA_EMERGENCY_STOPPED" /* emergency_stop：本机已紧急停控，业务命令一律拒绝，直至专用恢复票据清除（不可重试——须走恢复流程，不得盲目重发） */
+#define LEA_ERR_LOGIN_PROOF "QFR_LEA_LOGIN_PROOF" /* v3 P0-4：session.login_changed 的登录证明缺失／无效／过期／错配／重放／不可验（fail-closed，不可重试——须重新登录取新证明） */
 
 typedef enum {
     LEA_EXEC_LEA = 0,  /* LEA 服务本机执行 */
@@ -296,6 +298,27 @@ int lea_ticket_canonical(const char *account_id, const char *device_id,
                          const char *lease_id, long long expires_at,
                          char *out, size_t out_size);
 
+/* 吊销快照规范串（A7-whitelist，GPT 问题 2：验证服务端授权来源）。
+ * 4 行 \n 连接串，域名行由 version_tag 给出：
+ *   qfr-lea-revoked-sync-v1（keys.sync-revoked，经 rebind 回包转发）
+ *   qfr-lea-key-revoked-v1（lea.key_revoked，经 MeshCentral 通道下发）
+ * 第 2 行 device_id 须合 id 规则（lea_validate_id_field：非空、≤127、
+ * 无控制字符——含 \n 在内，故字段间不可能移位）；第 3 行 generation
+ * 为 ≥0 的整数（%lld 输出，无前导零变体）；第 4 行是列表哈希：
+ * key_ids 以 '\n' 连接的 SHA-256 hex。
+ * key_ids 须已是规范形：每项合 token 规则（lea_validate_token，
+ * 8..128 字节 [A-Za-z0-9_-]，不含分隔符），且严格升序（有序＋无重复），
+ * 否则返回 0——签名只覆盖规范形集合，非规范列表不得入串、不得应用
+ * （服务端签发前同样排序去重；重复项／乱序到达即验签失败）。
+ * 空集合法（哈希为 sha256("")），语义是并集合并下的无操作＋世代推进，
+ * 永不缩表。n_key_ids 上限 512（与 LEA_REVOKED_MAX_IDS 同值）。
+ * 服务端同款实现见 server/ext/lea/lea-core.js revokedSnapshotSigningBytes。
+ * 验签由调用点用 lea_verify_ticket_signature（同一把 Ed25519 公钥，
+ * 与票据／信封同一信任根；域名行不同故跨协议签名不可互用）。 */
+int lea_revoked_snapshot_canonical(const char *version_tag, const char *device_id,
+                                   long long generation, const char *const *key_ids,
+                                   int n_key_ids, char *out, size_t out_size);
+
 /* 绑定票据原文（binding.confirm 的 ticket JSON）。scopes 缓冲 257 字节：
  * v1 定整串上限 256 UTF-8 字节（与 JS ticketSigningBytes 同界），超限即
  * 解析失败；grant_muse_execute 存解析原值（可为 2／-1 等非法值，入串时
@@ -322,6 +345,104 @@ typedef struct {
  * 空串处理），缺失时按空串；lease_id 存在时须为字符串，非空时合 id 规则；
  * ticket_signature 须为非空字符串。 */
 int lea_parse_ticket(const char *text, lea_ticket_t *out);
+
+/* ---------- 登录证明（login proof，v3 P0-4／B3） ---------- */
+/* 证明 login_changed 声称的账号确系服务端认证的真实登录事件，而非请求体
+ * 自报。服务端在用户控制台登录后签发（POST /api/lea/v1/login-attestation，
+ * 会话推导账号），客户端随 login_changed 原样带回，本地服务以编译期烘焙
+ * 的服务端 Ed25519 公钥验签（与票据同一把钥匙、同一 verify_real）。
+ * 规范串：qfr-lea-login-v1\n<key_id>\n<account_id>\n<device_id>\n
+ * <issued_at>\n<expires_at>（LF 连接、无结尾换行；key_id 为服务端公钥
+ * 指纹前 16 位 hex，见 lea_server_pubkey_fingerprint，与 JS
+ * signingPublicKeyFingerprint 逐字节一致；account/device 须合 id 规则，
+ * 含 \n \r 控制字符即拒绝，规范串无字段边界歧义）。
+ * 时效：服务端签发 TTL 120 秒；本地验收上限 expires-issued ≤ 300 秒，
+ * 时钟偏差容忍 ±60 秒（对称检查）。重放由调用方另行以已消费集合拦截
+ * （见 QFRLEA.c），此处不做。 */
+#define LEA_LOGIN_PROOF_VERSION "qfr-lea-login-v1"
+#define LEA_LOGIN_PROOF_TTL_MAX_SEC 300
+#define LEA_LOGIN_PROOF_SKEW_SEC 60
+
+typedef struct {
+    char version[32];
+    char key_id[17];
+    char account_id[128];
+    char device_id[128];
+    long long issued_at;
+    long long expires_at;
+    char signature[512];
+} lea_login_proof_t;
+
+/* 构造登录证明规范串。key_id 须恰好 16 位小写 hex；account/device 须合
+ * id 规则；issued/expires 须为正数且 expires > issued。失败返回 0。 */
+int lea_login_proof_canonical(const char *key_id, const char *account_id,
+                              const char *device_id, long long issued_at,
+                              long long expires_at, char *out, size_t out_size);
+
+/* 严格解析登录证明 JSON（与 lea_parse_ticket 同口径：完整顶层对象遍历，
+ * 重复键即拒绝，字符串按 JSON 转义解码）。全部字段必填且按类型校验：
+ * version／key_id／account_id／device_id／signature 须为非空字符串；
+ * issued_at／expires_at 须为整数。失败返回 0。 */
+int lea_parse_login_proof(const char *text, lea_login_proof_t *out);
+
+/* 验登录证明。proof_json 为 login_proof 字段的字符串内容（证明 JSON 原文）；
+ * account_id／device_id 为 login_changed 信封声称的账号／设备，须与证明内
+ * 一致（只比请求体不够——签名绑定证明内字段，错配即拒绝）；now_unix 为
+ * 当前 unix 秒。reason 写入失败原因：login-proof-missing（字段缺失／解析
+ * 失败）／login-proof-invalid（版本／key_id／字段非法）／login-proof-expired
+ * （过期或时效超限）／login-proof-mismatch（账号／设备／key_id 与声称或
+ * 本机公钥指纹不一致）／login-proof-bad-signature／login-proof-unverifiable
+ * （未烘焙公钥，见 ed25519-pubkey-not-configured）。成功返回 1。 */
+int lea_verify_login_proof(const char *proof_json, const char *account_id,
+                           const char *device_id, long long now_unix,
+                           char *reason, size_t reason_size);
+
+/* emergency_stop 专用恢复票据原文（GPT 2026-11-18 裁决问题 3）。
+ * type 固定 "emergency_stop_recovery"，禁止与普通绑定票据混用；
+ * 普通 binding.confirm 即使签名有效也不能清除 emergency_stop。
+ * auth_context 是服务端强认证结果（由服务端产生并签名覆盖，设备端
+ * 只验存在＋签名覆盖，不解释其内容；本地审计只存其哈希）。
+ * scope 为恢复的控制权限范围（如 "device-control"）；ticket_id 一次性，
+ * recovery_epoch 为恢复操作的独立单调代次。 */
+#define LEA_RECOVERY_TICKET_TYPE "emergency_stop_recovery"
+typedef struct {
+    char type[64];
+    char account_id[128];
+    char device_id[128];
+    char stop_event_id[128];
+    long long binding_epoch;
+    long long grant_epoch;
+    long long recovery_epoch;
+    char scope[128];
+    char ticket_id[128];
+    long long issued_at;
+    long long expires_at;
+    char auth_context[256];
+    char signature[512];
+} lea_recovery_ticket_t;
+
+/* 恢复票据规范串 v1：12 行 \n 连接串，域名行
+ * qfr-lea-recovery-ticket-v1，覆盖全部字段（type 在首行之后）。
+ * 字段非法或空间不足返回 0。服务端 lea-core.js 的
+ * recoveryTicketSigningBytes 须逐行一致。 */
+int lea_recovery_ticket_canonical(const lea_recovery_ticket_t *t,
+                                  char *out, size_t out_size);
+
+/* 严格解析恢复票据（与 lea_parse_ticket 同款严格 JSON 成员遍历）。
+ * 全部字段按类型校验，失败返回 0：type 须为 "emergency_stop_recovery"；
+ * account_id／device_id／stop_event_id／ticket_id 须为字符串且合 id 规则；
+ * binding_epoch／grant_epoch／recovery_epoch／issued_at／expires_at 须为
+ * 整数，不得缺失；scope／auth_context 须为字符串（可为空串，但字段须
+ * 存在——服务端签发时必带）；signature 须为非空字符串。 */
+int lea_parse_recovery_ticket(const char *text, lea_recovery_ticket_t *out);
+
+/* 同步回执规范串：服务端 emergencyStopSync 签发回执时用同一格式；
+ * LEA 收到 lea.emergency-stop-sync 后凭此串验签。头部固定
+ * qfr-lea-emergency-stop-sync-v1，之后 4 行：stop_event_id、
+ * account_id、device_id、synced_at（unix 秒，十进制）。 */
+int lea_emergency_stop_sync_canonical(const char *stop_event_id, const char *account_id,
+                                      const char *device_id, long long synced_at,
+                                      char *out, size_t out_size);
 
 /* 重建信封行（供 LEA→USH 转发；签名等字段原样带回，USH 只信 LEA 不再验签）。
  * pkg1 #25：全部字符串字段经 JSON 转义后拼接，%s 直拼禁止；

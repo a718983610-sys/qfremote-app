@@ -3,6 +3,11 @@
  * 运行位置：用户登录会话内，当前登录用户权限，随登录启动
  * （计划任务 QFRLEA User Helper，见 register-ush.ps1；主程序兜底拉起由安装线接）。
  * 通道：命名管道 \\.\pipe\QFR\LEA\UserHelper\v1，一行 JSON 请求 → 一行 JSON 响应。
+ * 多会话限制（P1-2，2026-11-17 v2，文档口径）：管道名是机器全局单名，
+ * 首个启动的 USH 独占；后起会话的 USH 建管道失败、探活成功即整进程
+ * 退出（见下“单实例”）。故多会话下 UI 命令／自助绑定仅第一个 USH
+ * 所在会话可用，其余会话的转发因 token 对不上 USH 内存 token 而
+ * fail-closed，不静默错发到别的会话。单用户部署不受影响。
  * 权限：管道 ACL 仅 SYSTEM + Administrators（D:(A;;GA;;;SY)(A;;GA;;;BA)），
  * 即只有 QFRLEA 服务（SYSTEM 身份）能连。比 QFSysHelper 更严是故意的：
  * QFSysHelper 要接用户态 Electron 应用的调用故放行 AU（认证用户），
@@ -38,8 +43,9 @@
 #endif
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h> /* SetNamedSecurityInfoW／SE_FILE_OBJECT（token 文件级 DACL） */
 #include <bcrypt.h>
-#include <wtsapi32.h> /* WTSGetActiveConsoleSessionId（H03 第二轮：与 LEA 同源） */
+#include <wtsapi32.h> /* ProcessIdToSessionId（取自身会话 id，H03 第三轮） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,12 +64,285 @@ static HANDLE g_stop_event = NULL;
 
 /* ---------- H03：每启动随机 token ＋ 调用方鉴别 ---------- */
 /* token：32 字节 BCryptGenRandom → 64 位小写 hex，存在内存（g_ush_token），
- * 同时写入 %ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt 供 LEA 读取
- * 后随信封带回验。LEA 读不到 token 即不转发 UI 命令（fail-closed）。
+ * 同时写入 %ProgramData%\QFR\LEA\ush-tokens\<sessionid>\token.txt 供 LEA
+ * 读取后随信封带回验（v3 路径：每会话子目录，由 SYSTEM 服务创建并授
+ * DACL；目录未就绪时写失败、主循环每 30 秒重试，token 只生成一次）。
+ * LEA 读不到 token 即不转发 UI 命令（fail-closed）。
  * 生成失败返回 0：此时 g_ush_token 为空，全部 LEA 命令都会因 token
  * 不匹配被拒（fail-closed），只记日志继续跑，等下次启动重试。 */
 static char g_ush_token[65] = { 0 };
+/* 本进程 token 文件全路径（ush_token_init 填，ush_token_cleanup 用；
+ * 为空即未写文件）。 */
+static WCHAR g_ush_token_path[MAX_PATH] = { 0 };
 
+/* 退出清理（P1-1，2026-11-17 v2）：删自己会话的 token 文件，不留残留。
+ * 尽力而为：删不掉（例如旧 SDDL 下的文件无 DELETE 权限）只记日志，
+ * 残留文件是 inert 的——LEA 只读请求方会话的文件，USH 内存 token 已
+ * 换新，对不上即 fail-closed，不构成冒用。被 taskkill /F 强杀时不跑，
+ * 同样只留 inert 残留。 */
+static void ush_token_cleanup(void) {
+    if (g_ush_token_path[0] == L'\0') return;
+    if (DeleteFileW(g_ush_token_path)) {
+        ush_log_event("ush-token-cleaned", "own token file removed on exit");
+    } else {
+        ush_log_event("ush-token-cleanup-failed", "cannot remove own token file; stale file is inert (fail-closed)");
+    }
+    g_ush_token_path[0] = L'\0';
+}
+
+/* token 文件级 DACL（v3，2026-11-18，GPT A1 两处 DoS 根治）：SY/BA 完
+ * 全控制；本会话 Logon SID 最小权限 0x150083（FILE_READ_DATA｜
+ * FILE_WRITE_DATA｜DELETE｜WRITE_DAC｜FILE_READ_ATTRIBUTES｜SYNCHRONIZE）
+ * ——只够读写自己的 token 文件、原子替换（删旧文件）与收紧文件 DACL。
+ * Logon SID 而不用用户 SID：同一用户的两个登录会话各有不同的 Logon
+ * SID，同用户跨会话也抢占不了（大肥鱼会诊 Q2）。取不到 Logon SID 时
+ * 回退用户 SID（同掩码，记日志）——不因此把掩码放回 FA。构造出的
+ * DACL 供两处用：临时文件建好后立即用句柄收紧（SetSecurityInfo），
+ * 最终文件写完后按路径收紧（SetNamedSecurityInfoW）。*sd_out 须由调
+ * 用方 LocalFree。 */
+static int ush_token_logon_sid(LPWSTR *sid_str_out) {
+    HANDLE tok = NULL;
+    DWORD len = 0;
+    TOKEN_GROUPS *tg = NULL;
+    DWORD i;
+    int ok = 0;
+    *sid_str_out = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return 0;
+    (void)GetTokenInformation(tok, TokenGroups, NULL, 0, &len);
+    if (len == 0 || len > 65536) { CloseHandle(tok); return 0; }
+    tg = (TOKEN_GROUPS *)malloc(len);
+    if (!tg) { CloseHandle(tok); return 0; }
+    if (GetTokenInformation(tok, TokenGroups, tg, len, &len)) {
+        for (i = 0; i < tg->GroupCount; i++) {
+            if ((tg->Groups[i].Attributes & SE_GROUP_LOGON_ID) &&
+                IsValidSid(tg->Groups[i].Sid)) {
+                ok = ConvertSidToStringSidW(tg->Groups[i].Sid, sid_str_out) ? 1 : 0;
+                break;
+            }
+        }
+    }
+    free(tg);
+    CloseHandle(tok);
+    return ok;
+}
+
+static int ush_token_build_file_sd(PSECURITY_DESCRIPTOR *sd_out, PACL *dacl_out) {
+    *sd_out = NULL;
+    *dacl_out = NULL;
+    LPWSTR sid_str = NULL;
+    int via_logon = ush_token_logon_sid(&sid_str);
+    if (!via_logon) {
+        /* 回退用户 SID（同掩码，记日志）。 */
+        HANDLE tok = NULL;
+        DWORD len = 0;
+        TOKEN_USER *tu = NULL;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+            ush_log_event("ush-token-acl-failed", "cannot open process token");
+            return 0;
+        }
+        (void)GetTokenInformation(tok, TokenUser, NULL, 0, &len);
+        tu = (TOKEN_USER *)malloc(len > 0 ? len : 1);
+        if (!tu || !GetTokenInformation(tok, TokenUser, tu, len, &len)) {
+            ush_log_event("ush-token-acl-failed", "cannot query token user");
+            free(tu);
+            CloseHandle(tok);
+            return 0;
+        }
+        if (!ConvertSidToStringSidW(tu->User.Sid, &sid_str)) {
+            ush_log_event("ush-token-acl-failed", "cannot stringify user sid");
+            free(tu);
+            CloseHandle(tok);
+            return 0;
+        }
+        free(tu);
+        CloseHandle(tok);
+        ush_log_event("ush-token-acl-logon-fallback", "logon SID unavailable; token file DACL uses user SID");
+    }
+    WCHAR sddl[512];
+    _snwprintf(sddl, 512, L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x150083;;;%s)", sid_str);
+    sddl[511] = L'\0';
+    LocalFree(sid_str);
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, SDDL_REVISION_1, &sd, NULL)) {
+        ush_log_event("ush-token-acl-failed", "cannot build token file SDDL");
+        return 0;
+    }
+    PACL dacl = NULL;
+    BOOL present = FALSE, defaulted = FALSE;
+    if (!GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) || !present || !dacl) {
+        ush_log_event("ush-token-acl-failed", "cannot get token file DACL");
+        LocalFree(sd);
+        return 0;
+    }
+    *sd_out = sd;
+    *dacl_out = dacl;
+    return 1;
+}
+
+/* 按路径收紧指定文件的 DACL。返回 1=已设好，0=失败（调用方定策略：
+ * 原子路径下文件本已继承正确 DACL，失败只记日志继续；回退路径下文
+ * 件沿用旧 SDDL 的宽松 DACL，失败时调用方删文件 fail-closed，下次启
+ * 动文件不存在、走原子路径自愈）。 */
+static int ush_token_set_file_acl(WCHAR *wpath) {
+    PSECURITY_DESCRIPTOR sd = NULL;
+    PACL dacl = NULL;
+    if (!ush_token_build_file_sd(&sd, &dacl)) return 0;
+    DWORD rc = SetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
+                          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                          NULL, NULL, dacl, NULL);
+    LocalFree(sd);
+    if (rc != ERROR_SUCCESS) {
+        ush_log_event("ush-token-acl-failed", "cannot set token file DACL");
+        return 0;
+    }
+    return 1;
+}
+
+/* token 文件是否已写上（ush_token_write_file 置 1；写失败时主循环每
+ * 30 秒重试，重试只重写文件、token 不重生成）。 */
+static int g_ush_token_file_written = 0;
+
+/* 写 token 文件（v3 路径：每会话子目录 <sessionid>\token.txt，由 SYSTEM
+ * 服务创建并授 DACL——USH 不自己建目录（父目录只留 SY/BA，用户进程
+ * 建不了）；目录未就绪时写失败、返回 0，主循环 30 秒后重试，服务侧
+ * 启动枚举／LEA 读 token 时按需建目录，两边终会合。原子替换：先写同
+ * 目录临时文件再 MoveFileEx REPLACE_EXISTING 改名——LEA 永远读到完整
+ * 的新文件或完整的旧文件，不会读到写一半的截断内容；同目录改名是原
+ * 子操作。临时文件随机名＋CREATE_NEW 独占创建：pid 可预测、可复用，
+ * 攻击者可预置同名临时文件干扰写入；4 字节随机后缀使预置不可行，取
+ * 随机失败时回退 pid；独占创建使预置占位即碰撞，重试换名。（互斥体
+ * 本已挡住同会话双实例，此处只是纵深。）改名失败时回退直接覆写：
+ * 旧文件无 DELETE 权限、改名换不掉（一次性升级残留）；回退路径记日
+ * 志。回退写是截断式，LEA 并发读可能读到半截——但 token 格式校验
+ * （恰好 64 位小写 hex）使半截内容恒被拒，只造成一次性的 transient
+ * 失败，不会误接受；且写完后立即收紧文件 DACL（见
+ * ush_token_set_file_acl），旧洞一次写清，下次启动即走原子路径。 */
+static int ush_token_write_file(void) {
+    DWORD session_id = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session_id)) {
+        ush_log_event("ush-token-no-session", "cannot get own session id; token file not written, LEA forwards will fail closed");
+        return 0;
+    }
+    WCHAR wpd[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 0;
+    WCHAR wpath[MAX_PATH];
+    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\token.txt",
+               wpd, (unsigned long)session_id);
+    wcsncpy(g_ush_token_path, wpath, MAX_PATH - 1);
+    g_ush_token_path[MAX_PATH - 1] = L'\0';
+    unsigned char rnd[4] = { 0 };
+    unsigned long tmp_tag = (unsigned long)GetCurrentProcessId();
+    if (BCryptGenRandom(NULL, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)
+        tmp_tag = (unsigned long)(((unsigned long)rnd[0] << 24) | ((unsigned long)rnd[1] << 16) |
+                                  ((unsigned long)rnd[2] << 8) | (unsigned long)rnd[3]);
+    WCHAR wtmp[MAX_PATH];
+    _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
+               wpd, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
+    /* 临时文件独占创建（CREATE_NEW）：随机名＋独占创建，预置占位即碰
+     * 撞，重试换名；建好立即用句柄收紧临时文件 DACL（写内容之前），
+     * 不留“先写内容、后收紧”的暴露窗口。注意：文件以共享模式 0 独占
+     * 打开时，按路径设 DACL 会被共享冲突拒绝，故必须用句柄设 DACL
+     * （打开时带 WRITE_DAC）；收紧失败即关句柄、删临时文件、返回失败，
+     * 不继续写。非碰撞失败不重试（目录未就绪属此类，主循环 30 秒后重
+     * 试整个写文件流程）。 */
+    HANDLE htmp = INVALID_HANDLE_VALUE;
+    int attempt;
+    for (attempt = 0; attempt < 3 && htmp == INVALID_HANDLE_VALUE; attempt++) {
+        if (attempt > 0) {
+            if (BCryptGenRandom(NULL, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)
+                tmp_tag = (unsigned long)(((unsigned long)rnd[0] << 24) | ((unsigned long)rnd[1] << 16) |
+                                          ((unsigned long)rnd[2] << 8) | (unsigned long)rnd[3]);
+            _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
+                       wpd, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
+        }
+        htmp = CreateFileW(wtmp, GENERIC_WRITE | WRITE_DAC, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+        if (htmp == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS)
+            break;
+    }
+    if (htmp == INVALID_HANDLE_VALUE) {
+        ush_log_event("ush-token-file-failed", "cannot create ush token temp file; LEA forwards will fail closed (retry in 30s)");
+        return 0;
+    }
+    {
+        PSECURITY_DESCRIPTOR sd = NULL;
+        PACL dacl = NULL;
+        if (!ush_token_build_file_sd(&sd, &dacl) ||
+            SetSecurityInfo(htmp, SE_FILE_OBJECT,
+                            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                            NULL, NULL, dacl, NULL) != ERROR_SUCCESS) {
+            ush_log_event("ush-token-acl-failed", "cannot set temp token file DACL; aborting write");
+            LocalFree(sd);
+            CloseHandle(htmp);
+            if (!DeleteFileW(wtmp))
+                ush_log_event("ush-token-temp-delete-failed", "stale temp token file remains; not read by LEA");
+            return 0;
+        }
+        LocalFree(sd);
+    }
+    DWORD written = 0;
+    BOOL wok = WriteFile(htmp, g_ush_token, 64, &written, NULL) && written == 64;
+    if (wok) {
+        char nl = '\n';
+        DWORD w2 = 0;
+        wok = WriteFile(htmp, &nl, 1, &w2, NULL) && w2 == 1;
+    }
+    if (!CloseHandle(htmp) || !wok) {
+        ush_log_event("ush-token-file-failed", "cannot write ush token temp file; LEA forwards will fail closed (retry in 30s)");
+        if (!DeleteFileW(wtmp))
+            ush_log_event("ush-token-temp-delete-failed", "stale temp token file remains; not read by LEA");
+        return 0;
+    }
+    int via_fallback = 0;
+    if (!MoveFileExW(wtmp, wpath, MOVEFILE_REPLACE_EXISTING)) {
+        via_fallback = 1;
+        ush_log_event("ush-token-atomic-fallback", "atomic replace failed; falling back to direct overwrite (legacy ACL)");
+        if (!DeleteFileW(wtmp))
+            ush_log_event("ush-token-temp-delete-failed", "stale temp token file remains; not read by LEA");
+        FILE *f = _wfopen(wpath, L"wb");
+        if (!f) {
+            ush_log_event("ush-token-file-failed", "cannot write ush token file; LEA forwards will fail closed (retry in 30s)");
+            return 0;
+        }
+        size_t wn = fwrite(g_ush_token, 1, 64, f);
+        int wc = fputc('\n', f);
+        int cc = fclose(f);
+        if (wn != 64 || wc == EOF || cc != 0) {
+            ush_log_event("ush-token-file-failed", "cannot write ush token file; LEA forwards will fail closed (retry in 30s)");
+            return 0;
+        }
+    }
+    /* 写完即收紧文件级 DACL（见 ush_token_set_file_acl）：原子路径下
+     * 文件本已继承正确 DACL、临时文件也已用句柄收紧，此处是纵深，失败
+     * 只记日志继续；回退路径下文件沿用旧 SDDL 的宽松 DACL，收紧失败时
+     * 删文件 fail-closed（下次启动文件不存在，走原子路径自愈），不留
+     * 宽松文件继续用。删成功后清 g_ush_token_path，避免退出清理再对
+     * 已删文件记一条误导性的 cleanup-failed。删不掉（常见于文件属主
+     * 是他人、USH 无 DELETE 权）则把内存 token 清零再返回 0：与本函数
+     * 头注释的契约一致（返回 0 ⟺ g_ush_token 为空，全部转发命令因
+     * token 不匹配被拒），宽松文件里的 token 从此对不上内存，UI 命令
+     * fail-closed 直到下次启动重生成。 */
+    if (!ush_token_set_file_acl(wpath) && via_fallback) {
+        if (DeleteFileW(wpath)) {
+            g_ush_token_path[0] = L'\0';
+            ush_log_event("ush-token-acl-failed-removed", "token file DACL cannot be tightened; file removed, UI commands fail closed until next USH start");
+        } else {
+            ush_log_event("ush-token-acl-failed-remove-failed", "token file DACL cannot be tightened and file cannot be removed; memory token zeroed, UI commands fail closed until next USH start");
+            memset(g_ush_token, 0, sizeof(g_ush_token));
+            return 0;
+        }
+    }
+    g_ush_token_file_written = 1;
+    return 1;
+}
+
+/* 生成 token（只做一次）：32 字节 BCryptGenRandom → 64 位小写 hex，存
+ * 内存（g_ush_token），再调 ush_token_write_file 落盘供 LEA 读取。
+ * 生成失败返回 0：此时 g_ush_token 为空，全部 LEA 命令都会因 token
+ * 不匹配被拒（fail-closed），只记日志继续跑，等下次启动重试。写文件
+ * 失败返回 1（token 在内存，文件没写，主循环每 30 秒重试写文件）。 */
 static int ush_token_init(void) {
     unsigned char raw[32];
     if (BCryptGenRandom(NULL, raw, sizeof(raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
@@ -74,34 +353,15 @@ static int ush_token_init(void) {
         g_ush_token[i * 2 + 1] = hexd[raw[i] & 0xF];
     }
     g_ush_token[64] = '\0';
-    /* 文件名用活动控制台会话 id（H03 第二轮）：与 LEA 的 ush_token_read
-     * 用同一来源，RDP／多会话下不错配。旧版用自身会话 id
-     * （ProcessIdToSessionId），RDP 会话里的 USH 与 LEA 读的控制台会
-     * 话文件对不上，token 永远读不到。多会话各跑一个 USH 时同名文件
-     * 后写者胜——UI 命令本就只面向控制台桌面，残留 DoS 接受。
-     * DS 第二轮 #6：无活动控制台会话时不回退自身会话 id——LEA 的
-     * ush_token_read 同样用 WTSGetActiveConsoleSessionId，取不到直接
-     * 失败；两端不一致只会让日志难定位。RDP-only（无控制台会话）下
-     * token 文件不写，LEA 读不到 token，UI 命令 fail-closed（见 README）。 */
-    DWORD session_id = WTSGetActiveConsoleSessionId();
-    if (session_id == 0xFFFFFFFF) {
-        ush_log_event("ush-token-no-console-session", "no active console session; token file not written, LEA forwards will fail closed (RDP-only: UI commands unavailable)");
-        return 1; /* token 在内存，文件没写 */
-    }
-    WCHAR wpd[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return 1; /* token 在内存，文件写失败只记日志 */
-    WCHAR wpath[MAX_PATH];
-    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu.txt",
-               wpd, (unsigned long)session_id);
-    FILE *f = _wfopen(wpath, L"wb");
-    if (!f) {
-        ush_log_event("ush-token-file-failed", "cannot write ush token file; LEA forwards will fail closed");
-        return 1;
-    }
-    fwrite(g_ush_token, 1, 64, f);
-    fputc('\n', f);
-    fclose(f);
+    /* 文件名用 USH 自身会话 id（H03 第三轮，2026-11-17）：LEA 按“发来
+     * 本条命令的客户端所在会话”读 token（见 QFRLEA.c ush_token_read），
+     * 两端同源、RDP／多会话下不错配。旧版（第二轮）两端同用活动控制台
+     * 会话 id，Server＋RDP 下 USH 所在会话与控制台会话对不上、RDP-only
+     * 时甚至无控制台会话，token 文件不写、LEA 永远读不到，UI 命令与
+     * 自助绑定全线 fail-closed。多会话各跑一个 USH 时各写各的会话文件，
+     * 不再同名抢写。v3：文件改放每会话子目录 <sessionid>\token.txt
+     * （见 ush_token_write_file）。 */
+    ush_token_write_file();
     return 1;
 }
 
@@ -604,9 +864,19 @@ int main(int argc, char **argv) {
     HANDLE loop_thread = CreateThread(NULL, 0, pipe_loop, NULL, 0, NULL);
     if (!loop_thread) {
         ush_log_event("fatal", "cannot start pipe thread");
+        ush_token_cleanup();
         return 1;
     }
-    WaitForSingleObject(g_stop_event, INFINITE);
+    /* v3：token 文件写失败时每 30 秒重试一次（目录由 SYSTEM 服务创建，
+     * USH 启动时目录可能还没建好——服务启动枚举／LEA 读 token 时按需建；
+     * 目录未就绪时写失败只记日志，重试直到写上；token 只生成一次，重
+     * 试只重写文件）。 */
+    for (;;) {
+        DWORD w = WaitForSingleObject(g_stop_event, 30000);
+        if (w != WAIT_TIMEOUT) break;
+        if (g_ush_token[0] && !g_ush_token_file_written)
+            ush_token_write_file();
+    }
     InterlockedExchange(&g_running, 0);
     /* 自唤醒：连一次管道让 ConnectNamedPipe 返回 */
     {
@@ -615,6 +885,7 @@ int main(int argc, char **argv) {
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
     WaitForSingleObject(loop_thread, 5000);
+    ush_token_cleanup();
     ush_uia_shutdown();
     if (mutex) CloseHandle(mutex);
     ush_log_event("ush-stopped", "shutdown complete");

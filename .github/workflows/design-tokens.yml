@@ -1,0 +1,98 @@
+name: 设计令牌校验（S-132）
+
+# S-132（2026-11-18，GPT 新材料回复）：design-tokens/tokens.json 为唯一受版本控制的
+# 设计令牌正本；三端使用从正本生成或严格映射的值。CI 校验四项：
+#   1) tokens.json 符合 design-tokens/schema.json；
+#   2) 无 DIVERGENT 分歧 token；
+#   3) 基础对比度（WCAG AA 正文 ≥4.5:1）；
+#   4) 九个服务端页面＋网页端构建产物＋Windows 壳＋安卓 theme.dart 代码中无品牌蓝及蓝色系旧值；
+#   5) 生成器产物新鲜：dart design-tokens/generate.dart --check（Dart 常量与 CSS token 层与正本无漂移）；
+#   6) 网页端哈希产物零字面量色值（server/webapp/tests/lint-no-colors.mjs）。
+# 任一项失败即阻塞合并。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, lea-local-agent]
+    paths:
+      - 'design-tokens/**'
+      - 'tools/check-design-tokens.mjs'
+      - 'server/webapp/qf-tokens-generated.css'
+      - 'server/webapp/qf-tokens-*.css'
+      - 'server/webapp/tests/lint-no-colors.mjs'
+      - 'server/register/register.html'
+      - 'server/ext/license-pages.js'
+      - 'server/ext/home-page.js'
+      - 'server/friends/friends.html'
+      - 'server/forum/forum.html'
+      - 'server/friends/support/support-page.html'
+      - 'server/friends/qf-wrap.html'
+      - 'server/friends/chat/chat.html'
+      - 'server/meshcentral/public/scripts/custom.js'
+      - 'server/ext/server.js'
+      - 'android-app/lib/ui/theme.dart'
+      - 'android-app/lib/ui/generated_tokens.dart'
+      - 'windows/main.js'
+      - 'windows/console-preload.js'
+      - 'windows/toolbar-preload.js'
+      - 'windows/shared.css'
+      - '.github/workflows/design-tokens.yml'
+  pull_request:
+    branches: [lea-local-agent, main]
+    paths:
+      - 'design-tokens/**'
+      - 'tools/check-design-tokens.mjs'
+      - 'server/webapp/qf-tokens-generated.css'
+      - 'server/webapp/qf-tokens-*.css'
+      - 'server/webapp/tests/lint-no-colors.mjs'
+      - 'server/register/register.html'
+      - 'server/ext/license-pages.js'
+      - 'server/ext/home-page.js'
+      - 'server/friends/friends.html'
+      - 'server/forum/forum.html'
+      - 'server/friends/support/support-page.html'
+      - 'server/friends/qf-wrap.html'
+      - 'server/friends/chat/chat.html'
+      - 'server/meshcentral/public/scripts/custom.js'
+      - 'server/ext/server.js'
+      - 'android-app/lib/ui/theme.dart'
+      - 'android-app/lib/ui/generated_tokens.dart'
+      - 'windows/main.js'
+      - 'windows/console-preload.js'
+      - 'windows/toolbar-preload.js'
+      - 'windows/shared.css'
+      - '.github/workflows/design-tokens.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # 第三方 action 固定到已审查的完整 commit SHA（注释为对应 release 版）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Flutter ${{ env.FLUTTER_VERSION }}（Dart 3.13.7）
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: 令牌校验（Schema＋分歧＋对比度＋禁色）
+        run: node tools/check-design-tokens.mjs
+
+      - name: 生成器产物新鲜（Dart 常量＋CSS token 层与正本无漂移）
+        run: dart design-tokens/generate.dart --check
+
+      - name: 网页端哈希产物零字面量色值
+        working-directory: server/webapp
+        run: node tests/lint-no-colors.mjs

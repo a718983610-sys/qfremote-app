@@ -26,7 +26,7 @@ ReleaseEntry _entry() => ReleaseEntry(
 
 AboutDeps _deps(Future<AboutUpdateResult> Function() detail) => AboutDeps(
       currentVersion: '2.3.2',
-      palette: QfPalette(QfThemeMode.blue),
+      palette: QfPalette(QfThemeMode.light),
       probeNow: () async => ProbeResult(
           ok: true, at: DateTime.now(), elapsedMs: 3, statusCode: 200),
       checkUpdate: () async => null,

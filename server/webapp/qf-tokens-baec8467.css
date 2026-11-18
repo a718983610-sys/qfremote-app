@@ -6,7 +6,7 @@
 :root{
 /* 唯一全局 token 源；浅色为默认，深色值以 --dark-* 常量与 [data-theme="dark"] 提供。
    圆角定夺：控件 8px（--radius-1）、卡片 12px（--r）、弹窗 16px、胶囊 999px；卡片圆角定夺 6 的 8px 已按大肥鱼定夺改为 12px。 */
---bg:#FFFFFF;--brand:#111113;--navy:#111113;--tx:#111113;--sub:#4B4B55;--line:#E4E4E7;--card:#FFFFFF;--tint:#F7F7F8;--hover:#E8E8EB;--ok:#16A34A;--okbg:rgba(22,163,74,.08);--err:#DC2626;--errbg:rgba(220,38,38,.04);--warn:#EA580C;--warnbg:rgba(234,88,12,.08);
+--bg:#FFFFFF;--brand:#000000;--navy:#000000;--tx:#09090B;--sub:#52525B;--line:#E4E4E7;--card:#FFFFFF;--tint:#F7F7F8;--hover:#E8E8EB;--ok:#16A34A;--okbg:rgba(22,163,74,.08);--err:#DC2626;--errbg:rgba(220,38,38,.04);--warn:#EA580C;--warnbg:rgba(234,88,12,.08);
 /* REWORK A §3.0：表面角色 BG0–BG5（全局 6 级结构灰，单视图 ≤4）。浅：BG0–BG5 六级＋分割线（值见下方变量）。 */
 --bg0:#FFFFFF;--bg1:#F7F7F8;--bg2:#F0F0F2;--bg3:#E8E8EB;--bg4:#DFDFE3;--bg5:#D6D6DB;--hairline:#E4E4E7;
 /* REWORK A §3.0：交互叠色（不新增结构灰）。hover 浅黑 4%／深白 6%；selected 6%/9%；pressed 10%/13%。 */
@@ -14,15 +14,15 @@
 /* REWORK A §3.0：文字 4 角色独立，不参与结构灰计数。主／次／三／禁用（值见下方变量）。 */
 --surface-0:#FFFFFF;--surface-1:#F7F7F8;--surface-2:#F0F0F2;--surface-3:#E8E8EB;
 --border:#E4E4E7;--border-strong:#E4E4E7;--border-hover:#E4E4E7;
---text-1:#111113;--text-2:#4B4B55;--text-3:#6E6E78;/* REWORK：浅三级恢复独立角色（六项②“并入次级”按 A §4 废止） */--text-4:#A1A1AA;
+--text-1:#09090B;--text-2:#52525B;--text-3:#6E6E78;/* REWORK：浅三级恢复独立角色（六项②“并入次级”按 A §4 废止） */--text-4:#A1A1AA;
 --success:#16A34A;--success-light:#16A34A;--danger:#DC2626;--danger-light:#DC2626;--warning:#EA580C;--warning-light:#EA580C;--info:#3F3F46;--info-light:#3F3F46;
 --success-bg:rgba(22,163,74,.08);--success-ring:rgba(22,163,74,.30);--danger-bg:rgba(220,38,38,.04);--danger-ring:rgba(220,38,38,.30);--warning-bg:rgba(234,88,12,.08);--warning-ring:rgba(234,88,12,.30);--info-bg:rgba(0,0,0,.06);
 /* B 组 Toast 成功图标例外（RL-C02）：仅用于“成功 Toast 图标”本身，不用于边线／正文／普通状态点；控制台当前无图标元素，token 先行注册备用。 */
 --toast-ok-icon:#16A34A;
---dark-bg:#08090A;--dark-surface-0:#08090A;--dark-surface-1:#0D0E10;--dark-surface-2:#111113;--dark-surface-3:#17181A;
---dark-text-1:#F5F5F7;--dark-text-2:#B9B9C2;--dark-text-3:#8A8A93;/* 六项定夺①：深色三级（对比度已核，见下方变量） */--dark-text-4:#5A5B64;
---dark-border:#2E2F34;--dark-border-strong:#2E2F34;--dark-border-hover:#2E2F34;
---brand-lt:#111113;--brand-soft:rgba(0,0,0,.06);--brand-ring:#111113;
+--dark-bg:#08090A;--dark-surface-0:#08090A;--dark-surface-1:#111113;--dark-surface-2:#111113;--dark-surface-3:#17181A;
+--dark-text-1:#F7F7F8;--dark-text-2:#A1A1AA;--dark-text-3:#8A8A93;/* 六项定夺①：深色三级（对比度已核，见下方变量） */--dark-text-4:#5A5B64;
+--dark-border:#27272A;--dark-border-strong:#27272A;--dark-border-hover:#27272A;
+--brand-lt:#000000;--brand-soft:rgba(0,0,0,.06);--brand-ring:#000000;
 --r:12px;--radius-1:8px;--radius-2:16px;--radius-modal:16px;--radius-pop:8px;--radius-chat:16px;--radius-chat-tail:4px;
 --r-pill:999px;--r-round:50%;
 --fs-11:11px;--fs-12:12px;--fs-13:13px;--fs-14:14px;--fs-15:15px;--fs-16:16px;--fs-18:18px;--fs-20:20px;--fs-22:22px;--fs-24:24px;--fs-26:26px;--fs-29:29px;
@@ -47,10 +47,10 @@
 --z-side:50;--z-acct:70;--z-top:60000;--z-drawer:70000;--z-scrim:65000;--z-bnav:50000;--z-modal:90000;--z-toast:100000;
 --safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px)}
 /* 深色主题（深色阴影不用重黑：内高光 + 柔和黑影）。由 <html data-theme="dark"> 开启，默认跟随系统主题（见 index.html 预应用脚本与 app.js getTheme）。状态色按 B 组定稿（RL-C02），A 组旧值已废止。 */
-[data-theme="dark"]{--bg:#08090A;--brand:#FFFFFF;--brand-lt:#FFFFFF;--brand-soft:rgba(255,255,255,.09);--brand-ring:#FFFFFF;--navy:#F5F5F7;--tx:#F5F5F7;--sub:#B9B9C2;--line:#2E2F34;--card:#111113;--tint:#0D0E10;--hover:#17181A;--bg0:#08090A;--bg1:#0D0E10;--bg2:#111113;--bg3:#17181A;--bg4:#1F2023;--bg5:#27272A;--hairline:#2E2F34;--state-hover:rgba(255,255,255,.06);--state-selected:rgba(255,255,255,.09);--state-pressed:rgba(255,255,255,.13);--overlay-scrim:rgba(0,0,0,.56);
---surface-0:#08090A;--surface-1:#0D0E10;--surface-2:#111113;--surface-3:#17181A;
---border:#2E2F34;--border-strong:#2E2F34;--border-hover:#2E2F34;
---text-1:#F5F5F7;--text-2:#B9B9C2;--text-3:#8A8A93;--text-4:#5A5B64;
+[data-theme="dark"]{--bg:#08090A;--brand:#FFFFFF;--brand-lt:#FFFFFF;--brand-soft:rgba(255,255,255,.09);--brand-ring:#FFFFFF;--navy:#F7F7F8;--tx:#F7F7F8;--sub:#A1A1AA;--line:#27272A;--card:#111113;--tint:#0D0E10;--hover:#17181A;--bg0:#08090A;--bg1:#0D0E10;--bg2:#111113;--bg3:#17181A;--bg4:#1F2023;--bg5:#27272A;--hairline:#27272A;--state-hover:rgba(255,255,255,.06);--state-selected:rgba(255,255,255,.09);--state-pressed:rgba(255,255,255,.13);--overlay-scrim:rgba(0,0,0,.56);
+--surface-0:#08090A;--surface-1:#111113;--surface-2:#111113;--surface-3:#17181A;
+--border:#27272A;--border-strong:#27272A;--border-hover:#27272A;
+--text-1:#F7F7F8;--text-2:#A1A1AA;--text-3:#8A8A93;--text-4:#5A5B64;
 --success:#22C55E;--success-light:#22C55E;--danger:#F87171;--danger-light:#F87171;--warning:#FB923C;--warning-light:#FB923C;--info:#D4D4D8;--info-light:#D4D4D8;
 --success-bg:rgba(34,197,94,.12);--success-ring:rgba(34,197,94,.30);--danger-bg:rgba(248,113,113,.12);--danger-ring:rgba(248,113,113,.30);--warning-bg:rgba(251,146,60,.12);--warning-ring:rgba(251,146,60,.30);--info-bg:rgba(255,255,255,.08);
 --ok:#22C55E;--okbg:rgba(34,197,94,.12);--err:#F87171;--errbg:rgba(248,113,113,.12);--warn:#FB923C;--warnbg:rgba(251,146,60,.12);
@@ -66,7 +66,7 @@
 --scrim:rgba(0,0,0,.45);--drawer-shadow:rgba(0,0,0,.12);--drawer-shadow-desk:rgba(17,17,19,.12);
 --card-shadow:0 1px 2px rgba(17,17,19,.06);
 --focus-ring:rgba(0,0,0,.35);--disconnect-fg:#B91C1C;--disconnect-bg:#FFFFFF;--alert-bg:#B91C1C;
---link:#111113;--chrome-bg:#FFFFFF;--bnav-bg:#FFFFFF;
+--link:#09090B;--link-underline:#A1A1AA;--chrome-bg:#FFFFFF;--bnav-bg:#FFFFFF;
 --wall-glow-1:rgba(255,255,255,.07);--wall-glow-2:rgba(255,255,255,.04);--wall-glow-3:rgba(255,255,255,.03);
 --wall-grid:rgba(255,255,255,.028);--mask-black:#000;--glass-10:rgba(255,255,255,.10);--glass-16:rgba(255,255,255,.16);--glass-08:rgba(255,255,255,.08);
 --mark-bg:#FFFFFF;--mark-fg:#000000;--seg-sel-fg:#111113;
@@ -79,7 +79,7 @@
 --scrim:rgba(0,0,0,.45);--drawer-shadow:rgba(0,0,0,.12);--drawer-shadow-desk:rgba(0,0,0,.48);
 --card-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 1px 2px rgba(0,0,0,.36);
 --focus-ring:rgba(0,0,0,.35);--disconnect-fg:#FF6B61;--disconnect-bg:#111113;--alert-bg:#B91C1C;
---link:#FFFFFF;--chrome-bg:#08090A;--bnav-bg:#17181A;
+--link:#FFFFFF;--link-underline:#52525B;--chrome-bg:#08090A;--bnav-bg:#17181A;
 --wall-glow-1:rgba(255,255,255,.07);--wall-glow-2:rgba(255,255,255,.04);--wall-glow-3:rgba(255,255,255,.03);
 --wall-grid:rgba(255,255,255,.028);--mask-black:#000;--glass-10:rgba(255,255,255,.10);--glass-16:rgba(255,255,255,.16);--glass-08:rgba(255,255,255,.08);
 --mark-bg:#FFFFFF;--mark-fg:#000000;--seg-sel-fg:#F7F7F8;

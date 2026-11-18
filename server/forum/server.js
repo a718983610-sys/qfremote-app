@@ -732,11 +732,11 @@ function main() {
     if (entry) ssoTokens.delete(token); // 单次使用：取到即作废
     if (!entry || Date.now() > entry.exp) {
       res.writeHead(401, pageHeadersOf(req));
-      return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">这个入口链接已经失效</h1><p style="line-height:1.8;color:#43536a">入口链接仅可使用一次，有效期一分钟。请返回 QFRemote 软件重新打开论坛。</p></div></body></html>');
+      return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F7F7F8"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#000000">这个入口链接已经失效</h1><p style="line-height:1.8;color:#52525B">入口链接仅可使用一次，有效期一分钟。请返回 QFRemote 软件重新打开论坛。</p></div></body></html>');
     }
     if (await fetchBanLink(entry.user)) {
       res.writeHead(403, pageHeadersOf(req));
-      return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>账号已被封禁 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">该账号已被封禁</h1><p style="line-height:1.8;color:#43536a">封禁期间除客服与申诉外，其他功能不可用。如需申诉，请联系官方客服。</p></div></body></html>');
+      return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>账号已被封禁 · QFRemote</title></head><body style="font-family:sans-serif;background:#F7F7F8"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#000000">该账号已被封禁</h1><p style="line-height:1.8;color:#52525B">封禁期间除客服与申诉外，其他功能不可用。如需申诉，请联系官方客服。</p></div></body></html>');
     }
     issueForumSession(res, entry.user, { siteadmin: entry.isAdmin ? SITEADMIN_FULL : 0, creation: entry.accountCreatedAt ? Math.floor(entry.accountCreatedAt / 1000) : null }, false);
     modlog({ actor: 'system', action: 'sso-login-token', author: entry.user });

@@ -35,6 +35,35 @@ static const lea_command_spec_t k_commands[] = {
     /* S-021：本机状态查询（tier 0 内联，只读；与 sys.info 同款准入，
      * 绕过暂停门——暂停时也要能查到“已暂停”）。 */
     { "lea.status",    LEA_EXEC_INLINE,  5000,  5000, 0, NULL, 0 },
+    /* A7：管道侧五个改状态分支的已签名已审计通路（tier 0 内联）。
+     * 管道直接调用（--internal）在 handle_internal 一律拒绝；改状
+     * 态只能走信封：验签＋准入＋审计（见 QFRLEA.c handle_envelope
+     * 第 2 步内联分发）。内联即绕过 4.4 暂停门与危险授权门——
+     * resume 须在暂停态下可用，authorize-dangerous 本身就是授权。
+     * scope 置空：授权边界在服务端签发侧（控制台会话／API Key 鉴
+     * 权后才签发此类信封），设备端只认服务端签名＋绑定＋epoch；
+     * 另见 lea-core.js COMMANDS 表同款登记（tier 0）。 */
+    { "lea.pause",     LEA_EXEC_INLINE,  5000,  5000, 0, NULL, 0 },
+    { "lea.resume",    LEA_EXEC_INLINE,  5000,  5000, 0, NULL, 0 },
+    /* A7：authorize-dangerous 与 revoke-all-keys 标 dangerous＝1、scope
+     * muse.execute.dangerous——否则任意普通票据（只有 muse.execute）
+     * 就能给自己授危险权／一键撤销全部 Key（提权＋全站 DoS）。设备
+     * 端 lea_admit 的 scope 门（lea_state.c）凭此拒绝普通票据；站长
+     * 批过的危险 scope Key 与控制台正式撤销通路不受影响。pause／
+     * resume／revoke-dangerous-consent 是 fail-safe 方向（暂停、恢复
+     * 执行、收回危险授权），不新增权限，dangerous＝0。 */
+    { "lea.revoke-all-keys", LEA_EXEC_INLINE, 5000, 5000, 1, "muse.execute.dangerous", 0 },
+    { "lea.authorize-dangerous", LEA_EXEC_INLINE, 5000, 5000, 1, "muse.execute.dangerous", 0 },
+    { "lea.revoke-dangerous-consent", LEA_EXEC_INLINE, 5000, 5000, 0, NULL, 0 },
+    /* emergency_stop：专用恢复票据命令（tier 0 内联；设备端 QFRLEA.c
+     * handle_envelope 第 2 步内联分发 handle_emergency_stop_recover，
+     * attempt／result 审计＋提交顺序见 DESIGN.md §7.2）。dangerous＝1、
+     * scope muse.execute.dangerous——恢复即恢复控制权，属安全敏感操作，
+     * 只有站长批过的危险 scope Key 才能携带；普通 Key 携恢复信封一律
+     * 在 admit 的 scope 门被拒绝。恢复票据本身另有 type／事件／代次／
+     * 一次性校验（lea_parse_recovery_ticket＋QFRLEA.c 恢复判定），
+     * scope 门只是第一层。服务端 lea-core.js COMMANDS 表同款登记。 */
+    { "emergency_stop.recover", LEA_EXEC_INLINE, 5000, 5000, 1, "muse.execute.dangerous", 0 },
     { NULL, 0, 0, 0, 0, NULL, 0 },
 };
 
@@ -538,6 +567,44 @@ int lea_ticket_canonical(const char *account_id, const char *device_id,
     return 1;
 }
 
+/* 吊销快照规范串（A7-whitelist，见 lea_protocol.h）。流式算列表哈希，
+ * 免 64KB 拼接。规范形判定（有序＋无重复＋每项合 token 规则）在入串
+ * 前完成：服务端签发时已排序去重，C 端收到乱序／重复列表即拒绝入串，
+ * 不静默归一化——否则签名覆盖的集合与实际应用的集合可能不一致。
+ * 字段歧义：device_id 经 lea_validate_id_field（无 \n 等控制字符），
+ * generation 经 %lld 规范化，key_id 经 lea_validate_token（不含分隔
+ * 符），故 \n 分隔的 4 行不可能移位，无需长度前缀。
+ * 空集：SHA-256("")，合法；调用点语义是并集合并无操作＋世代推进。 */
+int lea_revoked_snapshot_canonical(const char *version_tag, const char *device_id,
+                                   long long generation, const char *const *key_ids,
+                                   int n_key_ids, char *out, size_t out_size) {
+    if (!out || out_size < 256) return 0;
+    if (!version_tag || !version_tag[0]) return 0;
+    for (const char *p = version_tag; *p; p++)
+        if (*p == '\n' || *p == '\r' || *p == ' ' || (unsigned char)*p < 0x21) return 0;
+    if (!lea_validate_id_field(device_id)) return 0;
+    if (generation < 0) return 0;
+    if (n_key_ids < 0 || n_key_ids > 512) return 0; /* 与 LEA_REVOKED_MAX_IDS 同值 */
+    if (n_key_ids > 0 && !key_ids) return 0;
+    for (int i = 0; i < n_key_ids; i++) {
+        if (!key_ids[i] || !lea_validate_token(key_ids[i])) return 0;
+        if (i > 0 && strcmp(key_ids[i - 1], key_ids[i]) >= 0) return 0;
+    }
+    lea_sha256_ctx_t ctx;
+    lea_sha256_init(&ctx);
+    for (int i = 0; i < n_key_ids; i++) {
+        if (i > 0) lea_sha256_update(&ctx, (const unsigned char *)"\n", 1);
+        lea_sha256_update(&ctx, (const unsigned char *)key_ids[i], strlen(key_ids[i]));
+    }
+    char list_hash[65];
+    lea_sha256_final_hex(&ctx, list_hash);
+    size_t off = 0;
+    if (!append_canonical(out, out_size, &off, "%s\n%s\n%lld\n%s",
+                          version_tag, device_id, generation, list_hash))
+        return 0;
+    return 1;
+}
+
 /* ---- 票据完整 JSON 成员解析（不用子串查找） ----
  * 下面的严格 JSON 解析器（json_parse_*）定义在本文件后部，此处先声明。 */
 static const char *json_skip_ws(const char *p);
@@ -800,6 +867,211 @@ int lea_parse_ticket(const char *text, lea_ticket_t *out) {
     if (!ticket_get_string(text, "ticket_signature", t.signature, sizeof(t.signature), 1) ||
         t.signature[0] == '\0') return 0;
     *out = t;
+    return 1;
+}
+
+/* 恢复票据规范串 v1（与 lea-core.js recoveryTicketSigningBytes 逐行一致）：
+ *   qfr-lea-recovery-ticket-v1
+ *   <type> <account_id> <device_id> <stop_event_id>
+ *   <binding_epoch> <grant_epoch> <recovery_epoch>
+ *   <scope> <ticket_id> <issued_at> <expires_at> <auth_context>
+ * 共 12 行 \n 连接。type／scope／auth_context 为字符串（空串即空行）；
+ * epoch 类字段为 long long 原值（不窄化）。 */
+int lea_recovery_ticket_canonical(const lea_recovery_ticket_t *t,
+                                  char *out, size_t out_size) {
+    if (!t || !out || out_size < 128) return 0;
+    if (strcmp(t->type, LEA_RECOVERY_TICKET_TYPE) != 0) return 0;
+    if (!lea_validate_id_field(t->account_id) || !lea_validate_id_field(t->device_id)) return 0;
+    if (!lea_validate_id_field(t->stop_event_id) || !lea_validate_id_field(t->ticket_id)) return 0;
+    /* scope 只允许 [A-Za-z0-9_.-] 单 token 或空串（恢复范围，如 device-control）。 */
+    if (t->scope[0]) {
+        for (const char *p = t->scope; *p; p++) {
+            char c = *p;
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-')) return 0;
+        }
+    }
+    size_t off = 0;
+    if (!append_canonical(out, out_size, &off,
+            "qfr-lea-recovery-ticket-v1\n%s\n%s\n%s\n%s\n%lld\n%lld\n%lld\n%s\n%s\n%lld\n%lld\n%s",
+            t->type, t->account_id, t->device_id, t->stop_event_id,
+            t->binding_epoch, t->grant_epoch, t->recovery_epoch,
+            t->scope, t->ticket_id, t->issued_at, t->expires_at,
+            t->auth_context))
+        return 0;
+    return 1;
+}
+
+int lea_parse_recovery_ticket(const char *text, lea_recovery_ticket_t *out) {
+    if (!text || !out) return 0;
+    lea_recovery_ticket_t t;
+    memset(&t, 0, sizeof(t));
+    if (!ticket_get_string(text, "type", t.type, sizeof(t.type), 1) ||
+        strcmp(t.type, LEA_RECOVERY_TICKET_TYPE) != 0) return 0;
+    if (!ticket_get_string(text, "account_id", t.account_id, sizeof(t.account_id), 1) ||
+        !lea_validate_id_field(t.account_id)) return 0;
+    if (!ticket_get_string(text, "device_id", t.device_id, sizeof(t.device_id), 1) ||
+        !lea_validate_id_field(t.device_id)) return 0;
+    if (!ticket_get_string(text, "stop_event_id", t.stop_event_id, sizeof(t.stop_event_id), 1) ||
+        !lea_validate_id_field(t.stop_event_id)) return 0;
+    if (!ticket_get_long(text, "binding_epoch", &t.binding_epoch) ||
+        !ticket_get_long(text, "grant_epoch", &t.grant_epoch) ||
+        !ticket_get_long(text, "recovery_epoch", &t.recovery_epoch) ||
+        !ticket_get_long(text, "issued_at", &t.issued_at) ||
+        !ticket_get_long(text, "expires_at", &t.expires_at)) return 0;
+    if (!ticket_get_string(text, "scope", t.scope, sizeof(t.scope), 1)) return 0;
+    /* scope 只允许 [A-Za-z0-9_.-] 单 token 或空串（与规范串同规则；
+     * 此处不验则解析通过、规范串重建时才失败，票据状态含糊）。 */
+    if (t.scope[0]) {
+        for (const char *p = t.scope; *p; p++) {
+            char c = *p;
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-')) return 0;
+        }
+    }
+    if (!ticket_get_string(text, "ticket_id", t.ticket_id, sizeof(t.ticket_id), 1) ||
+        !lea_validate_id_field(t.ticket_id)) return 0;
+    /* auth_context：字段须存在（服务端签发时必带，签名覆盖）；可为空串，
+     * 内容不解释（设备端只验签名覆盖＋存在性，不解析其语义）。 */
+    if (!ticket_get_string(text, "auth_context", t.auth_context, sizeof(t.auth_context), 1)) return 0;
+    if (!ticket_get_string(text, "ticket_signature", t.signature, sizeof(t.signature), 1) ||
+        t.signature[0] == '\0') return 0;
+    *out = t;
+    return 1;
+}
+
+/* 同步回执规范串（与 lea-core.js emergencyStopSync 签发回执逐行一致）：
+ * 头部 qfr-lea-emergency-stop-sync-v1，之后 4 行。 */
+int lea_emergency_stop_sync_canonical(const char *stop_event_id, const char *account_id,
+                                      const char *device_id, long long synced_at,
+                                      char *out, size_t out_size) {
+    if (!stop_event_id || !account_id || !device_id || !out || out_size == 0) return 0;
+    if (!lea_validate_id_field(stop_event_id)) return 0;
+    if (!lea_validate_id_field(account_id)) return 0;
+    if (!lea_validate_id_field(device_id)) return 0;
+    if (synced_at <= 0) return 0;
+    size_t o = 0;
+    out[0] = '\0';
+    /* 与 lea_recovery_ticket_canonical 同款：一次格式化调用、\n 写在格式
+     * 串里（append_canonical 只追加不补分隔符，分多次调用会拼成无分隔串）。 */
+    if (!append_canonical(out, out_size, &o,
+            "qfr-lea-emergency-stop-sync-v1\n%s\n%s\n%s\n%lld",
+            stop_event_id, account_id, device_id, synced_at)) return 0;
+    return 1;
+}
+
+/* ---------- 登录证明（login proof，v3 P0-4／B3） ---------- */
+static int login_proof_key_id_ok(const char *s) {
+    if (!s) return 0;
+    if (strlen(s) != 16) return 0;
+    for (int i = 0; i < 16; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+int lea_login_proof_canonical(const char *key_id, const char *account_id,
+                              const char *device_id, long long issued_at,
+                              long long expires_at, char *out, size_t out_size) {
+    if (!out || out_size < 128) return 0;
+    if (!login_proof_key_id_ok(key_id)) return 0;
+    if (!lea_validate_id_field(account_id) || !lea_validate_id_field(device_id)) return 0;
+    if (issued_at <= 0 || expires_at <= issued_at) return 0;
+    size_t off = 0;
+    if (!append_canonical(out, out_size, &off,
+            "qfr-lea-login-v1\n%s\n%s\n%s\n%lld\n%lld",
+            key_id, account_id, device_id, issued_at, expires_at))
+        return 0;
+    return 1;
+}
+
+int lea_parse_login_proof(const char *text, lea_login_proof_t *out) {
+    if (!text || !out) return 0;
+    lea_login_proof_t p;
+    memset(&p, 0, sizeof(p));
+    if (!ticket_get_string(text, "version", p.version, sizeof(p.version), 1) ||
+        p.version[0] == '\0') return 0;
+    if (!ticket_get_string(text, "key_id", p.key_id, sizeof(p.key_id), 1) ||
+        p.key_id[0] == '\0') return 0;
+    if (!ticket_get_string(text, "account_id", p.account_id, sizeof(p.account_id), 1) ||
+        !lea_validate_id_field(p.account_id)) return 0;
+    if (!ticket_get_string(text, "device_id", p.device_id, sizeof(p.device_id), 1) ||
+        !lea_validate_id_field(p.device_id)) return 0;
+    if (!ticket_get_long(text, "issued_at", &p.issued_at) ||
+        !ticket_get_long(text, "expires_at", &p.expires_at)) return 0;
+    if (!ticket_get_string(text, "signature", p.signature, sizeof(p.signature), 1) ||
+        p.signature[0] == '\0') return 0;
+    *out = p;
+    return 1;
+}
+
+int lea_verify_login_proof(const char *proof_json, const char *account_id,
+                           const char *device_id, long long now_unix,
+                           char *reason, size_t reason_size) {
+    if (reason) snprintf(reason, reason_size, "%s", "login-proof-missing");
+    if (!proof_json || proof_json[0] == '\0') return 0;
+    if (!account_id || !device_id) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-missing");
+        return 0;
+    }
+    lea_login_proof_t p;
+    if (!lea_parse_login_proof(proof_json, &p)) return 0;
+    /* 版本与 key_id 形状：版本不对即未知证明格式，拒绝；key_id 非 16 位
+     * 小写 hex 即非法（不与公钥指纹比对——比对在下行 mismatch 做）。 */
+    if (strcmp(p.version, LEA_LOGIN_PROOF_VERSION) != 0 ||
+        !login_proof_key_id_ok(p.key_id)) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-invalid");
+        return 0;
+    }
+    /* 时效：过期／签发时间非法／有效期超上限一律拒绝。对称时钟检查：
+     * now 不得超过 expires_at + 60s，issued_at 不得超前 now + 60s。 */
+    if (p.issued_at <= 0 || p.expires_at <= p.issued_at ||
+        p.expires_at - p.issued_at > LEA_LOGIN_PROOF_TTL_MAX_SEC ||
+        now_unix > p.expires_at + LEA_LOGIN_PROOF_SKEW_SEC ||
+        p.issued_at > now_unix + LEA_LOGIN_PROOF_SKEW_SEC) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-expired");
+        return 0;
+    }
+    /* 证明内账号／设备须与信封声称一致；key_id 须等于本机烘焙公钥的指纹
+     * （轮换后旧钥匙签发的证明即拒绝，不靠签名本身区分新旧钥匙）。
+     * 无公钥时先报 unverifiable（不是 mismatch——key_id 本身没错，只
+     * 是本机无从比对；顺序不可颠倒，否则 unverifiable 分支永远不可达）。 */
+    char fp[17] = { 0 };
+    if (strcmp(p.account_id, account_id) != 0 ||
+        strcmp(p.device_id, device_id) != 0) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-mismatch");
+        return 0;
+    }
+    if (!lea_server_pubkey_fingerprint(fp)) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-unverifiable");
+        return 0;
+    }
+    if (strcmp(p.key_id, fp) != 0) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-mismatch");
+        return 0;
+    }
+    /* 验签：与票据同一把 Ed25519 公钥、同一 verify_real。未烘焙公钥时
+     * verify_real 回 ed25519-pubkey-not-configured，此处映射为
+     * login-proof-unverifiable（fail-closed）；TEST-UNSIGNED 只在
+     * LEA_TEST_UNSIGNED 测试构建里放行，与票据同口径。 */
+    char canonical[1024];
+    if (!lea_login_proof_canonical(p.key_id, p.account_id, p.device_id,
+                                   p.issued_at, p.expires_at,
+                                   canonical, sizeof(canonical))) {
+        if (reason) snprintf(reason, reason_size, "%s", "login-proof-invalid");
+        return 0;
+    }
+    char sig_reason[128] = { 0 };
+    if (!lea_verify_ticket_signature(p.signature, canonical, sig_reason, sizeof(sig_reason))) {
+        if (strcmp(sig_reason, "ed25519-pubkey-not-configured") == 0) {
+            if (reason) snprintf(reason, reason_size, "%s", "login-proof-unverifiable");
+        } else {
+            if (reason) snprintf(reason, reason_size, "%s", "login-proof-bad-signature");
+        }
+        return 0;
+    }
+    if (reason) snprintf(reason, reason_size, "%s", "ok");
     return 1;
 }
 

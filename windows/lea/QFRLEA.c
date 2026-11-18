@@ -36,11 +36,46 @@
  *     不通过即丢弃绑定回 UNBOUND——DPAPI 本机可调不等于可伪造绑定。
  *   - 内部命令（session.login_changed／logout／binding.confirm）：只认
  *     已安装的 qf-lea-client.exe 进程（H01，调用方进程镜像全路径校验）
- *     ＋该进程的父进程须为主程序（QFRemote.exe／开发态 electron.exe，
- *     且在活动控制台会话内，H01 第二轮——只验镜像不够，任意用户都
- *     能直接运行合法客户端）。
+ *     ＋该进程的父进程须为主程序全路径（安装根目录下的 QFRemote.exe，
+ *     或开发构建（QFRLEA_ALLOW_DEV_ELECTRON，默认关闭）里的
+ *     <安装根目录>\node_modules\electron\dist\electron.exe；
+ *     2026-11-17 v2，P0-3：不再比 basename），且调用方会话须等于父
+ *     进程会话、两者均非 0（P0-2，堵父进程伪造与跨会话注入）。
+ *     2026-11-17 修：旧口径“活动控制台会话”在 Server＋RDP 上恒失败，
+ *     见 lea_collect_caller_identity。H01 第二轮——只验镜像不够，任意用户都
+ *     能直接运行合法客户端。
+ *     未定边界（P0-4，2026-11-18 v3 已关闭，见下）：补完 P0-2／P0-3
+ *     后，任意交互会话的正版客户端仍可发内部命令（含任意 account_id
+ *     的 login_changed）；GPT A1 裁决不批准原样接受。v3 两层收口：
+ *     ① 调用方身份（internal_caller_allowed）：从实际 IPC 调用进程
+ *     核对用户 SID、Session ID、登录 LUID——调用方与父进程三者须
+ *     一致且会话非 0，堵跨用户／跨登录伪造（含父进程属性伪造，见
+ *     lea_caller_identity_collect）；同会话同用户伪造不在本层防御内
+ *     （同会话代码执行已等同会话沦陷），由②兜底。
+ *     ② 登录证明（login_proof，B3 主方案签名校验）：login_changed
+ *     须附服务端签发的登录证明（Ed25519，规范串 qfr-lea-login-v1，
+ *     覆盖 key_id／账号／设备／签发／过期，TTL 120 秒），本地服务以
+ *     烘焙公钥验签；账号／设备／key_id 与信封声称不一致、过期、无
+ *     证明、重放一律拒绝。证明由控制台会话取（服务端按会话推导账
+ *     号，不信任请求体），已登录 A 的客户端无法宣称登录 B。
+ *   - 内部命令白名单（A7-whitelist，GPT 问题 2）：handle_internal 只认
+ *     显式白名单内的 13 个命令，未知命令默认拒绝＋审计；吊销同步
+ *     （keys.sync-revoked／lea.key_revoked）另须服务端 Ed25519 签名
+ *     快照＋递增代次；登出须与当前绑定同账号；login_changed 的账户
+ *     身份证明由 A1 线（login_proof）负责。
  *   - LEA→USH 转发：除管道 ACL 外，另带 USH 每启动一次的随机 token
  *     （H03，USH 验 token＋验 LEA 进程镜像，不再只信管道 ACL）。
+ *     多会话限制（P1-2，2026-11-17 v2，文档口径）：USH 管道是机器
+ *     全局单名（\\.\pipe\QFR\LEA\UserHelper\v1），首个启动的 USH 独
+ *     占；后起会话的 USH 建管道失败、探活成功即整进程退出（见 ush.c）。
+ *     故多会话下 UI 命令／自助绑定仅第一个 USH 所在会话可用，其余
+ *     会话的转发因 token 对不上 USH 内存 token 而 fail-closed，不静
+ *     默错发到别的会话。单用户部署不受影响。
+ *     Token 目录（v3，GPT A1 两处 DoS 根治）：父目录只留 SY/BA，普
+ *     通用户无创建权；每会话子目录 <sessionid>\token.txt 由 SYSTEM
+ *     服务创建，DACL 只给 SY、BA 与该会话的 Logon SID（最小权限，
+ *     目录只建文件、文件只读写删改 DACL）；旧扁平 <sessionid>.txt
+ *     升级时清理、不再读取。
  *   - 换号：同账号重登不升 epoch（H07，两端 epoch 保持一致，已生成 Key
  *     继续可用）；换号 epoch+1，旧绑定立即作废。
  *
@@ -93,13 +128,17 @@
 /* r10：与 set_sys_admin_acl() 同步带 OICI（本宏当前未被引用，留作防复发；
  * 无继承标志时服务启动会把数据目录可继承 ACE 剥掉，子项得空 DACL）。 */
 #define DIR_SDDL_W L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-/* USH token 目录：SY/BA 完全控制，AU 仅 FILE_ADD_FILE（WD）——USH（用户
- * 身份）只能新建自己的 token 文件，读不到他人 token；token 文件继承此
- * ACL，WD 在文件上即 FILE_WRITE_DATA，故同机认证用户可覆写他人 token
- * 文件内容（但删不掉、也建不了同名占位——删文件须文件 DELETE 或目录
- * FILE_DELETE_CHILD，均未授）。残留：覆写只造成 USH 转发失败（DoS），
- * 不能伪造通过（USH 只认自己内存里的 token）。 */
-#define USH_TOKENS_SDDL_W L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;WD;;;AU)"
+/* USH token 父目录（H03，2026-11-18 v3，GPT A1 两处 DoS 根治）：
+ * 只留 SY/BA 完全控制（可继承），普通用户在父目录里没有任何创建权——
+ * 任意已认证用户预创建他人会话 token 文件／目录的抢占向量就此封死。
+ * 每会话子目录 <sessionid>\ 由 SYSTEM 服务创建，DACL 只给 SY、BA 与
+ * 该会话的 Logon SID（见 ush_token_session_dir_ensure，目录 ACE 最小
+ * 权限、文件 ACE 继承限定）；token 文件固定名 token.txt（受控文件名）。
+ * 旧口径（v2，P1-1）的目录级 AU WD 在此作废：v2 的 SDDL 堵住了跨用户
+ * 覆写，却引入了会话文件名抢占（任意用户可预创建他人 <sessionid>.txt
+ * 当属主，合法 USH 写不进，fail-closed DoS）。v3 不再让任何用户进程在
+ * 父目录里创建任何东西，创建权只属于 SYSTEM 服务。 */
+#define USH_TOKENS_SDDL_W L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 #define PIPE_MAX_INSTANCES 8
 #define USH_CONNECT_TIMEOUT_MS 2000
 /* #14：LEA 管道读一行请求的总 deadline。旧实现读行无超时，一个连上不
@@ -151,12 +190,17 @@ static void lea_active_job_set_handles(HANDLE hProcess, HANDLE hJob);
 static void lea_active_job_clear_handles(void);
 static void lea_active_job_end(void);
 static int lea_active_job_check_timeout(void); /* 0=正常，1=看门狗超时，2=reset 强杀，3=吊销强杀（RC-02） */
-static void lea_reset_executor(const char *reason); /* 杀活动 job 树＋清待执行队列（RESET） */
+static int lea_reset_executor(const char *reason); /* 杀活动 job 树＋清待执行队列（RESET）；返回活动 job 结果：0=无活动 job，1=已强杀进程树，2=仅置标志（无子进程句柄） */
 /* S-021：本机状态助手（定义在 handle_internal 之前；execute_item／
  * handle_envelope 用前置声明）。 */
 static int local_status_snapshot(lea_local_status_t *out);
 static void lea_refresh_local_status(const char *last_command, const char *last_result);
 static void handle_lea_status(const lea_envelope_t *env, char *resp, size_t resp_size);
+/* v3：token 每会话目录（定义在 ensure_dirs 之后；启动时清理旧扁平文件
+ * 并为已有会话建目录，见 ush_token_cleanup_old_flat_files／
+ * ush_token_ensure_all_sessions）。 */
+static void ush_token_cleanup_old_flat_files(void);
+static void ush_token_ensure_all_sessions(void);
 static DWORD WINAPI watchdog_loop(LPVOID unused);
 static int pipe_write_all(HANDLE pipe, const char *buf, size_t len); /* B1：handle_envelope 写 ACK 用，定义在后 */
 static HANDLE g_watchdog_thread = NULL;
@@ -381,6 +425,10 @@ static void ensure_dirs(void) {
     snprintf(g_ushtokens_dir, sizeof(g_ushtokens_dir), "%s\\ush-tokens", g_base_dir);
     mkdir_one(g_ushtokens_dir);
     set_ushtokens_acl(g_ushtokens_dir);
+    /* v3：旧扁平 token 文件一次清掉（新代码不再读取）；为已有会话确保
+     * 子目录就绪（服务未建目录的窗口由 ush_token_read 按需再建）。 */
+    ush_token_cleanup_old_flat_files();
+    ush_token_ensure_all_sessions();
     snprintf(g_service_log_path, sizeof(g_service_log_path), "%s\\lea-service.log", g_logs_dir);
     /* 安装目录 = 本 exe 所在目录 */
     {
@@ -393,7 +441,10 @@ static void ensure_dirs(void) {
 }
 
 /* ---------- 审计 ---------- */
-static void audit_event(const lea_audit_event_t *ev) {
+/* A7：返回审计落盘结果（1=已持久化，0=失败）。高危改状态操作凭此
+ * fail-closed：attempt 审计落不下即拒绝执行；调用方不得忽略返回值
+ * （旧实现返回 void，磁盘满时审计静默丢失）。 */
+static int audit_event(const lea_audit_event_t *ev) {
     char date_ymd[16] = { 0 }, iso[40] = { 0 };
     local_date_iso(date_ymd, sizeof(date_ymd), iso, sizeof(iso));
     EnterCriticalSection(&g_audit_lock);
@@ -401,11 +452,12 @@ static void audit_event(const lea_audit_event_t *ev) {
     char dir_slash[MAX_PATH];
     snprintf(dir_slash, sizeof(dir_slash), "%s", g_logs_dir);
     for (char *p = dir_slash; *p; p++) if (*p == '\\') *p = '/';
-    lea_audit_append(dir_slash, date_ymd, ev, iso);
+    int ok = lea_audit_append(dir_slash, date_ymd, ev, iso);
     LeaveCriticalSection(&g_audit_lock);
+    return ok;
 }
 
-static void audit_for_envelope(const lea_envelope_t *env, const char *event,
+static int audit_for_envelope(const lea_envelope_t *env, const char *event,
                                const char *result, const char *error_code,
                                long duration_ms, const char *detail) {
     char params_hash[65] = { 0 };
@@ -433,7 +485,136 @@ static void audit_for_envelope(const lea_envelope_t *env, const char *event,
     ev.process_id = 0;
     ev.retry_count = 0;
     ev.detail = detail ? detail : "";
-    audit_event(&ev);
+    return audit_event(&ev);
+}
+
+/* A7-whitelist：拒绝审计的公共写段（限流由调用方做）。detail 前缀区分
+ * 拒绝原因；suppressed>0 时附 60 秒内同类拒绝被抑制的条数。
+ * 拒绝本身不受审计落盘失败影响（拒绝照常执行）；落盘失败记 svc_log。
+ * cmd 原值进 ev.command——审计序列化会转义，不破坏 JSONL 行格式。 */
+static void audit_internal_reject_write(const char *cmd, const char *detail_prefix,
+                                        int suppressed) {
+    char account[128] = { 0 }, device[128] = { 0 };
+    long long epoch = 0;
+    EnterCriticalSection(&g_lock);
+    snprintf(account, sizeof(account), "%s", g_binding.account_id);
+    snprintf(device, sizeof(device), "%s", g_binding.device_id);
+    epoch = g_binding.epoch;
+    LeaveCriticalSection(&g_lock);
+    char detail[256];
+    if (suppressed > 0)
+        snprintf(detail, sizeof(detail),
+                 "%s; %d same rejections suppressed in last 60s",
+                 detail_prefix, suppressed);
+    else
+        snprintf(detail, sizeof(detail), "%s", detail_prefix);
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "internal-reject";
+    ev.account_id = account;
+    ev.device_id = device;
+    ev.binding_epoch = epoch;
+    ev.command = cmd ? cmd : "";
+    ev.result = "rejected";
+    ev.error_code = LEA_ERR_BAD_ENVELOPE;
+    ev.detail = detail;
+    if (!audit_event(&ev))
+        svc_log("WARN audit persist failed for internal reject cmd=%s", cmd ? cmd : "");
+}
+
+/* A7：管道拒绝审计（限流）。5 个改状态命令在管道被拒时须留审计
+ * （GPT：审计须含失败和拒绝操作）；同一命令 60 秒内多次拒绝只记
+ * 一条，detail 带 suppressed 计数，防日志洪泛 DoS。
+ * （限流只针对拒绝审计；成功改状态调用的 attempt／result 审计
+ * 不限流，且 attempt 落不下即拒绝执行，见 handle_lea_control_command。） */
+static const char *k_pipe_rejected_cmds[5] = {
+    "lea.pause", "lea.resume", "lea.revoke-all-keys",
+    "lea.authorize-dangerous", "lea.revoke-dangerous-consent",
+};
+static long long g_pipe_reject_last[5];
+static int g_pipe_reject_suppressed[5];
+
+static void audit_pipe_reject(const char *cmd) {
+    int idx = -1;
+    for (int i = 0; i < 5; i++)
+        if (strcmp(cmd, k_pipe_rejected_cmds[i]) == 0) { idx = i; break; }
+    if (idx < 0) return;
+    long long now = now_unix();
+    if (now - g_pipe_reject_last[idx] < 60) {
+        g_pipe_reject_suppressed[idx]++;
+        return;
+    }
+    int suppressed = g_pipe_reject_suppressed[idx];
+    g_pipe_reject_last[idx] = now;
+    g_pipe_reject_suppressed[idx] = 0;
+    audit_internal_reject_write(cmd, "pipe state command rejected", suppressed);
+}
+
+/* A7-whitelist：未知内部命令拒绝审计（单桶限流 60 秒）。白名单外的
+ * 命令（含 cmd 缺失）一律走此处审计，detail 不回显攻击者可控的 cmd
+ * 原文以外的信息——cmd 本身已在 ev.command（转义后）中。 */
+static long long g_unknown_reject_last = 0;
+static int g_unknown_reject_suppressed = 0;
+
+static void audit_unknown_internal_reject(const char *cmd) {
+    long long now = now_unix();
+    if (now - g_unknown_reject_last < 60) {
+        g_unknown_reject_suppressed++;
+        return;
+    }
+    int suppressed = g_unknown_reject_suppressed;
+    g_unknown_reject_last = now;
+    g_unknown_reject_suppressed = 0;
+    audit_internal_reject_write(cmd, "unknown internal command rejected", suppressed);
+}
+
+/* A7-whitelist：吊销同步类拒绝审计（keys.sync-revoked／lea.key_revoked
+ * 各一桶，60 秒限流）。拒绝本身是低频安全事件，首条必留；落盘失败
+ * 不改变拒绝结果，只记 svc_log。 */
+static long long g_keys_sync_reject_last = 0, g_keys_kick_reject_last = 0;
+static int g_keys_sync_reject_suppressed = 0, g_keys_kick_reject_suppressed = 0;
+
+static void audit_keys_reject(const char *cmd, const char *detail, const char *code) {
+    long long *last = &g_keys_sync_reject_last;
+    int *suppressed = &g_keys_sync_reject_suppressed;
+    if (cmd && strcmp(cmd, "lea.key_revoked") == 0) {
+        last = &g_keys_kick_reject_last;
+        suppressed = &g_keys_kick_reject_suppressed;
+    }
+    long long now = now_unix();
+    if (now - *last < 60) {
+        (*suppressed)++;
+        return;
+    }
+    int s = *suppressed;
+    *last = now;
+    *suppressed = 0;
+    char account[128] = { 0 }, device[128] = { 0 };
+    long long epoch = 0;
+    EnterCriticalSection(&g_lock);
+    snprintf(account, sizeof(account), "%s", g_binding.account_id);
+    snprintf(device, sizeof(device), "%s", g_binding.device_id);
+    epoch = g_binding.epoch;
+    LeaveCriticalSection(&g_lock);
+    char full_detail[256];
+    if (s > 0)
+        snprintf(full_detail, sizeof(full_detail),
+                 "%s; %d same rejections suppressed in last 60s", detail, s);
+    else
+        snprintf(full_detail, sizeof(full_detail), "%s", detail);
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "keys";
+    ev.account_id = account;
+    ev.device_id = device;
+    ev.binding_epoch = epoch;
+    ev.command = cmd ? cmd : "";
+    ev.result = "rejected";
+    ev.error_code = code;
+    ev.detail = full_detail;
+    if (!audit_event(&ev))
+        svc_log("WARN audit persist failed for keys reject cmd=%s detail=%s",
+                cmd ? cmd : "", detail);
 }
 
 /* ---------- 幂等持久化 ---------- */
@@ -461,10 +642,12 @@ static void idem_persist_locked(void) {
         remove(tmp_path);
         return;
     }
-    /* 原子替换：先删旧文件再改名（Windows MoveFile 不覆盖已存在目标时用此法）。 */
-    remove(g_idem_path);
-    if (rename(tmp_path, g_idem_path) != 0) {
-        svc_log("WARN idem rename failed, keeping previous snapshot");
+    /* A9 原子替换：具替换语义的单步替换（Windows MoveFileExA
+     * REPLACE_EXISTING，POSIX rename 原生覆盖），绝不先删旧文件再
+     * 改名——旧写法中间空窗一旦改名失败，旧快照即丢失，重启后终态
+     * 命令可重复执行。替换失败仍删 tmp、保留旧快照。 */
+    if (!lea_file_replace(tmp_path, g_idem_path)) {
+        svc_log("WARN idem replace failed, keeping previous snapshot");
         remove(tmp_path);
     }
 }
@@ -518,14 +701,21 @@ static void binding_persist_locked(void) {
         svc_log("ERROR DPAPI protect binding failed %lu", (unsigned long)GetLastError());
         return;
     }
-    FILE *f = fopen(g_binding_path, "wb");
-    if (!f) {
+    /* A9：binding.dat 写 DPAPI 密文走 lea_file_write_atomic——逐段校验
+     * 实际写入字节数、fflush／fclose 均检查、fclose 只调一次、成功后
+     * 才同卷替换（MoveFileExA REPLACE_EXISTING），失败保留旧文件。
+     * 旧实现 fwrite／fclose 全不检查返回值：写满／部分写入仍报成功，
+     * 且 "wb" 先截断原文件，旧绑定直接被毁。 */
+    {
+        char detail[64] = { 0 };
+        int okw = lea_file_write_atomic(g_binding_path, out.pbData, out.cbData,
+                                        detail, sizeof(detail));
         LocalFree(out.pbData);
-        return;
+        if (!okw) {
+            svc_log("ERROR binding persist failed %s", detail);
+            return;
+        }
     }
-    fwrite(out.pbData, 1, out.cbData, f);
-    fclose(f);
-    LocalFree(out.pbData);
     /* #24：ACL 失败即删文件（fail-closed，不留宽松 ACL 的 binding.dat；
      * 下次启动即 UNBOUND，须重登重建绑定）。 */
     set_acl_or_remove_file(g_binding_path);
@@ -590,15 +780,366 @@ static void binding_load(void) {
  * 管道也发不了内部命令。防的是“随手发一行 JSON 就废掉绑定”的低成本
  * DoS；能覆写安装目录下客户端二进制的攻击者本来就已完全控制本机，
  * 不在本项防御内。 */
-/* 父进程校验（H01 第二轮）：内部命令的合法发起方只有主程序
- * （QFRemote.exe，安装态；electron.exe，开发态）。客户端必须是主程序
- * 的直接子进程——主程序用 spawnSync 拉起客户端。只验客户端镜像不够：
- * 任意用户都能直接运行已安装的合法客户端发内部命令。
- * 边界：同会话用户自己跑一个同名 QFRemote.exe 做父进程可绕过——但
- * 同会话代码执行已等同会话沦陷（可直接读主程序内存／会话），不在
- * 本项防御内；本项挡的是跨会话／跨用户／SYSTEM 服务直接拉客户端
- * 的滥用。 */
-static int parent_is_main_app(DWORD pid) {
+/* ---------- 内部命令调用方身份（H01 第三轮，2026-11-18 v3，P0-4／B3） ---------- */
+/* 只验镜像不够，任意用户都能直接运行合法客户端（H01 第二轮）。v2 补了
+ * 父进程全路径＋调用方／父进程会话一致（P0-2／P0-3），仍剩 P0-4：
+ * 同会话攻击者可用 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 把父进程指向
+ * 真的 QFRemote.exe，再发任意 account_id 的 login_changed——会话、
+ * 镜像全都对得上。v3 分两层收口：
+ *   ① 本层（调用方身份）：从实际 IPC 调用进程核对用户 SID、Session ID、
+ *      登录实例（LUID）。调用方与父进程的令牌用户 SID、登录 LUID、会话
+ *      id 三者须一致且会话非 0，堵跨用户／跨登录伪造。注意本层挡不住
+ *      同会话同用户的父进程伪造（SID／LUID／会话全相同，见大肥鱼会诊
+ *      Q1——创建时间检查对此无增益，已删），同会话伪造由②登录证明兜底。
+ *   ② 登录证明（见 handle_internal）：login_changed 的 account_id 须有
+ *      服务端签发的证明背书，否则一律拒绝。
+ * 实现要点：调用方与父进程各只打开一次句柄，镜像／令牌／会话／创建时
+ * 间全部从同一句柄上取，不按 PID 二次打开（防 PID 复用 TOCTOU；父进
+ * 程创建时间须不晚于调用方——真父进程必先于子进程创建，等值只源于时
+ * 间戳粒度，放行；晚于即 PID 复用信号，拒绝）。令牌只取 TOKEN_QUERY；
+ * SID 用 EqualSid 比二进制，不比字符串；任何一步失败即 fail-closed。
+ * 进程主令牌（非线程 impersonation 令牌）为准。 */
+/* 调用方身份（internal_caller_allowed 填，handle_internal 复用于审计；
+ * caller_logon_sid 供 token 会话目录用——服务按它给目录授 Logon SID）。 */
+typedef struct {
+    DWORD caller_pid;
+    DWORD parent_pid;
+    DWORD caller_session;
+    DWORD parent_session;
+    BYTE caller_sid[SECURITY_MAX_SID_SIZE];
+    BYTE parent_sid[SECURITY_MAX_SID_SIZE];
+    LUID caller_logon;   /* TokenStatistics.AuthenticationId */
+    LUID parent_logon;
+    BYTE caller_logon_sid[SECURITY_MAX_SID_SIZE]; /* TokenGroups SE_GROUP_LOGON_ID */
+    DWORD caller_logon_sid_len;
+    int has_logon_sid;
+} lea_caller_identity_t;
+
+static int token_user_sid_bytes(HANDLE hProc, BYTE *sid_buf) {
+    HANDLE tok = NULL;
+    DWORD len = 0;
+    TOKEN_USER *tu = NULL;
+    int ok = 0;
+    if (!OpenProcessToken(hProc, TOKEN_QUERY, &tok)) return 0;
+    (void)GetTokenInformation(tok, TokenUser, NULL, 0, &len);
+    if (len == 0 || len > 1024) { CloseHandle(tok); return 0; }
+    tu = (TOKEN_USER *)malloc(len);
+    if (!tu) { CloseHandle(tok); return 0; }
+    if (GetTokenInformation(tok, TokenUser, tu, len, &len) &&
+        IsValidSid(tu->User.Sid)) {
+        DWORD slen = GetLengthSid(tu->User.Sid);
+        if (slen <= SECURITY_MAX_SID_SIZE) {
+            memcpy(sid_buf, tu->User.Sid, slen);
+            ok = 1;
+        }
+    }
+    free(tu);
+    CloseHandle(tok);
+    return ok;
+}
+
+static int token_logon_luid(HANDLE hProc, LUID *luid) {
+    HANDLE tok = NULL;
+    TOKEN_STATISTICS ts;
+    DWORD len = 0;
+    int ok = 0;
+    if (!OpenProcessToken(hProc, TOKEN_QUERY, &tok)) return 0;
+    if (GetTokenInformation(tok, TokenStatistics, &ts, sizeof(ts), &len)) {
+        *luid = ts.AuthenticationId;
+        ok = 1;
+    }
+    CloseHandle(tok);
+    return ok;
+}
+
+static int token_logon_sid_bytes(HANDLE hProc, BYTE *sid_buf, DWORD *sid_len) {
+    HANDLE tok = NULL;
+    DWORD len = 0;
+    TOKEN_GROUPS *tg = NULL;
+    DWORD i;
+    int ok = 0;
+    if (!OpenProcessToken(hProc, TOKEN_QUERY, &tok)) return 0;
+    (void)GetTokenInformation(tok, TokenGroups, NULL, 0, &len);
+    if (len == 0 || len > 65536) { CloseHandle(tok); return 0; }
+    tg = (TOKEN_GROUPS *)malloc(len);
+    if (!tg) { CloseHandle(tok); return 0; }
+    if (GetTokenInformation(tok, TokenGroups, tg, len, &len)) {
+        for (i = 0; i < tg->GroupCount; i++) {
+            if ((tg->Groups[i].Attributes & SE_GROUP_LOGON_ID) &&
+                IsValidSid(tg->Groups[i].Sid)) {
+                DWORD slen = GetLengthSid(tg->Groups[i].Sid);
+                if (slen <= SECURITY_MAX_SID_SIZE) {
+                    memcpy(sid_buf, tg->Groups[i].Sid, slen);
+                    *sid_len = slen;
+                    ok = 1;
+                }
+                break;
+            }
+        }
+    }
+    free(tg);
+    CloseHandle(tok);
+    return ok;
+}
+
+static int proc_create_time(HANDLE hProc, ULONGLONG *out) {
+    FILETIME ct, et, kt, ut;
+    ULONGLONG v;
+    if (!GetProcessTimes(hProc, &ct, &et, &kt, &ut)) return 0;
+    v = ((ULONGLONG)ct.dwHighDateTime << 32) | ct.dwLowDateTime;
+    *out = v;
+    return 1;
+}
+
+static DWORD caller_parent_pid(DWORD pid) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe;
+    DWORD parent = 0;
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == pid) { parent = pe.th32ParentProcessID; break; }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return parent;
+}
+
+static int sid_to_string_a(const BYTE *sid, char *out, size_t out_size) {
+    LPSTR s = NULL;
+    if (!out || out_size == 0) return 0;
+    out[0] = '\0';
+    if (!IsValidSid((PSID)sid)) return 0;
+    if (!ConvertSidToStringSidA((PSID)sid, &s)) return 0;
+    snprintf(out, out_size, "%s", s);
+    LocalFree(s);
+    return 1;
+}
+
+/* 父进程镜像全路径比对（P0-3，v2 原样保留）：父镜像须等于安装根目录下
+ * 的 QFRemote.exe；开发构建（QFRLEA_ALLOW_DEV_ELECTRON，默认关闭）里
+ * 另接受 <安装根目录>\node_modules\electron\dist\electron.exe。正式构
+ * 建里 electron.exe 分支不存在。期望路径拼写超长即 fail-closed。 */
+static int parent_image_is_main_app(HANDLE hParent) {
+    WCHAR img[MAX_PATH];
+    DWORD n = MAX_PATH;
+    char img_u8[MAX_PATH];
+    char root[MAX_PATH];
+    char *slash = NULL;
+    char expect_qfr[MAX_PATH];
+    int nq;
+    int ok = 0;
+    if (!QueryFullProcessImageNameW(hParent, 0, img, &n) || n == 0) return 0;
+    utf16_to_utf8(img, img_u8, sizeof(img_u8));
+    snprintf(root, sizeof(root), "%s", g_install_dir);
+    slash = strrchr(root, '\\');
+    if (!slash || slash == root) return 0;
+    *slash = '\0';
+    nq = snprintf(expect_qfr, sizeof(expect_qfr), "%s\\QFRemote.exe", root);
+    if (nq < 0 || nq >= (int)sizeof(expect_qfr)) return 0;
+#ifdef QFRLEA_ALLOW_DEV_ELECTRON
+    {
+        char expect_dev[MAX_PATH];
+        int nd = snprintf(expect_dev, sizeof(expect_dev),
+                          "%s\\node_modules\\electron\\dist\\electron.exe", root);
+        if (nd < 0 || nd >= (int)sizeof(expect_dev)) return 0;
+        {
+            char *p;
+            for (p = img_u8; *p; p++) if (*p == '/') *p = '\\';
+            for (p = expect_qfr; *p; p++) if (*p == '/') *p = '\\';
+            for (p = expect_dev; *p; p++) if (*p == '/') *p = '\\';
+        }
+        ok = (_stricmp(img_u8, expect_qfr) == 0 ||
+              _stricmp(img_u8, expect_dev) == 0);
+    }
+#else
+    {
+        char *p;
+        for (p = img_u8; *p; p++) if (*p == '/') *p = '\\';
+        for (p = expect_qfr; *p; p++) if (*p == '/') *p = '\\';
+        ok = (_stricmp(img_u8, expect_qfr) == 0);
+    }
+#endif
+    return ok;
+}
+
+static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
+                                       char *reason, size_t reason_size) {
+    DWORD pid = 0;
+    HANDLE hCaller = NULL;
+    HANDLE hParent = NULL;
+    DWORD parent = 0;
+    WCHAR img[MAX_PATH];
+    DWORD n = MAX_PATH;
+    char img_u8[MAX_PATH];
+    char expect[MAX_PATH];
+    ULONGLONG caller_ct = 0, parent_ct = 0;
+    int ok = 0;
+    if (reason) snprintf(reason, reason_size, "%s", "no-client-pid");
+    memset(out, 0, sizeof(*out));
+    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
+    out->caller_pid = pid;
+    /* 调用方只开一次句柄，后续镜像／令牌／会话／创建时间全从该句柄取。 */
+    hCaller = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hCaller) {
+        if (reason) snprintf(reason, reason_size, "%s", "open-process-failed");
+        return 0;
+    }
+    /* 关 1：调用方镜像须等于安装目录下的 qf-lea-client.exe（全路径）。 */
+    if (!QueryFullProcessImageNameW(hCaller, 0, img, &n) || n == 0) {
+        if (reason) snprintf(reason, reason_size, "%s", "image-query-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    utf16_to_utf8(img, img_u8, sizeof(img_u8));
+    snprintf(expect, sizeof(expect), "%s\\qf-lea-client.exe", g_install_dir);
+    {
+        char *p;
+        for (p = img_u8; *p; p++) if (*p == '/') *p = '\\';
+        for (p = expect; *p; p++) if (*p == '/') *p = '\\';
+    }
+    if (_stricmp(img_u8, expect) != 0) {
+        svc_log("internal-allow: reject image-mismatch pid=%lu img=%s expect=%s",
+                (unsigned long)pid, img_u8, expect);
+        if (reason) snprintf(reason, reason_size, "%s", "image-mismatch");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* 调用方会话（须非 0）与创建时间。 */
+    if (!ProcessIdToSessionId(pid, &out->caller_session)) {
+        if (reason) snprintf(reason, reason_size, "%s", "caller-session-query-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    if (out->caller_session == 0) {
+        if (reason) snprintf(reason, reason_size, "%s", "caller-session-0");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    if (!proc_create_time(hCaller, &caller_ct)) {
+        if (reason) snprintf(reason, reason_size, "%s", "caller-time-query-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* 调用方令牌：用户 SID、登录 LUID、Logon SID（token 三件一次取齐）。 */
+    if (!token_user_sid_bytes(hCaller, out->caller_sid) ||
+        !token_logon_luid(hCaller, &out->caller_logon)) {
+        if (reason) snprintf(reason, reason_size, "%s", "caller-token-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    out->has_logon_sid = token_logon_sid_bytes(hCaller, out->caller_logon_sid,
+                                               &out->caller_logon_sid_len);
+    /* 父进程：快照只用来发现父 PID；打开后全部核对都从该句柄上做。 */
+    parent = caller_parent_pid(pid);
+    if (!parent) {
+        if (reason) snprintf(reason, reason_size, "%s", "parent-check-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    out->parent_pid = parent;
+    hParent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
+    if (!hParent) {
+        if (reason) snprintf(reason, reason_size, "%s", "parent-open-failed");
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* P0-3：父进程镜像全路径比对（安装根目录下的 QFRemote.exe）。 */
+    if (!parent_image_is_main_app(hParent)) {
+        if (reason) snprintf(reason, reason_size, "%s", "parent-check-failed");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* 父进程创建时间须不晚于调用方（真父进程必先于子进程创建；等值只源
+     * 于时间戳粒度，放行；晚于即 PID 复用信号，拒绝）。 */
+    if (!proc_create_time(hParent, &parent_ct) || parent_ct > caller_ct) {
+        if (reason) snprintf(reason, reason_size, "%s", "parent-create-time-after-caller");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* 父进程会话须等于调用方会话且非 0（P0-2：堵父进程属性伪造与跨会话注入）。 */
+    if (!ProcessIdToSessionId(parent, &out->parent_session) ||
+        out->parent_session == 0 ||
+        out->parent_session != out->caller_session) {
+        svc_log("internal-allow: reject session-mismatch pid=%lu caller_session=%lu parent_session=%lu",
+                (unsigned long)pid, (unsigned long)out->caller_session,
+                (unsigned long)out->parent_session);
+        if (reason) snprintf(reason, reason_size, "%s", "session-mismatch");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    /* 父进程令牌：用户 SID 与登录 LUID 须与调用方一致（P0-4 第一层：
+     * 跨用户／跨登录伪造到此为止；同会话同用户伪造由登录证明兜底）。 */
+    if (!token_user_sid_bytes(hParent, out->parent_sid) ||
+        !token_logon_luid(hParent, &out->parent_logon)) {
+        if (reason) snprintf(reason, reason_size, "%s", "parent-token-failed");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    if (!EqualSid((PSID)out->caller_sid, (PSID)out->parent_sid)) {
+        if (reason) snprintf(reason, reason_size, "%s", "sid-mismatch");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    if (out->caller_logon.HighPart != out->parent_logon.HighPart ||
+        out->caller_logon.LowPart != out->parent_logon.LowPart) {
+        if (reason) snprintf(reason, reason_size, "%s", "logon-mismatch");
+        CloseHandle(hParent);
+        CloseHandle(hCaller);
+        return 0;
+    }
+    ok = 1;
+    CloseHandle(hParent);
+    CloseHandle(hCaller);
+    if (reason) snprintf(reason, reason_size, "%s", "ok");
+    return ok;
+}
+
+static int internal_caller_allowed(HANDLE pipe, lea_caller_identity_t *ident_out) {
+    lea_caller_identity_t ident;
+    char reason[64] = { 0 };
+    DWORD pid = 0;
+    if (!lea_collect_caller_identity(pipe, &ident, reason, sizeof(reason))) {
+        (void)GetNamedPipeClientProcessId(pipe, &pid);
+        svc_log("internal-allow: reject %s pid=%lu", reason, (unsigned long)pid);
+        return 0;
+    }
+    if (ident_out) *ident_out = ident;
+    return 1;
+}
+
+/* 管道对端进程的会话 id（H03 第三轮，2026-11-17）：USH token 文件按
+ * USH 自身会话 id 命名（见 ush.c ush_token_init），LEA 须按“发来本条
+ * 命令的客户端所在会话”读 token，而不是按活动控制台会话读——
+ * Server＋RDP 下两者不同，旧实现恒读不到（见 ush_token_read）。 */
+static DWORD pipe_client_session(HANDLE pipe) {
+    DWORD pid = 0, sid = 0xFFFFFFFF;
+    if (GetNamedPipeClientProcessId(pipe, &pid) && pid != 0) {
+        if (!ProcessIdToSessionId(pid, &sid)) sid = 0xFFFFFFFF;
+    }
+    return sid;
+}
+
+/* ---------- emergency_stop 专用 admission（GPT 2026-11-18 裁决问题 1） ----------
+ * 与 H01 内部命令面严格隔离：lea.emergency-stop／lea.emergency-stop-sync
+ * 不进 handle_internal（S-021 五命令在那里拒绝），只走本函数。
+ * 与 H01 的区别只有一个：会话谓词不同——H01 要求父进程在活动控制台
+ * 会话里（A1 根因：RDP 会话不是控制台会话，腾讯机上 H01 恒拒）；
+ * 紧急停控必须在 RDP 会话里也能用（用户正在 RDP 里发现异常才要停），
+ * 故此处只要求调用方会话＝父进程会话（任意交互会话），不要求控制台
+ * 会话。待 A1 落地后两处会话谓词统一复核。
+ * 四项全过才放行，任一步取不到信息即拒绝（fail-closed）：
+ * ①调用方镜像全路径＝安装目录 qf-lea-client.exe；
+ * ②父进程镜像名＝QFRemote.exe 或 electron.exe；
+ * ③调用方会话 id＝父进程会话 id；
+ * ④调用方 token 用户 SID＝父进程 token 用户 SID。 */
+static DWORD emergency_stop_parent_pid(DWORD pid) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W pe;
@@ -610,32 +1151,43 @@ static int parent_is_main_app(DWORD pid) {
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
-    if (!parent) return 0;
-    /* 父进程须在当前活动控制台会话里（主程序是交互会话进程；SYSTEM
-     * 服务在 session 0，跨会话拉客户端直接拒）。 */
-    DWORD parent_session = 0;
-    if (!ProcessIdToSessionId(parent, &parent_session)) return 0;
-    if (parent_session != WTSGetActiveConsoleSessionId()) return 0;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
-    if (!h) return 0;
-    WCHAR img[MAX_PATH];
-    DWORD n = MAX_PATH;
-    int ok = 0;
-    if (QueryFullProcessImageNameW(h, 0, img, &n) && n > 0) {
-        WCHAR *base = img;
-        for (WCHAR *p = img; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
-        ok = (_wcsicmp(base, L"QFRemote.exe") == 0 ||
-              _wcsicmp(base, L"electron.exe") == 0);
+    return parent;
+}
+
+static int token_user_sid_string(HANDLE h, char *out, size_t out_size) {
+    HANDLE tok = NULL;
+    if (!OpenProcessToken(h, TOKEN_QUERY, &tok)) return 0;
+    DWORD len = 0;
+    GetTokenInformation(tok, TokenUser, NULL, 0, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) {
+        CloseHandle(tok);
+        return 0;
     }
-    CloseHandle(h);
+    TOKEN_USER *tu = (TOKEN_USER *)malloc(len);
+    if (!tu) {
+        CloseHandle(tok);
+        return 0;
+    }
+    int ok = 0;
+    if (GetTokenInformation(tok, TokenUser, tu, len, &len)) {
+        LPSTR s = NULL;
+        if (ConvertSidToStringSidA(tu->User.Sid, &s) && s) {
+            snprintf(out, out_size, "%s", s);
+            LocalFree(s);
+            ok = 1;
+        }
+    }
+    free(tu);
+    CloseHandle(tok);
     return ok;
 }
 
-static int internal_caller_allowed(HANDLE pipe) {
+static int emergency_stop_caller_allowed(HANDLE pipe) {
     DWORD pid = 0;
     if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return 0;
+    /* ① 调用方镜像全路径。 */
     WCHAR img[MAX_PATH];
     DWORD n = MAX_PATH;
     int ok = 0;
@@ -648,34 +1200,392 @@ static int internal_caller_allowed(HANDLE pipe) {
         for (char *p = expect; *p; p++) if (*p == '/') *p = '\\';
         ok = (_stricmp(img_u8, expect) == 0);
     }
+    /* ③ 调用方会话（先取，④ 要用同一句柄的 token）。 */
+    DWORD caller_session = 0;
+    if (ok && !ProcessIdToSessionId(pid, &caller_session)) ok = 0;
+    char caller_sid[256] = { 0 };
+    if (ok && !token_user_sid_string(h, caller_sid, sizeof(caller_sid))) ok = 0;
     CloseHandle(h);
-    /* 镜像对上还不够：客户端须是主程序的直接子进程（见 parent_is_main_app）。 */
-    if (ok) ok = parent_is_main_app(pid);
-    return ok;
+    if (!ok) return 0;
+    /* ② 父进程镜像名。 */
+    DWORD parent = emergency_stop_parent_pid(pid);
+    if (!parent) return 0;
+    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
+    if (!ph) return 0;
+    WCHAR pimg[MAX_PATH];
+    DWORD pn = MAX_PATH;
+    int pok = 0;
+    if (QueryFullProcessImageNameW(ph, 0, pimg, &pn) && pn > 0) {
+        WCHAR *base = pimg;
+        for (WCHAR *p = pimg; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
+        pok = (_wcsicmp(base, L"QFRemote.exe") == 0 ||
+               _wcsicmp(base, L"electron.exe") == 0);
+    }
+    /* ③ 父进程会话＝调用方会话。 */
+    DWORD parent_session = 0;
+    if (pok && !ProcessIdToSessionId(parent, &parent_session)) pok = 0;
+    if (pok && parent_session != caller_session) pok = 0;
+    /* ④ 父进程 token 用户 SID＝调用方 token 用户 SID。 */
+    char parent_sid[256] = { 0 };
+    if (pok && !token_user_sid_string(ph, parent_sid, sizeof(parent_sid))) pok = 0;
+    if (pok && strcmp(parent_sid, caller_sid) != 0) pok = 0;
+    CloseHandle(ph);
+    return pok;
 }
 
 /* ---------- USH 鉴权 token（H03） ---------- */
-/* 读当前控制台会话 USH 的每启动随机 token（USH 启动时生成并写入
- * %ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt）。返回 1=读到
- * 合法 token（64 位小写 hex）。读不到／格式不对即返回 0，调用方
- * fail-closed，不裸发 UI 命令。 */
-static int ush_token_read(char *out, size_t out_size) {
-    DWORD sid = WTSGetActiveConsoleSessionId();
-    if (sid == 0xFFFFFFFF) return 0;
+/* v3（2026-11-18，GPT A1 两处 DoS 根治）：token 文件改放每会话子目录
+ *   %ProgramData%\QFR\LEA\ush-tokens\<sessionid>\token.txt
+ * 父目录只留 SY/BA（USH_TOKENS_SDDL_W），任何用户进程都不能在父目录里
+ * 创建东西——v2 的“目录级 AU WD”堵住了跨用户覆写，却引入了会话文件
+ * 名抢占（任意用户预创建他人 <sessionid>.txt 当属主，合法 USH 写不进，
+ * fail-closed DoS）。v3 的创建权只属于 SYSTEM 服务：
+ *   · 每会话子目录由服务创建（启动枚举全部会话＋读 token 时按需创建）；
+ *   · 子目录 DACL：SY/BA 完全控制，该会话 Logon SID 两条 ACE——目录本
+ *     身 0x100083（只够建 token 文件，不可删目录／改 DACL／建子目录），
+ *     文件继承 0x150083（只够读写自己的 token 文件、原子替换与收紧文件
+ *     DACL）；Logon SID 而不用用户 SID：同一用户的两个登录会话各有不
+ *     同的 Logon SID，同用户跨会话也抢占不了（大肥鱼会诊 Q2）。
+ *   · 目录属主须为 SYSTEM；是重解析点、属主不对、DACL 不含当前 Logon
+ *     SID（会话号复用后旧登录残留）时，服务删树重建；删不掉即 fail-closed。
+ *   · 启动时清理旧扁平文件 <sessionid>.txt／<sessionid>.tmp-*.txt（新代
+ *     码不再读取）；token 格式校验（恰好 64 位小写 hex）绝不移除。 */
+
+/* 取指定会话的 Logon SID：枚举全部进程，逐个 ProcessIdToSessionId
+ * 比对会话（PROCESSENTRY32 本身不带会话 id），取首个属于该会话的进
+ * 程，读其令牌 TokenGroups 里的 SE_GROUP_LOGON_ID。会话内无进程
+ * （无 USH 可存活）即失败。 */
+static int lea_session_logon_sid(DWORD session_id, BYTE *sid_buf, DWORD *sid_len) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe;
+    int ok = 0;
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            HANDLE h = NULL;
+            DWORD s = 0;
+            if (pe.th32ProcessID == 0 || pe.th32ProcessID == 4) continue;
+            if (!ProcessIdToSessionId(pe.th32ProcessID, &s) || s != session_id) continue;
+            h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!h) continue;
+            if (token_logon_sid_bytes(h, sid_buf, sid_len)) ok = 1;
+            CloseHandle(h);
+            if (ok) break;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return ok;
+}
+
+/* 每会话子目录的安全描述符：SY/BA 完全控制（可继承）；Logon SID 目录
+ * 本身 ACE 0x100083（不继承）、文件继承 ACE 0x150083（OI＋IO，只继承
+ * 给文件）。返回的 SD 由调用方 LocalFree。 */
+static int ush_token_session_dir_sd(const BYTE *logon_sid, PSECURITY_DESCRIPTOR *sd_out) {
+    LPWSTR sid_str = NULL;
+    WCHAR sddl[512];
+    int ok = 0;
+    *sd_out = NULL;
+    if (!ConvertSidToStringSidW((PSID)logon_sid, &sid_str)) return 0;
+    if (_snwprintf(sddl, 512,
+                   L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+                   L"(A;;0x100083;;;%s)(A;OIIO;0x150083;;;%s)",
+                   sid_str, sid_str) < 0) {
+        LocalFree(sid_str);
+        return 0;
+    }
+    LocalFree(sid_str);
+    ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+             sddl, SDDL_REVISION_1, sd_out, NULL) ? 1 : 0;
+    return ok;
+}
+
+/* 删会话子目录整棵树（token.txt＋残留 tmp 文件＋目录本身），尽力而为；
+ * 返回 1=目录已不存在。 */
+static int ush_token_session_dir_remove(const char *dir_utf8) {
+    WCHAR wdir[MAX_PATH];
+    WCHAR wpat[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    char tmp_pat[MAX_PATH];
+    utf8_to_utf16(dir_utf8, wdir, MAX_PATH);
+    /* token.txt */
+    {
+        WCHAR wf[MAX_PATH];
+        _snwprintf(wf, MAX_PATH, L"%s\\token.txt", wdir);
+        DeleteFileW(wf);
+    }
+    /* <sessionid>.tmp-*.txt 残留（v2 USH 原子写临时文件）。 */
+    snprintf(tmp_pat, sizeof(tmp_pat), "%s\\*.tmp-*.txt", dir_utf8);
+    utf8_to_utf16(tmp_pat, wpat, MAX_PATH);
+    h = FindFirstFileW(wpat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            WCHAR wf[MAX_PATH];
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            _snwprintf(wf, MAX_PATH, L"%s\\%s", wdir, fd.cFileName);
+            DeleteFileW(wf);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(wdir);
+    return GetFileAttributesW(wdir) == INVALID_FILE_ATTRIBUTES;
+}
+
+/* 验证已存在的会话子目录：普通目录、非重解析点、属主 SYSTEM、DACL 含
+ * 当前 Logon SID（带 FILE_ADD_FILE 的允许 ACE）。任一项不符即返回 0。 */
+static int ush_token_session_dir_verify(const WCHAR *wdir, const BYTE *logon_sid) {
+    PSID owner = NULL;
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    PSID sys_sid = NULL;
+    int ok = 0;
+    DWORD i;
+    if (GetNamedSecurityInfoW(wdir, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                              &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS)
+        return 0;
+    if (!ConvertStringSidToSidW(L"S-1-5-18", &sys_sid)) {
+        LocalFree(sd);
+        return 0;
+    }
+    if (!IsValidSid(owner) || !EqualSid(owner, sys_sid)) {
+        LocalFree(sys_sid);
+        LocalFree(sd);
+        return 0;
+    }
+    LocalFree(sys_sid);
+    LocalFree(sd);
+    sd = NULL;
+    if (GetNamedSecurityInfoW(wdir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                              NULL, NULL, &dacl, NULL, &sd) != ERROR_SUCCESS)
+        return 0;
+    if (dacl) {
+        for (i = 0; i < dacl->AceCount; i++) {
+            void *ace = NULL;
+            if (!GetAce(dacl, i, &ace)) continue;
+            if (((PACE_HEADER)ace)->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+            {
+                ACCESS_ALLOWED_ACE *aa = (ACCESS_ALLOWED_ACE *)ace;
+                if ((aa->Mask & FILE_ADD_FILE) &&
+                    IsValidSid((PSID)&aa->SidStart) &&
+                    EqualSid((PSID)&aa->SidStart, (PSID)logon_sid)) {
+                    ok = 1;
+                    break;
+                }
+            }
+        }
+    }
+    LocalFree(sd);
+    return ok;
+}
+
+/* 确保每会话子目录就绪：不存在即创建并授 DACL；已存在但验证不通过
+ * （重解析点／属主不对／DACL 不含当前 Logon SID）即删树重建；重建
+ * 失败即返回 0（fail-closed）。 */
+static int ush_token_session_dir_ensure(DWORD session_id) {
+    BYTE logon_sid[SECURITY_MAX_SID_SIZE];
+    DWORD logon_sid_len = 0;
+    char dir[MAX_PATH];
+    WCHAR wdir[MAX_PATH];
+    DWORD attr;
+    if (session_id == 0 || session_id == 0xFFFFFFFF) return 0;
+    if (!lea_session_logon_sid(session_id, logon_sid, &logon_sid_len)) {
+        svc_log("ush-token-dir: session %lu has no process to resolve logon SID",
+                (unsigned long)session_id);
+        return 0;
+    }
+    snprintf(dir, sizeof(dir), "%s\\%lu", g_ushtokens_dir, (unsigned long)session_id);
+    utf8_to_utf16(dir, wdir, MAX_PATH);
+    attr = GetFileAttributesW(wdir);
+    if (attr != INVALID_FILE_ATTRIBUTES) {
+        int ok = 0;
+        if (!(attr & FILE_ATTRIBUTE_REPARSE_POINT) &&
+            (attr & FILE_ATTRIBUTE_DIRECTORY))
+            ok = ush_token_session_dir_verify(wdir, logon_sid);
+        if (ok) return 1;
+        svc_log("ush-token-dir: session %lu dir tampered or stale, rebuilding",
+                (unsigned long)session_id);
+        if (!ush_token_session_dir_remove(dir)) return 0;
+    }
+    if (!CreateDirectoryW(wdir, NULL)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS) return 0;
+        /* 竞争：另一线程已建，重新验证一次。 */
+        attr = GetFileAttributesW(wdir);
+        if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+        if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            !(attr & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+        return ush_token_session_dir_verify(wdir, logon_sid);
+    }
+    {
+        PSECURITY_DESCRIPTOR sd = NULL;
+        PACL dacl = NULL;
+        BOOL dacl_present = FALSE, dacl_defaulted = FALSE;
+        int ok = 0;
+        if (ush_token_session_dir_sd(logon_sid, &sd) &&
+            GetSecurityDescriptorDacl(sd, &dacl_present, &dacl, &dacl_defaulted) &&
+            dacl_present && dacl) {
+            DWORD r = SetNamedSecurityInfoW(wdir, SE_FILE_OBJECT,
+                                            DACL_SECURITY_INFORMATION |
+                                            PROTECTED_DACL_SECURITY_INFORMATION,
+                                            NULL, NULL, dacl, NULL);
+            ok = (r == ERROR_SUCCESS);
+        }
+        if (sd) LocalFree(sd);
+        if (!ok) {
+            ush_token_session_dir_remove(dir);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 清理旧扁平 token 文件（v2 布局 <sessionid>.txt／<sessionid>.tmp-*.txt，
+ * v3 不再读取）。只删文件，目录一律跳过。 */
+static void ush_token_cleanup_old_flat_files(void) {
+    WCHAR wpat[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    char pat[MAX_PATH];
+    if (!g_ushtokens_dir[0]) return;
+    snprintf(pat, sizeof(pat), "%s\\*.txt", g_ushtokens_dir);
+    utf8_to_utf16(pat, wpat, MAX_PATH);
+    h = FindFirstFileW(wpat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char name[MAX_PATH];
+        size_t n;
+        int digits = 1, i;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        utf16_to_utf8(fd.cFileName, name, sizeof(name));
+        n = strlen(name);
+        if (n < 5 || strcmp(name + n - 4, ".txt") != 0) continue;
+        /* 数字前缀＋.txt（旧 token）或数字前缀＋.tmp-（旧原子写临时文件）。 */
+        for (i = 0; name[i] && name[i] != '.'; i++) {
+            if (name[i] < '0' || name[i] > '9') { digits = 0; break; }
+        }
+        if (!digits || i == 0) continue;
+        {
+            char full[MAX_PATH];
+            WCHAR wf[MAX_PATH];
+            snprintf(full, sizeof(full), "%s\\%s", g_ushtokens_dir, name);
+            utf8_to_utf16(full, wf, MAX_PATH);
+            DeleteFileW(wf);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* 启动时为每个已有会话确保子目录就绪（尽力而为；失败只记日志，读
+ * token 时按需再建——服务未建目录的窗口由读路径兜底）。 */
+static void ush_token_ensure_all_sessions(void) {
+    PWTS_SESSION_INFOW sessions = NULL;
+    DWORD count = 0;
+    DWORD i;
+    if (!g_ushtokens_dir[0]) return;
+    if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1,
+                               &sessions, &count))
+        return;
+    for (i = 0; i < count; i++) {
+        DWORD sid = sessions[i].SessionId;
+        if (sid == 0) continue;
+        if (!ush_token_session_dir_ensure(sid))
+            svc_log("ush-token-dir: session %lu dir ensure failed at startup",
+                    (unsigned long)sid);
+    }
+    WTSFreeMemory(sessions);
+}
+
+/* token 文件属主校验：须为该会话用户／SYSTEM／BA。会话无登录用户即
+ * 失败（fail-closed；无用户的会话里没有 USH）。 */
+static int ush_token_file_owner_ok(const WCHAR *wpath, DWORD session_id) {
+    LPWSTR user = NULL;
+    DWORD bytes = 0;
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    PSID sys_sid = NULL, ba_sid = NULL;
+    BYTE user_sid[SECURITY_MAX_SID_SIZE];
+    DWORD user_sid_len = SECURITY_MAX_SID_SIZE;
+    WCHAR domain[256];
+    DWORD domain_len = 256;
+    SID_NAME_USE use;
+    int ok = 0;
+    if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id,
+                                     WTSUserName, &user, &bytes))
+        return 0;
+    if (!user || !user[0]) {
+        WTSFreeMemory(user);
+        return 0;
+    }
+    if (!LookupAccountNameW(NULL, user, (PSID)user_sid, &user_sid_len,
+                            domain, &domain_len, &use)) {
+        WTSFreeMemory(user);
+        return 0;
+    }
+    WTSFreeMemory(user);
+    if (GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                              &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS)
+        return 0;
+    (void)ConvertStringSidToSidW(L"S-1-5-18", &sys_sid);
+    (void)ConvertStringSidToSidW(L"S-1-5-32-544", &ba_sid);
+    if (IsValidSid(owner) &&
+        (EqualSid(owner, (PSID)user_sid) ||
+         (sys_sid && EqualSid(owner, sys_sid)) ||
+         (ba_sid && EqualSid(owner, ba_sid))))
+        ok = 1;
+    if (sys_sid) LocalFree(sys_sid);
+    if (ba_sid) LocalFree(ba_sid);
+    LocalFree(sd);
+    return ok;
+}
+
+/* 读指定会话 USH 的每启动随机 token（USH 启动时生成并写入
+ * %ProgramData%\QFR\LEA\ush-tokens\<sessionid>\token.txt）。返回 1=读
+ * 到合法 token（恰好 64 位小写 hex——格式校验绝不移除，见 GPT A1
+ * 第 5 条）。读不到／格式不对／重解析点／属主不对即返回 0，调用方
+ * fail-closed，不裸发 UI 命令。
+ * 2026-11-17 修（H03 第三轮）：旧实现按 WTSGetActiveConsoleSessionId()
+ * 读，Server＋RDP 下与 USH 所在会话对不上（RDP-only 时甚至无控制台
+ * 会话、恒返回 0xFFFFFFFF），token 永远读不到；调用方须传发来本条
+ * 命令的客户端会话 id（pipe_client_session）。v3 改读每会话子目录。 */
+static int ush_token_read(char *out, size_t out_size, DWORD session_id) {
+    DWORD sid = session_id;
     char path[MAX_PATH];
-    snprintf(path, sizeof(path), "%s\\%lu.txt", g_ushtokens_dir, (unsigned long)sid);
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
+    WCHAR wpath[MAX_PATH];
+    DWORD attr;
+    FILE *f = NULL;
     char buf[128] = { 0 };
-    size_t r = fread(buf, 1, sizeof(buf) - 1, f);
+    size_t r = 0, n = 0, i = 0;
+    if (sid == 0xFFFFFFFF || sid == 0) return 0;
+    /* 目录须先就绪（服务按当前 Logon SID 创建／重建；会话号复用后旧
+     * 目录会被重建，旧 token 不会漏读）。 */
+    if (!ush_token_session_dir_ensure(sid)) return 0;
+    snprintf(path, sizeof(path), "%s\\%lu\\token.txt", g_ushtokens_dir, (unsigned long)sid);
+    utf8_to_utf16(path, wpath, MAX_PATH);
+    attr = GetFileAttributesW(wpath);
+    if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+        svc_log("ush-token: reparse point at session %lu token file, refusing",
+                (unsigned long)sid);
+        return 0;
+    }
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) return 0;
+    if (!ush_token_file_owner_ok(wpath, sid)) {
+        svc_log("ush-token: session %lu token file owner mismatch, refusing",
+                (unsigned long)sid);
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    r = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[r] = '\0';
-    size_t n = strlen(buf);
+    n = strlen(buf);
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
                      buf[n - 1] == ' ' || buf[n - 1] == '\t'))
         buf[--n] = '\0';
     if (n != 64) return 0;
-    for (size_t i = 0; i < n; i++)
+    for (i = 0; i < n; i++)
         if (!((buf[i] >= '0' && buf[i] <= '9') || (buf[i] >= 'a' && buf[i] <= 'f')))
             return 0;
     if (out_size < 65) return 0;
@@ -1983,9 +2893,9 @@ static int lea_drain_queue_revoked(const char *const *key_ids, int n_key_ids) {
 
 /* 执行器重置（sys.reset 与看门狗积压共用）：杀活动 job 树＋清待执行队列。
  * 不杀 MeshCentral agent、不重启服务、不重启整机。 */
-static void lea_reset_executor(const char *reason) {
+static int lea_reset_executor(const char *reason) {
     svc_log("B1 reset executor reason=%s", reason ? reason : "");
-    lea_watchdog_kill_active_job(1);
+    int job = lea_watchdog_kill_active_job(1);
     lea_drain_queue_reset();
     lea_audit_event_t ev;
     memset(&ev, 0, sizeof(ev));
@@ -1994,6 +2904,7 @@ static void lea_reset_executor(const char *reason) {
     ev.result = "ok";
     ev.detail = reason ? reason : "";
     audit_event(&ev);
+    return job; /* 0=无活动 job，1=已强杀，2=仅置标志（无子进程句柄） */
 }
 
 /* 看门狗 1 秒检查：活动 job 超 deadline 即强杀。 */
@@ -2603,7 +3514,9 @@ static void execute_item(lea_queue_item_t *item) {
             /* batch1-fix2：旧实现按进程名枚举就 TerminateProcess（SYSTEM
              * 身份），会误杀其他登录用户的同名实例。新实现全量核对＋
              * 优先优雅退出（见 lea_appclose.h）：
-             *   ① 被授权会话＝活动控制台会话（与 H01 同口径）；
+             *   ① 被授权会话＝请求方会话（v3 改：原“活动控制台会话”
+             *      在 RDP 会话真机上无定义，见 B1；队列入队时已捕获
+             *      item->client_session，0／0xFFFFFFFF 即拒绝）；
              *   ② 该会话用户的 SID（WTS 用户名 → LookupAccountName）；
              *   ③ 该用户安装位置的 QFRemote.exe 全路径（其卸载注册表
              *      InstallLocation，取不到即拒绝）；
@@ -2617,10 +3530,10 @@ static void execute_item(lea_queue_item_t *item) {
                 ok = 0; code = LEA_ERR_BAD_ENVELOPE;
                 snprintf(detail, sizeof(detail), "%s", "params.process_id-invalid");
             } else {
-                DWORD auth_session = WTSGetActiveConsoleSessionId();
+                DWORD auth_session = item->client_session;
                 char auth_sid[LEA_APPCLOSE_SID_MAX] = { 0 };
                 char auth_image[LEA_APPCLOSE_PATH_MAX] = { 0 };
-                if (auth_session == 0xFFFFFFFFUL ||
+                if (auth_session == 0 || auth_session == 0xFFFFFFFFUL ||
                     !lea_appclose_authorized_identity(auth_session, auth_sid,
                                                       sizeof(auth_sid),
                                                       auth_image, sizeof(auth_image))) {
@@ -2742,7 +3655,7 @@ static void execute_item(lea_queue_item_t *item) {
         if (!lea_rebuild_envelope(env, env_line, sizeof(env_line))) {
             ok = 0; code = LEA_ERR_INTERNAL;
             snprintf(detail, sizeof(detail), "%s", "rebuild-envelope-failed");
-        } else if (!ush_token_read(ush_token, sizeof(ush_token))) {
+        } else if (!ush_token_read(ush_token, sizeof(ush_token), item->client_session)) {
             ok = 0; code = LEA_ERR_USH_UNAVAILABLE;
             snprintf(detail, sizeof(detail), "%s", "ush-token-missing");
         } else if (!lea_json_insert_string_field(env_line, "ush_token", ush_token,
@@ -3021,12 +3934,12 @@ static int ush_response_data(const char *resp, char *out, size_t out_size) {
  * USH 管道；USH 响应 ok 时把其 data 对象透传为本命令的 result，
  * 失败时透传 USH 的 code。QFRLEA 不解析、不留存 Key 明文。 */
 static void selfbind_forward_ush(const char *ush_cmd_json, long timeout_ms,
-                                 char *resp, size_t resp_size) {
+                                 char *resp, size_t resp_size, DWORD session_id) {
     char token[65] = { 0 };
     char env_tok[LEA_MAX_ENVELOPE] = { 0 };
     char ush_resp[LEA_MAX_RESPONSE] = { 0 };
     char udetail[256] = { 0 };
-    if (!ush_token_read(token, sizeof(token))) {
+    if (!ush_token_read(token, sizeof(token), session_id)) {
         build_resp(resp, resp_size, 0, LEA_ERR_USH_UNAVAILABLE, "", 0, "ush-token-missing", NULL);
         return;
     }
@@ -3113,30 +4026,670 @@ static void handle_lea_status(const lea_envelope_t *env, char *resp, size_t resp
     build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result);
 }
 
-static void handle_internal(const char *text, char *resp, size_t resp_size) {
+/* A7：已签名已审计的改状态信封通路（handle_envelope 第 2 步内联）。
+ * 前置条件（调用方已保证）：信封验签通过＋准入通过（绑定／epoch／
+ * 授权＋吊销三态；authorize-dangerous 与 revoke-all-keys 另须票据带
+ * muse.execute.dangerous——lea_protocol.c 表内 dangerous＝1，lea_admit
+ * 的 scope 门凭此拒绝普通票据）。内联命令不进队列，故不占幂等、不走
+ * 4.4 暂停门与危险授权门（resume 须在暂停态下可用；authorize-dangerous
+ * 本身就是授权）。
+ * 审计门：attempt 审计先行，落盘失败即拒绝执行（fail-closed，不改
+ * 状态）；执行后写 result 审计，落盘失败记 svc_log 错误＋响应注明
+ * （操作已发生、证据缺失，调用方须对账——不得静默谎报成功）。
+ * 撤销标记写撤销时绑定的 grant_epoch／expires_at（服务端单调量），
+ * 供 binding.confirm 恢复判定用；旧 Key 服务端保持撤销态。 */
+static void handle_lea_control_command(const lea_envelope_t *env, char *resp, size_t resp_size) {
+    const char *cmd = env->command;
+    if (!audit_for_envelope(env, "control-attempt", "attempt", "", 0, "")) {
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env->request_id, 0,
+                           "audit-persist-failed", NULL);
+        svc_log("REJECT control cmd=%s audit-persist-failed", cmd);
+        return;
+    }
+    int ok = 0;
+    const char *fail_detail = "";
+    const char *result_json = "";
+    if (strcmp(cmd, "lea.pause") == 0) {
+        ok = lea_local_set_paused(g_base_dir, 1);
+        fail_detail = "pause-failed";
+        result_json = "{\"paused\":true}";
+    } else if (strcmp(cmd, "lea.resume") == 0) {
+        ok = lea_local_set_paused(g_base_dir, 0);
+        fail_detail = "resume-failed";
+        result_json = "{\"paused\":false}";
+    } else if (strcmp(cmd, "lea.revoke-all-keys") == 0) {
+        long long ge = 0, exp = 0;
+        EnterCriticalSection(&g_lock);
+        ge = g_binding.grant_epoch;
+        exp = g_binding.expires_at;
+        LeaveCriticalSection(&g_lock);
+        ok = lea_local_set_revoke_all_at(g_base_dir, 1, ge, exp);
+        fail_detail = "revoke-failed";
+        result_json = "{\"revoked_all\":true}";
+    } else if (strcmp(cmd, "lea.authorize-dangerous") == 0) {
+        ok = lea_local_set_dangerous_consent(g_base_dir, 1);
+        fail_detail = "authorize-failed";
+        result_json = "{\"dangerous_consented\":true}";
+    } else if (strcmp(cmd, "lea.revoke-dangerous-consent") == 0) {
+        ok = lea_local_set_dangerous_consent(g_base_dir, 0);
+        fail_detail = "revoke-consent-failed";
+        result_json = "{\"dangerous_consented\":false}";
+    } else {
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env->request_id, 0,
+                           "unknown-control-command", NULL);
+        return;
+    }
+    if (!ok) {
+        audit_for_envelope(env, "control-execute", "failed", LEA_ERR_INTERNAL, 0, fail_detail);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env->request_id, 0,
+                           fail_detail, NULL);
+        return;
+    }
+    lea_refresh_local_status(cmd, "ok");
+    if (!audit_for_envelope(env, "control-execute", "ok", "", 0, "")) {
+        /* 操作已发生、证据缺失：响应里明说，不谎报“已审计”。 */
+        svc_log("ERROR control cmd=%s executed but result audit persist failed", cmd);
+        build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0,
+                           "audit-persist-failed-after-execute", result_json);
+        return;
+    }
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0, "", result_json);
+}
+
+/* ---------- emergency_stop 处理（GPT 2026-11-18 裁决问题 1、3、六节） ----------
+ * 本机单向停控：只允许把本机控制状态从允许变为拒绝，绝不经本地入口
+ * 恢复授权。恢复只走 emergency_stop.recover（已签名专用票据，见下）。
+ * 响应逐项分开报：stopped_session（本次调用是否停了当前会话）与
+ * persisted（是否已可靠保存、重启后仍停）是两个字段——写盘失败时
+ * persisted=false 且 stopped_session=false（没杀 job、不称停控）。
+ * MeshCentral 交互式远控（桌面共享＋键鼠注入）本地无法只切不断 A：
+ * 响应里如实报 meshcentral_interactive=not-blocked-residual-risk，
+ * 不谎称已阻断（大肥鱼 Q2 会诊结论）。 */
+static void handle_emergency_stop(const char *text, char *resp, size_t resp_size) {
+    char rid[64] = { 0 };
+    lea_json_top_level_string(text, "request_id", rid, sizeof(rid));
+    EnterCriticalSection(&g_lock);
+    lea_emergency_stop_t old;
+    int rc = lea_local_emergency_stop_read(g_base_dir, &old);
+    if (rc == -1) {
+        /* 标记文件损坏：4.4 门已按已停控 fail-closed，本次调用不覆写
+         * 损坏文件（保证据），也不谎报新停控已建立。 */
+        LeaveCriticalSection(&g_lock);
+        svc_log("emergency-stop rejected: stop-state-corrupt");
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 0,
+                           "stop-state-corrupt", NULL);
+        return;
+    }
+    if (rc == 1 && old.stopped) {
+        /* 已停控：幂等返回既有事件，不重复杀 job。 */
+        char result[512];
+        snprintf(result, sizeof(result),
+                 "{\"stopped_session\":false,\"persisted\":true,\"stop_event_id\":\"%s\","
+                 "\"stop_seq\":%lld,\"queue_drained\":false,\"active_job\":\"none\","
+                 "\"meshcentral_interactive\":\"not-blocked-residual-risk\","
+                 "\"sync_status\":\"%s\",\"acl_hardened\":true}",
+                 old.stop_event_id, old.stop_seq, old.sync_status);
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 1, LEA_OK, rid, 0, "already-stopped", result);
+        return;
+    }
+    long long now = now_unix();
+    long long seq = (rc == 1 ? old.stop_seq : 0) + 1;
+    char event_id[128];
+    snprintf(event_id, sizeof(event_id), "estop-%lld-%lld", seq, now);
+    char account[128] = { 0 }, device[128] = { 0 };
+    snprintf(account, sizeof(account), "%s", g_binding.account_id);
+    snprintf(device, sizeof(device), "%s", g_binding.device_id);
+    long long binding_epoch = g_binding.epoch;
+    long long grant_epoch = g_binding.grant_epoch;
+    /* attempt 审计先行（A7 同款 fail-closed）：落盘失败即拒绝，不改状态。 */
+    char detail[640];
+    snprintf(detail, sizeof(detail),
+             "stop_event_id=%s stop_seq=%lld grant_epoch=%lld",
+             event_id, seq, grant_epoch);
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop";
+    ev.account_id = account;
+    ev.device_id = device;
+    ev.binding_epoch = binding_epoch;
+    ev.command = "lea.emergency-stop";
+    ev.result = "attempt";
+    ev.detail = detail;
+    if (!audit_event(&ev)) {
+        LeaveCriticalSection(&g_lock);
+        svc_log("emergency-stop rejected: audit-persist-failed");
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 0,
+                           "audit-persist-failed", NULL);
+        return;
+    }
+    /* 1. 先持久化标记（写盘失败即报失败，不杀 job、不称停控）。 */
+    lea_emergency_stop_t marker;
+    lea_emergency_stop_init(&marker);
+    marker.stopped = 1;
+    snprintf(marker.stop_event_id, sizeof(marker.stop_event_id), "%s", event_id);
+    marker.stop_seq = seq;
+    snprintf(marker.account_id, sizeof(marker.account_id), "%s", account);
+    snprintf(marker.device_id, sizeof(marker.device_id), "%s", device);
+    snprintf(marker.scope, sizeof(marker.scope), "%s", "device-control");
+    marker.binding_epoch = binding_epoch;
+    marker.grant_epoch = grant_epoch;
+    marker.stopped_at = now;
+    if (!lea_local_emergency_stop_write(g_base_dir, &marker)) {
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "emergency-stop";
+        ev.account_id = account;
+        ev.device_id = device;
+        ev.binding_epoch = binding_epoch;
+        ev.command = "lea.emergency-stop";
+        ev.result = "failed";
+        ev.error_code = LEA_ERR_INTERNAL;
+        ev.detail = "persist-failed";
+        audit_event(&ev);
+        LeaveCriticalSection(&g_lock);
+        svc_log("emergency-stop failed: persist-failed event=%s", event_id);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 1,
+                           "persist-failed", NULL);
+        return;
+    }
+    /* 2. 停当前会话：杀活动 job 树＋清待执行队列（响应逐项分开报）。 */
+    int job = lea_reset_executor("emergency-stop");
+    const char *job_str = job == 1 ? "killed" : job == 2 ? "marked" : "none";
+    /* 3. 标记文件 ACL 加固（SY／BA 全权，与 binding.dat 同款；失败不删
+     * 文件——删标记等于亲手解锁，是 fail-open，只记 acl_hardened=false
+     * 并审计，停控本身仍然有效）。 */
+    char stop_path[MAX_PATH];
+    snprintf(stop_path, sizeof(stop_path), "%s\\emergency-stop.json", g_base_dir);
+    int acl_ok = set_sys_admin_acl(stop_path);
+    if (!acl_ok)
+        svc_log("WARN emergency-stop acl-harden-failed event=%s", event_id);
+    /* 4. result 审计（落盘失败记 svc_log 错误＋响应注明，不得静默谎报）。 */
+    char rdetail[640];
+    snprintf(rdetail, sizeof(rdetail),
+             "stop_event_id=%s stop_seq=%lld grant_epoch=%lld queue-drained "
+             "active-job=%s acl-hardened=%d",
+             event_id, seq, grant_epoch, job_str, acl_ok ? 1 : 0);
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop";
+    ev.account_id = account;
+    ev.device_id = device;
+    ev.binding_epoch = binding_epoch;
+    ev.command = "lea.emergency-stop";
+    ev.result = "ok";
+    ev.detail = rdetail;
+    int audit_ok = audit_event(&ev);
+    if (!audit_ok)
+        svc_log("ERROR emergency-stop result audit persist failed event=%s", event_id);
+    char result[768];
+    snprintf(result, sizeof(result),
+             "{\"stopped_session\":true,\"persisted\":true,\"stop_event_id\":\"%s\","
+             "\"stop_seq\":%lld,\"queue_drained\":true,\"active_job\":\"%s\","
+             "\"meshcentral_interactive\":\"not-blocked-residual-risk\","
+             "\"sync_status\":\"pending\",\"acl_hardened\":%s}",
+             event_id, seq, job_str, acl_ok ? "true" : "false");
+    LeaveCriticalSection(&g_lock);
+    svc_log("emergency-stop ok event=%s job=%s acl=%d", event_id, job_str, acl_ok ? 1 : 0);
+    build_resp(resp, resp_size, 1, LEA_OK, rid, 0,
+                       audit_ok ? "" : "result-audit-persist-failed", result);
+}
+
+/* lea.emergency-stop-sync：main.js 拿到服务端签名回执后经内部管道发来，
+ * LEA 验回执签名后把标记 sync_status 改为 synced。回执字段放内部命令
+ * 顶层（与 binding.confirm 票据字段顶层同款）：stop_event_id、
+ * synced_at、signature。回执规范串见 lea_emergency_stop_sync_canonical
+ *（须与 lea-core.js emergencyStopSync 逐行一致）。 */
+static void handle_emergency_stop_sync(const char *text, char *resp, size_t resp_size) {
+    char rid[64] = { 0 };
+    lea_json_top_level_string(text, "request_id", rid, sizeof(rid));
+    char event_id[128] = { 0 }, signature[512] = { 0 };
+    long long synced_at = 0;
+    if (!lea_json_top_level_string(text, "stop_event_id", event_id, sizeof(event_id)) ||
+        !lea_validate_id_field(event_id) ||
+        lea_json_top_level_long(text, "synced_at", &synced_at) != 1 || synced_at <= 0 ||
+        !lea_json_top_level_string(text, "signature", signature, sizeof(signature)) ||
+        signature[0] == '\0') {
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, rid, 0,
+                           "sync-receipt-fields-invalid", NULL);
+        return;
+    }
+    EnterCriticalSection(&g_lock);
+    lea_emergency_stop_t marker;
+    int rc = lea_local_emergency_stop_read(g_base_dir, &marker);
+    if (rc == -1) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 0,
+                           "stop-state-corrupt", NULL);
+        return;
+    }
+    if (rc == 0 || !marker.stopped) {
+        LeaveCriticalSection(&g_lock);
+        char result[128];
+        snprintf(result, sizeof(result), "{\"sync_status\":\"not-stopped\"}");
+        build_resp(resp, resp_size, 1, LEA_OK, rid, 0, "", result);
+        return;
+    }
+    if (strcmp(marker.sync_status, "synced") == 0) {
+        char result[256];
+        snprintf(result, sizeof(result),
+                 "{\"sync_status\":\"synced\",\"stop_event_id\":\"%s\"}",
+                 marker.stop_event_id);
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 1, LEA_OK, rid, 0, "already-synced", result);
+        return;
+    }
+    if (strcmp(event_id, marker.stop_event_id) != 0) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, rid, 0,
+                           "receipt-event-mismatch", NULL);
+        return;
+    }
+    char canonical[1024];
+    if (!lea_emergency_stop_sync_canonical(event_id, marker.account_id,
+                                           marker.device_id, synced_at,
+                                           canonical, sizeof(canonical))) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, rid, 0,
+                           "canonical-build-failed", NULL);
+        return;
+    }
+    char reason[128] = { 0 };
+    if (!lea_verify_ticket_signature(signature, canonical, reason, sizeof(reason))) {
+        const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0
+            ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
+        LeaveCriticalSection(&g_lock);
+        svc_log("emergency-stop-sync rejected: %s", reason);
+        build_resp(resp, resp_size, 0, code, rid, 0, reason, NULL);
+        return;
+    }
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop-sync";
+    ev.account_id = marker.account_id;
+    ev.device_id = marker.device_id;
+    ev.binding_epoch = marker.binding_epoch;
+    ev.command = "lea.emergency-stop-sync";
+    ev.result = "attempt";
+    char detail[256];
+    snprintf(detail, sizeof(detail), "stop_event_id=%s synced_at=%lld", event_id, synced_at);
+    ev.detail = detail;
+    if (!audit_event(&ev)) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 0,
+                           "audit-persist-failed", NULL);
+        return;
+    }
+    snprintf(marker.sync_status, sizeof(marker.sync_status), "%s", "synced");
+    snprintf(marker.sync_receipt, sizeof(marker.sync_receipt), "sig:%.32s", signature);
+    if (!lea_local_emergency_stop_write(g_base_dir, &marker)) {
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "emergency-stop-sync";
+        ev.account_id = marker.account_id;
+        ev.device_id = marker.device_id;
+        ev.binding_epoch = marker.binding_epoch;
+        ev.command = "lea.emergency-stop-sync";
+        ev.result = "failed";
+        ev.error_code = LEA_ERR_INTERNAL;
+        ev.detail = "persist-failed";
+        audit_event(&ev);
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, rid, 1,
+                           "persist-failed", NULL);
+        return;
+    }
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop-sync";
+    ev.account_id = marker.account_id;
+    ev.device_id = marker.device_id;
+    ev.binding_epoch = marker.binding_epoch;
+    ev.command = "lea.emergency-stop-sync";
+    ev.result = "ok";
+    ev.detail = detail;
+    if (!audit_event(&ev))
+        svc_log("ERROR emergency-stop-sync result audit persist failed event=%s", event_id);
+    char result[256];
+    snprintf(result, sizeof(result),
+             "{\"sync_status\":\"synced\",\"stop_event_id\":\"%s\"}", event_id);
+    LeaveCriticalSection(&g_lock);
+    build_resp(resp, resp_size, 1, LEA_OK, rid, 0, "", result);
+}
+
+/* emergency_stop.recover：信封第 2 步内联（已签名已审计，与 A7 改状态
+ * 通路同款准入；绕过 4.4 停控门——恢复本身就是在停控态下用的）。
+ * 前置（调用方 handle_envelope 已保证）：信封验签通过＋准入通过
+ * （绑定／epoch／授权＋吊销三态）。注意：恢复信封须用未吊销的 Key
+ * 签发——停控已同步（服务端按 device_scope 吊销旧 Key）后，须先走
+ * 步骤 1（服务端签发新绑定票据＋新 Key，binding.confirm 激活，
+ * 停控保留），再用新 Key 发恢复信封；旧 Key 发恢复信封会被吊销门
+ * 拒绝，这是设计不是死锁。
+ * 提交顺序（大肥鱼 Q3 会诊结论）：attempt 审计→写 used-record 为
+ * consumed_pending_clear→清标记（stopped=false＋cleared_by_*）→
+ * 写 used-record 为 recovered→result 审计。清标记写盘失败返回
+ * UNKNOWN（票据已消费、停控仍在、须申请新票，绝不盲目重放）。 */
+static void handle_emergency_stop_recover(const lea_envelope_t *env, char *resp, size_t resp_size) {
+    lea_recovery_ticket_t tk;
+    if (!lea_parse_recovery_ticket(env->params_raw, &tk)) {
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env->request_id, 0,
+                           "recovery-ticket-fields-invalid", NULL);
+        svc_log("emergency-stop-recover rejected: ticket-fields-invalid");
+        return;
+    }
+    char canonical[2048];
+    if (!lea_recovery_ticket_canonical(&tk, canonical, sizeof(canonical))) {
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env->request_id, 0,
+                           "canonical-build-failed", NULL);
+        svc_log("emergency-stop-recover rejected: canonical-build-failed");
+        return;
+    }
+    char reason[128] = { 0 };
+    if (!lea_verify_ticket_signature(tk.signature, canonical, reason, sizeof(reason))) {
+        const char *code = strcmp(reason, "ed25519-pubkey-not-configured") == 0
+            ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
+        build_resp(resp, resp_size, 0, code, env->request_id, 0, reason, NULL);
+        svc_log("emergency-stop-recover rejected: %s", reason);
+        return;
+    }
+    if (tk.expires_at <= 0) {
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, env->request_id, 0,
+                           "recovery-ticket-no-expiry", NULL);
+        svc_log("emergency-stop-recover rejected: recovery-ticket-no-expiry");
+        return;
+    }
+    long long now = now_unix();
+    if (now > tk.expires_at) {
+        build_resp(resp, resp_size, 0, LEA_ERR_EXPIRED, env->request_id, 0,
+                           "recovery-ticket-expired", NULL);
+        svc_log("emergency-stop-recover rejected: recovery-ticket-expired");
+        return;
+    }
+    EnterCriticalSection(&g_lock);
+    long long cur_epoch = g_binding.epoch;
+    if (tk.binding_epoch != cur_epoch) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, env->request_id, 0,
+                           "binding-epoch-mismatch", NULL);
+        svc_log("emergency-stop-recover rejected: binding-epoch-mismatch ticket=%lld current=%lld",
+                tk.binding_epoch, cur_epoch);
+        return;
+    }
+    lea_emergency_stop_t marker;
+    int rc = lea_local_emergency_stop_read(g_base_dir, &marker);
+    if (rc == -1) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env->request_id, 0,
+                           "stop-state-corrupt", NULL);
+        return;
+    }
+    if (rc == 0 || !marker.stopped) {
+        /* 无活动停控：已完成恢复的票据重放即幂等返回已恢复结果；
+         * 否则拒绝（没有可清除的停控）。 */
+        char status[64] = { 0 };
+        long long repoch = 0;
+        int found = lea_local_recovery_ticket_status(g_base_dir, tk.ticket_id,
+                                                     status, sizeof(status), &repoch);
+        LeaveCriticalSection(&g_lock);
+        if (found && strcmp(status, "recovered") == 0) {
+            char result[384];
+            snprintf(result, sizeof(result),
+                     "{\"recovered\":true,\"stop_event_id\":\"%s\",\"ticket_id\":\"%s\","
+                     "\"recovery_epoch\":%lld}",
+                     tk.stop_event_id, tk.ticket_id, repoch);
+            build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0,
+                               "already-recovered", result);
+            return;
+        }
+        build_resp(resp, resp_size, 0, LEA_ERR_NOT_FOUND, env->request_id, 0,
+                           "no-active-emergency-stop", NULL);
+        return;
+    }
+    long long max_epoch = lea_local_recovery_max_epoch(g_base_dir);
+    if (!lea_emergency_stop_recovery_allowed(&marker, &tk, max_epoch)) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, env->request_id, 0,
+                           "recovery-not-allowed", NULL);
+        svc_log("emergency-stop-recover rejected: recovery-not-allowed ticket=%s event=%s epoch=%lld",
+                tk.ticket_id, tk.stop_event_id, tk.recovery_epoch);
+        return;
+    }
+    char detail[640];
+    snprintf(detail, sizeof(detail),
+             "stop_event_id=%s ticket_id=%s recovery_epoch=%lld",
+             tk.stop_event_id, tk.ticket_id, tk.recovery_epoch);
+    lea_audit_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop-recover";
+    ev.account_id = tk.account_id;
+    ev.device_id = tk.device_id;
+    ev.binding_epoch = cur_epoch;
+    ev.command = "emergency_stop.recover";
+    ev.result = "attempt";
+    ev.detail = detail;
+    if (!audit_event(&ev)) {
+        LeaveCriticalSection(&g_lock);
+        build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, env->request_id, 0,
+                           "audit-persist-failed", NULL);
+        return;
+    }
+    /* 第 1 步提交：写 used-record 为 consumed_pending_clear。失败即
+     * 票据已在记录中——查状态：recovered 即幂等返回；pending 即上次
+     * 尝试结果未知，返回 UNKNOWN（不盲目重放，凭 ticket_id 查询）。 */
+    if (!lea_local_recovery_ticket_consume(g_base_dir, tk.ticket_id,
+                                           tk.stop_event_id, tk.recovery_epoch)) {
+        char status[64] = { 0 };
+        long long repoch = 0;
+        int found = lea_local_recovery_ticket_status(g_base_dir, tk.ticket_id,
+                                                     status, sizeof(status), &repoch);
+        LeaveCriticalSection(&g_lock);
+        if (found && strcmp(status, "recovered") == 0) {
+            char result[384];
+            snprintf(result, sizeof(result),
+                     "{\"recovered\":true,\"stop_event_id\":\"%s\",\"ticket_id\":\"%s\","
+                     "\"recovery_epoch\":%lld}",
+                     tk.stop_event_id, tk.ticket_id, repoch);
+            build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0,
+                               "already-recovered", result);
+            return;
+        }
+        build_resp(resp, resp_size, 0, LEA_ERR_UNKNOWN, env->request_id, 0,
+                           "previous attempt outcome unknown; confirm manually", NULL);
+        return;
+    }
+    /* 第 2 步提交：清标记（stopped=false＋cleared_by_*，文件不删）。 */
+    marker.stopped = 0;
+    snprintf(marker.cleared_by_ticket_id, sizeof(marker.cleared_by_ticket_id),
+             "%s", tk.ticket_id);
+    marker.cleared_by_recovery_epoch = tk.recovery_epoch;
+    marker.cleared_at = now;
+    marker.last_recovery_epoch = tk.recovery_epoch;
+    if (!lea_local_emergency_stop_write(g_base_dir, &marker)) {
+        memset(&ev, 0, sizeof(ev));
+        ev.event = "emergency-stop-recover";
+        ev.account_id = tk.account_id;
+        ev.device_id = tk.device_id;
+        ev.binding_epoch = cur_epoch;
+        ev.command = "emergency_stop.recover";
+        ev.result = "failed";
+        ev.error_code = LEA_ERR_UNKNOWN;
+        ev.detail = "clear-marker-failed-after-consume";
+        audit_event(&ev);
+        LeaveCriticalSection(&g_lock);
+        svc_log("emergency-stop-recover UNKNOWN: clear-marker-failed ticket=%s", tk.ticket_id);
+        build_resp(resp, resp_size, 0, LEA_ERR_UNKNOWN, env->request_id, 0,
+                           "clear-marker-failed-after-consume; ticket consumed, stop still active, request a new ticket", NULL);
+        return;
+    }
+    /* 第 3 步提交：used-record 改为 recovered（失败由下次启动对账补，
+     * 此处只记日志＋响应注明，不谎称票据状态已落盘）。 */
+    int record_ok = lea_local_recovery_ticket_mark_recovered(g_base_dir, tk.ticket_id);
+    if (!record_ok)
+        svc_log("ERROR emergency-stop-recover ticket-record update failed ticket=%s, reconcile will repair",
+                tk.ticket_id);
+    memset(&ev, 0, sizeof(ev));
+    ev.event = "emergency-stop-recover";
+    ev.account_id = tk.account_id;
+    ev.device_id = tk.device_id;
+    ev.binding_epoch = cur_epoch;
+    ev.command = "emergency_stop.recover";
+    ev.result = "recovered";
+    ev.detail = detail;
+    int audit_ok = audit_event(&ev);
+    if (!audit_ok)
+        svc_log("ERROR emergency-stop-recover result audit persist failed ticket=%s", tk.ticket_id);
+    char result[384];
+    snprintf(result, sizeof(result),
+             "{\"recovered\":true,\"stop_event_id\":\"%s\",\"ticket_id\":\"%s\","
+             "\"recovery_epoch\":%lld}",
+             tk.stop_event_id, tk.ticket_id, tk.recovery_epoch);
+    LeaveCriticalSection(&g_lock);
+    svc_log("emergency-stop-recover ok ticket=%s event=%s epoch=%lld",
+            tk.ticket_id, tk.stop_event_id, tk.recovery_epoch);
+    build_resp(resp, resp_size, 1, LEA_OK, env->request_id, 0,
+                       (audit_ok && record_ok) ? "" : "result-audit-or-record-persist-failed", result);
+}
+
+/* 已消费登录证明集合（防重放，v3）。内存态、上限 128 条，按证明签名哈希
+ * 记账；同一证明在 TTL 内重复提交即拒绝。合法重登每次取新证明（签发时
+ * 间不同→签名不同），不误伤。服务重启清空集合——残留窗口 ≤ TTL＋时钟
+ * 偏差（180 秒），且重放者须先持有有效证明（须经控制台会话签发），记
+ * 为已知残留（见返工报告）。调用方须已持 g_lock（与绑定更新同一临界区
+ * 内原子消费：验过→记入→绑定的顺序不可被另一条 login_changed 插队）。 */
+#define LEA_LOGIN_PROOF_SEEN_MAX 128
+typedef struct { char hash[65]; long long expires_at; } lea_proof_seen_t;
+static lea_proof_seen_t g_proof_seen[LEA_LOGIN_PROOF_SEEN_MAX];
+static int g_proof_seen_n = 0;
+static int lea_login_proof_seen_insert(const char *signature, long long now_unix, long long expires_at) {
+    char hash[65] = { 0 };
+    int i, j;
+    lea_sha256_hex((const unsigned char *)signature, strlen(signature), hash);
+    for (i = 0; i < g_proof_seen_n; i++) {
+        if (g_proof_seen[i].expires_at <= now_unix) continue; /* 过期条目视作未见 */
+        if (strcmp(g_proof_seen[i].hash, hash) == 0) return 1; /* 重放 */
+    }
+    j = 0;
+    for (i = 0; i < g_proof_seen_n; i++) {
+        if (g_proof_seen[i].expires_at > now_unix) g_proof_seen[j++] = g_proof_seen[i];
+    }
+    g_proof_seen_n = j;
+    if (g_proof_seen_n >= LEA_LOGIN_PROOF_SEEN_MAX) {
+        memmove(&g_proof_seen[0], &g_proof_seen[1],
+                sizeof(g_proof_seen[0]) * (LEA_LOGIN_PROOF_SEEN_MAX - 1));
+        g_proof_seen_n = LEA_LOGIN_PROOF_SEEN_MAX - 1;
+    }
+    snprintf(g_proof_seen[g_proof_seen_n].hash, sizeof(g_proof_seen[g_proof_seen_n].hash), "%s", hash);
+    g_proof_seen[g_proof_seen_n].expires_at = expires_at;
+    g_proof_seen_n++;
+    return 0;
+}
+
+static void handle_internal(const char *text, char *resp, size_t resp_size, DWORD client_session,
+                            const lea_caller_identity_t *ident) {
     char cmd[64] = { 0 };
     /* H08：内部命令各字段同样只认顶层成员（嵌套同名键不得遮蔽顶层值）。 */
     if (!lea_json_top_level_string(text, "cmd", cmd, sizeof(cmd))) {
+        audit_unknown_internal_reject("");
         build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "cmd-missing", NULL);
+        return;
+    }
+    /* A7：管道侧五个改状态分支关闭（GPT 裁决）——生产管道直接调用
+     * 一律拒绝（CLI 的 5 命令已在 v6 关闭，只删 CLI 不够；管道是
+     * 剩下的非授权本地管理旁路）。改状态只能走已签名已审计的信封
+     * 通路（handle_envelope 第 2 步内联 lea.* 命令）；正式撤销另走
+     * 服务端控制台 API。拒绝须审计（限流，见 audit_pipe_reject）。
+     * 只读 lea.status 不受影响。 */
+    if (lea_internal_state_command(cmd)) {
+        audit_pipe_reject(cmd);
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0,
+                           "internal-state-command-requires-signed-envelope", NULL);
+        svc_log("REJECT internal state command cmd=%s", cmd);
+        return;
+    }
+    /* A7-whitelist：显式内部命令白名单（GPT 问题 2，不批准整体禁用
+     * internal 命令面）。白名单外的命令默认拒绝＋审计
+     * （unknown-internal-cmd）；调用方身份已由 pipe_client_thread
+     * 按 H01 验过（安装目录客户端＋主程序父进程），此处只做命令准入，
+     * 不重复验调用方。 */
+    if (!lea_internal_whitelist_command(cmd)) {
+        audit_unknown_internal_reject(cmd);
+        build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0,
+                           "unknown-internal-cmd", NULL);
+        svc_log("REJECT internal unknown cmd=%s", cmd);
         return;
     }
     if (strcmp(cmd, "session.login_changed") == 0) {
         char account[128] = { 0 }, device[128] = { 0 };
+        char proof[2048] = { 0 };
+        char proof_reason[128] = { 0 };
+        lea_login_proof_t parsed;
+        char sid_str[256] = { 0 };
+        char detail[512] = { 0 };
+        char result[256] = { 0 };
+        long long epoch = 0;
+        lea_audit_event_t ev;
+        memset(&parsed, 0, sizeof(parsed));
+        memset(&parsed, 0, sizeof(parsed));
         if (!lea_json_top_level_string(text, "account_id", account, sizeof(account)) || !account[0]) {
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "account_id-missing", NULL);
             return;
         }
         lea_json_top_level_string(text, "device_id", device, sizeof(device));
+        /* v3 P0-4 第二层（B3 主方案）：account_id 不得自报，须附服务端签发
+         * 的登录证明。证明缺失／无效／过期／错配／验签失败／不可验一律拒绝，
+         * 不进 PENDING、不碰绑定（旧绑定不受影响——伪造的换号通知到此为止）。
+         * 证明须与信封声称的账号／设备一致（见 lea_verify_login_proof）。
+         * 证明取自控制台会话（main.js 取证明后随信封发来）；取不到证明时
+         * 客户端仍发送（不静默），服务以 login-proof-missing 明确拒绝。 */
+        if (!lea_json_top_level_string(text, "login_proof", proof, sizeof(proof)) ||
+            !lea_verify_login_proof(proof, account, device, now_unix(),
+                                    proof_reason, sizeof(proof_reason))) {
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "binding";
+            ev.account_id = account;
+            ev.device_id = device;
+            ev.command = "session.login_changed";
+            ev.result = "rejected";
+            ev.detail = proof_reason[0] ? proof_reason : "login-proof-invalid";
+            audit_event(&ev);
+            svc_log("binding login_changed rejected: %s account=%s",
+                    proof_reason[0] ? proof_reason : "login-proof-invalid", account);
+            build_resp(resp, resp_size, 0, LEA_ERR_LOGIN_PROOF, "", 0,
+                       proof_reason[0] ? proof_reason : "login-proof-invalid", NULL);
+            return;
+        }
+        if (!lea_parse_login_proof(proof, &parsed)) {
+            /* 验签已过，解析不可能失败；防御性分支。 */
+            build_resp(resp, resp_size, 0, LEA_ERR_LOGIN_PROOF, "", 0, "login-proof-invalid", NULL);
+            return;
+        }
+        if (ident) sid_to_string_a(ident->caller_sid, sid_str, sizeof(sid_str));
+        /* A7：换号才清标记——比较须在 lea_binding_on_login 改写
+         * account_id 之前做。同号重登不清标记：一键撤销须由新票据
+         * 在 binding.confirm 恢复（见该处，票据单调量判定），否则
+         * 一次 login_changed 就能绕过撤销。 */
+        int account_changed = 0;
         EnterCriticalSection(&g_lock);
-        long long epoch = lea_binding_on_login(&g_binding, account,
-                                               device[0] ? device : g_binding.device_id,
-                                               now_unix());
+        account_changed = (g_binding.account_id[0] != '\0' &&
+                           strcmp(account, g_binding.account_id) != 0);
+        if (lea_login_proof_seen_insert(parsed.signature, now_unix(), parsed.expires_at)) {
+            LeaveCriticalSection(&g_lock);
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "binding";
+            ev.account_id = account;
+            ev.device_id = device;
+            ev.command = "session.login_changed";
+            ev.result = "rejected";
+            ev.detail = "login-proof-replay";
+            audit_event(&ev);
+            svc_log("binding login_changed rejected: login-proof-replay account=%s", account);
+            build_resp(resp, resp_size, 0, LEA_ERR_LOGIN_PROOF, "", 0, "login-proof-replay", NULL);
+            return;
+        }
+        epoch = lea_binding_on_login(&g_binding, account,
+                                     device[0] ? device : g_binding.device_id,
+                                     now_unix());
         binding_persist_locked();
         LeaveCriticalSection(&g_lock);
         /* S-021：换号登录清除本机一键撤销标记（旧号撤销不带到新号），并刷新状态。 */
-        lea_local_clear_revoke_all(g_base_dir);
+        if (account_changed) lea_local_clear_revoke_all(g_base_dir);
         lea_refresh_local_status("session.login_changed", "ok");
-        lea_audit_event_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.event = "binding";
         ev.trace_id = "";
@@ -3146,10 +4699,13 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.binding_epoch = epoch;
         ev.command = "session.login_changed";
         ev.result = "pending";
-        ev.detail = "login-changed: old binding revoked, awaiting ticket";
+        snprintf(detail, sizeof(detail),
+                 "login-changed: verified sid=%s session=%lu -> PENDING, awaiting ticket",
+                 sid_str[0] ? sid_str : "unknown", (unsigned long)client_session);
+        ev.detail = detail;
         audit_event(&ev);
-        svc_log("binding login_changed account=%s epoch=%lld -> PENDING", account, epoch);
-        char result[256];
+        svc_log("binding login_changed account=%s epoch=%lld -> PENDING (verified sid=%s session=%lu)",
+                account, epoch, sid_str[0] ? sid_str : "unknown", (unsigned long)client_session);
         if (!lea_binding_login_result(epoch, result, sizeof(result))) {
             build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "login-result-too-small", NULL);
             return;
@@ -3158,6 +4714,43 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         return;
     }
     if (strcmp(cmd, "session.logout") == 0) {
+        /* A7-whitelist：登出限定当前授权主体（GPT 问题 2）。请求须带
+         * account_id 且与当前绑定一致；绑定为空（已 UNBOUND）时按幂等
+         * 空操作放行。错号／无号的登出不得废掉他人绑定。登出本身无
+         * 服务端登录事件可证（A1 v3 §8 同款结论），故只做本机绑定
+         * 比对，不强制 login_proof。
+         * “有绑定”的判定必须用 state（!= UNBOUND），不能用
+         * account_id 是否为空：lea_binding_revoke 有意保留
+         * account_id／device_id 作最后绑定身份（仅清票据／scopes／
+         * 租约），UNBOUND 后 account_id 仍有值；用它判“有绑定”
+         * 会使一次成功登出后、任何错号／无号登出都被永久拒绝，
+         * 幂等性被破坏（Wine T8d 复现，2026-11-18）。 */
+        char logout_account[128] = { 0 };
+        lea_json_top_level_string(text, "account_id", logout_account, sizeof(logout_account));
+        char bound_account[128] = { 0 };
+        int has_binding = 0;
+        EnterCriticalSection(&g_lock);
+        snprintf(bound_account, sizeof(bound_account), "%s", g_binding.account_id);
+        has_binding = (g_binding.state != LEA_BIND_UNBOUND);
+        LeaveCriticalSection(&g_lock);
+        if (has_binding &&
+            (logout_account[0] == '\0' || strcmp(logout_account, bound_account) != 0)) {
+            lea_audit_event_t ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "binding";
+            ev.account_id = logout_account;
+            ev.device_id = "";
+            ev.command = "session.logout";
+            ev.result = "rejected";
+            ev.error_code = LEA_ERR_BINDING_CHANGED;
+            ev.detail = "logout account mismatch";
+            if (!audit_event(&ev))
+                svc_log("WARN audit persist failed for logout reject");
+            svc_log("binding logout rejected: account mismatch (bound=%s)", bound_account);
+            build_resp(resp, resp_size, 0, LEA_ERR_BINDING_CHANGED, "", 0,
+                               "logout-account-mismatch", NULL);
+            return;
+        }
         EnterCriticalSection(&g_lock);
         lea_binding_revoke(&g_binding, now_unix());
         binding_persist_locked();
@@ -3241,6 +4834,47 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
                     tk.account_id, tk.device_id);
             return;
         }
+        /* A7：一键撤销恢复——仅当新票据比撤销时绑定的票据更新才清除
+         * 标记。判定用服务端单调量（grant_epoch 更大或 expires_at 更
+         * 晚），不用本机墙钟（可篡改／漂移）；旧票据重放不得清除。
+         * 恢复前先写 attempt 审计，落盘失败即不清除（fail-closed，
+         * 下次登录重试）。旧 Key 服务端仍保持撤销态——恢复只是清
+         * 本地标记，新 Key 须服务端重新签发，旧 Key 永不复活。 */
+        int revoke_recovered = 0, revoke_retained = 0;
+        {
+            long long mg = 0, me = 0;
+            int marker = lea_local_get_revoke_all(g_base_dir, &mg, &me);
+            if (marker && lea_revoke_recovery_allowed(mg, me, tk.grant_epoch, tk.expires_at)) {
+                lea_audit_event_t rev;
+                memset(&rev, 0, sizeof(rev));
+                rev.event = "revoke-recover";
+                rev.account_id = tk.account_id;
+                rev.device_id = tk.device_id;
+                rev.binding_epoch = cur_epoch;
+                rev.command = "binding.confirm";
+                rev.result = "attempt";
+                rev.detail = "fresh ticket newer than revoke marker, clearing";
+                if (audit_event(&rev)) {
+                    if (lea_local_clear_revoke_all(g_base_dir)) {
+                        revoke_recovered = 1;
+                        memset(&rev, 0, sizeof(rev));
+                        rev.event = "revoke-recover";
+                        rev.account_id = tk.account_id;
+                        rev.device_id = tk.device_id;
+                        rev.binding_epoch = cur_epoch;
+                        rev.command = "binding.confirm";
+                        rev.result = "recovered";
+                        rev.detail = "revoke marker cleared by fresh ticket";
+                        if (!audit_event(&rev))
+                            svc_log("ERROR revoke-recover result audit persist failed");
+                    }
+                } else {
+                    svc_log("ERROR revoke-recover attempt audit persist failed, marker retained");
+                }
+            } else if (marker) {
+                revoke_retained = 1;
+            }
+        }
         lea_audit_event_t ev;
         memset(&ev, 0, sizeof(ev));
         ev.event = "binding";
@@ -3249,7 +4883,20 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.binding_epoch = cur_epoch;
         ev.command = "binding.confirm";
         ev.result = "active";
-        ev.detail = "ticket verified, binding ACTIVE";
+        /* emergency_stop：普通 binding.confirm 即使签名有效也绝不清停控
+         * 标记（GPT 裁决问题 3）；此处只在审计 detail 注明停控保留，
+         * 不加任何清逻辑。 */
+        char bdetail[512];
+        snprintf(bdetail, sizeof(bdetail), "%s",
+                 revoke_recovered ? "ticket verified, binding ACTIVE; revoke marker cleared by fresh ticket"
+                    : revoke_retained ? "ticket verified, binding ACTIVE; revoke marker retained (ticket not newer than revoke)"
+                    : "ticket verified, binding ACTIVE");
+        if (lea_local_emergency_stopped(g_base_dir)) {
+            size_t dl = strlen(bdetail);
+            snprintf(bdetail + dl, sizeof(bdetail) - dl,
+                     "; emergency-stop retained (recovery ticket required)");
+        }
+        ev.detail = bdetail;
         audit_event(&ev);
         svc_log("binding confirm account=%s epoch=%lld -> ACTIVE", tk.account_id, cur_epoch);
         char result[256];
@@ -3262,22 +4909,29 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         /* #17：C 侧吊销表写入方。主程序在 rebind 拿到服务端吊销全集快照
          * （rb.json.revocations.revoked_key_ids）后经 qf-lea-client.exe
          * --internal 发 {"cmd":"keys.sync-revoked","key_ids":[...]}。
-         * 写入语义是并集合并（lea_revoked_merge），不是全量替换：本机表
-         * 另有 H21 下发前推送这一全量替换写入方，两方到达顺序无保证，
-         * 陈旧快照全量替换会缩表（丢新吊销项，陈旧空集还会清表）；服务
-         * 端台账只增不减，并集合并下陈旧快照／空集至多无操作，永不缩表。
-         * key_ids 缺失／非数组／元素非法即拒绝，不写残集；写盘失败
-         * （含 ACL 失败删文件）即报 INTERNAL，调用方下次下发前服务端
-         * 推送会重新同步（H21 pushed_epoch 未追上即重推）。调用方已由
+         * 写入语义是并集合并（lea_revoked_merge_with_generation），不是
+         * 全量替换：本机表另有 H21 下发前推送这一全量替换写入方，两方
+         * 到达顺序无保证，陈旧快照全量替换会缩表（丢新吊销项，陈旧空
+         * 集还会清表）；服务端台账只增不减，并集合并下陈旧快照／空集
+         * 至多无操作，永不缩表。key_ids 缺失／非数组／元素非法即拒绝，
+         * 不写残集；写盘失败即报 INTERNAL，调用方下次下发前服务端推送
+         * 会重新同步（H21 pushed_epoch 未追上即重推）。调用方已由
          * pipe_client_thread 按 H01 验过（安装目录客户端＋主程序父进程），
          * 此处不再另验。
-         * #1 版本化：generation 成员缺失（旧版回包）即走无版本并集合并，
-         * 不推进本机世代；存在但非法（非裸整数／负数／溢出／重复键）
-         * 即整单拒绝；存在且小于本机已接受的最大世代即陈旧快照，拒绝
-         * 不写盘（detail revoked-generation-stale）。 */
+         * A7-whitelist（GPT 问题 2）：只接受可信服务端来源＋递增代次。
+         * 来源证明＝服务端 Ed25519 签名的快照（规范串见
+         * lea_revoked_snapshot_canonical；签名由 rebind 回包经 main.js
+         * 原样转发；device_id 取本机绑定，不用请求体自报）。
+         * 顺序：字段校验 → 规范形校验（入串）→ 验签 → 代次 → 合并。
+         * 空集合法（并集合并下无操作＋只推进世代，永不缩表）。
+         * 缺签／错签／缺代次／陈旧代次一律拒绝＋审计；H21 推送仍是
+         * 主同步路径，sync 只是第二写入方，拒绝不丢吊销数据。
+         * 旧行为“无代次即无版本合并”已废止：无版本合并等于接受任意
+         * 客户端自报列表，与“验证服务端授权来源”相悖。 */
         char ids[LEA_REVOKED_MAX_IDS][128];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
+            audit_keys_reject("keys.sync-revoked", "key_ids-invalid", LEA_ERR_BAD_ENVELOPE);
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
             return;
         }
@@ -3285,22 +4939,54 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         for (int i = 0; i < n; i++) ptrs[i] = ids[i];
         long long gen = -1;
         int gen_rc = lea_json_top_level_long(text, "generation", &gen);
-        if (gen_rc < 0 || (gen_rc == 1 && gen < 0)) {
+        if (gen_rc == 0) {
+            audit_keys_reject("keys.sync-revoked", "revoked-generation-required", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-generation-required", NULL);
+            return;
+        }
+        if (gen_rc < 0 || gen < 0) {
+            audit_keys_reject("keys.sync-revoked", "generation-invalid", LEA_ERR_BAD_ENVELOPE);
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "generation-invalid", NULL);
             return;
         }
-        if (gen_rc == 1) {
-            int stale = 0;
-            if (!lea_revoked_merge_with_generation(g_revoked_path, ptrs, n, gen, &stale)) {
-                build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0,
-                           stale ? "revoked-generation-stale" : "revoked-write-failed", NULL);
-                svc_log("ERROR keys.sync-revoked %s count=%d generation=%lld",
-                        stale ? "stale-generation" : "write failed", n, gen);
-                return;
-            }
-        } else if (!lea_revoked_merge(g_revoked_path, ptrs, n)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoked-write-failed", NULL);
-            svc_log("ERROR keys.sync-revoked write failed count=%d", n);
+        char sync_sig[512] = { 0 };
+        if (!lea_json_top_level_string(text, "sync_signature", sync_sig, sizeof(sync_sig)) || !sync_sig[0]) {
+            audit_keys_reject("keys.sync-revoked", "revoked-sync-signature-missing", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-sync-signature-missing", NULL);
+            return;
+        }
+        char sync_device[128] = { 0 };
+        EnterCriticalSection(&g_lock);
+        snprintf(sync_device, sizeof(sync_device), "%s", g_binding.device_id);
+        LeaveCriticalSection(&g_lock);
+        if (!sync_device[0]) {
+            audit_keys_reject("keys.sync-revoked", "revoked-sync-no-binding", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-sync-no-binding", NULL);
+            return;
+        }
+        char sync_canonical[512];
+        if (!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", sync_device, gen, ptrs, n,
+                                            sync_canonical, sizeof(sync_canonical))) {
+            audit_keys_reject("keys.sync-revoked", "revoked-sync-not-canonical", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-sync-not-canonical", NULL);
+            return;
+        }
+        char sync_reason[128] = { 0 };
+        if (!lea_verify_ticket_signature(sync_sig, sync_canonical, sync_reason, sizeof(sync_reason))) {
+            const char *code = strcmp(sync_reason, "ed25519-pubkey-not-configured") == 0
+                ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
+            audit_keys_reject("keys.sync-revoked", sync_reason, code);
+            build_resp(resp, resp_size, 0, code, "", 0, sync_reason, NULL);
+            svc_log("REJECT keys.sync-revoked signature reason=%s", sync_reason);
+            return;
+        }
+        int stale = 0;
+        if (!lea_revoked_merge_with_generation(g_revoked_path, ptrs, n, gen, &stale)) {
+            const char *detail = stale ? "revoked-generation-stale" : "revoked-write-failed";
+            audit_keys_reject("keys.sync-revoked", detail, LEA_ERR_INTERNAL);
+            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, detail, NULL);
+            svc_log("ERROR keys.sync-revoked %s count=%d generation=%lld",
+                    stale ? "stale-generation" : "write failed", n, gen);
             return;
         }
         if (!set_sys_admin_acl(g_revoked_path))
@@ -3312,35 +4998,86 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.event = "keys";
         ev.command = "keys.sync-revoked";
         ev.result = "ok";
-        ev.detail = "revoked_keys.txt merged from rebind";
+        char ev_detail[192];
+        snprintf(ev_detail, sizeof(ev_detail),
+                 "revoked_keys.txt merged from rebind; generation=%lld count=%d", gen, n);
+        ev.detail = ev_detail;
         audit_event(&ev);
         char result[128];
-        if (gen_rc == 1)
-            snprintf(result, sizeof(result), "{\"revoked_count\":%d,\"generation\":%lld}", n, gen);
-        else
-            snprintf(result, sizeof(result), "{\"revoked_count\":%d}", n);
+        snprintf(result, sizeof(result), "{\"revoked_count\":%d,\"generation\":%lld}", n, gen);
         build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
     if (strcmp(cmd, "lea.key_revoked") == 0) {
-        /* RC-02：服务端吊销踢出（经 qf-lea-client.exe --internal-b64 下发，
-         * 调用方已由 pipe_client_thread 按 H01 验过：安装目录客户端＋
-         * 主程序父进程）。
-         * 三步：① key_ids 并集合并进本机吊销表（尽力，失败只记日志不阻断
-         * 后两步——服务端 H21 推送已是主同步路径）；② 清该 Key 的排队
-         * 命令（回 KEY_REVOKED，不可重试）；③ 强杀该 Key 的活动 job
-         * （worker 收尾改判 KEY_REVOKED）。 */
+        /* RC-02＋A7-whitelist：服务端吊销踢出（经 qf-lea-client.exe
+         * --internal-b64 下发，调用方已由 pipe_client_thread 按 H01
+         * 验过：安装目录客户端＋主程序父进程）。踢出命令同样只接受
+         * 服务端签名快照（标签 qfr-lea-key-revoked-v1）＋递增代次：
+         * 缺签／错签／缺代次整单拒绝、不清队不强杀；代次陈旧时跳过
+         * 合并但仍清队＋强杀（被踢 Key 已撤销是单调事实，新快照必
+         * 含之；合并只是 best-effort，服务端 H21 推送已是主同步路径）。
+         * 三步：① 验签＋代次后 key_ids 并集合并进本机吊销表（尽力，
+         * 失败只记日志不阻断后两步）；② 清该 Key 的排队命令（回
+         * KEY_REVOKED，不可重试）；③ 强杀该 Key 的活动 job（worker
+         * 收尾改判 KEY_REVOKED）。 */
         char ids[LEA_REVOKED_MAX_IDS][128];
         int n = lea_json_top_level_string_array(text, "key_ids", ids, LEA_REVOKED_MAX_IDS);
         if (n < 0) {
+            audit_keys_reject("lea.key_revoked", "key_ids-invalid", LEA_ERR_BAD_ENVELOPE);
             build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "key_ids-invalid", NULL);
             return;
         }
         const char *ptrs[LEA_REVOKED_MAX_IDS];
         for (int i = 0; i < n; i++) ptrs[i] = ids[i];
-        int merged = lea_revoked_merge(g_revoked_path, ptrs, n);
-        if (!merged)
-            svc_log("WARN lea.key_revoked merge failed count=%d (queue/job kill continues)", n);
+        long long kgen = -1;
+        int kgen_rc = lea_json_top_level_long(text, "generation", &kgen);
+        if (kgen_rc == 0) {
+            audit_keys_reject("lea.key_revoked", "revoked-generation-required", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-generation-required", NULL);
+            return;
+        }
+        if (kgen_rc < 0 || kgen < 0) {
+            audit_keys_reject("lea.key_revoked", "generation-invalid", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "generation-invalid", NULL);
+            return;
+        }
+        char kick_sig[512] = { 0 };
+        if (!lea_json_top_level_string(text, "kick_signature", kick_sig, sizeof(kick_sig)) || !kick_sig[0]) {
+            audit_keys_reject("lea.key_revoked", "revoked-kick-signature-missing", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-kick-signature-missing", NULL);
+            return;
+        }
+        char kick_device[128] = { 0 };
+        EnterCriticalSection(&g_lock);
+        snprintf(kick_device, sizeof(kick_device), "%s", g_binding.device_id);
+        LeaveCriticalSection(&g_lock);
+        if (!kick_device[0]) {
+            audit_keys_reject("lea.key_revoked", "revoked-kick-no-binding", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-kick-no-binding", NULL);
+            return;
+        }
+        char kick_canonical[512];
+        if (!lea_revoked_snapshot_canonical("qfr-lea-key-revoked-v1", kick_device, kgen, ptrs, n,
+                                            kick_canonical, sizeof(kick_canonical))) {
+            audit_keys_reject("lea.key_revoked", "revoked-kick-not-canonical", LEA_ERR_BAD_ENVELOPE);
+            build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "revoked-kick-not-canonical", NULL);
+            return;
+        }
+        char kick_reason[128] = { 0 };
+        if (!lea_verify_ticket_signature(kick_sig, kick_canonical, kick_reason, sizeof(kick_reason))) {
+            const char *code = strcmp(kick_reason, "ed25519-pubkey-not-configured") == 0
+                ? LEA_ERR_SIG_NOT_CONFIGURED : LEA_ERR_BAD_SIGNATURE;
+            audit_keys_reject("lea.key_revoked", kick_reason, code);
+            build_resp(resp, resp_size, 0, code, "", 0, kick_reason, NULL);
+            svc_log("REJECT lea.key_revoked signature reason=%s", kick_reason);
+            return;
+        }
+        int kstale = 0;
+        int merged = lea_revoked_merge_with_generation(g_revoked_path, ptrs, n, kgen, &kstale);
+        if (!merged && !kstale)
+            svc_log("WARN lea.key_revoked merge failed count=%d generation=%lld (queue/job kill continues)", n, kgen);
+        if (kstale)
+            svc_log("lea.key_revoked stale generation=%lld, merge skipped (queue/job kill continues)", kgen);
         int cleared = lea_drain_queue_revoked(ptrs, n);
         /* 强杀分真杀／只置标志两档（见 lea_watchdog_kill_active_job_kind）：
          * 只置标志不是“已终止”，响应须如实分开报，不得用 killed 掩盖。 */
@@ -3354,16 +5091,16 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         ev.result = "ok";
         char ev_detail[192];
         snprintf(ev_detail, sizeof(ev_detail),
-                 "revoked=%d cleared_queued=%d killed_active=%d marked_active=%d merged=%s",
-                 n, cleared, killed, marked, merged ? "yes" : "no");
+                 "revoked=%d cleared_queued=%d killed_active=%d marked_active=%d merged=%s generation=%lld",
+                 n, cleared, killed, marked, merged ? "yes" : "no", kgen);
         ev.detail = ev_detail;
         audit_event(&ev);
         svc_log("lea.key_revoked count=%d cleared_queued=%d killed_active=%d marked_active=%d merged=%d",
                 n, cleared, killed, marked, merged);
         char result[192];
         snprintf(result, sizeof(result),
-                 "{\"revoked_count\":%d,\"cleared_queued\":%d,\"killed_active\":%d,\"marked_active\":%d,\"merged\":%s}",
-                 n, cleared, killed, marked, merged ? "true" : "false");
+                 "{\"revoked_count\":%d,\"cleared_queued\":%d,\"killed_active\":%d,\"marked_active\":%d,\"merged\":%s,\"generation\":%lld}",
+                 n, cleared, killed, marked, merged ? "true" : "false", kgen);
         build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
@@ -3371,18 +5108,18 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
     if (strcmp(cmd, "selfbind.ush-status") == 0) {
         /* USH 探活：ui.ping 不过会话门（锁屏也能回），只验 H03 token。
          * 5 秒预算：探活只是读 token 文件＋一次管道往返。 */
-        selfbind_forward_ush("{\"command\":\"ui.ping\"}", 5000, resp, resp_size);
+        selfbind_forward_ush("{\"command\":\"ui.ping\"}", 5000, resp, resp_size, client_session);
         return;
     }
     if (strcmp(cmd, "selfbind.clear-credential") == 0) {
         /* 清本机凭据：转 USH 删 DPAPI 凭据文件＋元数据。10 秒预算。 */
         selfbind_forward_ush("{\"command\":\"selfbind.clear-credential\"}", 10000,
-                             resp, resp_size);
+                             resp, resp_size, client_session);
         return;
     }
     if (strcmp(cmd, "selfbind.status") == 0) {
         /* 本机链接态：转 USH 读元数据（不含凭据）。5 秒预算。 */
-        selfbind_forward_ush("{\"command\":\"selfbind.status\"}", 5000, resp, resp_size);
+        selfbind_forward_ush("{\"command\":\"selfbind.status\"}", 5000, resp, resp_size, client_session);
         return;
     }
     if (strcmp(cmd, "selfbind.renew") == 0) {
@@ -3409,7 +5146,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
             build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "selfbind-command-overflow", NULL);
             return;
         }
-        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size);
+        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size, client_session);
         return;
     }
     if (strcmp(cmd, "selfbind.deliver-ticket") == 0) {
@@ -3479,7 +5216,7 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
             return;
         }
         /* 30 秒预算：USH 内做 CNG 签名＋一次 WinHTTP 服务端往返。 */
-        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size);
+        selfbind_forward_ush(ush_cmd, 30000, resp, resp_size, client_session);
         return;
     }
     if (strcmp(cmd, "job.cancel") == 0) {
@@ -3698,51 +5435,12 @@ static void handle_internal(const char *text, char *resp, size_t resp_size) {
         build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", result);
         return;
     }
-    if (strcmp(cmd, "lea.pause") == 0) {
-        if (!lea_local_set_paused(g_base_dir, 1)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "pause-failed", NULL);
-            return;
-        }
-        lea_refresh_local_status("lea.pause", "ok");
-        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"paused\":true}");
-        return;
-    }
-    if (strcmp(cmd, "lea.resume") == 0) {
-        if (!lea_local_set_paused(g_base_dir, 0)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "resume-failed", NULL);
-            return;
-        }
-        lea_refresh_local_status("lea.resume", "ok");
-        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"paused\":false}");
-        return;
-    }
-    if (strcmp(cmd, "lea.revoke-all-keys") == 0) {
-        if (!lea_local_set_revoke_all(g_base_dir, 1)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoke-failed", NULL);
-            return;
-        }
-        lea_refresh_local_status("lea.revoke-all-keys", "ok");
-        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"revoked_all\":true}");
-        return;
-    }
-    if (strcmp(cmd, "lea.authorize-dangerous") == 0) {
-        if (!lea_local_set_dangerous_consent(g_base_dir, 1)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "authorize-failed", NULL);
-            return;
-        }
-        lea_refresh_local_status("lea.authorize-dangerous", "ok");
-        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"dangerous_consented\":true}");
-        return;
-    }
-    if (strcmp(cmd, "lea.revoke-dangerous-consent") == 0) {
-        if (!lea_local_set_dangerous_consent(g_base_dir, 0)) {
-            build_resp(resp, resp_size, 0, LEA_ERR_INTERNAL, "", 0, "revoke-consent-failed", NULL);
-            return;
-        }
-        lea_refresh_local_status("lea.revoke-dangerous-consent", "ok");
-        build_resp(resp, resp_size, 1, LEA_OK, "", 0, "", "{\"dangerous_consented\":false}");
-        return;
-    }
+    /* A7：五个改状态分支（lea.pause／lea.resume／lea.revoke-all-keys／
+     * lea.authorize-dangerous／lea.revoke-dangerous-consent）已从管道
+     * 删除——入口处 lea_internal_state_command 一律拒绝（见上）。
+     * 授权通路在 handle_envelope 第 2 步内联分发
+     * （handle_lea_control_command：验签＋准入＋attempt／result 审计）。
+     * 此处不再保留任何改状态执行分支，防后来人误恢复旁路。 */
     build_resp(resp, resp_size, 0, LEA_ERR_BAD_ENVELOPE, "", 0, "unknown-internal-cmd", NULL);
 }
 
@@ -3859,9 +5557,19 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
             return;
         }
     }
-    /* 2. sys.info／sys.ping／sys.reset／lea.status 内联，不进队列／不占幂等。 */
+    /* 2. sys.info／sys.ping／sys.reset／lea.status／lea.* 内联，不进队列／不占幂等。
+     * A7：lea.pause／lea.resume／lea.revoke-all-keys／
+     * lea.authorize-dangerous／lea.revoke-dangerous-consent 只认已签名
+     * 信封（管道直接调用已在 handle_internal 拒绝）。内联即绕过 4.4
+     * 暂停门与危险授权门（resume 须在暂停态下可用；authorize-dangerous
+     * 本身就是授权）；准入（绑定／epoch／授权＋吊销三态）与本段其他
+     * 内联命令同款，缺一不可。
+     * emergency_stop.recover 同款内联（绕过 4.4 停控门——恢复本身就是
+     * 在停控态下用的；恢复授权凭专用票据签名，不凭信封 Key 的授权）。 */
     if (strcmp(env.command, "sys.info") == 0 || strcmp(env.command, "sys.ping") == 0 ||
-        strcmp(env.command, "sys.reset") == 0 || strcmp(env.command, "lea.status") == 0) {
+        strcmp(env.command, "sys.reset") == 0 || strcmp(env.command, "lea.status") == 0 ||
+        strcmp(env.command, "emergency_stop.recover") == 0 ||
+        lea_internal_state_command(env.command)) {
         /* 三者同样要过准入（未绑定时返回 NOT_BOUND；Key 已吊销也拒绝）。
          * F-01 三态（lea_revocation_error_code，单测覆盖）：仅 NOT_REVOKED
          * 放行；REVOKED → KEY_REVOKED；ERROR → REVOCATION_UNAVAILABLE。 */
@@ -3889,6 +5597,13 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
         } else if (strcmp(env.command, "lea.status") == 0) {
             /* S-021：与 sys.info 同款准入，绕过暂停门（暂停时仍可查状态）。 */
             handle_lea_status(&env, resp, resp_size);
+        } else if (strcmp(env.command, "emergency_stop.recover") == 0) {
+            /* 专用恢复票据（GPT 裁决问题 3）：普通 binding.confirm 绝不
+             * 清停控，只认本命令＋专用票据。 */
+            handle_emergency_stop_recover(&env, resp, resp_size);
+        } else if (lea_internal_state_command(env.command)) {
+            /* A7：已签名已审计的改状态通路（attempt／result 审计＋执行）。 */
+            handle_lea_control_command(&env, resp, resp_size);
         } else {
             handle_sys_info(&env, resp, resp_size);
         }
@@ -3934,6 +5649,18 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
         audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_PAUSED, 0,
                            "local-paused");
         svc_log("REJECT paused request=%s", env.request_id);
+        return;
+    }
+    /* 4.4b emergency_stop：本机紧急停控门（在幂等／入队之前；lea.status
+     * 与 emergency_stop.recover 已在第 2 步内联处理，不到此处，故停控
+     * 时仍可查状态、可恢复。只读内联命令（sys.info／sys.ping）不受影响。
+     * 门查标记文件本身（实时态，单源真理；文件损坏即按已停控）。 */
+    if (lea_local_emergency_stopped(g_base_dir)) {
+        build_resp(resp, resp_size, 0, LEA_ERR_EMERGENCY_STOPPED, env.request_id, 0,
+                           "emergency-stop-active", NULL);
+        audit_for_envelope(&env, "admit-reject", "rejected", LEA_ERR_EMERGENCY_STOPPED, 0,
+                           "emergency-stop-active");
+        svc_log("REJECT emergency-stop request=%s", env.request_id);
         return;
     }
     if (lea_command_is_dangerous(&env) && !lea_local_has_dangerous_consent(g_base_dir)) {
@@ -4058,6 +5785,11 @@ static void handle_envelope(const char *text, char *resp, size_t resp_size, HAND
     item->idem = idem;
     item->ctx = ctx;
     item->batch_prev_seq = batch_prev_seq; /* B1：reset 清队时回滚 batch seq 用 */
+    /* P0-1（v2）：入队时捕获管道客户端会话。worker 线程执行时管道可能
+     * 已断，执行时现取不可靠；且 execute_item 作用域内根本没有 pipe
+     * 句柄（v1 在此写 pipe_client_session(pipe) 是编译错误）。
+     * 取不到回 0xFFFFFFFF，ush_token_read 拒之，fail-closed。 */
+    item->client_session = pipe_client_session(pipe);
     char qerr[64] = { 0 };
     /* B1：队列准入（在队＋在执行合计 ≤8）。满即回 QUEUE_FULL（沿用既有
      * 队列满路径：batch seq 回滚＋幂等回 RECEIVED），不入队；100 条容量
@@ -4227,9 +5959,35 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
          * handle_internal、绕过信封验签；无顶层 "cmd" 即走信封处理。 */
         char cmd[64] = { 0 };
         if (lea_json_top_level_string(buf, "cmd", cmd, sizeof(cmd)) && cmd[0]) {
-            /* H01：内部命令先验调用方身份——不是已安装的客户端一律拒绝，
-             * 含 session.logout 这类可废掉绑定的命令。 */
-            if (!internal_caller_allowed(pipe)) {
+            /* emergency_stop：与 S-021 五命令严格隔离——不停控入口不进
+             * handle_internal，走专用 admission（全路径＋父进程＋同会
+             * 话＋同用户 SID；有意不要求控制台会话，RDP 会话里同样要
+             * 能紧急停控）。 */
+            lea_caller_identity_t ident;
+            memset(&ident, 0, sizeof(ident));
+            if (strcmp(cmd, "lea.emergency-stop") == 0 ||
+                strcmp(cmd, "lea.emergency-stop-sync") == 0) {
+                if (!emergency_stop_caller_allowed(pipe)) {
+                    svc_log("REJECT emergency-stop cmd=%s caller-not-allowed", cmd);
+                    lea_audit_event_t ev;
+                    memset(&ev, 0, sizeof(ev));
+                    ev.event = "emergency-stop";
+                    ev.command = cmd;
+                    ev.result = "rejected";
+                    ev.detail = "emergency-stop-caller-not-allowed";
+                    audit_event(&ev);
+                    build_resp(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
+                                       "emergency-stop-caller-not-allowed", NULL);
+                } else if (strcmp(cmd, "lea.emergency-stop") == 0) {
+                    handle_emergency_stop(buf, resp, sizeof(resp));
+                } else {
+                    handle_emergency_stop_sync(buf, resp, sizeof(resp));
+                }
+            } else if (!internal_caller_allowed(pipe, &ident)) {
+                /* H01：内部命令先验调用方身份——不是已安装的客户端一律拒绝，
+                 * 含 session.logout 这类可废掉绑定的命令。v3：核对通过的调用
+                 * 方身份透传给 handle_internal（login_changed 审计＋证明核对
+                 * 时的已验证身份，见 lea_caller_identity_t）。 */
                 svc_log("REJECT internal cmd=%s caller-not-allowed", cmd);
                 lea_audit_event_t ev;
                 memset(&ev, 0, sizeof(ev));
@@ -4241,7 +5999,7 @@ static DWORD WINAPI pipe_client_thread(LPVOID param) {
                 build_resp(resp, sizeof(resp), 0, LEA_ERR_CALLER_NOT_ALLOWED, "", 0,
                                    "internal-caller-not-allowed", NULL);
             } else {
-                handle_internal(buf, resp, sizeof(resp));
+                handle_internal(buf, resp, sizeof(resp), pipe_client_session(pipe), &ident);
             }
         } else {
             handle_envelope(buf, resp, sizeof(resp), pipe);
@@ -4361,6 +6119,15 @@ static int lea_service_init(void) {
     ensure_dirs();
     binding_load();
     revocation_startup_init(); /* F-01：吊销表启动初始化（条件式，见上） */
+    /* emergency_stop 启动对账（GPT 裁决六节）：标记文件丢失时凭审计
+     * 日志＋已用票据记录重建；损坏／对账失败即按已停控处理
+     * （fail-closed），只记日志不覆写损坏文件。 */
+    {
+        int erc = lea_local_emergency_stop_reconcile(g_base_dir, g_logs_dir);
+        if (erc == 1) svc_log("startup: emergency-stop marker rebuilt from audit");
+        else if (erc == 2) svc_log("startup: emergency-stop ticket record repaired");
+        else if (erc < 0) svc_log("WARN startup: emergency-stop reconcile failed, treating as stopped");
+    }
     idem_load();
     /* 启动恢复：崩溃残留的 RUNNING/RECEIVED 标 UNKNOWN（不自动重试）。 */
     EnterCriticalSection(&g_lock);

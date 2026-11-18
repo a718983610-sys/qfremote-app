@@ -142,7 +142,7 @@
     if (t === 'dark') document.documentElement.dataset.theme = 'dark';
     else delete document.documentElement.dataset.theme;
   }
-  applyTheme(q.get('t') || 'blue');
+  applyTheme(q.get('t') || 'light');
   qfLock.onTheme(applyTheme);
   document.getElementById('close').addEventListener('click', () => qfLock.close());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') qfLock.close(); });

@@ -554,6 +554,142 @@ int main(void) {
 #endif
     }
 
+
+    /* ---------- 登录证明（v3 P0-4／B3） ---------- */
+    /* 测试向量：测试密钥种子 bytes(range(32))，与签名验签节同源；
+     * 规范串 qfr-lea-login-v1\nff73a0647bbc29aa\nqftest20261114d\n
+     * test-device-001\n1794940000\n1794940120；now 取 1794940060
+     * （签发后 60 秒、过期前 60 秒）。 */
+    {
+        char reason[128] = { 0 };
+        const long long now = 1794940060LL;
+        const char *proof_valid =
+            "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+            "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+            "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+            "\"signature\":\"l-XQWzA5WpY7qs167VQD_LaLtdhpOapgxIfc-MqQbyIYvXhChqDw19A_zjJ4Ci7iNpRxv7HeI8qLTSNRqSIuDQ\"}";
+        const char *proof_attacker =
+            "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+            "\"account_id\":\"attacker\",\"device_id\":\"test-device-001\","
+            "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+            "\"signature\":\"0IauHPix62ay0Yi7MObGpjP0NYT5rlyfFA_gogR8TUCSjN3XxA07fTUgkayky695mTIXqXHP4Ph_B4Ec2ST-BQ\"}";
+        /* 规范串逐字节一致（服务端 lea-core issueLoginAttestation 同串） */
+        {
+            char canonical[1024] = { 0 };
+            CHECK(lea_login_proof_canonical("ff73a0647bbc29aa", "qftest20261114d",
+                                            "test-device-001", 1794940000LL, 1794940120LL,
+                                            canonical, sizeof(canonical)),
+                  "proof-canonical-ok");
+            CHECK_STR_EQ(canonical,
+                         "qfr-lea-login-v1\nff73a0647bbc29aa\nqftest20261114d\ntest-device-001\n1794940000\n1794940120",
+                         "proof-canonical-matches");
+            /* 规范串字段歧义字符即拒（\n 在 id 里） */
+            CHECK(!lea_login_proof_canonical("ff73a0647bbc29aa", "a\nb",
+                                             "test-device-001", 1794940000LL, 1794940120LL,
+                                             canonical, sizeof(canonical)),
+                  "proof-canonical-newline-rejected");
+            /* key_id 形状不对即拒 */
+            CHECK(!lea_login_proof_canonical("FF73A0647BBC29AA", "qftest20261114d",
+                                             "test-device-001", 1794940000LL, 1794940120LL,
+                                             canonical, sizeof(canonical)),
+                  "proof-canonical-uppercase-keyid-rejected");
+        }
+        /* 解析：缺字段即拒 */
+        {
+            lea_login_proof_t p;
+            CHECK(lea_parse_login_proof(proof_valid, &p) &&
+                  strcmp(p.account_id, "qftest20261114d") == 0 &&
+                  p.issued_at == 1794940000LL && p.expires_at == 1794940120LL,
+                  "proof-parse-ok");
+            CHECK(!lea_parse_login_proof(
+                      "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+                      "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                      "\"issued_at\":1794940000,\"expires_at\":1794940120}",
+                      &p),
+                  "proof-parse-missing-signature-rejected");
+        }
+        /* 空证明／缺失即 login-proof-missing（reason 初始值亦然） */
+        CHECK(!lea_verify_login_proof("", "qftest20261114d", "test-device-001",
+                                      now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-missing") == 0, "proof-empty-missing");
+        CHECK(!lea_verify_login_proof(NULL, "qftest20261114d", "test-device-001",
+                                      now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-missing") == 0, "proof-null-missing");
+        /* 版本不对即 login-proof-invalid */
+        CHECK(!lea_verify_login_proof(
+                  "{\"version\":\"qfr-lea-login-v2\",\"key_id\":\"ff73a0647bbc29aa\","
+                  "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                  "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+                  "\"signature\":\"l-XQWzA5WpY7qs167VQD_LaLtdhpOapgxIfc-MqQbyIYvXhChqDw19A_zjJ4Ci7iNpRxv7HeI8qLTSNRqSIuDQ\"}",
+                  "qftest20261114d", "test-device-001", now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-invalid") == 0, "proof-wrong-version-invalid");
+        /* 过期：now = expires + 61（偏差容忍 60 秒已耗尽） */
+        CHECK(!lea_verify_login_proof(proof_valid, "qftest20261114d", "test-device-001",
+                                      1794940181LL, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-expired") == 0, "proof-expired-rejected");
+        /* 超前签发：issued_at > now + 60 */
+        CHECK(!lea_verify_login_proof(proof_valid, "qftest20261114d", "test-device-001",
+                                      1794939939LL, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-expired") == 0, "proof-issued-in-future-rejected");
+        /* 有效期超上限（300 秒）：改 expires_at 为 issued + 301，签名仍是
+         * 原串的——时效检查先于验签，故 reason 必为 expired 而非 bad-signature。 */
+        CHECK(!lea_verify_login_proof(
+                  "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+                  "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                  "\"issued_at\":1794940000,\"expires_at\":1794940301,"
+                  "\"signature\":\"l-XQWzA5WpY7qs167VQD_LaLtdhpOapgxIfc-MqQbyIYvXhChqDw19A_zjJ4Ci7iNpRxv7HeI8qLTSNRqSIuDQ\"}",
+                  "qftest20261114d", "test-device-001", now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-expired") == 0, "proof-ttl-too-long-rejected");
+#ifdef LEA_SERVER_PUBKEY_HEX
+        /* ---- 真实验签（测试公钥已编入） ---- */
+        CHECK(lea_verify_login_proof(proof_valid, "qftest20261114d", "test-device-001",
+                                     now, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "proof-valid-verified");
+        /* 标准 base64 形式签名同样验过（服务端签发编码） */
+        CHECK(lea_verify_login_proof(
+                  "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+                  "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                  "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+                  "\"signature\":\"l+XQWzA5WpY7qs167VQD/LaLtdhpOapgxIfc+MqQbyIYvXhChqDw19A/zjJ4Ci7iNpRxv7HeI8qLTSNRqSIuDQ==\"}",
+                  "qftest20261114d", "test-device-001", now, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "proof-valid-std-b64-verified");
+        /* 攻击者证明（account=attacker，用攻击者账号签过）对声称账号
+         * qftest20261114d → mismatch（B3：已登录 A 的客户端不得宣称登录了 B）。 */
+        CHECK(!lea_verify_login_proof(proof_attacker, "qftest20261114d", "test-device-001",
+                                      now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-mismatch") == 0, "proof-attacker-account-mismatch");
+        /* 同一证明对攻击者自己的声称账号即验过（证明本身合法，错在声称）。 */
+        CHECK(lea_verify_login_proof(proof_attacker, "attacker", "test-device-001",
+                                     now, reason, sizeof(reason)) &&
+              strcmp(reason, "ok") == 0, "proof-attacker-self-verified");
+        /* 有效证明配攻击者签名（规范串被换账号）→ bad-signature。 */
+        CHECK(!lea_verify_login_proof(
+                  "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"ff73a0647bbc29aa\","
+                  "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                  "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+                  "\"signature\":\"0IauHPix62ay0Yi7MObGpjP0NYT5rlyfFA_gogR8TUCSjN3XxA07fTUgkayky695mTIXqXHP4Ph_B4Ec2ST-BQ\"}",
+                  "qftest20261114d", "test-device-001", now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-bad-signature") == 0, "proof-wrong-signature-rejected");
+        /* key_id 与本机公钥指纹不符 → mismatch（轮换后旧钥匙证明即拒）。 */
+        CHECK(!lea_verify_login_proof(
+                  "{\"version\":\"qfr-lea-login-v1\",\"key_id\":\"0000000000000000\","
+                  "\"account_id\":\"qftest20261114d\",\"device_id\":\"test-device-001\","
+                  "\"issued_at\":1794940000,\"expires_at\":1794940120,"
+                  "\"signature\":\"l-XQWzA5WpY7qs167VQD_LaLtdhpOapgxIfc-MqQbyIYvXhChqDw19A_zjJ4Ci7iNpRxv7HeI8qLTSNRqSIuDQ\"}",
+                  "qftest20261114d", "test-device-001", now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-mismatch") == 0, "proof-wrong-keyid-mismatch");
+        /* 设备错配 → mismatch。 */
+        CHECK(!lea_verify_login_proof(proof_valid, "qftest20261114d", "other-device",
+                                      now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-mismatch") == 0, "proof-device-mismatch");
+#else
+        /* ---- 占位（未编入公钥，fail-closed：有效证明亦不可验） ---- */
+        CHECK(!lea_verify_login_proof(proof_valid, "qftest20261114d", "test-device-001",
+                                      now, reason, sizeof(reason)) &&
+              strcmp(reason, "login-proof-unverifiable") == 0, "proof-valid-but-no-pubkey-unverifiable");
+#endif
+    }
+
     /* ---------- RC-01：握手状态机（纯函数） ---------- */
     {
         lea_handshake_state_t hs;
@@ -3543,8 +3679,10 @@ int main(void) {
         CHECK(lea_local_has_dangerous_consent(ldir), "s021-consent-on");
         CHECK(lea_local_set_dangerous_consent(ldir, 0), "s021-consent-clear-ok");
         CHECK(!lea_local_has_dangerous_consent(ldir), "s021-consent-off");
-        /* 覆盖写（wine 实测回归：mingw rename 不覆盖已存在目标，
-         * atomic_write 须删旧再改名；Linux 下 rename 原生覆盖）。 */
+        /* 覆盖写（A9：统一走 lea_file_write_atomic，同卷替换用
+         * MoveFileExA REPLACE_EXISTING／rename 原子覆盖，不再先删旧
+         * 文件再改名；Linux 下 rename 原生覆盖，Windows 下替换语义
+         * 由 MoveFileExA 保证）。 */
         CHECK(lea_local_set_dangerous_consent(ldir, 1) &&
               lea_local_set_dangerous_consent(ldir, 0) &&
               lea_local_set_dangerous_consent(ldir, 1) &&
@@ -3876,6 +4014,446 @@ int main(void) {
         }
     }
 
+    /* ---------- A9：数据完整性修复（GPT P0） ----------
+     * 两处必修：① binding.dat 写 DPAPI 密文（QFRLEA.c
+     * binding_persist_locked）与 ② lea_local.c atomic_write
+     * （本机状态文件）统一走 lea_file_write_atomic；③ idem 快照
+     * 替换走具替换语义的 lea_file_replace，不再先删旧文件再改名。
+     * 本组验收 GPT 点名的失败场景（磁盘满／替换失败／权限不足），
+     * 断言一律：返回失败、旧文件完好、无临时文件残留。binding.dat
+     * 本体是 DPAPI 密文，沙箱无 DPAPI，用同一份
+     * lea_file_write_atomic 覆盖写路径等价验证（QFRLEA.c 与本组
+     * 共用实现；真机 DPAPI 端到端待腾讯机补验）。进程中断场景：
+     * 写中被杀只留 tmp 或旧文件（替换是单步原子操作），与替换失
+     * 败同构，本组第 2 项覆盖其结果态。 */
+    {
+        char dir[] = "/tmp/lea-a9-test-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "a9-mkdtemp");
+        if (dir[0]) {
+            /* 1. 磁盘满：lea-paused 的 tmp 符号链接到 /dev/full，
+             * set_paused 须报失败、旧标记完好、无 tmp 残留。 */
+            {
+                char ldir[512], target[528], tmp[600];
+                snprintf(ldir, sizeof(ldir), "%s/state", dir);
+                mkdir(ldir, 0700);
+                snprintf(target, sizeof(target), "%s/lea-paused", ldir);
+                snprintf(tmp, sizeof(tmp), "%s.tmp.%lu", target,
+                         (unsigned long)getpid());
+                CHECK(lea_local_set_paused(ldir, 1) &&
+                      lea_local_is_paused(ldir), "a9-full-setup-paused");
+                CHECK(symlink("/dev/full", tmp) == 0, "a9-full-setup-symlink");
+                int rc = lea_local_set_paused(ldir, 1);
+                int still = lea_local_is_paused(ldir);
+                int no_tmp = (access(tmp, F_OK) != 0);
+                CHECK(rc == 0 && still && no_tmp,
+                      "a9-disk-full-setter-fails-orig-intact");
+                remove(tmp); /* 容错：失败时 helper 已删 symlink，残留则清掉 */
+                CHECK(lea_local_set_paused(ldir, 0) && !lea_local_is_paused(ldir),
+                      "a9-full-teardown");
+            }
+            /* 2. 替换失败：目标是已存在目录，写 tmp 成功、替换失败，
+             * 须报失败、目录原样、无 tmp 残留。 */
+            {
+                char target[512], tmp[600], sub[528];
+                snprintf(sub, sizeof(sub), "%s/adir", dir);
+                mkdir(sub, 0755);
+                snprintf(target, sizeof(target), "%s/adir", dir);
+                snprintf(tmp, sizeof(tmp), "%s.tmp.%lu", target,
+                         (unsigned long)getpid());
+                char detail[64] = { 0 };
+                const unsigned char data[] = "new-content";
+                int rc = lea_file_write_atomic(target, data, 11,
+                                               detail, sizeof(detail));
+                struct stat st;
+                int dir_intact = (stat(target, &st) == 0 && S_ISDIR(st.st_mode));
+                CHECK(rc == 0 && strcmp(detail, "file-replace-failed") == 0 &&
+                      dir_intact && access(tmp, F_OK) != 0,
+                      "a9-replace-failed-dir-intact");
+                rmdir(sub);
+            }
+            /* 3. 权限不足：fork 子进程 setuid nobody 后调 setter，
+             * 0555 只读目录内写标记须报失败。 */
+            {
+                char ldir[512], rodir[528];
+                snprintf(ldir, sizeof(ldir), "%s/perm", dir);
+                mkdir(ldir, 0755);
+                snprintf(rodir, sizeof(rodir), "%s/ro", ldir);
+                mkdir(rodir, 0755);
+                chmod(rodir, 0555);
+                int pfd[2];
+                int rc = -9;
+                if (pipe(pfd) == 0) {
+                    pid_t pid = fork();
+                    if (pid == 0) {
+                        close(pfd[0]);
+                        char out[16];
+                        if (setgid(65534) != 0 || setuid(65534) != 0) {
+                            snprintf(out, sizeof(out), "SETUID-FAIL");
+                        } else {
+                            int r = lea_local_set_paused(rodir, 1);
+                            snprintf(out, sizeof(out), "%d", r);
+                        }
+                        size_t off = 0, wlen = strlen(out);
+                        while (off < wlen) {
+                            ssize_t w = write(pfd[1], out + off, wlen - off);
+                            if (w <= 0) break;
+                            off += (size_t)w;
+                        }
+                        close(pfd[1]);
+                        _exit(0);
+                    }
+                    if (pid > 0) {
+                        close(pfd[1]);
+                        char res[16] = { 0 };
+                        ssize_t got, total = 0;
+                        while ((got = read(pfd[0], res + total,
+                                           sizeof(res) - 1 - (size_t)total)) > 0)
+                            total += got;
+                        close(pfd[0]);
+                        int status = 0;
+                        waitpid(pid, &status, 0);
+                        res[total] = '\0';
+                        rc = atoi(res);
+                    }
+                }
+                char marker[600];
+                snprintf(marker, sizeof(marker), "%s/lea-paused", rodir);
+                CHECK(rc == 0 && access(marker, F_OK) != 0,
+                      "a9-permission-setter-fails-no-marker");
+                chmod(rodir, 0755);
+                rmdir(rodir);
+                rmdir(ldir);
+            }
+            /* 4. 撤销标记 epoch 往返：set_at 写 grant_epoch／expires_at，
+             * get 读回；覆盖写更新；旧格式标记（无两字段）读回 0。 */
+            {
+                char ldir[512];
+                snprintf(ldir, sizeof(ldir), "%s/rev", dir);
+                mkdir(ldir, 0700);
+                long long g = -1, e = -1;
+                CHECK(lea_local_set_revoke_all_at(ldir, 1, 7, 1700000999LL) &&
+                      lea_local_has_revoke_all(ldir) &&
+                      lea_local_get_revoke_all(ldir, &g, &e) &&
+                      g == 7 && e == 1700000999LL,
+                      "a9-revoke-marker-epoch-roundtrip");
+                CHECK(lea_local_set_revoke_all_at(ldir, 1, 9, 1700002000LL) &&
+                      lea_local_get_revoke_all(ldir, &g, &e) &&
+                      g == 9 && e == 1700002000LL,
+                      "a9-revoke-marker-epoch-overwrite");
+                CHECK(lea_local_clear_revoke_all(ldir) &&
+                      !lea_local_has_revoke_all(ldir) &&
+                      !lea_local_get_revoke_all(ldir, &g, &e),
+                      "a9-revoke-marker-clear");
+                /* 旧格式标记：只有 revoked／at，get 须回 0／0 而不是失败。 */
+                {
+                    char path[600];
+                    snprintf(path, sizeof(path), "%s/revoke-all.json", ldir);
+                    FILE *f = fopen(path, "wb");
+                    if (f) { fputs("{\"revoked\":true,\"at\":123}", f); fclose(f); }
+                    CHECK(lea_local_has_revoke_all(ldir) &&
+                          lea_local_get_revoke_all(ldir, &g, &e) &&
+                          g == 0 && e == 0,
+                          "a9-revoke-marker-legacy-format");
+                    CHECK(lea_local_clear_revoke_all(ldir),
+                          "a9-revoke-marker-legacy-teardown");
+                }
+                rmdir(ldir);
+            }
+            /* 5. 状态快照覆盖写往返（新原子写路径）：两次写不同内容，
+             * 第二次须整体替换第一次，无残留 tmp。 */
+            {
+                char ldir[512];
+                snprintf(ldir, sizeof(ldir), "%s/st", dir);
+                mkdir(ldir, 0700);
+                lea_local_status_t w;
+                lea_local_status_init(&w);
+                snprintf(w.account_id, sizeof(w.account_id), "%s", "alice");
+                CHECK(lea_local_write_status(ldir, &w), "a9-status-write-1");
+                snprintf(w.account_id, sizeof(w.account_id), "%s", "bob");
+                CHECK(lea_local_write_status(ldir, &w), "a9-status-write-2");
+                lea_local_status_t st;
+                CHECK(lea_local_status_snapshot(ldir, &st) &&
+                      strcmp(st.account_id, "bob") == 0,
+                      "a9-status-overwrite-replaces");
+                rmdir(ldir);
+            }
+            rmdir(dir);
+        }
+    }
+
+    /* ---- A7（2026-11-18，GPT 裁决）：管道五命令关闭＋信封内联＋审计耐久 ----
+     * 测的是纯函数层（命令表／内部命令判定／恢复判定／审计落盘）；
+     * QFRLEA.c 的管道拒绝分发与 handle_lea_control_command 是 Windows
+     * 服务进程逻辑，沙箱单测覆盖不了，须腾讯真机／Wine 补验（见报告）。
+     * 恢复判定是 OR 语义（grant_epoch 更大或 expires_at 更晚即允许）：
+     * 两维都更旧才拒绝；主门是信封 admit——旧票据在 admit 即被拒，
+     * 到不了恢复判定，这里只测判定本身。 */
+    {
+        /* 命令表：五命令已知、tier 0、内联、不可取消。 */
+        const lea_command_spec_t *sp;
+        sp = lea_command_spec("lea.pause");
+        CHECK(sp && sp->executor == LEA_EXEC_INLINE && sp->tier == 0,
+              "a7-spec-pause-inline-tier0");
+        sp = lea_command_spec("lea.resume");
+        CHECK(sp && sp->executor == LEA_EXEC_INLINE && sp->tier == 0,
+              "a7-spec-resume-inline-tier0");
+        sp = lea_command_spec("lea.revoke-all-keys");
+        CHECK(sp && sp->executor == LEA_EXEC_INLINE && sp->tier == 0,
+              "a7-spec-revoke-all-inline-tier0");
+        sp = lea_command_spec("lea.authorize-dangerous");
+        CHECK(sp && sp->executor == LEA_EXEC_INLINE && sp->tier == 0,
+              "a7-spec-authz-dangerous-inline-tier0");
+        sp = lea_command_spec("lea.revoke-dangerous-consent");
+        CHECK(sp && sp->executor == LEA_EXEC_INLINE && sp->tier == 0,
+              "a7-spec-revoke-consent-inline-tier0");
+        /* 两项提权／全站破坏操作须标 dangerous＋危险 scope，否则普通
+         * 票据（只有 muse.execute）就能给自己授危险权／一键撤销全部 Key。 */
+        sp = lea_command_spec("lea.authorize-dangerous");
+        CHECK(sp && sp->dangerous == 1 && sp->required_scope &&
+              strcmp(sp->required_scope, "muse.execute.dangerous") == 0,
+              "a7-spec-authz-dangerous-scope");
+        sp = lea_command_spec("lea.revoke-all-keys");
+        CHECK(sp && sp->dangerous == 1 && sp->required_scope &&
+              strcmp(sp->required_scope, "muse.execute.dangerous") == 0,
+              "a7-spec-revoke-all-dangerous-scope");
+        /* fail-safe 方向三项不新增权限，不标 dangerous。 */
+        sp = lea_command_spec("lea.pause");
+        CHECK(sp && sp->dangerous == 0 && sp->required_scope == NULL,
+              "a7-spec-pause-not-dangerous");
+        sp = lea_command_spec("lea.resume");
+        CHECK(sp && sp->dangerous == 0 && sp->required_scope == NULL,
+              "a7-spec-resume-not-dangerous");
+        sp = lea_command_spec("lea.revoke-dangerous-consent");
+        CHECK(sp && sp->dangerous == 0 && sp->required_scope == NULL,
+              "a7-spec-revoke-consent-not-dangerous");
+        /* 未知命令 fail-closed。 */
+        CHECK(lea_command_spec("lea.bogus") == NULL &&
+              lea_command_tier("lea.bogus") == -1,
+              "a7-spec-unknown-fail-closed");
+        /* 内联命令不进队列，不可取消。 */
+        CHECK(!lea_command_is_cancellable(&(lea_envelope_t){ .command = "lea.pause", .params_raw = "{}" }),
+              "a7-cancellable-pause-no");
+        CHECK(!lea_command_is_cancellable(&(lea_envelope_t){ .command = "lea.revoke-all-keys", .params_raw = "{}" }),
+              "a7-cancellable-revoke-all-no");
+        CHECK(!lea_command_is_cancellable(&(lea_envelope_t){ .command = "lea.authorize-dangerous", .params_raw = "{}" }),
+              "a7-cancellable-authz-no");
+        /* 管道拒绝判定：五真，其余假。 */
+        CHECK(lea_internal_state_command("lea.pause"), "a7-internal-pause");
+        CHECK(lea_internal_state_command("lea.resume"), "a7-internal-resume");
+        CHECK(lea_internal_state_command("lea.revoke-all-keys"), "a7-internal-revoke-all");
+        CHECK(lea_internal_state_command("lea.authorize-dangerous"), "a7-internal-authz");
+        CHECK(lea_internal_state_command("lea.revoke-dangerous-consent"), "a7-internal-revoke-consent");
+        CHECK(!lea_internal_state_command("lea.status"), "a7-internal-status-false");
+        CHECK(!lea_internal_state_command("sys.info"), "a7-internal-sys-info-false");
+        CHECK(!lea_internal_state_command("lea.bogus"), "a7-internal-unknown-false");
+        CHECK(!lea_internal_state_command(NULL), "a7-internal-null-false");
+        /* 恢复判定（OR 语义；参数：标记 grant／标记 expiry／票据 grant／票据 expiry）。 */
+        CHECK(lea_revoke_recovery_allowed(10, 1000, 11, 1000),
+              "a7-recovery-newer-grant");
+        CHECK(lea_revoke_recovery_allowed(10, 1000, 10, 2000),
+              "a7-recovery-newer-expiry");
+        CHECK(!lea_revoke_recovery_allowed(10, 1000, 10, 1000),
+              "a7-recovery-replay-denied");
+        CHECK(!lea_revoke_recovery_allowed(10, 1000, 9, 500),
+              "a7-recovery-both-older-denied");
+        CHECK(lea_revoke_recovery_allowed(10, 1000, 9, 2000),
+              "a7-recovery-older-grant-later-expiry");
+        CHECK(lea_revoke_recovery_allowed(0, 0, 1, 1000),
+              "a7-recovery-legacy-marker");
+        CHECK(!lea_revoke_recovery_allowed(0, 0, 0, 0),
+              "a7-recovery-zero-ticket-denied");
+        /* 审计落盘：成功写＋内容可查；不存在的目录失败；/dev/full 失败
+         * （旧实现 fopen 成功即恒回 1，磁盘满也谎报成功——本组即回归）。 */
+        {
+            char dir[] = "/tmp/lea-a7-audit-XXXXXX";
+            CHECK(mkdtemp(dir) != NULL, "a7-audit-mkdtemp");
+            lea_audit_event_t ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.event = "control-attempt";
+            ev.command = "lea.pause";
+            ev.result = "attempt";
+            CHECK(lea_audit_append(dir, "2026-11-18", &ev, "2026-11-18T03:00:00+08:00"),
+                  "a7-audit-append-ok");
+            char fpath[1024];
+            snprintf(fpath, sizeof(fpath), "%s/lea-2026-11-18.jsonl", dir);
+            FILE *rf = fopen(fpath, "r");
+            CHECK(rf != NULL, "a7-audit-file-exists");
+            if (rf) {
+                char buf[8192];
+                size_t n = fread(buf, 1, sizeof(buf) - 1, rf);
+                buf[n] = '\0';
+                CHECK(strstr(buf, "lea.pause") != NULL, "a7-audit-line-has-command");
+                fclose(rf);
+            }
+            CHECK(!lea_audit_append("/tmp/lea-a7-no-such-dir-xyz", "2026-11-18", &ev,
+                                    "2026-11-18T03:00:00+08:00"),
+                  "a7-audit-append-bad-dir-fails");
+            char linkpath[1024];
+            snprintf(linkpath, sizeof(linkpath), "%s/lea-2026-11-19.jsonl", dir);
+            CHECK(symlink("/dev/full", linkpath) == 0, "a7-audit-full-setup-symlink");
+            CHECK(!lea_audit_append(dir, "2026-11-19", &ev, "2026-11-19T03:00:00+08:00"),
+                  "a7-audit-append-dev-full-fails");
+            unlink(linkpath);
+            unlink(fpath);
+            rmdir(dir);
+        }
+    }
+
+    /* ---- A7-whitelist（2026-11-18，GPT 问题 2）：显式白名单＋吊销快照签名 ----
+     * 白名单 13 个命令全命中；5 个改状态命令、未知命令、近似命令、空／NULL
+     * 一律不在表内。吊销快照规范串与签名向量由 tools/gen-wl-vectors.mjs
+     * 生成（测试密钥种子 bytes(range(32))，与 A1 登录证明同一把）；
+     * 规范串逐字节比对，真签名只在测试公钥构建（[3/5]）上验，
+     * 攻击者签名／错设备／错代次／跨协议一律拒绝。 */
+    {
+        /* 白名单：13 个表内命令（GPT 问题 2 保留清单＋只读／自助绑定／job 查询）。 */
+        CHECK(lea_internal_whitelist_command("session.login_changed"), "wl-login-changed");
+        CHECK(lea_internal_whitelist_command("session.logout"), "wl-logout");
+        CHECK(lea_internal_whitelist_command("binding.confirm"), "wl-confirm");
+        CHECK(lea_internal_whitelist_command("keys.sync-revoked"), "wl-sync-revoked");
+        CHECK(lea_internal_whitelist_command("lea.key_revoked"), "wl-key-revoked");
+        CHECK(lea_internal_whitelist_command("lea.status"), "wl-status");
+        CHECK(lea_internal_whitelist_command("selfbind.ush-status"), "wl-selfbind-ush-status");
+        CHECK(lea_internal_whitelist_command("selfbind.clear-credential"), "wl-selfbind-clear");
+        CHECK(lea_internal_whitelist_command("selfbind.status"), "wl-selfbind-status");
+        CHECK(lea_internal_whitelist_command("selfbind.renew"), "wl-selfbind-renew");
+        CHECK(lea_internal_whitelist_command("selfbind.deliver-ticket"), "wl-selfbind-ticket");
+        CHECK(lea_internal_whitelist_command("job.cancel"), "wl-job-cancel");
+        CHECK(lea_internal_whitelist_command("job.query"), "wl-job-query");
+        /* 白名单外：5 个改状态命令＋未知命令＋前缀／后缀近似＋空／NULL。 */
+        CHECK(!lea_internal_whitelist_command("lea.pause"), "wl-pause-out");
+        CHECK(!lea_internal_whitelist_command("lea.resume"), "wl-resume-out");
+        CHECK(!lea_internal_whitelist_command("lea.revoke-all-keys"), "wl-revoke-all-out");
+        CHECK(!lea_internal_whitelist_command("lea.authorize-dangerous"), "wl-authz-out");
+        CHECK(!lea_internal_whitelist_command("lea.revoke-dangerous-consent"), "wl-revoke-consent-out");
+        CHECK(!lea_internal_whitelist_command("lea.bogus"), "wl-bogus-out");
+        CHECK(!lea_internal_whitelist_command("session.login"), "wl-prefix-out");
+        CHECK(!lea_internal_whitelist_command("job.cancel "), "wl-trailing-space-out");
+        CHECK(!lea_internal_whitelist_command("lea.key_revoked2"), "wl-suffix-out");
+        CHECK(!lea_internal_whitelist_command(""), "wl-empty-out");
+        CHECK(!lea_internal_whitelist_command(NULL), "wl-null-out");
+        /* 规范串逐字节比对（向量 S1／S2／S3）。 */
+        {
+            const char *ids1[] = { "k_aaaa1111", "k_bbbb2222", "k_cccc3333" };
+            const char *ids2[] = { "k_aaaa1111" };
+            char canon[512];
+            CHECK(lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                 7, ids1, 3, canon, sizeof(canon)) &&
+                  strcmp(canon, "qfr-lea-revoked-sync-v1\ntest-device-001\n7\nf8f601b246325b2691624a7fcadcfe62043475c5b2bd6bb2e46adba53f0c1dc0") == 0,
+                  "wl-canon-s1-exact");
+            CHECK(lea_revoked_snapshot_canonical("qfr-lea-key-revoked-v1", "test-device-001",
+                                                 7, ids2, 1, canon, sizeof(canon)) &&
+                  strcmp(canon, "qfr-lea-key-revoked-v1\ntest-device-001\n7\n5c43e22ae7d1f977fc1ae42407e976d27fce02f165c0bda73d1743c20b1f5876") == 0,
+                  "wl-canon-s2-exact");
+            CHECK(lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                 8, NULL, 0, canon, sizeof(canon)) &&
+                  strcmp(canon, "qfr-lea-revoked-sync-v1\ntest-device-001\n8\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0,
+                  "wl-canon-s3-empty-exact");
+            /* 乱序／重复即拒绝入串（不静默归一化）。 */
+            {
+                const char *unsorted[] = { "k_bbbb2222", "k_aaaa1111" };
+                const char *dup[] = { "k_aaaa1111", "k_aaaa1111" };
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, unsorted, 2, canon, sizeof(canon)),
+                      "wl-canon-unsorted-rejected");
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, dup, 2, canon, sizeof(canon)),
+                      "wl-canon-duplicate-rejected");
+            }
+            /* 非法 token（太短／含分隔符）即拒。 */
+            {
+                const char *short_id[] = { "k_1" };
+                const char *bad_char[] = { "k_aaaa!111" };
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, short_id, 1, canon, sizeof(canon)),
+                      "wl-canon-short-token-rejected");
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, bad_char, 1, canon, sizeof(canon)),
+                      "wl-canon-bad-token-rejected");
+            }
+            /* 负代次／空设备／NULL 设备／歧义标签即拒。 */
+            CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                  -1, ids1, 3, canon, sizeof(canon)),
+                  "wl-canon-negative-gen-rejected");
+            CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "",
+                                                  7, ids1, 3, canon, sizeof(canon)),
+                  "wl-canon-empty-device-rejected");
+            CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", NULL,
+                                                  7, ids1, 3, canon, sizeof(canon)),
+                  "wl-canon-null-device-rejected");
+            CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync v1", "test-device-001",
+                                                  7, ids1, 3, canon, sizeof(canon)),
+                  "wl-canon-space-tag-rejected");
+            CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1\nx", "test-device-001",
+                                                  7, ids1, 3, canon, sizeof(canon)),
+                  "wl-canon-newline-tag-rejected");
+            /* 超 512 项即拒（不截断）；输出缓冲不足即拒。 */
+            {
+                const char *ids513[513];
+                char small[100];
+                int i;
+                for (i = 0; i < 513; i++) ids513[i] = "k_aaaa1111";
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, ids513, 513, canon, sizeof(canon)),
+                      "wl-canon-over-512-rejected");
+                CHECK(!lea_revoked_snapshot_canonical("qfr-lea-revoked-sync-v1", "test-device-001",
+                                                      7, ids1, 3, small, sizeof(small)),
+                      "wl-canon-small-out-rejected");
+            }
+        }
+        /* 验签：规范串＋签名（S1／S2／S3）＋攻击者／错配／跨协议拒绝。 */
+        {
+            char reason[128] = { 0 };
+            const char *canon_s1 =
+                "qfr-lea-revoked-sync-v1\ntest-device-001\n7\nf8f601b246325b2691624a7fcadcfe62043475c5b2bd6bb2e46adba53f0c1dc0";
+            const char *canon_s2 =
+                "qfr-lea-key-revoked-v1\ntest-device-001\n7\n5c43e22ae7d1f977fc1ae42407e976d27fce02f165c0bda73d1743c20b1f5876";
+            const char *canon_s3 =
+                "qfr-lea-revoked-sync-v1\ntest-device-001\n8\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            const char *sig_s1 =
+                "T1+q4gN+KlqLUZqdoNKoRQOkgA4V6kOPmgxCQ6BIBMzuFRaFtyzO1HNcDUI74joAYy8eQUEKY2ESTmVOaf9TBw==";
+            const char *sig_s2 =
+                "M0HTUtgd0Ikdgk69K6pZEt3YKuSCnUDgSxi13wCcYut+aVfP0AepqwkcadFFNODplq2JrGloX0T+nqi5aXX9DQ==";
+            const char *sig_s3 =
+                "6U6Iezqeiv4ZSFDc9j6bgLDWD6HJuZigPPSo60A8zmh+a7FcpuTGOhBxQXpVEbRBFdLEPAfqwPptAWQFPszPDw==";
+            const char *sig_attacker =
+                "gctcB/L0m3S9/dZSvTi/Kvu+DcfL8unIN+jasKb75wj9UXW1im448nok1PLUb7UvaRjPEOMhn4V+eIkG+dKbCQ==";
+#ifdef LEA_SERVER_PUBKEY_HEX
+            CHECK(lea_verify_ticket_signature(sig_s1, canon_s1, reason, sizeof(reason)) &&
+                  strcmp(reason, "ok") == 0, "wl-sig-s1-verified");
+            CHECK(lea_verify_ticket_signature(sig_s2, canon_s2, reason, sizeof(reason)) &&
+                  strcmp(reason, "ok") == 0, "wl-sig-s2-verified");
+            CHECK(lea_verify_ticket_signature(sig_s3, canon_s3, reason, sizeof(reason)) &&
+                  strcmp(reason, "ok") == 0, "wl-sig-s3-empty-verified");
+            /* 攻击者签名（另一把密钥签同一规范串）→ 拒绝。 */
+            CHECK(!lea_verify_ticket_signature(sig_attacker, canon_s1, reason, sizeof(reason)) &&
+                  strcmp(reason, "bad-signature") == 0, "wl-sig-attacker-rejected");
+            /* S1 签名用于 S2 规范串（跨协议：sync 签名不可冒充 kick）→ 拒绝。 */
+            CHECK(!lea_verify_ticket_signature(sig_s1, canon_s2, reason, sizeof(reason)) &&
+                  strcmp(reason, "bad-signature") == 0, "wl-sig-cross-protocol-rejected");
+            /* S1 签名用于代次被改的规范串（重放旧代次＋新列表的变体）→ 拒绝。 */
+            CHECK(!lea_verify_ticket_signature(sig_s1,
+                  "qfr-lea-revoked-sync-v1\ntest-device-001\n8\nf8f601b246325b2691624a7fcadcfe62043475c5b2bd6bb2e46adba53f0c1dc0",
+                  reason, sizeof(reason)) &&
+                  strcmp(reason, "bad-signature") == 0, "wl-sig-gen-tampered-rejected");
+            /* S1 签名用于设备被改的规范串 → 拒绝。 */
+            CHECK(!lea_verify_ticket_signature(sig_s1,
+                  "qfr-lea-revoked-sync-v1\nother-device\n7\nf8f601b246325b2691624a7fcadcfe62043475c5b2bd6bb2e46adba53f0c1dc0",
+                  reason, sizeof(reason)) &&
+                  strcmp(reason, "bad-signature") == 0, "wl-sig-device-tampered-rejected");
+#endif
+#ifdef LEA_TEST_UNSIGNED
+            CHECK(lea_verify_ticket_signature("TEST-UNSIGNED", canon_s1, reason, sizeof(reason)) &&
+                  strcmp(reason, "test-only-unsigned-accepted") == 0, "wl-sig-test-unsigned");
+#endif
+#if !defined(LEA_SERVER_PUBKEY_HEX) && !defined(LEA_TEST_UNSIGNED)
+            /* 严格构建无公钥：真签名亦不可验（unverifiable）。 */
+            CHECK(!lea_verify_ticket_signature(sig_s1, canon_s1, reason, sizeof(reason)) &&
+                  strcmp(reason, "ed25519-pubkey-not-configured") == 0, "wl-sig-no-pubkey-unverifiable");
+#endif
+        }
+    }
+
     /* ---- batch1-fix2：app.close 全量核对（负向测试：复现原误杀缺陷） ----
      * 原问题：旧 app.close 只按进程名 QFRemote.exe 就 TerminateProcess，
      * 同名但不同会话／不同用户／不同路径的进程都会被误杀。本组用不匹配的
@@ -4047,6 +4625,405 @@ int main(void) {
                       "{\"process_name\":\"QFRemote.exe\",\"process_id\":\"1234\"}",
                       "process_id", &v) == -1,
                   "appclose-params-pid-string-rejected");
+        }
+    }
+
+    /* ---------- emergency_stop：离线紧急停控（GPT 2026-11-18 裁决问题 1、3、六节） ----------
+     * 覆盖纯 C 层：恢复票据规范串（与 lea-core.js recoveryTicketSigningBytes
+     * 逐行一致）／严格解析／同步回执规范串／停控状态 JSON 往返／标记文件
+     * 读写与 fail-closed／磁盘满写失败／已用票据记录与重放拒绝／恢复
+     * 判定纯函数／启动对账各情形／状态快照叠加／命令面隔离断言。
+     * QFRLEA.c 内逻辑（专用 admission、停控门、恢复提交顺序）不在单测
+     * 覆盖内，须 Wine／腾讯真机补验（见 REPORT.md 待验清单）。 */
+    {
+        /* 1. 恢复票据规范串：13 行 \n 连接，无尾换行。 */
+        lea_recovery_ticket_t tk;
+        memset(&tk, 0, sizeof(tk));
+        snprintf(tk.type, sizeof(tk.type), "%s", LEA_RECOVERY_TICKET_TYPE);
+        snprintf(tk.account_id, sizeof(tk.account_id), "%s", "alice");
+        snprintf(tk.device_id, sizeof(tk.device_id), "%s", "node-1");
+        snprintf(tk.stop_event_id, sizeof(tk.stop_event_id), "%s", "estop-3-1763412000");
+        tk.binding_epoch = 3; tk.grant_epoch = 2; tk.recovery_epoch = 5;
+        snprintf(tk.scope, sizeof(tk.scope), "%s", "device-control");
+        snprintf(tk.ticket_id, sizeof(tk.ticket_id), "%s", "rtk-0123456789abcdef0123456789abcdef");
+        tk.issued_at = 1763412000; tk.expires_at = 1763415600;
+        snprintf(tk.auth_context, sizeof(tk.auth_context), "%s", "password+mfa@1763412000");
+        snprintf(tk.signature, sizeof(tk.signature), "%s", "AAECAwQFBgc=");
+        char canon[2048];
+        CHECK(lea_recovery_ticket_canonical(&tk, canon, sizeof(canon)), "estop-canon-ok");
+        CHECK_STR_EQ(canon,
+            "qfr-lea-recovery-ticket-v1\nemergency_stop_recovery\nalice\nnode-1\n"
+            "estop-3-1763412000\n3\n2\n5\ndevice-control\n"
+            "rtk-0123456789abcdef0123456789abcdef\n1763412000\n1763415600\n"
+            "password+mfa@1763412000", "estop-canon-exact");
+        /* 规范串拒绝：类型错／scope 含空格／ticket_id 为空。 */
+        lea_recovery_ticket_t bad = tk;
+        snprintf(bad.type, sizeof(bad.type), "%s", "binding");
+        CHECK(!lea_recovery_ticket_canonical(&bad, canon, sizeof(canon)), "estop-canon-bad-type");
+        bad = tk;
+        snprintf(bad.scope, sizeof(bad.scope), "%s", "device control");
+        CHECK(!lea_recovery_ticket_canonical(&bad, canon, sizeof(canon)), "estop-canon-bad-scope");
+        bad = tk;
+        bad.ticket_id[0] = '\0';
+        CHECK(!lea_recovery_ticket_canonical(&bad, canon, sizeof(canon)), "estop-canon-empty-ticket");
+        /* 跨语言互通：下行签名由 Node（测试种子 bytes(range(32))，与
+         * LEA_TEST_PUBKEY_HEX 同源）对 estop-canon-exact 规范串签出；
+         * C 端 lea_verify_ticket_signature 须验过，篡改规范串即不过。
+         * 只在公钥构建跑（其余构建无公钥，验签恒报未配置）。 */
+#ifdef LEA_SERVER_PUBKEY_HEX
+        {
+            char reason[128] = { 0 };
+            CHECK(lea_verify_ticket_signature(
+                      "itPw5205xtKmVLktKn9zt5g6oojAMQSuBEToa1O05bns1xh8GiwKmmW+yO38ZmCP+jeyQiUQtXxIzeS3QEwLBQ==",
+                      canon, reason, sizeof(reason)),
+                  "estop-interop-js-signed-ticket-verifies");
+            char bad_canon[2048];
+            snprintf(bad_canon, sizeof(bad_canon), "%s", canon);
+            bad_canon[strlen(bad_canon) - 1] = 'X';
+            CHECK(!lea_verify_ticket_signature(
+                      "itPw5205xtKmVLktKn9zt5g6oojAMQSuBEToa1O05bns1xh8GiwKmmW+yO38ZmCP+jeyQiUQtXxIzeS3QEwLBQ==",
+                      bad_canon, reason, sizeof(reason)),
+                  "estop-interop-tampered-canonical-rejected");
+        }
+#endif
+        /* 2. 严格解析：全字段通过；缺 expires_at／缺 auth_context／类型错／
+         * scope 非法／签名缺失一律拒绝。 */
+        char tj[2048];
+        snprintf(tj, sizeof(tj),
+                 "{\"type\":\"emergency_stop_recovery\",\"account_id\":\"alice\",\"device_id\":\"node-1\","
+                 "\"stop_event_id\":\"estop-3-1763412000\",\"binding_epoch\":3,\"grant_epoch\":2,"
+                 "\"recovery_epoch\":5,\"scope\":\"device-control\",\"ticket_id\":\"rtk-0123456789abcdef0123456789abcdef\","
+                 "\"issued_at\":1763412000,\"expires_at\":1763415600,\"auth_context\":\"password+mfa@1763412000\","
+                 "\"ticket_signature\":\"AAECAwQFBgc=\"}");
+        lea_recovery_ticket_t pt;
+        CHECK(lea_parse_recovery_ticket(tj, &pt), "estop-parse-ok");
+        CHECK(pt.recovery_epoch == 5 && pt.binding_epoch == 3 && pt.grant_epoch == 2 &&
+              strcmp(pt.stop_event_id, "estop-3-1763412000") == 0 &&
+              strcmp(pt.auth_context, "password+mfa@1763412000") == 0, "estop-parse-fields");
+        char tj2[2048];
+        snprintf(tj2, sizeof(tj2),
+                 "{\"type\":\"binding\",\"account_id\":\"alice\",\"device_id\":\"node-1\","
+                 "\"stop_event_id\":\"estop-3-1763412000\",\"binding_epoch\":3,\"grant_epoch\":2,"
+                 "\"recovery_epoch\":5,\"scope\":\"device-control\",\"ticket_id\":\"rtk-0123456789abcdef0123456789abcdef\","
+                 "\"issued_at\":1763412000,\"expires_at\":1763415600,\"auth_context\":\"x\","
+                 "\"ticket_signature\":\"AAECAwQFBgc=\"}");
+        CHECK(!lea_parse_recovery_ticket(tj2, &pt), "estop-parse-wrong-type");
+        snprintf(tj2, sizeof(tj2),
+                 "{\"type\":\"emergency_stop_recovery\",\"account_id\":\"alice\",\"device_id\":\"node-1\","
+                 "\"stop_event_id\":\"estop-3-1763412000\",\"binding_epoch\":3,\"grant_epoch\":2,"
+                 "\"recovery_epoch\":5,\"scope\":\"device-control\",\"ticket_id\":\"rtk-0123456789abcdef0123456789abcdef\","
+                 "\"issued_at\":1763412000,\"auth_context\":\"x\","
+                 "\"ticket_signature\":\"AAECAwQFBgc=\"}");
+        CHECK(!lea_parse_recovery_ticket(tj2, &pt), "estop-parse-missing-expires");
+        snprintf(tj2, sizeof(tj2),
+                 "{\"type\":\"emergency_stop_recovery\",\"account_id\":\"alice\",\"device_id\":\"node-1\","
+                 "\"stop_event_id\":\"estop-3-1763412000\",\"binding_epoch\":3,\"grant_epoch\":2,"
+                 "\"recovery_epoch\":5,\"scope\":\"device control\",\"ticket_id\":\"rtk-0123456789abcdef0123456789abcdef\","
+                 "\"issued_at\":1763412000,\"expires_at\":1763415600,\"auth_context\":\"x\","
+                 "\"ticket_signature\":\"AAECAwQFBgc=\"}");
+        CHECK(!lea_parse_recovery_ticket(tj2, &pt), "estop-parse-bad-scope");
+        snprintf(tj2, sizeof(tj2),
+                 "{\"type\":\"emergency_stop_recovery\",\"account_id\":\"alice\",\"device_id\":\"node-1\","
+                 "\"stop_event_id\":\"estop-3-1763412000\",\"binding_epoch\":3,\"grant_epoch\":2,"
+                 "\"recovery_epoch\":5,\"scope\":\"device-control\",\"ticket_id\":\"rtk-0123456789abcdef0123456789abcdef\","
+                 "\"issued_at\":1763412000,\"expires_at\":1763415600,"
+                 "\"ticket_signature\":\"AAECAwQFBgc=\"}");
+        CHECK(!lea_parse_recovery_ticket(tj2, &pt), "estop-parse-missing-auth-context");
+        /* 3. 同步回执规范串：头部＋4 行，与 lea-core.js emergencyStopSync
+         * SigningBytes 逐行一致；synced_at<=0 拒绝。 */
+        char sc[1024];
+        CHECK(lea_emergency_stop_sync_canonical("estop-3-1763412000", "alice", "node-1",
+                                                1763412100, sc, sizeof(sc)), "estop-sync-canon-ok");
+        CHECK_STR_EQ(sc, "qfr-lea-emergency-stop-sync-v1\nestop-3-1763412000\nalice\nnode-1\n1763412100",
+                     "estop-sync-canon-exact");
+        CHECK(!lea_emergency_stop_sync_canonical("estop-3-1763412000", "alice", "node-1",
+                                                 0, sc, sizeof(sc)), "estop-sync-canon-no-time");
+        /* 4. 命令面隔离：恢复命令在命令表内（tier 0、dangerous、scope
+         * muse.execute.dangerous），但 lea.emergency-stop／
+         * lea.emergency-stop-sync 不在 A7 五命令集合内（不进 handle_internal）。 */
+        const lea_command_spec_t *rspec = lea_command_spec("emergency_stop.recover");
+        CHECK(rspec && rspec->dangerous == 1 && rspec->tier == 0, "estop-recover-spec");
+        CHECK(rspec && rspec->required_scope &&
+              strcmp(rspec->required_scope, "muse.execute.dangerous") == 0, "estop-recover-scope");
+        CHECK(!lea_internal_state_command("lea.emergency-stop"), "estop-not-in-internal-five");
+        CHECK(!lea_internal_state_command("lea.emergency-stop-sync"), "estop-sync-not-in-internal-five");
+        CHECK(!lea_internal_state_command("emergency_stop.recover"), "estop-recover-not-in-internal-five");
+        /* 5. 停控状态 JSON 往返；未闭合字符串即损坏（from_json 失败）。 */
+        lea_emergency_stop_t st;
+        lea_emergency_stop_init(&st);
+        st.stopped = 1;
+        snprintf(st.stop_event_id, sizeof(st.stop_event_id), "%s", "estop-3-1763412000");
+        st.stop_seq = 3;
+        snprintf(st.account_id, sizeof(st.account_id), "%s", "alice");
+        snprintf(st.device_id, sizeof(st.device_id), "%s", "node-1");
+        st.binding_epoch = 3; st.grant_epoch = 2; st.stopped_at = 1763412000;
+        snprintf(st.sync_status, sizeof(st.sync_status), "%s", "pending");
+        char sj[2048];
+        CHECK(lea_emergency_stop_to_json(&st, sj, sizeof(sj)), "estop-json-enc");
+        lea_emergency_stop_t st2;
+        CHECK(lea_emergency_stop_from_json(sj, &st2), "estop-json-dec");
+        CHECK(st2.stopped == 1 && st2.stop_seq == 3 && st2.binding_epoch == 3 &&
+              st2.grant_epoch == 2 && st2.stopped_at == 1763412000 &&
+              strcmp(st2.stop_event_id, "estop-3-1763412000") == 0 &&
+              strcmp(st2.sync_status, "pending") == 0, "estop-json-roundtrip");
+        CHECK(!lea_emergency_stop_from_json("{\"stopped\":true,\"stop_event_id\":\"estop-3-1763412000",
+                                            &st2), "estop-json-unterminated-rejected");
+        CHECK(!lea_emergency_stop_from_json("not json", &st2), "estop-json-nonobject-rejected");
+        /* 6. 标记文件读写：全新目录缺失→0／未停控；写停控→读回；清除
+         * （stopped=false＋cleared_by_*，文件不删）→未停控；写垃圾→
+         * 读 -1 且判定为已停控（fail-closed）。 */
+        char dir[] = "/tmp/lea-estop-test-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "estop-mkdtemp");
+        if (dir[0]) {
+            lea_emergency_stop_t m;
+            CHECK(lea_local_emergency_stop_read(dir, &m) == 0, "estop-read-fresh-missing");
+            CHECK(!lea_local_emergency_stopped(dir), "estop-fresh-not-stopped");
+            lea_emergency_stop_t w;
+            lea_emergency_stop_init(&w);
+            w.stopped = 1;
+            snprintf(w.stop_event_id, sizeof(w.stop_event_id), "%s", "estop-3-1763412000");
+            w.stop_seq = 3;
+            snprintf(w.account_id, sizeof(w.account_id), "%s", "alice");
+            snprintf(w.device_id, sizeof(w.device_id), "%s", "node-1");
+            w.binding_epoch = 3; w.grant_epoch = 2; w.stopped_at = 1763412000;
+            CHECK(lea_local_emergency_stop_write(dir, &w), "estop-write-stopped");
+            CHECK(lea_local_emergency_stopped(dir), "estop-stopped-after-write");
+            lea_emergency_stop_t r;
+            CHECK(lea_local_emergency_stop_read(dir, &r) == 1 && r.stopped && r.stop_seq == 3 &&
+                  strcmp(r.account_id, "alice") == 0, "estop-read-back");
+            w.stopped = 0;
+            snprintf(w.cleared_by_ticket_id, sizeof(w.cleared_by_ticket_id), "%s", "rtk-0123456789abcdef0123456789abcdef");
+            w.cleared_by_recovery_epoch = 5;
+            w.cleared_at = 1763412100;
+            w.last_recovery_epoch = 5;
+            CHECK(lea_local_emergency_stop_write(dir, &w), "estop-write-cleared");
+            CHECK(!lea_local_emergency_stopped(dir), "estop-not-stopped-after-clear");
+            CHECK(lea_local_emergency_stop_read(dir, &r) == 1 && !r.stopped &&
+                  strcmp(r.cleared_by_ticket_id, "rtk-0123456789abcdef0123456789abcdef") == 0 &&
+                  r.last_recovery_epoch == 5, "estop-cleared-fields-kept");
+            /* 磁盘满：停控 tmp 符号链接到 /dev/full，写新标记须报失败、
+             * 旧标记完好、无 tmp 残留（写盘失败不能报告停控成功）。 */
+            {
+                char target[528], tmp[600];
+                snprintf(target, sizeof(target), "%s/emergency-stop.json", dir);
+                snprintf(tmp, sizeof(tmp), "%s.tmp.%lu", target, (unsigned long)getpid());
+                lea_emergency_stop_t w2;
+                lea_emergency_stop_init(&w2);
+                w2.stopped = 1;
+                snprintf(w2.stop_event_id, sizeof(w2.stop_event_id), "%s", "estop-9-1763413000");
+                w2.stop_seq = 9;
+                CHECK(symlink("/dev/full", tmp) == 0, "estop-full-setup-symlink");
+                int wrc = lea_local_emergency_stop_write(dir, &w2);
+                int intact = (lea_local_emergency_stop_read(dir, &r) == 1 && !r.stopped);
+                int no_tmp = (access(tmp, F_OK) != 0);
+                CHECK(wrc == 0 && intact && no_tmp, "estop-disk-full-write-fails-orig-intact");
+                remove(tmp);
+            }
+            /* 损坏文件：写垃圾后读 -1、判定已停控（fail-closed）。 */
+            {
+                char target[528];
+                snprintf(target, sizeof(target), "%s/emergency-stop.json", dir);
+                FILE *f = fopen(target, "wb");
+                if (f) { fputs("{\"stopped\":true,\"stop_event_id\":\"estop-", f); fclose(f); }
+                CHECK(lea_local_emergency_stop_read(dir, &m) == -1, "estop-read-corrupt");
+                CHECK(lea_local_emergency_stopped(dir), "estop-corrupt-fail-closed-stopped");
+                remove(target);
+            }
+            /* 7. 已用票据记录：消费→pending；重放拒绝；代次单调；
+             * mark_recovered→recovered；消费已恢复票据仍拒绝。 */
+            {
+                char status[64]; long long repoch = 0;
+                CHECK(lea_local_recovery_ticket_consume(dir, "rtk-aaa", "estop-1-100", 1),
+                      "estop-consume-ok");
+                CHECK(lea_local_recovery_ticket_status(dir, "rtk-aaa", status, sizeof(status), &repoch) &&
+                      strcmp(status, "consumed_pending_clear") == 0 && repoch == 1,
+                      "estop-ticket-status-pending");
+                CHECK(!lea_local_recovery_ticket_consume(dir, "rtk-aaa", "estop-1-100", 1),
+                      "estop-consume-replay-rejected");
+                CHECK(lea_local_recovery_max_epoch(dir) == 1, "estop-max-epoch-1");
+                CHECK(lea_local_recovery_ticket_consume(dir, "rtk-bbb", "estop-1-100", 3),
+                      "estop-consume-2");
+                CHECK(lea_local_recovery_max_epoch(dir) == 3, "estop-max-epoch-3");
+                CHECK(lea_local_recovery_ticket_mark_recovered(dir, "rtk-aaa"),
+                      "estop-mark-recovered");
+                CHECK(lea_local_recovery_ticket_status(dir, "rtk-aaa", status, sizeof(status), &repoch) &&
+                      strcmp(status, "recovered") == 0, "estop-ticket-status-recovered");
+                CHECK(!lea_local_recovery_ticket_consume(dir, "rtk-aaa", "estop-1-100", 1),
+                      "estop-consume-after-recovered-rejected");
+                CHECK(!lea_local_recovery_ticket_status(dir, "rtk-nope", status, sizeof(status), NULL),
+                      "estop-ticket-status-missing");
+                CHECK(!lea_local_recovery_ticket_mark_recovered(dir, "rtk-nope"),
+                      "estop-mark-missing-rejected");
+            }
+            /* 8. 恢复判定纯函数：全过才允许；任一条件不满足即拒绝。 */
+            {
+                lea_emergency_stop_t mk;
+                lea_emergency_stop_init(&mk);
+                mk.stopped = 1;
+                snprintf(mk.stop_event_id, sizeof(mk.stop_event_id), "%s", "estop-3-1763412000");
+                snprintf(mk.account_id, sizeof(mk.account_id), "%s", "alice");
+                snprintf(mk.device_id, sizeof(mk.device_id), "%s", "node-1");
+                mk.grant_epoch = 2; mk.last_recovery_epoch = 4;
+                lea_recovery_ticket_t good = tk; /* recovery_epoch=5, grant_epoch=2 */
+                CHECK(lea_emergency_stop_recovery_allowed(&mk, &good, 4), "estop-allowed-good");
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 5),
+                      "estop-allowed-epoch-not-greater-than-record");
+                good.recovery_epoch = 4;
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 4),
+                      "estop-allowed-epoch-equal-rejected");
+                good.recovery_epoch = 5; good.grant_epoch = 1;
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 4),
+                      "estop-allowed-grant-too-old");
+                good.grant_epoch = 2;
+                snprintf(good.stop_event_id, sizeof(good.stop_event_id), "%s", "estop-9-999");
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 4),
+                      "estop-allowed-event-mismatch");
+                snprintf(good.stop_event_id, sizeof(good.stop_event_id), "%s", "estop-3-1763412000");
+                snprintf(good.account_id, sizeof(good.account_id), "%s", "bob");
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 4),
+                      "estop-allowed-account-mismatch");
+                snprintf(good.account_id, sizeof(good.account_id), "%s", "alice");
+                mk.stopped = 0;
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, &good, 4),
+                      "estop-allowed-not-stopped");
+                CHECK(!lea_emergency_stop_recovery_allowed(NULL, &good, 4),
+                      "estop-allowed-null-marker");
+                CHECK(!lea_emergency_stop_recovery_allowed(&mk, NULL, 4),
+                      "estop-allowed-null-ticket");
+            }
+            /* 9. 状态快照叠加：停控字段进 lea.status（经 lea_local_status_snapshot）。 */
+            {
+                lea_local_status_t sst;
+                CHECK(lea_local_status_snapshot(dir, &sst), "estop-snap-ok");
+                CHECK(sst.emergency_stopped == 0, "estop-snap-cleared-not-stopped");
+                lea_emergency_stop_t w3;
+                lea_emergency_stop_init(&w3);
+                w3.stopped = 1;
+                snprintf(w3.stop_event_id, sizeof(w3.stop_event_id), "%s", "estop-2-100");
+                snprintf(w3.sync_status, sizeof(w3.sync_status), "%s", "pending");
+                CHECK(lea_local_emergency_stop_write(dir, &w3), "estop-snap-write");
+                CHECK(lea_local_status_snapshot(dir, &sst), "estop-snap-stopped-ok");
+                CHECK(sst.emergency_stopped == 1 &&
+                      strcmp(sst.emergency_stop_event_id, "estop-2-100") == 0 &&
+                      strcmp(sst.emergency_sync_status, "pending") == 0, "estop-snap-stopped-fields");
+                char sj2[4096];
+                CHECK(lea_local_status_to_json(&sst, sj2, sizeof(sj2)), "estop-snap-json");
+                CHECK(strstr(sj2, "\"emergency_stopped\":true") != NULL &&
+                      strstr(sj2, "\"emergency_stop_event_id\":\"estop-2-100\"") != NULL,
+                      "estop-snap-json-fields");
+                lea_local_status_t sst2;
+                CHECK(lea_local_status_from_json(sj2, &sst2) && sst2.emergency_stopped == 1,
+                      "estop-snap-json-roundtrip");
+            }
+        }
+        /* 10. 启动对账各情形（各用独立临时目录；审计日志放 logs/ 子目录）。 */
+        {
+            /* R1：全新目录，无标记无日志→0。 */
+            char d1[] = "/tmp/lea-estop-rec1-XXXXXX";
+            CHECK(mkdtemp(d1) != NULL, "estop-rec1-mkdtemp");
+            if (d1[0]) CHECK(lea_local_emergency_stop_reconcile(d1, NULL) == 0, "estop-reconcile-fresh");
+            /* R2：标记丢失＋审计最后一条终态是停控成功→重建（1）。 */
+            char d2[] = "/tmp/lea-estop-rec2-XXXXXX";
+            CHECK(mkdtemp(d2) != NULL, "estop-rec2-mkdtemp");
+            if (d2[0]) {
+                char logs[512], lp[600];
+                snprintf(logs, sizeof(logs), "%s/logs", d2);
+                mkdir(logs, 0700);
+                snprintf(lp, sizeof(lp), "%s/lea-2026-11-18.jsonl", logs);
+                FILE *f = fopen(lp, "w");
+                if (f) {
+                    fputs("{\"event\":\"emergency-stop\",\"result\":\"ok\",\"detail\":\"stop_event_id=estop-7-1763412000 stop_seq=7 grant_epoch=2\",\"account_id\":\"alice\",\"device_id\":\"node-1\",\"binding_epoch\":3}\n", f);
+                    fclose(f);
+                }
+                CHECK(lea_local_emergency_stop_reconcile(d2, logs) == 1, "estop-reconcile-rebuild");
+                lea_emergency_stop_t m;
+                CHECK(lea_local_emergency_stop_read(d2, &m) == 1 && m.stopped &&
+                      strcmp(m.stop_event_id, "estop-7-1763412000") == 0 && m.stop_seq == 7 &&
+                      strcmp(m.account_id, "alice") == 0, "estop-reconcile-rebuilt-marker");
+            }
+            /* R3：标记丢失＋审计最后一条终态是恢复成功→不重建（0）。 */
+            char d3[] = "/tmp/lea-estop-rec3-XXXXXX";
+            CHECK(mkdtemp(d3) != NULL, "estop-rec3-mkdtemp");
+            if (d3[0]) {
+                char logs[512], lp[600];
+                snprintf(logs, sizeof(logs), "%s/logs", d3);
+                mkdir(logs, 0700);
+                snprintf(lp, sizeof(lp), "%s/lea-2026-11-18.jsonl", logs);
+                FILE *f = fopen(lp, "w");
+                if (f) {
+                    fputs("{\"event\":\"emergency-stop\",\"result\":\"ok\",\"detail\":\"stop_event_id=estop-7-1763412000 stop_seq=7 grant_epoch=2\",\"account_id\":\"alice\",\"device_id\":\"node-1\",\"binding_epoch\":3}\n", f);
+                    fputs("{\"event\":\"emergency-stop-recover\",\"result\":\"recovered\",\"detail\":\"stop_event_id=estop-7-1763412000 ticket_id=rtk-x recovery_epoch=5\",\"account_id\":\"alice\",\"device_id\":\"node-1\",\"binding_epoch\":3}\n", f);
+                    fclose(f);
+                }
+                CHECK(lea_local_emergency_stop_reconcile(d3, logs) == 0, "estop-reconcile-recovered-no-rebuild");
+                lea_emergency_stop_t m;
+                CHECK(lea_local_emergency_stop_read(d3, &m) == 0, "estop-reconcile-recovered-no-marker");
+            }
+            /* R4：标记丢失＋票据已消费未清→按已停控重建最小标记（1）。 */
+            char d4[] = "/tmp/lea-estop-rec4-XXXXXX";
+            CHECK(mkdtemp(d4) != NULL, "estop-rec4-mkdtemp");
+            if (d4[0]) {
+                CHECK(lea_local_recovery_ticket_consume(d4, "rtk-p1", "estop-9-1763412000", 2),
+                      "estop-rec4-consume");
+                CHECK(lea_local_emergency_stop_reconcile(d4, NULL) == 1, "estop-reconcile-pending-rebuild");
+                lea_emergency_stop_t m;
+                CHECK(lea_local_emergency_stop_read(d4, &m) == 1 && m.stopped &&
+                      strcmp(m.stop_event_id, "estop-9-1763412000") == 0, "estop-reconcile-pending-marker");
+            }
+            /* R5：标记在位已停控→无操作（0）。 */
+            char d5[] = "/tmp/lea-estop-rec5-XXXXXX";
+            CHECK(mkdtemp(d5) != NULL, "estop-rec5-mkdtemp");
+            if (d5[0]) {
+                lea_emergency_stop_t w;
+                lea_emergency_stop_init(&w);
+                w.stopped = 1;
+                snprintf(w.stop_event_id, sizeof(w.stop_event_id), "%s", "estop-1-100");
+                CHECK(lea_local_emergency_stop_write(d5, &w), "estop-rec5-write");
+                CHECK(lea_local_emergency_stop_reconcile(d5, NULL) == 0, "estop-reconcile-stopped-noop");
+            }
+            /* R6：标记已清＋同事件票据仍 pending→补票据状态为 recovered（2）。 */
+            char d6[] = "/tmp/lea-estop-rec6-XXXXXX";
+            CHECK(mkdtemp(d6) != NULL, "estop-rec6-mkdtemp");
+            if (d6[0]) {
+                lea_emergency_stop_t w;
+                lea_emergency_stop_init(&w);
+                w.stopped = 0;
+                snprintf(w.stop_event_id, sizeof(w.stop_event_id), "%s", "estop-5-100");
+                snprintf(w.cleared_by_ticket_id, sizeof(w.cleared_by_ticket_id), "%s", "rtk-c1");
+                w.cleared_by_recovery_epoch = 2;
+                CHECK(lea_local_emergency_stop_write(d6, &w), "estop-rec6-write");
+                CHECK(lea_local_recovery_ticket_consume(d6, "rtk-c1", "estop-5-100", 2),
+                      "estop-rec6-consume");
+                CHECK(lea_local_emergency_stop_reconcile(d6, NULL) == 2, "estop-reconcile-repair");
+                char status[64];
+                CHECK(lea_local_recovery_ticket_status(d6, "rtk-c1", status, sizeof(status), NULL) &&
+                      strcmp(status, "recovered") == 0, "estop-reconcile-repaired-ticket");
+            }
+            /* R7：标记损坏→-1（不覆写损坏文件）。 */
+            char d7[] = "/tmp/lea-estop-rec7-XXXXXX";
+            CHECK(mkdtemp(d7) != NULL, "estop-rec7-mkdtemp");
+            if (d7[0]) {
+                char target[528];
+                snprintf(target, sizeof(target), "%s/emergency-stop.json", d7);
+                FILE *f = fopen(target, "wb");
+                if (f) { fputs("{\"stopped\":true,\"stop_event_id\":\"estop-", f); fclose(f); }
+                CHECK(lea_local_emergency_stop_reconcile(d7, NULL) == -1, "estop-reconcile-corrupt");
+            }
+            /* R8：标记丢失＋审计只有失败的停控 attempt→不重建（0）。 */
+            char d8[] = "/tmp/lea-estop-rec8-XXXXXX";
+            CHECK(mkdtemp(d8) != NULL, "estop-rec8-mkdtemp");
+            if (d8[0]) {
+                char logs[512], lp[600];
+                snprintf(logs, sizeof(logs), "%s/logs", d8);
+                mkdir(logs, 0700);
+                snprintf(lp, sizeof(lp), "%s/lea-2026-11-18.jsonl", logs);
+                FILE *f = fopen(lp, "w");
+                if (f) {
+                    fputs("{\"event\":\"emergency-stop\",\"result\":\"failed\",\"detail\":\"stop_event_id=estop-7-1763412000 stop_seq=7 grant_epoch=2\",\"account_id\":\"alice\",\"device_id\":\"node-1\",\"binding_epoch\":3}\n", f);
+                    fclose(f);
+                }
+                CHECK(lea_local_emergency_stop_reconcile(d8, logs) == 0, "estop-reconcile-failed-stop-no-rebuild");
+            }
         }
     }
 

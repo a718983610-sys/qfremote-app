@@ -130,7 +130,7 @@ const ALLOWED_PORTS = ['443', ''];
 const TOOLBAR_HEIGHT = 52; // 重做 A §3.2：工具栏 52px（原 48px）
 const PREVIEW = process.env.QFREMOTE_PREVIEW || ''; // '', 'main', 'offline', 'splash'
 const PREVIEW_DIR = process.env.QFREMOTE_PREVIEW_DIR || '';
-const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'blue' | 'dark'（'blue' 为历史键名，含义是浅色白底黑字，不对应蓝色）
+const PREVIEW_THEME = process.env.QFREMOTE_PREVIEW_THEME || ''; // 仅预览自检：强制主题 'light' | 'dark'（旧 'blue' 为历史键名，读兼容归一化为 'light'）
 // 仅预览自检：探活目标可经环境变量改指（与生产相同的探活代码、仅路由不同）；
 // 生产环境恒用正式域名源（2026-10-29 审计 J-2 定案，见下方探活节口径）
 const PROBE_URL = (PREVIEW && process.env.QFREMOTE_PROBE_URL) ? process.env.QFREMOTE_PROBE_URL : 'https://app.qfremote.top/release.json';
@@ -846,20 +846,23 @@ function applyAutoLaunchDefault() {
 }
 
 // ---------- 主题（浅色 / 深色 / 跟随系统，工具栏与各页联动，选择持久化） ----------
-// W1 定夺（2026-11-14，大肥鱼）：settings.theme 合法值 'system' | 'blue' | 'dark'；
-// 无键／空值／非法值统一按 'system'（默认跟随系统，与安卓一致）；只有用户
-// 点三态按钮才写盘，启动时不把无键老用户写死。'blue' 仍表示浅色，不新增 'light'。
+// 三态迁移（2026-11-18，GPT 新材料回复裁决）：对外统一 'system' | 'light' | 'dark'；
+// 旧 'blue' 只保留读取兼容（归一化为 'light'），新写入一律 'light'。无键／空值／非法值
+// 统一按 'system'（默认跟随系统，与安卓一致）；只有用户点三态按钮才写盘，启动时
+// 不把无键老用户写死；从旧版迁移来的 'blue' 视为用户明确选过的浅色，绝不能变成跟随系统。
 function currentThemeMode() {
-  if (PREVIEW_THEME === 'dark' || PREVIEW_THEME === 'blue') return PREVIEW_THEME;
+  if (PREVIEW_THEME === 'dark') return 'dark';
+  if (PREVIEW_THEME === 'blue' || PREVIEW_THEME === 'light') return 'light';
   const m = settings.theme;
-  return (m === 'system' || m === 'blue' || m === 'dark') ? m : 'system';
+  if (m === 'blue') return 'light';
+  return (m === 'system' || m === 'light' || m === 'dark') ? m : 'system';
 }
-// 解析后的实际主题，只返回 'dark' | 'blue'（渲染端只认识这两值，绝不下发 'system'）。
+// 解析后的实际主题，只返回 'dark' | 'light'（渲染端只认识这两值，绝不下发 'system'）。
 function currentTheme() {
   const mode = currentThemeMode();
   if (mode === 'dark') return 'dark';
-  if (mode === 'blue') return 'blue';
-  return nativeTheme.shouldUseDarkColors ? 'dark' : 'blue';
+  if (mode === 'light') return 'light';
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
 }
 function themeBg() { return currentTheme() === 'dark' ? '#08090A' : BG_DEEP; }
 function contentBg() { return currentTheme() === 'dark' ? '#08090A' : BG_DEEP; }
@@ -2978,7 +2981,7 @@ trustedOn('qf-top-toggle', () => toggleTop());
 // ---------- 主题切换（三态：跟随系统 → 浅色 → 深色 → 跟随系统，W1 定夺） ----------
 // applyThemeBroadcast：重算解析主题后统一落地——全部 BrowserWindow 改底色
 // （W9 开关打开时走透明底）、全部 WebContentsView 改底色、向全部 webContents
-// 发 resolved（qf-theme-state，内容页只认识 dark/blue）＋向工具栏发 mode
+// 发 resolved（qf-theme-state，内容页只认识 dark/light）＋向工具栏发 mode
 // （qf-theme-mode {mode, resolved}，工具栏三态按钮要区分“跟随系统且深色”
 // 与“手动深色”）。广播走 webContents.getAllWebContents() 去重，不再手写
 // 视图清单（旧清单会漏 about/lock 独立窗口与 splash 存活态）。
@@ -3016,13 +3019,13 @@ function applyThemeBroadcast() {
 }
 function cycleThemeMode() {
   const mode = currentThemeMode();
-  const nextMode = mode === 'system' ? 'blue' : mode === 'blue' ? 'dark' : 'system';
+  const nextMode = mode === 'system' ? 'light' : mode === 'light' ? 'dark' : 'system';
   settings.theme = nextMode;
   saveSettings();
   applyThemeBroadcast();
 }
 trustedOn('qf-theme-toggle', () => cycleThemeMode());
-// 系统深浅变化时，只有 mode 为 system（或无键）才跟随；手动 blue/dark 不动。
+// 系统深浅变化时，只有 mode 为 system（或无键）才跟随；手动 light/dark 不动。
 // 注册一次（app ready 后），退出时移除，防热重载重复注册。
 let themeUpdatedRegistered = false;
 function registerThemeUpdatedListener() {
@@ -3062,7 +3065,7 @@ trustedOn('qf-overflow-menu', (event, payload) => {
   if (ids.length === 0) return;
   // 主题项标签按当前档动态化（写下一档动作）：跟随系统→切浅色，浅色→切深色，深色→切跟随系统。
   const mode = currentThemeMode();
-  const themeLabel = mode === 'system' ? '切换主题：切到浅色' : mode === 'blue' ? '切换主题：切到深色' : '切换主题：切到跟随系统';
+  const themeLabel = mode === 'system' ? '切换主题：切到浅色' : mode === 'light' ? '切换主题：切到深色' : '切换主题：切到跟随系统';
   const template = ids.map((id) => {
     if (id === 'themeBtn') return { label: themeLabel, click: () => cycleThemeMode() };
     return { label: OVERFLOW_MENU_ITEMS[id].label, click: () => OVERFLOW_MENU_ITEMS[id].run() };
@@ -4084,16 +4087,105 @@ trustedHandle('qf-lea-selfbind-clear', async () => {
 trustedHandle('qf-lea-local-status', async () => {
   try {
     const raw = await leaNotifyInternalAsync(leaStatus.buildLeaStatusRequest(), 10000);
-    return leaStatus.parseLeaStatusResponse(raw);
+    const st = leaStatus.parseLeaStatusResponse(raw);
+    // emergency_stop：轮询见已停控且同步 pending 时，后台触发一次同步
+    // （不 await、不阻塞状态响应；离线失败即保持 pending，下次轮询重试）。
+    if (st && st.emergency_stopped === true && st.emergency_sync_status !== 'synced') {
+      syncEmergencyStop(st).catch(() => {});
+    }
+    return st;
   } catch (e) { return leaStatus.parseLeaStatusResponse(null); }
 });
+/* emergency_stop：本机紧急停控（GPT 2026-11-18 裁决问题 1、六节）。
+ * triggerEmergencyStop()：经本地管道发 lea.emergency-stop（专用 admission，
+ * 不进 handle_internal 的 S-021 五命令面）；返回 QFRLEA 响应（逐项分开报
+ * stopped_session／persisted／queue_drained／active_job／
+ * meshcentral_interactive／sync_status）。停控成功即 best-effort 尝试
+ * 同步一次（离线时保持 pending，下次状态轮询重试）。
+ * syncEmergencyStop(knownStatus)：状态轮询见 emergency_stopped 且 sync
+ * pending 时，把停控事件 POST 到服务端同步端点，拿回执后经内部管道发
+ * lea.emergency-stop-sync 交 LEA 验签后改 synced。服务端回执的代次
+ * （binding_epoch／grant_epoch）以服务端记录为准，设备不另报（主进程
+ * 读不到 SY／BA 专属的标记文件，状态快照只带事件 ID 与设备 ID）。
+ * 按钮接线（产品 UI）为后续项，此处只提供主进程函数；两个函数都不抛错，
+ * 失败只记 bootLog＋返回 { ok:false, reason }。 */
+async function triggerEmergencyStop() {
+  try {
+    const r = await leaNotifyInternalAsync({ cmd: 'lea.emergency-stop' }, 15000);
+    if (!r || r.ok !== true) {
+      bootLog('lea.emergency-stop-failed', (r && (r.code || r.reason)) || 'unknown');
+      return { ok: false, reason: (r && (r.code || r.reason)) || 'unknown', detail: r && r.detail };
+    }
+    bootLog('lea.emergency-stop-ok', r.result && r.result.stop_event_id ? String(r.result.stop_event_id) : '');
+    try { await syncEmergencyStop(); } catch (e) { /* ignore：下次轮询重试 */ }
+    return r;
+  } catch (e) { return { ok: false, reason: 'throw' }; }
+}
+async function syncEmergencyStop(knownStatus) {
+  try {
+    let st = knownStatus || null;
+    if (!st) {
+      const raw = await leaNotifyInternalAsync(leaStatus.buildLeaStatusRequest(), 10000);
+      st = leaStatus.parseLeaStatusResponse(raw);
+    }
+    if (!st || st.emergency_stopped !== true) return { ok: false, reason: 'not-stopped' };
+    if (st.emergency_sync_status === 'synced') return { ok: true, reason: 'already-synced' };
+    if (!st.device_id || !st.emergency_stop_event_id) return { ok: false, reason: 'missing-context' };
+    const sync = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/emergency-stop/sync',
+      { device_id: st.device_id, stop_event_id: st.emergency_stop_event_id });
+    if (!sync || sync.status !== 200 || !sync.json || !sync.json.receipt) {
+      bootLog('lea.emergency-stop-sync-failed', sync ? String(sync.status) : 'no-response');
+      return { ok: false, reason: 'sync-failed', status: sync && sync.status };
+    }
+    const receipt = sync.json.receipt;
+    const r = await leaNotifyInternalAsync({
+      cmd: 'lea.emergency-stop-sync',
+      stop_event_id: receipt.stop_event_id,
+      synced_at: receipt.synced_at,
+      signature: receipt.signature,
+    }, 10000);
+    if (!r || r.ok !== true) {
+      bootLog('lea.emergency-stop-sync-confirm-failed', (r && (r.code || r.reason)) || 'unknown');
+      return { ok: false, reason: 'confirm-failed' };
+    }
+    bootLog('lea.emergency-stop-sync-ok', String(st.emergency_stop_event_id));
+    return r;
+  } catch (e) { return { ok: false, reason: 'throw' }; }
+}
 async function notifyLeaLogin(account) {
   try {
     if (!account || account === leaLastNotifiedAccount) return { ok: false, reason: 'skip' };
     let deviceId = null;
     try { deviceId = await resolveOwnNodeId(); } catch (e) { deviceId = null; }
-    const r = leaNotifyInternal({ cmd: 'session.login_changed', account_id: String(account), device_id: deviceId || '' });
-    if (!r || r.ok !== true) { bootLog('lea.login-notify-failed', (r && (r.code || r.reason)) || 'unknown'); return { ok: false, reason: 'notify-failed' }; }
+    /* v3 P0-4 第二层（B3 主方案）：login_changed 须附服务端签发的登录
+     * 证明。证明取自控制台会话（extRequest 带控制台会话 cookie＋https＋
+     * 主机白名单＋8 秒超时，见 extRequest）；取不到时仍发送（不静默），
+     * 服务以 login-proof-missing 明确拒绝并记 bootLog。证明只在内存里
+     * 过一遍，不落盘、不记日志内容。服务端回包字段原样 JSON 序列化进
+     * login_proof——账号／设备以服务端签发的为准，与本地登录事件不符
+     * 时 C 侧以 login-proof-mismatch 拒绝，不由 JS 替服务端改写。 */
+    let loginProof = null;
+    if (deviceId) {
+      try {
+        const at = await extRequest('POST', 'https://app.qfremote.top/api/lea/v1/login-attestation', { device_id: String(deviceId) });
+        if (at && at.status === 200 && at.json && typeof at.json.signature === 'string' && at.json.signature &&
+            typeof at.json.key_id === 'string' && at.json.key_id &&
+            typeof at.json.version === 'string' && at.json.version &&
+            typeof at.json.account_id === 'string' && at.json.account_id &&
+            typeof at.json.device_id === 'string' && at.json.device_id &&
+            Number.isSafeInteger(at.json.issued_at) && Number.isSafeInteger(at.json.expires_at)) {
+          loginProof = JSON.stringify({ version: at.json.version, key_id: at.json.key_id,
+            account_id: at.json.account_id, device_id: at.json.device_id,
+            issued_at: at.json.issued_at, expires_at: at.json.expires_at, signature: at.json.signature });
+        } else bootLog('lea.login-proof-unavailable', at ? String(at.status) : 'no-response');
+      } catch (e) { bootLog('lea.login-proof-unavailable', 'throw'); }
+    } else {
+      bootLog('lea.login-proof-unavailable', 'no-device-id');
+    }
+    const loginObj = { cmd: 'session.login_changed', account_id: String(account), device_id: deviceId || '' };
+    if (loginProof) loginObj.login_proof = loginProof;
+    const r = leaNotifyInternal(loginObj);
+    if (!r || r.ok !== true) { bootLog('lea.login-notify-failed', ((r && (r.code || r.reason)) || 'unknown') + ' exe=' + String(leaClientExePath() || '')); return { ok: false, reason: 'notify-failed' }; }
     leaLastNotifiedAccount = String(account);
     // r8 副项（2026-11-11）：成功路径 boot log 只记失败项，登录成功在 boot log
     // 里无行可查（r7 实证：17:25 之后零新行，尽管其间 6 次 LEA 事件）。此处
@@ -4121,14 +4213,12 @@ async function notifyLeaLogin(account) {
         const snap = rb.json.revocations;
         const fullIds = (snap && Array.isArray(snap.revoked_key_ids)) ? snap.revoked_key_ids : null;
         if (fullIds && fullIds.every((x) => typeof x === 'string' && x)) {
-          // #1 版本化：只认 generation 字段（新版服务端字段；顶层
-          // revocation_generation 与 revocations.generation 同值）。
-          // 旧版回包无此字段即按缺失处理——不拿 revocation_epoch 凑合、
-          // 不静默当最新；缺失时不发 generation，C 侧做无版本并集合并
-          // （不推进本机 generation）。存在但非法（非安全整数／负数）
-          // → 不发 sync（记 bootLog，等下次下发重推），绝不降级成无版
-          // 本合并——非法是服务端／传输出错的信号，与“旧版缺失”语义
-          // 不同，须与 C 侧 lea_json_top_level_long 的三态保持一致。
+          // #1 版本化＋A7-whitelist：只认 generation 字段（新版服务端字段；
+          // 顶层 revocation_generation 与 revocations.generation 同值），
+          // 另须 revocations.sync_signature（服务端签发的快照签名）。
+          // 缺失代次／缺失签名一律不发 sync（记 bootLog，等下次下发重推），
+          // C 端同样缺一即拒绝；存在但非法（非安全整数／负数）→ 不发 sync，
+          // 绝不降级成无版本／无签名合并。
           const hasSnapGen = snap && snap.generation !== undefined;
           const genRaw = hasSnapGen ? snap.generation : rb.json.revocation_generation;
           let gen = null;
@@ -4137,11 +4227,15 @@ async function notifyLeaLogin(account) {
             if (typeof genRaw === 'number' && Number.isSafeInteger(genRaw) && genRaw >= 0) gen = genRaw;
             else genBad = true;
           }
+          const sigRaw = snap && typeof snap.sync_signature === 'string' ? snap.sync_signature : null;
           if (genBad) {
             bootLog('lea.sync-revoked-bad-generation', JSON.stringify(genRaw));
+          } else if (gen === null) {
+            bootLog('lea.sync-revoked-no-generation');
+          } else if (!sigRaw) {
+            bootLog('lea.sync-revoked-no-signature');
           } else {
-            const syncObj = { cmd: 'keys.sync-revoked', key_ids: fullIds };
-            if (gen !== null) syncObj.generation = gen;
+            const syncObj = { cmd: 'keys.sync-revoked', key_ids: fullIds, generation: gen, sync_signature: sigRaw };
             const sr = leaNotifyInternal(syncObj);
             if (!sr || sr.ok !== true) bootLog('lea.sync-revoked-failed', (sr && (sr.code || sr.reason)) || 'unknown');
           }
@@ -4171,8 +4265,13 @@ async function notifyLeaLogin(account) {
 }
 async function notifyLeaLogout() {
   try {
+    // A7-whitelist：登出带 account_id（C 端须与当前绑定一致才放行；
+    // 拿不到账号时不带字段，绑定在位时 C 端即拒绝）。
+    const account = leaLastNotifiedAccount || (typeof currentGateUsername === 'function' ? currentGateUsername() : '') || '';
     leaLastNotifiedAccount = '';
-    const r = leaNotifyInternal({ cmd: 'session.logout' });
+    const logoutObj = { cmd: 'session.logout' };
+    if (account) logoutObj.account_id = String(account);
+    const r = leaNotifyInternal(logoutObj);
     if (!r || r.ok !== true) bootLog('lea.logout-notify-failed', (r && (r.code || r.reason)) || 'unknown');
     return { ok: !!(r && r.ok) };
   } catch (e) { bootLog('lea.logout-notify-throw', (e && e.message) || String(e)); return { ok: false }; }

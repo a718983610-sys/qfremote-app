@@ -53,7 +53,7 @@ Future<void> _pumpLicenseSection(
 
 void main() {
   group('S-033：无障碍（深浅两主题）', () {
-    for (final mode in [QfThemeMode.blue, QfThemeMode.dark]) {
+    for (final mode in [QfThemeMode.light, QfThemeMode.dark]) {
       final name = mode == QfThemeMode.dark ? '深色' : '浅色';
       testWidgets('$name：查询密钥文字链有下划线、色取 linkUnderline、触控目标 ≥44', (tester) async {
         await _pumpLicenseSection(tester, mode);

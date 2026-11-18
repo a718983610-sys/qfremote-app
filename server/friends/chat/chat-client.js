@@ -909,27 +909,31 @@ window.qfShellUnlock = async function (password) {
 // ---------- 主题（P0-2：与控制台统一来源；聊天页不再私自存 qfchat-theme） ----------
 // 有效主题 = 壳手动选择 ＞ 控制台共用偏好（localStorage['qf-theme']）＞ 系统主题。
 // 壳推送经窗口事件 'qf-theme-state'（Electron 由 console-preload.js 转发主进程推送，
-// Android 由壳注入 JS 派发）；detail 为 {resolved: 'dark'|'blue', mode: 'system'|'blue'|'dark'}，
-// 其中 'blue' 是浅色历史键名，不对应蓝色。纯浏览器下该事件永不触发，走偏好/系统两层。
+// Android 由壳注入 JS 派发）；detail 为 {resolved: 'dark'|'light', mode: 'system'|'light'|'dark'}，
+// 旧 'blue' 为浅色历史键名，读兼容归一化为 'light'。纯浏览器下该事件永不触发，走偏好/系统两层。
 // 壳推送只作运行时生效，不写 localStorage。
-let chatShellMode = null; // 'system' | 'blue' | 'dark' | null（null = 未收到壳推送）
-let chatShellResolved = null; // 'dark' | 'blue' | null
+let chatShellMode = null; // 'system' | 'light' | 'dark' | null（null = 未收到壳推送）
+let chatShellResolved = null; // 'dark' | 'light' | null
 function chatSystemTheme() { try { return (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'; } catch (e) { return 'light'; } }
 function chatStoredTheme() { try { const v = localStorage.getItem('qf-theme'); return (v === 'dark' || v === 'light') ? v : null; } catch (e) { return null; } }
 function chatApplyEffectiveTheme() {
   let t;
-  if (chatShellMode === 'dark' || chatShellMode === 'blue') t = chatShellResolved === 'dark' ? 'dark' : 'light';
+  if (chatShellMode === 'dark' || chatShellMode === 'light') t = chatShellResolved === 'dark' ? 'dark' : 'light';
   else t = chatStoredTheme() || chatSystemTheme();
   document.body.classList.toggle('dark', t === 'dark');
   return t;
 }
 function chatOnShellTheme(resolved, mode) {
-  if (resolved === 'dark' || resolved === 'blue') chatShellResolved = resolved;
-  if (mode !== 'dark' && mode !== 'blue' && mode !== 'system') {
-    // 无 mode 的推送不改 mode、不重落主题：Windows console-preload 的
+  if (resolved === 'blue') resolved = 'light'; // 旧壳读兼容
+  if (mode === 'blue') mode = 'light';
+  if (resolved === 'dark' || resolved === 'light') chatShellResolved = resolved;
+  if (mode !== 'dark' && mode !== 'light' && mode !== 'system') {
+    // 无 mode 的推送不改 mode、不重落主题：旧 Windows console-preload 的
     // 'qf-theme-state' 通道只带 resolved、mode 恒为 null（cb(t, null)），
     // 旧代码照常重落，会把壳手动深色一次闪回本机偏好/系统浅色；同一次
     // 广播的 'qf-theme-mode' 随后会带 mode 纠正（P0-2 实测，2026-11-17）。
+    // A10（2026-11-18）已修 console-preload 不再发无 mode 推送，本分支
+    // 保留作旧壳防御。
     try { return document.body.classList.contains('dark') ? 'dark' : 'light'; } catch (e) { return 'light'; }
   }
   chatShellMode = mode;

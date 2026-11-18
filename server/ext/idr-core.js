@@ -8,10 +8,16 @@
  * 必须是“校验 + 鉴权 + 去重 + 限流 + 转发/合并 + 审计”。
  *
  * 规则（数值全部来自复核意见原文）：
- *   - 鉴权/绑定：只接受已登录且已绑定该 sessionId 的控制通道；
- *     服务端校验 sessionId 属于当前连接/用户/agent（绑定关系由
- *     调用方（server.js）传入，`boundSessions` 集合）；禁止客户
- *     端指定任意 sessionId。
+ *   - 鉴权/绑定（U3；GPT A4 裁决）：绑定只认调用方注入校验器验证过的身份——
+ *     createIdrGate({ verifyAgent })，verifyAgent(userId, agentId) 须由调用方
+ *     用服务端可信源实现（server.js 用 LEA 绑定台账：绑定存在、account_id
+ *     等于登录用户、state 为 ACTIVE）。未注入校验器，或校验未通过，bind()
+ *     一律拒绝建立绑定（返回 null）。每次 request() 重验绑定归属（换绑/解绑
+ *     后旧绑定立即失效，不等过期）。先到先得只发生在“同一 (sessionId, user,
+ *     agent)”之内：已存在的绑定不受后来 bind() 调用影响，request() 按绑定
+ *     的 userId/agentId 比对——伪造 agentId、冒用他人 sessionId 一律拒绝。
+ *     闲置过期：sweep(nowMs, idleMs) 丢弃长期无请求的绑定，过期后重建须重新
+ *     校验，不复活旧状态（seq/冷却清零）。
  *   - 字段校验：reason 白名单（loss/join/quality-change）；seq
  *     每会话单调递增，服务端维护重放窗口（只接受 seq > 已见最大
  *     seq，乱序/重放拒绝）。
@@ -43,8 +49,18 @@ const JOIN_GRACE_MS = 10000;
 
 function createIdrGate(deps) {
   const log = (deps && deps.log) || (() => {});
-  const sessions = new Map(); // sessionId -> { userId, agentId, maxSeq, bucket, tokensAt, lastForwardMsByReason, hardWindow:[], rejects, cooldownUntil, joinGraceUsed, createdAt }
+  // U3：agent 归属校验器（调用方注入，server.js 用 LEA 绑定台账实现）。
+  // 未注入时 bind 一律拒绝（fail-closed）——任何调用方都不得在不验证 agent
+  // 身份的情况下建立绑定。校验器抛错按未通过处理（不把异常当放行）。
+  const verifyAgent = (deps && typeof deps.verifyAgent === 'function') ? deps.verifyAgent : null;
+  const sessions = new Map(); // sessionId -> { userId, agentId, maxSeq, bucket, tokensAt, lastForwardMsByReason, hardWindow:[], rejects, cooldownUntil, joinGraceUsed, createdAt, lastSeenAt }
   const agents = new Map(); // agentId -> { tokens, tokensAt }
+
+  function agentVerified(userId, agentId) {
+    if (!verifyAgent) return false;
+    try { return verifyAgent(userId, agentId) === true; }
+    catch (e) { return false; }
+  }
 
   function refill(bucket, rate, burst, nowMs) {
     const elapsedSec = Math.max(0, (nowMs - bucket.at) / 1000);
@@ -53,15 +69,34 @@ function createIdrGate(deps) {
   }
 
   function bind(sessionId, userId, agentId, nowMs) {
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, {
-        userId, agentId, maxSeq: 0,
-        bucket: { tokens: SESSION_BURST, at: nowMs },
-        lastForwardMsByReason: {}, hardWindow: [],
-        rejects: 0, cooldownUntil: 0, joinGraceUsed: false, createdAt: nowMs,
-      });
+    if (sessions.has(sessionId)) return sessions.get(sessionId);
+    // 绑定只认已验证的身份：未注入校验器，或校验未通过，一律拒绝建立
+    // （返回 null，调用方按 AGENT_NOT_BOUND 拒绝）。已存在的绑定不受影响。
+    if (!agentVerified(userId, agentId)) {
+      log({ ev: 'idr-bind-refused', sessionId, agentId, hasVerifier: !!verifyAgent });
+      return null;
     }
+    sessions.set(sessionId, {
+      userId, agentId, maxSeq: 0,
+      bucket: { tokens: SESSION_BURST, at: nowMs },
+      lastForwardMsByReason: {}, hardWindow: [],
+      rejects: 0, cooldownUntil: 0, joinGraceUsed: false, createdAt: nowMs, lastSeenAt: nowMs,
+    });
     return sessions.get(sessionId);
+  }
+
+  // 闲置过期：丢弃 lastSeenAt 超过 idleMs 的绑定与 agent 令牌桶缓存。
+  // 过期后重建须重新走 bind 校验，不复活旧状态（seq/冷却清零）。
+  function sweep(nowMs, idleMs) {
+    let dropped = 0;
+    for (const [sid, st] of sessions) {
+      if (nowMs - (st.lastSeenAt || st.createdAt) > idleMs) { sessions.delete(sid); dropped++; }
+    }
+    for (const [aid, ab] of agents) {
+      if (nowMs - ab.at > idleMs) agents.delete(aid);
+    }
+    if (dropped) log({ ev: 'idr-sweep', dropped });
+    return dropped;
   }
 
   function request(input) {
@@ -73,6 +108,13 @@ function createIdrGate(deps) {
     const seq = Number(input.seq);
     const st = sessions.get(sessionId);
     if (!st) return { decision: 'rejected', code: 'NO_SESSION', msg: '会话未绑定。' };
+    st.lastSeenAt = nowMs;
+    // U3 撤权复核：每次请求重验绑定归属——设备换绑/解绑后旧绑定立即失效，
+    // 不等过期。校验失败不删绑定（校验器瞬时异常不摧毁 live 会话），只拒绝本次请求。
+    if (!agentVerified(st.userId, st.agentId)) {
+      log({ ev: 'idr-agent-reverify-failed', sessionId, agentId: st.agentId });
+      return { decision: 'rejected', code: 'AGENT_NOT_BOUND', msg: '设备归属校验未通过（可能已换绑或解绑）。' };
+    }
     if (st.userId !== userId || st.agentId !== agentId) {
       return { decision: 'rejected', code: 'NOT_BOUND', msg: '会话不属于当前用户/agent。' };
     }
@@ -135,7 +177,7 @@ function createIdrGate(deps) {
     return { decision: 'rejected', code, msg };
   }
 
-  return { bind, request, REASONS, COALESCE_MS };
+  return { bind, request, sweep, REASONS, COALESCE_MS };
 }
 
 module.exports = { createIdrGate };

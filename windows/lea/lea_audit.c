@@ -88,10 +88,13 @@ int lea_audit_append(const char *dir, const char *date_ymd,
     if (!lea_audit_format_line(ev, iso_ts, line, sizeof(line))) return 0;
     FILE *f = fopen(path, "a");
     if (!f) return 0;
-    fputs(line, f);
-    fputc('\n', f);
-    fclose(f);
-    return 1;
+    /* A7：审计落盘须可验证——fputs／fputc／fflush／fclose 任一失败
+     * 即返回失败（调用方据此 fail-closed）；fclose 只调一次。
+     * 旧实现全不检查返回值，磁盘满时审计静默丢失、调用方还以为已记。 */
+    int ok = (fputs(line, f) != EOF) && (fputc('\n', f) != EOF) &&
+             (fflush(f) == 0);
+    if (fclose(f) != 0) ok = 0;
+    return ok;
 }
 
 /* "YYYY-MM-DD" 转天数（Civil from Days 算法，Howard Hinnant 公共领域算法）。 */

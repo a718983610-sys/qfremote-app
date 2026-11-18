@@ -126,7 +126,7 @@ class SplashView extends StatelessWidget {
 }
 
 /// 整页断线友好页（与 Windows 版断线页同行为）：
-/// 白卡（深色 #22262E）＋「无法连接服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
+/// 白卡（深色 #111113，2026-11-18 黑白收口：旧 #22262E 已随服务端深色卡片一并收敛）＋「无法连接服务器，正在重试」＋倒计时＋立即重试，恢复自动回控制台。
 class OfflineView extends StatelessWidget {
   final QfPalette palette;
   final int secondsLeft;

@@ -45,11 +45,15 @@ const path = require('path');
 const crypto = require('crypto');
 // S-083：统一诊断事件禁键过滤（server/ext/qf-diagnostics.js）。
 // 加载失败时退化为本地同名实现（审计永不因模块缺失而停摆）。
+// U6：回退路径必须用与正本同一份禁键规则（server/ext/lea/forbidden-keys.js，
+// 与 qf-diagnostics.js 共用）。该文件亦不可用时直接抛错、拒绝启动 LEA——
+// 绝不用更宽松的过滤静默运行（GPT A4）；调用方（server.js）会把 LEA 置为
+// 不可用并记日志，审计不带弱过滤上线。
 let scrubForbiddenKeys;
 try {
   scrubForbiddenKeys = require('../qf-diagnostics').scrubForbiddenKeys;
 } catch (e) {
-  const _FORBIDDEN = new Set(['password', 'passwd', 'pwd', 'cookie', 'cookies', 'api_key', 'apikey', 'api-key', 'secret', 'private_key', 'privatekey', 'private-key', 'authorization', 'token', 'access_token', 'refresh_token', 'id_token', 'input', 'content', 'plaintext', 'plain_text', 'cipher', 'ciphertext', 'sessioncopy', 'session_copy', 'wrappedpriv', 'wrappedvault']);
+  const _FORBIDDEN = new Set(require('./forbidden-keys').FORBIDDEN_KEYS);
   scrubForbiddenKeys = (fields) => {
     const out = {};
     if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return out;
@@ -72,6 +76,18 @@ const ENVELOPE_FIELDS = new Set([
   'job_id', 'mode', 'deadline_ms', 'signature',
 ]);
 const TICKET_TTL_S = 24 * 3600;       // 绑定票据有效期 24h（规范串 v1 口径）
+// emergency_stop 专用恢复票据有效期 1h：操作员须完成两步恢复流程
+// （强认证→新绑定票据＋新 Key→恢复信封），5 分钟太紧；1h 封顶被盗
+// 票据的可用窗口，过期即作废、须重新申请。
+const RECOVERY_TICKET_TTL_S = 3600;
+// emergency_stop 恢复票据 MFA（GPT 2026-11-18 裁决 §三）：auth_context
+// 须为 password+<合格第二因素>@<验证完成时间>，方法仅限 totp／passkey
+// （Passkey 为后续项）；验证完成时间须在签发前 5 分钟内（允许 60 秒
+// 时钟偏差）。登录密码＋再次输入同一密码不构成 MFA，故 'password@...'
+// 与泛化的 'password+mfa@...' 一律拒绝。
+const RECOVERY_MFA_MAX_AGE_S = 300;
+const RECOVERY_MFA_SKEW_S = 60;
+const RECOVERY_MFA_METHODS = ['totp', 'passkey'];
 const REPLAY_WINDOW_MS = 10 * 60 * 1000; // 服务端 nonce 去重表保留 ≥10 分钟
 const TIMESTAMP_SKEW_S = 60;          // HTTP 头时间戳允许偏差（LEA 端 ±30s，服务端取 60s 上限）
 const DISPATCH_TIMEOUT_MS = 8000;     // B1：下发 8s（客户端 ACK 2s＋结果 6s＝8s 上限；
@@ -152,6 +168,24 @@ const COMMANDS = {
   // params 带两项签名参数（server_pubkey_fp＋protocol_version），
   // binding_epoch／grant_epoch 已是信封顶层签名覆盖字段。
   'sys.handshake': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 8000, tier: 0 },
+  // A7：本机改状态命令（tier 0 内联；设备端 QFRLEA.c handle_envelope
+  // 第 2 步内联分发 handle_lea_control_command，attempt／result 审计）。
+  // 管道直接调用已拒，改状态只能走已签名信封；正式撤销另走服务端
+  // 控制台 API（revokeKey／revokeAllKeys）。authorize-dangerous 与
+  // revoke-all-keys 标 dangerous（admit 凭此要求 muse.execute.dangerous，
+  // 否则普通 Key 能给自己提权／一键撤销全部 Key）；pause／resume／
+  // revoke-dangerous-consent 是 fail-safe 方向，不新增权限。
+  'lea.pause': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  'lea.resume': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  'lea.revoke-all-keys': { scope: 'muse.execute.dangerous', dangerous: true, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  'lea.authorize-dangerous': { scope: 'muse.execute.dangerous', dangerous: true, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  'lea.revoke-dangerous-consent': { scope: 'muse.execute', dangerous: false, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
+  // emergency_stop 专用恢复票据命令（GPT 2026-11-18 裁决问题 3；tier 0
+  // 内联，设备端 QFRLEA.c handle_envelope 第 2 步内联分发
+  // handle_emergency_stop_recover，绕过 4.4 停控门）。标 dangerous、
+  // scope muse.execute.dangerous：普通 Key 发恢复信封会被 admit 的
+  // scope 门拒绝，恢复 Key 须由服务端在步骤 1 随新绑定票据一并签发。
+  'emergency_stop.recover': { scope: 'muse.execute.dangerous', dangerous: true, timeoutMs: 5000, maxTimeoutMs: 5000, tier: 0 },
 };
 const DANGEROUS_SCOPE = 'muse.execute.dangerous';
 
@@ -172,6 +206,7 @@ const ERR = {
   NOT_WHITELISTED: 'QFR_DEVICE_NOT_WHITELISTED', // 403：设备不在白名单（H04，DESIGN §6.2 第 ② 项）
   QUEUE_FULL: 'QFR_QUEUE_FULL', // 503：队列满（本版服务端不排队，仅透传 LEA 端此码）
   HANDSHAKE_REQUIRED: 'QFR_LEA_HANDSHAKE_REQUIRED', // 403：设备端握手未完成（RC-01），业务命令拒绝投递
+  EMERGENCY_STOPPED: 'QFR_LEA_EMERGENCY_STOPPED', // 403：设备已紧急停控，须用专用恢复票据恢复后才能继续操作（admit 门；只读内联命令与 emergency_stop.recover 除外）
   VALIDATION: 'VALIDATION', // 400
 };
 
@@ -230,6 +265,16 @@ function createLeaCore(opts) {
   // 同一把设备私钥签名，验签不过仍拒绝，不留存在性预言口子；不存
   // 任何 Key 明文／哈希／grant，重新绑定时由 recordBinding 清掉。
   const DEREGISTERED_FILE = path.join(dir, 'deregistered.json');
+  // emergency_stop 服务端停控记录（emergency-stops.json）：域外防回滚
+  // 锚点——设备本地标记文件被旧备份覆盖／删除时，服务端记录仍为已停控，
+  // admit 拒绝新授权，设备须重新停控。记录只增状态、不删除（恢复后
+  // stopped=false 保留历史，供审计与代次判定）。
+  const EMERGENCY_STOPS_FILE = path.join(dir, 'emergency-stops.json');
+  // 专用恢复票据已用记录（recovery-tickets-used.json）：按 ticket_id
+  // 记 status（consumed_pending_clear／recovered）＋recovery_epoch，
+  // 供签发时代次判定与恢复结果查询。票据明文（签名）不落盘，只存
+  // ticket_id 与元数据。
+  const RECOVERY_TICKETS_FILE = path.join(dir, 'recovery-tickets-used.json');
 
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
 
@@ -280,6 +325,10 @@ function createLeaCore(opts) {
   function saveReconnectTickets(s) { writeJsonAtomic(RECONNECT_TICKETS_FILE, s); }
   function loadDeregistered() { return readJson(DEREGISTERED_FILE, { devices: {} }); }
   function saveDeregistered(s) { writeJsonAtomic(DEREGISTERED_FILE, s); }
+  function loadEmergencyStops() { return readJson(EMERGENCY_STOPS_FILE, { stops: {} }); }
+  function saveEmergencyStops(s) { writeJsonAtomic(EMERGENCY_STOPS_FILE, s); }
+  function loadRecoveryTickets() { return readJson(RECOVERY_TICKETS_FILE, { tickets: {} }); }
+  function saveRecoveryTickets(s) { writeJsonAtomic(RECOVERY_TICKETS_FILE, s); }
 
   // ---------- 崩溃上报接收（CRASH-REPORT-SPEC.md；匿名接收＋强防护） ----------
   // 报告只含技术信息（版本号／系统版本／模块／堆栈），不含账号／密码／
@@ -920,6 +969,318 @@ function createLeaCore(opts) {
     return signTicket(ticket);
   }
 
+  // ---------- emergency_stop 专用恢复票据（GPT 2026-11-18 裁决问题 3） ----------
+  // 规范串 13 行 \n 连接（头部＋12 字段），须与 C 端
+  // lea_recovery_ticket_canonical 逐行一致（顺序：头部、type、
+  // account_id、device_id、stop_event_id、binding_epoch、grant_epoch、
+  // recovery_epoch、scope、ticket_id、issued_at、expires_at、auth_context）。
+  // scope 只允许 [A-Za-z0-9_.-] 单 token 或空串；auth_context 只验
+  // 存在性＋签名覆盖，不解析语义（服务端强认证结果原文由路由层记
+  // 审计，票据里只带其摘要——设备端审计不记明文）。
+  function recoveryTicketSigningBytes(t) {
+    if (t.type !== 'emergency_stop_recovery') throw new Error('LEA recovery ticket type invalid');
+    checkIdField(t.account_id, 'account_id');
+    checkIdField(t.device_id, 'device_id');
+    checkIdField(t.stop_event_id, 'stop_event_id');
+    checkIdField(t.ticket_id, 'ticket_id');
+    for (const [name, v] of [['binding_epoch', t.binding_epoch], ['grant_epoch', t.grant_epoch], ['recovery_epoch', t.recovery_epoch], ['issued_at', t.issued_at], ['expires_at', t.expires_at]]) {
+      if (!Number.isSafeInteger(v)) throw new Error('LEA recovery ticket field invalid: ' + name);
+    }
+    if (typeof t.scope !== 'string') throw new Error('LEA recovery ticket scope not a string');
+    checkCanonicalString(t.scope, 'scope');
+    if (t.scope !== '' && !/^[A-Za-z0-9_.-]+$/.test(t.scope)) throw new Error('LEA recovery ticket scope invalid');
+    if (typeof t.auth_context !== 'string') throw new Error('LEA recovery ticket auth_context not a string');
+    checkCanonicalString(t.auth_context, 'auth_context');
+    return [
+      'qfr-lea-recovery-ticket-v1',
+      'emergency_stop_recovery',
+      String(t.account_id),
+      String(t.device_id),
+      String(t.stop_event_id),
+      String(t.binding_epoch),
+      String(t.grant_epoch),
+      String(t.recovery_epoch),
+      t.scope,
+      String(t.ticket_id),
+      String(t.issued_at),
+      String(t.expires_at),
+      t.auth_context,
+    ].join('\n');
+  }
+  function signRecoveryTicket(ticket) {
+    // F-04 同款：签名能力关闭时直接拒，不签无密钥票据。
+    if (signing.mode === 'disabled' || !signing.privateKey) throw new Error('LEA signing disabled: no signing key configured (signing_mode=' + signing.mode + ')');
+    const sig = crypto.sign(null, Buffer.from(recoveryTicketSigningBytes(ticket), 'utf8'), signing.privateKey);
+    return Object.assign({}, ticket, { ticket_signature: sig.toString('base64') });
+  }
+  function verifyRecoveryTicket(ticket, publicKeyBase64) {
+    try {
+      if (!ticket || !ticket.ticket_signature) return false;
+      if (ticket.type !== 'emergency_stop_recovery') return false;
+      const pubJwk = { kty: 'OKP', crv: 'Ed25519', x: publicKeyBase64 || signing.publicKeyBase64 };
+      const pub = crypto.createPublicKey({ key: pubJwk, format: 'jwk' });
+      return crypto.verify(null, Buffer.from(recoveryTicketSigningBytes(ticket), 'utf8'), pub,
+        Buffer.from(String(ticket.ticket_signature), 'base64'));
+    } catch (e) { return false; }
+  }
+  // 已用恢复票据记录（服务端镜像，状态与设备端 recovery-tickets-used.jsonl
+  // 同义；设备端记录为准，服务端记录供签发时代次判定与恢复结果查询）。
+  // 票据签名明文不落盘、不进日志，只存 ticket_id 与元数据。
+  // 已 recovered 的记录永不降级回 consumed_pending_clear（重放同一票据
+  // 下发时不改状态）。
+  function recordRecoveryTicketUsed(ticket, status) {
+    const st = loadRecoveryTickets();
+    const prev = st.tickets[ticket.ticket_id];
+    if (prev && prev.status === 'recovered' && status !== 'recovered') return prev;
+    st.tickets[ticket.ticket_id] = {
+      ticket_id: ticket.ticket_id,
+      stop_event_id: ticket.stop_event_id,
+      account_id: ticket.account_id,
+      device_id: ticket.device_id,
+      recovery_epoch: ticket.recovery_epoch,
+      used_at: now(),
+      status: status || 'consumed_pending_clear',
+    };
+    saveRecoveryTickets(st);
+    return st.tickets[ticket.ticket_id];
+  }
+  function markRecoveryTicketRecovered(ticketId) {
+    const st = loadRecoveryTickets();
+    const rec = st.tickets[String(ticketId)];
+    if (!rec) return null;
+    rec.status = 'recovered';
+    saveRecoveryTickets(st);
+    return rec;
+  }
+  function getRecoveryTicket(ticketId) {
+    const st = loadRecoveryTickets();
+    return st.tickets[String(ticketId)] || null;
+  }
+  function recoveryMaxEpoch(accountId, deviceId) {
+    const stop = getEmergencyStop(accountId, deviceId);
+    let m = (stop && stop.last_recovery_epoch) || 0;
+    const st = loadRecoveryTickets();
+    for (const rec of Object.values(st.tickets || {})) {
+      if (rec && rec.account_id === String(accountId) &&
+          bareNodeId(rec.device_id) === bareNodeId(String(deviceId)) &&
+          Number.isSafeInteger(rec.recovery_epoch) && rec.recovery_epoch > m) {
+        m = rec.recovery_epoch;
+      }
+    }
+    return m;
+  }
+  // 签发专用恢复票据。调用方（路由层）须先完成服务端强认证（控制台
+  // 会话＋密码二次确认＋全员强制 MFA，见 lea-routes handleRecoveryTicket
+  // 与 mfa-core），把认证结果摘要当 auth_context 传入；本函数除验停控
+  // 记录与代次外，另验 auth_context 本身：方法须为合格第二因素
+  // （totp／passkey），验证完成时间须在签发前 5 分钟内——路由层被绕过
+  // 时此处仍拒绝只凭密码的签发。恢复流程两步：
+  // ①服务端签发新绑定票据＋新 Key（binding.confirm 激活，停控保留；
+  // 旧 Key 保持吊销，永不复活）；②凭本票据发 emergency_stop.recover
+  // 信封。recovery_epoch 由本函数铸造（已见最大代次＋1），调用方不得
+  // 自选代次；已见最大＝停控记录的 last_recovery_epoch 与已用票据
+  // 记录的大者。
+  function issueRecoveryTicket(input) {
+    const accountId = String(input.accountId || '');
+    const deviceId = bareNodeId(String(input.deviceId || ''));
+    if (!accountId || !deviceId) { const e = new Error('account_id and device_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    const stop = getEmergencyStop(accountId, deviceId);
+    if (!stop || !stop.stopped) {
+      const e = new Error('no active emergency stop for this device');
+      e.code = 'QFR_LEA_NO_ACTIVE_EMERGENCY_STOP'; throw e;
+    }
+    if (String(stop.stop_event_id) !== String(input.stopEventId || '')) {
+      const e = new Error('stop_event_id mismatch'); e.code = 'QFR_VALIDATION'; throw e;
+    }
+    // MFA 强校验（GPT 2026-11-18 裁决 §三）：auth_context 须为
+    // password+<totp|passkey>@<verified_at>，且 verified_at 在签发前
+    // 5 分钟内（允许 60 秒时钟偏差）。只凭密码（'password@...'）或
+    // 泛化表述（'password+mfa@...'）一律拒绝——登录密码＋再次输入
+    // 同一密码不构成 MFA。
+    const m = /^password\+([A-Za-z0-9_.-]+)@(\d+)$/.exec(String(input.authContext || ''));
+    if (!m || RECOVERY_MFA_METHODS.indexOf(m[1]) === -1) {
+      const e = new Error('recovery ticket requires a qualified second-factor verification (totp/passkey)');
+      e.code = 'QFR_VALIDATION'; throw e;
+    }
+    const verifiedAt = Number(m[2]);
+    if (!Number.isSafeInteger(verifiedAt) ||
+        verifiedAt < nowSec() - RECOVERY_MFA_MAX_AGE_S ||
+        verifiedAt > nowSec() + RECOVERY_MFA_SKEW_S) {
+      const e = new Error('MFA verification expired (must be within 5 minutes)');
+      e.code = 'QFR_VALIDATION'; throw e;
+    }
+    // recovery_epoch 由服务端铸造：已见最大代次＋1（已见最大＝停控记录
+    // 的 last_recovery_epoch 与已用票据记录的大者；已用记录含下发时
+    // 记为 consumed_pending_clear 的票据，故上次尝试未完成时下一次
+    // 自动取更高代次，不会原地打转）。调用方不得自选代次。
+    const recoveryEpoch = recoveryMaxEpoch(accountId, deviceId) + 1;
+    const binding = getBinding(deviceId);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== accountId) {
+      const e = new Error('device is not bound to this account');
+      e.code = 'QFR_LEA_NOT_BOUND'; throw e;
+    }
+    const ticket = {
+      type: 'emergency_stop_recovery',
+      account_id: accountId,
+      device_id: deviceId,
+      stop_event_id: String(input.stopEventId),
+      binding_epoch: binding.binding_epoch,
+      grant_epoch: input.grantEpoch,
+      recovery_epoch: recoveryEpoch,
+      scope: String(input.scope || ''),
+      ticket_id: 'rtk-' + crypto.randomBytes(16).toString('hex'),
+      issued_at: nowSec(),
+      expires_at: nowSec() + (Number.isSafeInteger(input.ttlSec) && input.ttlSec > 0 ? input.ttlSec : RECOVERY_TICKET_TTL_S),
+      auth_context: String(input.authContext || ''),
+    };
+    const signed = signRecoveryTicket(ticket);
+    audit('lea-recovery-ticket-issued', {
+      account_id: accountId, device_id: deviceId,
+      stop_event_id: ticket.stop_event_id, ticket_id: ticket.ticket_id,
+      recovery_epoch: ticket.recovery_epoch, binding_epoch: ticket.binding_epoch,
+      grant_epoch: ticket.grant_epoch, expires_at: ticket.expires_at,
+      auth_context: ticket.auth_context,
+    });
+    return signed;
+  }
+
+  // ---------- emergency_stop 服务端停控记录（域外防回滚锚点） ----------
+  function emergencyStopKey(accountId, deviceId) {
+    return String(accountId) + '|' + bareNodeId(String(deviceId));
+  }
+  function getEmergencyStop(accountId, deviceId) {
+    const st = loadEmergencyStops();
+    return st.stops[emergencyStopKey(accountId, deviceId)] || null;
+  }
+  function recordEmergencyStop(input) {
+    const accountId = String(input.accountId || '');
+    const deviceId = bareNodeId(String(input.deviceId || ''));
+    if (!accountId || !deviceId) { const e = new Error('account_id and device_id required'); e.code = 'QFR_VALIDATION'; throw e; }
+    const st = loadEmergencyStops();
+    const key = emergencyStopKey(accountId, deviceId);
+    const prev = st.stops[key] || {};
+    const rec = {
+      account_id: accountId,
+      device_id: deviceId,
+      stop_event_id: String(input.stopEventId || ''),
+      stop_seq: Number.isSafeInteger(input.stopSeq) ? input.stopSeq : 0,
+      scope: String(input.scope || 'device-control'),
+      binding_epoch: Number.isSafeInteger(input.bindingEpoch) ? input.bindingEpoch : 0,
+      grant_epoch: Number.isSafeInteger(input.grantEpoch) ? input.grantEpoch : 0,
+      stopped_at: Number.isSafeInteger(input.stoppedAt) ? input.stoppedAt : nowSec(),
+      stopped: true,
+      sync_status: 'synced',
+      synced_at: nowSec(),
+      last_recovery_epoch: prev.last_recovery_epoch || 0,
+      recovered_at: null,
+      cleared_by_ticket_id: null,
+    };
+    st.stops[key] = rec;
+    saveEmergencyStops(st);
+    audit('lea-emergency-stop-recorded', {
+      account_id: accountId, device_id: deviceId,
+      stop_event_id: rec.stop_event_id, stop_seq: rec.stop_seq,
+      binding_epoch: rec.binding_epoch, grant_epoch: rec.grant_epoch,
+    });
+    return rec;
+  }
+  function clearEmergencyStopRecord(accountId, deviceId, ticketId, recoveryEpoch) {
+    const st = loadEmergencyStops();
+    const key = emergencyStopKey(accountId, deviceId);
+    const rec = st.stops[key];
+    if (!rec || !rec.stopped) return null;
+    rec.stopped = false;
+    rec.recovered_at = nowSec();
+    rec.cleared_by_ticket_id = String(ticketId);
+    rec.last_recovery_epoch = recoveryEpoch;
+    saveEmergencyStops(st);
+    audit('lea-emergency-stop-cleared', {
+      account_id: String(accountId), device_id: bareNodeId(String(deviceId)),
+      stop_event_id: rec.stop_event_id, ticket_id: String(ticketId),
+      recovery_epoch: recoveryEpoch,
+    });
+    return rec;
+  }
+  // 同步回执规范串（须与 C 端 lea_emergency_stop_sync_canonical 逐行一致）：
+  // 头部 qfr-lea-emergency-stop-sync-v1，之后 4 行。
+  function emergencyStopSyncSigningBytes(r) {
+    checkIdField(r.stop_event_id, 'stop_event_id');
+    checkIdField(r.account_id, 'account_id');
+    checkIdField(r.device_id, 'device_id');
+    if (!Number.isSafeInteger(r.synced_at) || r.synced_at <= 0) throw new Error('LEA sync receipt field invalid: synced_at');
+    return [
+      'qfr-lea-emergency-stop-sync-v1',
+      String(r.stop_event_id),
+      String(r.account_id),
+      String(r.device_id),
+      String(r.synced_at),
+    ].join('\n');
+  }
+  // 联网后同步：设备上报停控事件 → 服务端记录停控（域外锚点）→ 按
+  // device_scope 逐个吊销该设备全部 Key → 返回服务端签名回执。
+  // revokeAllKeys 是全账号吊销，不可用于设备级停控同步（会误伤同账号
+  // 其他设备），此处逐个 revokeKey。旧 Key 服务端保持吊销，永不复活。
+  function emergencyStopSync(input) {
+    const rec = recordEmergencyStop(input);
+    const st = loadKeys();
+    const revokedIds = [];
+    for (const k of st.keys) {
+      if (k.account_id === String(input.accountId) && !k.revoked_at &&
+          k.device_scope && bareNodeId(k.device_scope) === bareNodeId(String(input.deviceId))) {
+        const r = revokeKey(k.key_id, String(input.accountId), 'emergency-stop-sync');
+        if (r.ok) revokedIds.push(k.key_id);
+      }
+    }
+    const syncedAt = nowSec();
+    const receipt = {
+      stop_event_id: rec.stop_event_id,
+      account_id: rec.account_id,
+      device_id: rec.device_id,
+      synced_at: syncedAt,
+    };
+    if (signing.mode === 'disabled' || !signing.privateKey) throw new Error('LEA signing disabled: no signing key configured (signing_mode=' + signing.mode + ')');
+    const sig = crypto.sign(null, Buffer.from(emergencyStopSyncSigningBytes(receipt), 'utf8'), signing.privateKey);
+    receipt.signature = sig.toString('base64');
+    audit('lea-emergency-stop-synced', {
+      account_id: rec.account_id, device_id: rec.device_id,
+      stop_event_id: rec.stop_event_id, revoked_key_ids: revokedIds,
+    });
+    return { receipt, revoked_key_ids: revokedIds };
+  }
+
+  // ---------- 吊销快照签名（A7-whitelist，GPT 问题 2：验证服务端授权来源） ----------
+  // 规范串与 C 端 lea_revoked_snapshot_canonical（windows/lea/lea_protocol.c）同款：
+  //   <tag>\n<device_id>\n<generation>\n<sha256hex(排序去重后 key_ids 以 \n 连接)>
+  // tag：qfr-lea-revoked-sync-v1（keys.sync-revoked，经 rebind 回包转发）、
+  //      qfr-lea-key-revoked-v1（lea.key_revoked，经 MeshCentral 通道下发）。
+  // 只签权威台账快照（getRevocations），永不签客户端自报的 key_ids／generation／
+  // device_id——否则签名只证明“服务端签过”，不证明“服务端授权该吊销”。
+  // device_id 一律裸形（与 C 端本机绑定同口径）；generation 由台账单调递增，
+  // 不接受客户端自报；key_ids 排序去重后入串（C 端收到乱序／重复即拒绝入串）。
+  // 空集合法：sha256("")，语义是并集合并下的无操作＋世代推进，永不缩表。
+  // 与票据／信封同一把 Ed25519 密钥；域名行不同故跨协议签名不可互用。
+  const REVOKED_TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
+  function revokedSnapshotSigningBytes(kind, deviceId, generation, keyIds) {
+    const tag = kind === 'key-revoked' ? 'qfr-lea-key-revoked-v1' : 'qfr-lea-revoked-sync-v1';
+    checkIdField(deviceId, 'device_id');
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('LEA revoked snapshot generation invalid');
+    const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
+    for (const id of ids) if (!REVOKED_TOKEN_RE.test(id)) throw new Error('LEA revoked snapshot key_id invalid');
+    const listHash = crypto.createHash('sha256').update(ids.join('\n'), 'utf8').digest('hex');
+    return [tag, String(deviceId), String(generation), listHash].join('\n');
+  }
+  function signRevokedSnapshot(kind, deviceId, generation, keyIds) {
+    // F-04 同款：签名能力关闭（disabled）时直接拒，不签无密钥快照。
+    if (signing.mode === 'disabled' || !signing.privateKey) throw new Error('LEA signing disabled: no signing key configured (signing_mode=' + signing.mode + ')');
+    const sig = crypto.sign(null, Buffer.from(revokedSnapshotSigningBytes(kind, deviceId, generation, keyIds), 'utf8'), signing.privateKey);
+    return sig.toString('base64');
+  }
+  // rebind 回包用的 sync 签名：只签当前权威快照（getRevocations）。
+  function signRevokedSync(deviceId) {
+    const snap = getRevocations(deviceId);
+    return signRevokedSnapshot('sync', bareNodeId(deviceId), snap.generation, snap.revoked_key_ids);
+  }
+
   // ---------- 防重放 / 幂等（内存去重表，DESIGN §4.1/§4.2） ----------
   // nonce：按 key_id 分桶，保留 10 分钟；idempotency：按 (account,key,键)
   // 记结果，保留 7 天（危险命令 30 天——本版统一 30 天，宁严勿松）。
@@ -1101,6 +1462,56 @@ function createLeaCore(opts) {
     if (k.expires_at && now() > k.expires_at) return 'expired';
     return 'active';
   }
+  // D2-K1：造 Key 的归属校验（GPT D1＋D2 最后两项裁决 ④）。显式 device_scope
+  // 与自动取唯一设备走同一套 Core 校验；直接调 generateKey 的旁路同样受
+  // 此限（路由层不得是唯一防线）。
+  // 设备 id 格式：归一后非空、不含空白／控制字符。真实 MeshCentral 节点 id
+  // 与测试 id 均满足；含换行／空白的 id 不可能是真实设备 id（此前
+  // attestation 测试用 'node//a\nb' 作“不存在设备”的探针——造 Key 路径上
+  // 此类 id 一律 400，不进入归属判定）。
+  function isValidDeviceIdFormat(deviceId) {
+    const bare = bareNodeId(String(deviceId || ''));
+    return bare.length > 0 && !/[\s\x00-\x1f\x7f]/.test(bare);
+  }
+  // 归属权威＝绑定台账（getBinding）：造 Key 发生在绑定之后（DC-A-1 已要
+  // 求先绑定），台账即归属的权威来源；MeshCentral 可见性是运行时视图，
+  // 造 Key 不依赖它——设备离线不得因此拒绝合法拥有者，MeshCentral 故障
+  // 也不得阻塞造 Key（使用时由 admit() 重新验证绑定、授权和代次，并由
+  // 执行通道检查设备当前可执行状态；nodeOnline() 本身不证明该账户具有
+  // MeshCentral 节点可见权限）。拒绝时抛
+  // 带 code 的错，路由层按码转 HTTP 状态；对外文案一律不透露设备属于谁、
+  // 不区分“不存在”与“非本人设备”（防存在性预言）：
+  //   无绑定／绑他人／状态非 ACTIVE（非 PENDING）→ QFR_SCOPE_DENIED（403）
+  //   绑本人但状态 PENDING → QFR_LEA_BINDING_PENDING（409；仅当请求方确
+  //     有权查看该绑定状态时才返回——此处调用方即绑定账号本人）
+  //   设备 id 格式非法 → VALIDATION（400）
+  //   归属台账读取本身抛错 → QFR_VISIBILITY_UNAVAILABLE（503，fail-closed）
+  function validateKeyDeviceOwnership(accountId, deviceId) {
+    if (!isValidDeviceIdFormat(deviceId)) {
+      const e = new Error('LEA device_id format invalid');
+      e.code = ERR.VALIDATION; e.reason = 'device-id-format'; throw e;
+    }
+    let binding;
+    try {
+      binding = getBinding(deviceId);
+    } catch (e) {
+      const err = new Error('LEA ownership authority unavailable');
+      err.code = 'QFR_VISIBILITY_UNAVAILABLE'; err.reason = 'ownership-authority-unavailable'; throw err;
+    }
+    if (!binding || binding.account_id !== String(accountId)) {
+      const e = new Error('LEA device not bound to this account');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
+    if (binding.state === 'PENDING') {
+      const e = new Error('LEA device binding pending confirmation');
+      e.code = ERR.BINDING_PENDING; e.reason = 'binding-pending'; throw e;
+    }
+    if (binding.state !== 'ACTIVE') {
+      const e = new Error('LEA device binding not active');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
+    return { binding, binding_epoch: binding.binding_epoch };
+  }
   function generateKey(accountId, optsGen) {
     optsGen = optsGen || {};
     // H06：生成 Key 须已有 muse.execute 授权；dangerous scope 须站长另授
@@ -1114,7 +1525,7 @@ function createLeaCore(opts) {
     const wantScopes = Array.isArray(optsGen.scopes) && optsGen.scopes.length ? optsGen.scopes : ['muse.execute'];
     if (wantScopes.includes(DANGEROUS_SCOPE) && !hasDangerousGrant(accountId)) {
       const e = new Error('LEA dangerous scope requires station-admin approval');
-      e.code = 'QFR_SCOPE_DENIED'; throw e;
+      e.code = 'QFR_SCOPE_DENIED'; e.reason = 'dangerous-scope'; throw e;
     }
     // DC-A-1：device_scope 为空时不得再发 binding_epoch 0 的死钥——
     // 控制台 UI 生成 Key 从不传 device_id，此前发出的 Key 表面 active、
@@ -1134,6 +1545,8 @@ function createLeaCore(opts) {
         throw e;
       }
     }
+    // D2-K1：显式 scope 与自动取设备走同一套归属校验（见 validateKeyDeviceOwnership）。
+    const ownership = validateKeyDeviceOwnership(String(accountId), deviceScope);
     const plain = KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
     const salt = crypto.randomBytes(16).toString('hex');
     const st = loadKeys();
@@ -1150,7 +1563,9 @@ function createLeaCore(opts) {
       account_id: String(accountId),
       device_scope: deviceScope, // DC-A-1：恒有值（显式传参或恰绑 1 台自动取），不再发 device_scope=null 的死钥
       scopes: wantScopes,
-      binding_epoch: currentBindingEpoch(deviceScope, String(accountId)),
+      // D2-K1：代次取自校验时新读的绑定记录，不再用“查不到即 0”的旧口径
+      // （旧口径会给他人设备盖 epoch 0，造出表面可用、准入恒拒的 Key）。
+      binding_epoch: ownership.binding_epoch,
       // T07/D1：Key 盖上生成时账号授权的 grant_epoch；admit 比对，授权撤销
       // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。H06 已保证生成
       // 时必有在效授权，故此处 grant_epoch 恒 ≥1。
@@ -1165,6 +1580,16 @@ function createLeaCore(opts) {
       self_bind: !!optsGen.self_bind,
     };
     if (optsGen.expires_in_days) rec.expires_at = now() + Math.floor(optsGen.expires_in_days) * 24 * 3600 * 1000;
+    // D2-K1：提交前复核——校验与写入之间若绑定已变（换绑／状态变更），不得
+    // 按旧代次发 Key。Node 单线程内 generateKey 同步执行，本次调用内无交错
+    // 窗口；此处复核是结构性防线（防后续异步重构引入窗口），与 admit ③ 的
+    // 使用阶段复核形成两层。复核失败时不写台账、不记生成审计、不返回明文。
+    const finalBinding = getBinding(deviceScope);
+    if (!finalBinding || finalBinding.account_id !== String(accountId)
+      || finalBinding.state !== 'ACTIVE' || finalBinding.binding_epoch !== rec.binding_epoch) {
+      const e = new Error('LEA device binding changed during key issuance');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
     st.keys.push(rec);
     saveKeys(st);
     audit('lea-key-generated', {
@@ -1305,6 +1730,47 @@ function createLeaCore(opts) {
       ticket_hash: sha256Hex(ticket).slice(0, 16), expires_at: expiresAt,
     });
     return { ticket, challenge, expires_at: expiresAt, ttl_s: SELFBIND_TICKET_TTL_S };
+  }
+  // 登录证明（v3 P0-4 第二层，B3 主方案）：服务端签发、Ed25519 签名，
+  // 供 Windows 客户端随 session.login_changed 发给本机 QFRLEA 服务验签。
+  // 规范串（与 C lea_login_proof_canonical 逐字节一致）：
+  //   qfr-lea-login-v1\n<key_id>\n<account_id>\n<device_id>\n<issued_at>\n<expires_at>
+  // key_id = 服务端公钥指纹前 16 hex（signingPublicKeyFingerprint，与 C
+  // lea_server_pubkey_fingerprint 同定义）。账号恒等于控制台会话认证
+  // 账号（路由层取 a.user），无站长代签口子；设备可见性校验在路由层复
+  // 用 rebind 的①②（节点可见性＋节点存在性），不做已绑他人检查（证明
+  // ≠绑定，绑定决策仍在 rebind——登录事件发生在绑定之前，绑 ACTIVE
+  // 才能签证明是鸡生蛋）。TTL 120 秒；签名能力非 real 时 503 拒绝
+  // （不签无密钥证明）。无 nonce／jti：120 秒 TTL＋本机重放集合兜底，
+  // challenge-response 列 3.1 后续。
+  const LEA_LOGIN_PROOF_TTL_S = 120;
+  const LEA_LOGIN_PROOF_VERSION = 'qfr-lea-login-v1';
+  function issueLoginAttestation(accountId, deviceId) {
+    accountId = String(accountId || '');
+    deviceId = bareNodeId(String(deviceId || ''));
+    checkIdField(accountId, 'account_id');
+    checkIdField(deviceId, 'device_id');
+    if (signing.mode !== 'real' || !signing.privateKey) {
+      const e = new Error('LEA signing disabled: no signing key configured');
+      e.code = 'QFR_SIGNING_UNAVAILABLE'; throw e;
+    }
+    const keyId = signingPublicKeyFingerprint();
+    if (!keyId) {
+      const e = new Error('LEA signing public key unavailable');
+      e.code = 'QFR_SIGNING_UNAVAILABLE'; throw e;
+    }
+    const issuedAt = nowSec();
+    const expiresAt = issuedAt + LEA_LOGIN_PROOF_TTL_S;
+    const canonical = [LEA_LOGIN_PROOF_VERSION, keyId, accountId, deviceId,
+                       String(issuedAt), String(expiresAt)].join('\n');
+    const signature = crypto.sign(null, Buffer.from(canonical, 'utf8'), signing.privateKey).toString('base64url');
+    audit('lea-login-attestation-issued', {
+      account_id: accountId, device_id: deviceId, key_id: keyId,
+      issued_at: issuedAt, expires_at: expiresAt,
+    });
+    return { version: LEA_LOGIN_PROOF_VERSION, key_id: keyId,
+             account_id: accountId, device_id: deviceId,
+             issued_at: issuedAt, expires_at: expiresAt, signature };
   }
   // 自助完成规范串 v1（与信封 v1 隔离，独立版本）：
   //   qfr-lea-selfbind-v1\n<account_id>\n<device_id>\n<ticket>\n<challenge>
@@ -2053,11 +2519,6 @@ function createLeaCore(opts) {
   function getBinding(deviceId) {
     return loadBindings().bindings[bareNodeId(deviceId)] || null;
   }
-  function currentBindingEpoch(deviceId, accountId) {
-    const b = deviceId ? getBinding(deviceId) : null;
-    if (b && b.account_id === String(accountId)) return b.binding_epoch;
-    return 0;
-  }
   // T07：生成 Key 时盖上的授权代次（无授权记录时为 0）。
   function currentGrantEpoch(accountId) {
     const g = getGrant(accountId);
@@ -2345,12 +2806,18 @@ function createLeaCore(opts) {
   }
   // 踢出命令（runcommands 字符串）：qf-lea-client.exe --internal-b64 <base64>。
   // base64 字母表对 cmd.exe 安全（dispatch <b64> 同款形态）；不用 --internal
-  // 裸 JSON（JSON 内双引号会被 cmd.exe 截断）。设备端收到后：先把 key_ids
-  // 并集合并进本机吊销表，再清掉该 Key 的排队命令、强杀活动 job（见 QFRLEA.c）。
-  function leaKeyRevokedCmd(keyIds) {
+  // 裸 JSON（JSON 内双引号会被 cmd.exe 截断）。设备端收到后：先验踢出签名
+  // （标签 qfr-lea-key-revoked-v1）＋代次，再把 key_ids 并集合并进本机吊
+  // 销表，然后清掉该 Key 的排队命令、强杀活动 job（见 QFRLEA.c）。
+  // A7-whitelist：generation 与 kick_signature 必传——C 端缺签／错签／缺
+  // 代次整单拒绝。签名只覆盖本次下发的 (device_id, generation, key_ids)，
+  // 由调用点从权威台账取 generation（getRevocations），不由客户端自报。
+  function leaKeyRevokedCmd(keyIds, deviceId, generation) {
     const ids = [...new Set((keyIds || []).filter((x) => typeof x === 'string' && x))].sort();
     if (!ids.length) throw new Error('leaKeyRevokedCmd: keyIds required');
-    const json = JSON.stringify({ cmd: 'lea.key_revoked', key_ids: ids });
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('leaKeyRevokedCmd: generation required');
+    const kickSignature = signRevokedSnapshot('key-revoked', bareNodeId(deviceId), generation, ids);
+    const json = JSON.stringify({ cmd: 'lea.key_revoked', key_ids: ids, generation, kick_signature: kickSignature });
     const b64 = Buffer.from(json, 'utf8').toString('base64');
     return LEA_CLIENT_EXE + ' --internal-b64 ' + b64;
   }
@@ -2385,7 +2852,10 @@ function createLeaCore(opts) {
         if (Date.now() < deadline) {
           try {
             const remain = Math.max(0, Math.min(KICK_PER_DEVICE_MS, deadline - Date.now()));
-            const out = await channel.runCommand(d, leaKeyRevokedCmd(keyIds), remain);
+            // A7-whitelist：踢出命令带权威台账代次（getRevocations 现取）
+            // ＋签名；签发失败即本台 kick 失败（admit 与 H21 推送不受影响）。
+            const kickGen = getRevocations(d).generation;
+            const out = await channel.runCommand(d, leaKeyRevokedCmd(keyIds, d, kickGen), remain);
             kick = (typeof out === 'string' && out.includes('"ok":true')) ? 'ok' : 'unexpected-output';
           } catch (e) { kick = 'failed:' + String(e && e.message).slice(0, 80); }
         } else { kick = 'skipped-budget'; }
@@ -2453,6 +2923,22 @@ function createLeaCore(opts) {
     // grant_epoch，旧 Key 的 epoch 再也对不上，永不复活。重授予后须发新 Key。
     if ((k.grant_epoch || 0) !== grant.grant_epoch) {
       return { ok: false, status: 403, code: ERR.GRANT_REVOKED, msg: '授权代次已变更，请重新生成 Key。' };
+    }
+    // emergency_stop 服务端锚点（域外防回滚）：服务端记录为已停控时，
+    // 拒绝新的业务授权——设备本地标记文件被旧备份覆盖／删除导致自动
+    // 解锁时，服务端仍拒绝，设备须重新停控。只读内联命令（sys.info／
+    // sys.ping／sys.reset／sys.handshake）与恢复命令本身
+    // （emergency_stop.recover，授权凭专用票据、不凭 admit）除外：
+    // 停控时仍可查状态、可恢复；恢复流程步骤 1（新绑定票据）不走 admit，
+    // 不受此门影响。注意：lea.status 不在服务端 COMMANDS 表内（设备
+    // 状态只走本地管道，远程状态走 GET /devices/{id}/status），故不
+    // 在此豁免——admit 遇到它先报未知命令，与停控门无关。
+    const STOP_EXEMPT_COMMANDS = new Set(['sys.info', 'sys.ping', 'sys.reset', 'sys.handshake', 'emergency_stop.recover']);
+    if (!STOP_EXEMPT_COMMANDS.has(ctx.command)) {
+      const stop = getEmergencyStop(k.account_id, deviceId);
+      if (stop && stop.stopped) {
+        return { ok: false, status: 403, code: ERR.EMERGENCY_STOPPED, msg: '设备已紧急停控，须用专用恢复票据恢复后才能继续操作。' };
+      }
     }
     return { ok: true, binding, grant };
   }
@@ -2972,10 +3458,19 @@ function createLeaCore(opts) {
     // RC-01：握手（签名参数＋版本绑定）
     HANDSHAKE_PROTOCOL_VERSION, buildHandshakeEnvelope, ensureHandshake, handshakeState, invalidateHandshake,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
+    revokedSnapshotSigningBytes, signRevokedSnapshot, signRevokedSync,
+    // emergency_stop：专用恢复票据＋服务端停控记录＋同步
+    recoveryTicketSigningBytes, signRecoveryTicket, verifyRecoveryTicket, issueRecoveryTicket,
+    recordRecoveryTicketUsed, markRecoveryTicketRecovered, getRecoveryTicket, recoveryMaxEpoch,
+    recordEmergencyStop, getEmergencyStop, clearEmergencyStopRecord, emergencyStopSync,
+    emergencyStopSyncSigningBytes, RECOVERY_TICKET_TTL_S,
+    RECOVERY_MFA_MAX_AGE_S, RECOVERY_MFA_SKEW_S, RECOVERY_MFA_METHODS,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,
     // C1：自助绑定（issue/complete/renew/status/自助吊销/最后在线）
     issueSelfBindTicket, completeSelfBind, renewSelfBindKey, selfBindStatus,
     revokeSelfBindKey, revokeAllSelfBindKeys, touchDeviceSeen,
+    // v3：登录证明（issue；供 Windows 客户端随 session.login_changed 发给本机 QFRLEA 验签）
+    issueLoginAttestation, LEA_LOGIN_PROOF_TTL_S, LEA_LOGIN_PROOF_VERSION,
     // RC-04：断线重连票据（issue/verify+消费/作废）
     issueReconnectTicket, verifyReconnectTicket, voidReconnectTickets,
     reconnectTicketSigningBytes, signReconnectTicket, verifyReconnectTicketSignature,
@@ -2988,7 +3483,7 @@ function createLeaCore(opts) {
     selfBindCompleteSigningBytes, selfBindRenewSigningBytes, selfBindParseDevicePubkey, selfBindVerifySignature,
     ecdsaP1363ToDer, ecdsaDerToP1363,
     SELFBIND_TICKET_TTL_S, SELFBIND_KEY_DAYS, SELFBIND_RENEW_WINDOW_MS, SELFBIND_RENEW_DAYS,
-    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId,
+    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId, isValidDeviceIdFormat,
     recordBinding, getBinding, devicesForAccount,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,
@@ -3000,7 +3495,7 @@ function createLeaCore(opts) {
     probeNodeHealth,
     getRevocations, syncRevocations, leaRevocationsWriteCmd,
     // 供路由层/单测的内部状态（不含任何 Key 明文）
-    _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, loadDeregistered, loadReconnectTickets, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
+    _test: { loadKeys, loadGrants, loadBindings, loadJobs, loadRevocations, loadDeregistered, loadReconnectTickets, loadEmergencyStops, loadRecoveryTickets, nonceSeen, idemSeen, hashKey, maskKey, stableStringify, normalizeParams },
   };
 }
 

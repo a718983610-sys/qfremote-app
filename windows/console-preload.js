@@ -24,11 +24,13 @@ contextBridge.exposeInMainWorld('qfLea', {
   selfBindRenew: (deviceId) => ipcRenderer.invoke('qf-lea-selfbind-renew', deviceId),
   clearCredential: () => ipcRenderer.invoke('qf-lea-selfbind-clear'),
   // P0-2 主题同步（只读＋推送监听，不写任何设置）：主进程下发 resolved
-  // （'dark'|'blue'，'blue' 为浅色历史键名）与 mode（'system'|'blue'|'dark'）；
-  // 页面收到后按“壳手动 ＞ 本机偏好 ＞ 系统”统一落主题。getThemeState 供页面
-  // 初次加载同步一次（视图懒创建时无广播可接，须主动取）。
+  // （'dark'|'light'）与 mode（'system'|'light'|'dark'）；旧 'blue' 读兼容
+  // 归一化为 'light'。页面收到后按“壳手动 ＞ 本机偏好 ＞ 系统”统一落主题。
+  // getThemeState 供页面初次加载同步一次（视图懒创建时无广播可接，须主动取）。
+  // A10（2026-11-18）：只订阅 'qf-theme-mode'（唯一权威源），不再订阅
+  // 'qf-theme-state'——旧通道只带 resolved、mode 恒为 null（cb(t,null)），
+  // 会把壳手动深色一次闪回本机偏好／系统浅色。
   onTheme: (cb) => {
-    ipcRenderer.on('qf-theme-state', (e, t) => { try { cb(t, null); } catch (_) {} });
     ipcRenderer.on('qf-theme-mode', (e, m) => { try { cb(m && m.resolved, m && m.mode); } catch (_) {} });
   },
   getThemeState: () => ipcRenderer.invoke('qf-theme-state-get'),

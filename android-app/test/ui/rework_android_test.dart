@@ -24,7 +24,7 @@ import 'package:qfremote/ui/theme.dart';
 /// theme_tokens_test／reduced_motion_test／button_input_visual_height_test
 /// 覆盖，本文件不重复。
 void main() {
-  const light = QfPalette(QfThemeMode.blue);
+  const light = QfPalette(QfThemeMode.light);
   const dark = QfPalette(QfThemeMode.dark);
 
   group('A §3.0 表面层级 BG0–BG5（与 surface0–3 并存，不替换旧 token）', () {
@@ -638,8 +638,8 @@ void main() {
           QfThemeMode.dark);
       expect(
           resolveThemeMode(
-              pref: 'blue', platformBrightness: Brightness.dark),
-          QfThemeMode.blue);
+              pref: 'light', platformBrightness: Brightness.dark),
+          QfThemeMode.light);
       expect(
           resolveThemeMode(
               pref: null, platformBrightness: Brightness.dark),
@@ -647,7 +647,22 @@ void main() {
       expect(
           resolveThemeMode(
               pref: null, platformBrightness: Brightness.light),
-          QfThemeMode.blue);
+          QfThemeMode.light);
+    });
+
+    test('旧存值 blue 读兼容为固定浅色；显式 system 跟随系统', () {
+      expect(
+          resolveThemeMode(
+              pref: 'blue', platformBrightness: Brightness.dark),
+          QfThemeMode.light);
+      expect(
+          resolveThemeMode(
+              pref: 'system', platformBrightness: Brightness.dark),
+          QfThemeMode.dark);
+      expect(
+          resolveThemeMode(
+              pref: 'system', platformBrightness: Brightness.light),
+          QfThemeMode.light);
     });
   });
 }

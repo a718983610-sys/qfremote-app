@@ -37,15 +37,15 @@ function toggleTheme() {
    - 系统主题：matchMedia('(prefers-color-scheme: dark)')，打开期间翻转实时跟随。
    - 壳手动选择：Electron 主进程推送（console-preload.js 转发为窗口事件
      'qf-theme-state'）或 Android 壳注入 JS 派发同一事件；detail 为
-     {resolved: 'dark'|'blue', mode: 'system'|'blue'|'dark'}，其中 'blue'
-     是浅色历史键名，不对应蓝色。纯浏览器下该事件永不触发。
+     {resolved: 'dark'|'light', mode: 'system'|'light'|'dark'}；旧 'blue'
+     为浅色历史键名，读兼容归一化为 'light'。纯浏览器下该事件永不触发。
    - 壳推送只作运行时生效，不写 localStorage；本机偏好仍只由“我的页”开关写。 */
-let shellThemeMode = null; // 'system' | 'blue' | 'dark' | null（null = 未收到壳推送）
-let shellThemeResolved = null; // 'dark' | 'blue' | null
+let shellThemeMode = null; // 'system' | 'light' | 'dark' | null（null = 未收到壳推送）
+let shellThemeResolved = null; // 'dark' | 'light' | null
 function systemTheme() { try { return (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'; } catch (e) { return 'light'; } }
 function applyEffectiveTheme() {
   let t;
-  if (shellThemeMode === 'dark' || shellThemeMode === 'blue') t = shellThemeResolved === 'dark' ? 'dark' : 'light';
+  if (shellThemeMode === 'dark' || shellThemeMode === 'light') t = shellThemeResolved === 'dark' ? 'dark' : 'light';
   else t = getTheme();
   const r = applyTheme(t);
   syncPfThemeControl();
@@ -64,7 +64,7 @@ function syncPfThemeControl() {
   let btn = null;
   try { btn = document.getElementById('pf-theme-toggle'); } catch (e) {}
   if (!btn) return;
-  const shellManual = (shellThemeMode === 'dark' || shellThemeMode === 'blue');
+  const shellManual = (shellThemeMode === 'dark' || shellThemeMode === 'light');
   try { btn.disabled = !!shellManual; } catch (e) {}
   try { btn.setAttribute('aria-disabled', shellManual ? 'true' : 'false'); } catch (e) {}
   let note = null;
@@ -72,13 +72,16 @@ function syncPfThemeControl() {
   if (note) { try { note.hidden = !shellManual; } catch (e) {} }
 }
 function onShellTheme(resolved, mode) {
-  if (resolved === 'dark' || resolved === 'blue') shellThemeResolved = resolved;
-  if (mode !== 'dark' && mode !== 'blue' && mode !== 'system') {
-    // 无 mode 的推送不改 mode、不重落主题：Windows console-preload 的
+  if (resolved === 'blue') resolved = 'light'; // 旧壳读兼容
+  if (mode === 'blue') mode = 'light';
+  if (resolved === 'dark' || resolved === 'light') shellThemeResolved = resolved;
+  if (mode !== 'dark' && mode !== 'light' && mode !== 'system') {
+    // 无 mode 的推送不改 mode、不重落主题：旧 Windows console-preload 的
     // 'qf-theme-state' 通道只带 resolved、mode 恒为 null（cb(t, null)），
     // 旧代码照常重落，会把壳手动深色一次闪回本机偏好/系统浅色；同一次
     // 广播的 'qf-theme-mode' 随后会带 mode 纠正（P0-2 实测，2026-11-17）。
-    // 只记 resolved，不动当前生效主题。
+    // A10（2026-11-18）已修 console-preload 不再发无 mode 推送，本分支
+    // 保留作旧壳防御。只记 resolved，不动当前生效主题。
     try { return document.documentElement.getAttribute('data-theme') || getTheme(); } catch (e) { return getTheme(); }
   }
   shellThemeMode = mode;

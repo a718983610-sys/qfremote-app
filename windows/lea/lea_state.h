@@ -369,6 +369,14 @@ struct lea_queue_item {
      * 看门狗／sys.reset 清队列时，未执行的 batch 步须用它回滚，否则该
      * seq 被记为“已消费”，重试同步会被判重复拒绝（与队列满路径同款）。 */
     long long batch_prev_seq;
+    /* H03 第三轮 v2（2026-11-17，P0-1）：入队时捕获的管道客户端会话
+     * id（handle_envelope 用 pipe_client_session 取，见 QFRLEA.c）。
+     * worker 线程执行时管道可能已断，执行时现取不可靠；且 execute_item
+     * 作用域内根本没有 pipe 句柄，只能经队列项透传。unsigned long 而
+     * 不用 DWORD：本头文件亦被 Linux 单测编译，DWORD 是 Windows 类型；
+     * Windows 上 DWORD 即 unsigned long，赋值无截断。calloc 置 0，
+     * 0 即无效会话，ush_token_read 拒 0，fail-closed。 */
+    unsigned long client_session; /* 入队时捕获的客户端会话 id（0=未捕获／无效） */
     lea_queue_item_t *next;
 };
 

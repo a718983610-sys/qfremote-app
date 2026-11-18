@@ -175,3 +175,33 @@ flutter test $(find test -name '*_test.dart' \
 - 纯冻结树只排除 3 文件：`+549 -8`，exit 1（仍红）。
 - 纯冻结树排除 11 文件：**549 通过，`All tests passed!`，exit 0**，
   SKIP 11 项（本文件所列 11 项）。
+
+---
+
+## A2 恢复记录（2026-11-18，A2 线）
+
+> GPT A2 裁决（2026-11-18）批准将 `release_signature.dart`、`release_signature_test.dart`
+> 及对应测试向量补进冻结。本次补录 3 个文件（源：CI 验证基线 `97f445a`，SHA256
+> 逐字节核对一致；另含签名负向测试 `signing_negative_test.dart`，GPT A2
+> “更新签名负向测试”所指即此文件，覆盖重放/降级攻击 E 组）：
+>
+> - `android-app/lib/core/release_signature.dart`（390 行，纯 Dart Ed25519，r11③ 垫片已删）
+> - `android-app/test/release_signature_test.dart`（502 行，25 用例：RFC 8032 官方向量＋Node 交叉向量＋拒绝腿）
+> - `android-app/test/signing_negative_test.dart`（533 行，27 用例：A 缺签名／B 错签名／C 篡改／D 旧版合法签名正面控制／E 降级攻击／F 取清单负向）
+>
+> 恢复实测（Flutter 3.47.8／Dart 3.13.7，工作副本 e3eefd4＋本补录）：
+>
+> - `flutter analyze`：No issues found（冻结树原 8 issues 全因缺此文件，已清零）。
+> - `flutter test` 全量：**707 通过、1 失败**（冻结树原 549 通过、11 失败／跳过）。
+> - 本文件所列 11 项中 **10 项已恢复**（第 1、2、4–11 项，92 个静态用例中 91 个；
+>   其余 1 项即第 3 项 `file_size_gate_test.dart` 仍失败——它要的
+>   `docs/REFACTOR-LIST.md` 属第三批／Week 2，不在 A2 范围内，GPT A2 亦明确
+>   “不代表批准整个第二批新功能进 v6”）。
+> - 唯一失败项：`test/lint/file_size_gate_test.dart`（单文件行数门，缺重构清单）。
+>   全量 `flutter test` 因此仍 exit 1；排除该 1 文件即全绿。
+> - 新增的 2 个签名测试文件 25＋27＝52 用例全部通过；4 类 fail-closed
+>   （缺签名／错误公钥／错误签名／重放旧清单）均有对应拒绝用例且通过。
+>
+> 注意：`release_gate.sh check()` 只跑 `test/lint/ test/data/ test/app/ test/ui/`
+> 四个子目录（实测 314 个用例），顶层测试文件（含本次补录的 2 个签名测试）
+> 不在其运行范围内；全量以 `flutter test`（CI 工作流同款）为准。见 A15 审核报告。

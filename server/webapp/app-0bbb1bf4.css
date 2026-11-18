@@ -586,11 +586,8 @@ th .sort-chev{width:8px;height:8px;vertical-align:2px}
 .dot6.off{background:var(--err)}
 .dot6.warn{background:var(--warn)}
 .sv-mask-meta{font-size:12px;line-height:18px;color:var(--text-3);font-variant-numeric:tabular-nums;margin-top:12px;text-align:left;word-break:break-all}
-/* --- 顶栏 sticky 材质 A §5：78% 底＋blur 20＋1px 分割（纯色 fallback 为 --card） --- */
+/* --- 顶栏 sticky：不透明底 --chrome-bg；毛玻璃 blur(20px) 已按 2026-11-18 裁决删除 --- */
 .top{background:var(--chrome-bg)}
-@supports ((-webkit-backdrop-filter:blur(20px)) or (backdrop-filter:blur(20px))){
-  .top{background:color-mix(in srgb,var(--card) 78%,transparent);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
-}
 /* --- 设置行 A §3.1：二级导航 200；设置行 56；label 14/22/500，desc 12/18；控件右对齐 32 高 --- */
 .setrow{min-height:56px}
 .setrow .lbl{font-size:14px;line-height:22px;font-weight:500}

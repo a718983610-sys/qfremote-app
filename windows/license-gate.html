@@ -107,7 +107,7 @@
     if (t === 'dark') document.documentElement.dataset.theme = 'dark';
     else delete document.documentElement.dataset.theme;
   }
-  applyTheme(q.get('t') || 'blue');
+  applyTheme(q.get('t') || 'light');
   if (window.qfGate && qfGate.onTheme) qfGate.onTheme(applyTheme);
 
   const titleEl = document.getElementById('title');

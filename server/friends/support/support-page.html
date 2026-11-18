@@ -7,14 +7,18 @@
 <style>
   /* 与定版样图 support-page-preview.html 及好友/聊天页家族同一套令牌 */
   :root{
-    --brand-grad:linear-gradient(180deg,#3F8CFF,#2470E0);
-    --deep:#0B2B5B; --bg1:#EDF3FD; --bg2:#FFFFFF; --card:#FFFFFF;
-    --ink:#243B5E; --sub:#6B7A90; --line:#D7E1F2; --orange:#FF8A1E;
+    --brand-grad:#000000;
+    --deep:#000000; --bg1:#F7F7F8; --bg2:#FFFFFF; --card:#FFFFFF;
+    --ink:#09090B; --sub:#52525B; --line:#E4E4E7; --orange:#FF8A1E;
     --ok-ink:#12753C; --ok-bg:#E7F8EE;
   }
   @media (prefers-color-scheme: dark){
-    :root{ --deep:#EAF1FD; --bg1:#10141C; --bg2:#171B23; --card:#22262E;
-      --ink:#EDF2F9; --sub:#9AA7BC; --line:#3A4150; --ok-ink:#5EEAA0; --ok-bg:#173527; }
+    :root{ --deep:#FFFFFF; --bg1:#08090A; --bg2:#111113; --card:#111113;
+      --ink:#F7F7F8; --sub:#A1A1AA; --line:#27272A; --ok-ink:#5EEAA0; --ok-bg:#173527; }
+  }
+  @media (prefers-color-scheme: dark){
+    /* 2026-11-18 黑白收口：品牌底＋白字在深色下反为白底黑字 */
+    .mark, .avatar, .btn, .chip.primary, .inputbar button { background:#FFFFFF; color:#000000; }
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
@@ -26,17 +30,17 @@
   .head h1{font-size:19px;margin:0;color:var(--deep)}
   .head p{margin:2px 0 0;font-size:12.5px;color:var(--sub)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:18px;
-    box-shadow:0 12px 40px rgba(13,49,112,.12);margin-bottom:14px}
+    box-shadow:0 12px 40px rgba(0,0,0,.12);margin-bottom:14px}
   .disclosure{font-size:13.5px;line-height:1.75;color:var(--ink);
     border-left:4px solid var(--orange);padding:10px 14px;background:rgba(255,138,30,.07);border-radius:8px}
   .msg{display:flex;gap:10px;margin:14px 0}
   .msg.me{flex-direction:row-reverse}
   .avatar{flex:0 0 34px;width:34px;height:34px;border-radius:10px;background:var(--brand-grad);
     color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
-  .avatar.human{background:#5B7BA5}
-  .avatar.me{background:#93A3B8}
+  .avatar.human{background:#52525B}
+  .avatar.me{background:#71717A}
   .bubble{border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;line-height:1.75;max-width:88%;white-space:pre-wrap;word-break:break-word}
-  .msg.me .bubble{background:rgba(63,140,255,.10)}
+  .msg.me .bubble{background:rgba(0,0,0,.06)}
   .name{font-size:12px;color:var(--sub);margin-bottom:4px}
   .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
   .chip{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;

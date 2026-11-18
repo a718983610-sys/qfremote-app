@@ -9,15 +9,25 @@
  *   deps.log(obj)
  *   deps.verifyPassword(username, password) -> Promise<boolean>
  *     （二次确认：重新输入账号密码；MFA 若启用，另见 verifyMfa）
- *   deps.verifyMfa(username, code) -> Promise<boolean>（可选；
- *     未注入时表示本站暂无 MFA 校验入口，生成 Key 仅凭密码二次确认，
- *     见 README「未完成/须联调」）
+ *   deps.verifyMfa(username, code) -> Promise<boolean>（可选；仅 Key
+ *     管理入口的 passwordConfirm 在注入时调用。恢复票据签发不走此处，
+ *     改走下方 deps.mfa 全员强制 MFA 门，见 emergency_stop 节）
+ *   deps.mfa —— MFA 核心（mfa-core.createMfaCore）：恢复票据签发
+ *     的全员强制 MFA 门（GPT 2026-11-18 裁决 §三）。未注入时恢复票据
+ *     签发 fail-closed（503 MFA_UNAVAILABLE），绝不降级为只凭密码。
+ *     方法：getFactorStatus / beginEnrollment / confirmEnrollment /
+ *     verifyCode / createVerification / consumeVerification /
+ *     reportLost / resolveCase / getCase / listOpenCases。
  *   deps.resolveConsoleAuth(req) -> Promise<{user, siteadmin}|null>
  *     （控制台会话校验，复用 validateConsoleCookie）
  *   deps.isSiteAdmin(auth) -> boolean（复用 isAdmin）
- *   deps.listVisibleDeviceIds(auth) -> Promise<[deviceId]>（可选；H05 换绑
- *     节点可见性校验：返回该账号在 MeshCentral 可见的设备 id 清单。
- *     未注入时换绑只做“设备存在＋当前归属”校验，server.js 接入后可补注）
+ *   deps.listVisibleDeviceIds(auth, req) -> Promise<[deviceId]>（强制；D2：
+ *     H05 换绑与 login-attestation 的节点可见性校验，返回该账号在
+ *     MeshCentral 可见的设备 id 清单。未注入／查询失败／返回异常时对应
+ *     接口一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放行；清单取回成功
+ *     但不含该设备时按“确认不可见”回 403。server.js 以控制台会话
+ *     cookie 查 MeshCentral nodes（auth.user 的账号视角），不得用请求体
+ *     自报的设备列表。）
  * deps 缺失时对应接口 fail-closed（503/401），绝不放行。
  *
  * 路由（DESIGN §8.1）：
@@ -38,6 +48,7 @@
  *   POST /api/lea/v1/self-bind/issue    签发一次性绑定票据（控制台会话）
  *   POST /api/lea/v1/self-bind/complete USH 持票据＋设备签名换 Key（明文仅本次返回）
  *   GET  /api/lea/v1/self-bind/status   轮询绑定状态（控制台会话，不含凭据）
+ *   POST /api/lea/v1/login-attestation  签发登录证明（控制台会话；v3 P0-4 第二层，供客户端随 session.login_changed 发给本机 QFRLEA 验签）
  *   POST /api/lea/v1/self-bind/renew    设备续期（Bearer Key＋设备签名）
  *   POST /api/lea/v1/self-bind/revoke/{key_id} 吊销自助 Key（控制台会话，无密码）
  *   POST /api/lea/v1/self-bind/revoke-all 吊销全部自助 Key（控制台会话，无密码）
@@ -52,6 +63,26 @@
  *   POST /api/lea/v1/crash-report 接收 Windows 端崩溃报告（匿名接收＋
  *     强防护：形状白名单＋200KB 上限＋每 IP 限流＋落盘封顶轮转；
  *     报告只含技术信息，无鉴权要求——上传发生在下次启动，用户未必已登录）
+ * emergency_stop（GPT 2026-11-18 裁决问题 1、3、六节）：
+ *   POST /api/lea/v1/emergency-stop/sync 同步停控事件（控制台会话＋
+ *     设备归属校验；服务端记录停控＋按 device_scope 逐个吊销该设备
+ *     全部 Key，返回服务端签名回执供 LEA 验签后改 sync_status）
+ *   POST /api/lea/v1/emergency-stop/recovery-ticket 签发专用恢复票据
+ *     （控制台会话＋密码二次确认＋全员强制 MFA，GPT 2026-11-18 裁决
+ *     §三；未启用 MFA 拒绝直接签发并给安全注册路径；新注册 MFA 有
+ *     24 小时冷静期；MFA 丢失走专门恢复流程；MFA 验证与本次请求绑定、
+ *     5 分钟内有效；票据明文只本次返回，recovery_epoch 由服务端铸造；
+ *     恢复流程两步：①新绑定票据＋新 Key 激活绑定（停控保留），②凭票据
+ *     发 emergency_stop.recover 信封；下发时路由层记票据
+ *     consumed_pending_clear，设备回 recovered 时改记 recovered＋清
+ *     服务端停控记录）
+ *   MFA 注册与恢复（同上裁决 §三）：
+ *   POST /api/lea/v1/mfa/enroll/begin   开始注册（控制台会话＋密码二次确认）
+ *   POST /api/lea/v1/mfa/enroll/confirm 确认注册（凭 TOTP 码证明持有；成功后进冷静期）
+ *   POST /api/lea/v1/mfa/verify         验证第二因素，签发 5 分钟内有效的单次验证记录
+ *   POST /api/lea/v1/mfa/status         查询本账号 MFA 状态与待处理恢复案件
+ *   POST /api/lea/v1/mfa/report-lost    挂失 MFA 因素＋立案（不降低为只输入密码）
+ *   POST /api/lea/v1/mfa/recovery/resolve 站长审批恢复案件（仅站长）
  */
 const crypto = require('crypto');
 const { bareNodeId, nodeMatchesId } = require('./lea-channel');
@@ -398,6 +429,22 @@ function createLeaRoutes(core, channel, deps) {
       grantEpoch: adm.grant.grant_epoch,
       idempotencyKey: idemKey, command, params, timeoutMs,
     });
+    // emergency_stop：恢复信封下发前，把票据记为 consumed_pending_clear
+    // （服务端镜像；设备端记录为准）。只记验签通过的票据（防调用方用
+    // 伪造 epoch 抬高代次下限）。设备回 recovered 时在成功分支改记
+    // recovered＋清停控记录；其他结果不改记录（停控仍在，调用方凭
+    // ticket_id 查询后决定是否申请新票）。
+    if (command === 'emergency_stop.recover' && params && typeof params.ticket_id === 'string') {
+      try {
+        if (core.verifyRecoveryTicket(params)) {
+          core.recordRecoveryTicketUsed({
+            ticket_id: params.ticket_id, stop_event_id: params.stop_event_id,
+            account_id: key.account_id, device_id: deviceId,
+            recovery_epoch: params.recovery_epoch,
+          }, 'consumed_pending_clear');
+        }
+      } catch (e) { log({ ev: 'lea-recovery-record-failed', err: String(e && e.message) }); }
+    }
     const t0 = Date.now();
     let disp;
     try {
@@ -411,6 +458,18 @@ function createLeaRoutes(core, channel, deps) {
       core.idemRecord(key.account_id, key.key_id, idemKey, { status: 'SUCCEEDED', job_id: job.job_id, dangerous: spec.dangerous, req_fp: reqFp, result: { job_id: job.job_id, result: disp.result } }, core.IDEM_NS.EXEC);
       auditCall(Object.assign({}, baseAudit, { result: 'ok', job_id: job.job_id, duration_ms: durationMs }));
       try { core.audit('lea-deliver', Object.assign({}, baseAudit, { job_id: job.job_id, direction: 'reply', duration_ms: durationMs })); } catch (e) {}
+      // emergency_stop：设备回 recovered 时，服务端记票据 recovered＋清
+      // 停控记录（域外锚点解除）。设备回的结果以其回执为准（ticket_id／
+      // recovery_epoch 取设备回执内字段，不取请求 params）。
+      if (command === 'emergency_stop.recover') {
+        try {
+          const inner = disp.result && disp.result.result;
+          if (inner && inner.recovered === true && inner.ticket_id) {
+            core.markRecoveryTicketRecovered(inner.ticket_id);
+            core.clearEmergencyStopRecord(key.account_id, deviceId, inner.ticket_id, inner.recovery_epoch);
+          }
+        } catch (e) { log({ ev: 'lea-recovery-bookkeeping-failed', err: String(e && e.message) }); }
+      }
       return sendJson(res, 200, { ok: true, request_id: requestId, job_id: job.job_id, result: disp.result, duration_ms: durationMs });
     }
     // B1：in-flight 名额满（QUEUE_FULL）→ 503，调用方可稍后重试同一幂等键
@@ -701,15 +760,21 @@ function createLeaRoutes(core, channel, deps) {
     return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, batch_id: batchId, status: 'RUNNING', msg: '批量执行中，请用 job_id 轮询。' });
   }
 
-  // DC-A-3：设备状态／吊销快照只许“绑定归属账号的 Key”或“该设备域的 Key”
-  // 读——此前 device_scope 为空的任意有效 Key 可读任意设备的绑定账号／
-  // 在线态／吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。未绑定设备
-  // 一律 403（不以 404 区分“不存在”与“非本人设备”，防存在性预言）。
+  // DC-A-3：设备状态／吊销快照只许“绑定归属账号的 Key”读——此前
+  // device_scope 为空的任意有效 Key 可读任意设备的绑定账号／在线态／
+  // 吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。D2：device_scope
+  // 匹配不再单独放行，须同时是绑定归属账号（scope 是归属之内的进一
+  // 步收窄，不是归属的替代）。未绑定设备一律 403（不以 404 区分“不存
+  // 在”与“非本人设备”，防存在性预言）。
   function deviceVisibleTo(key, deviceId) {
-    // 归一后比对：Key 的 device_scope 可能为全形，URL 来的 deviceId 可能为裸形。
-    if (key.device_scope && bareNodeId(key.device_scope) === bareNodeId(deviceId)) return true;
+    // D2（全面复审 §二.1／整改第 2 步）：读路径归属必验。设备须当前绑
+    // 定到该 Key 的账号；device_scope 若已设定须同时匹配（未设定时归属
+    // 匹配即足够，兼容 DC-A-1 之前无 scope 旧 Key）。归一后比对：Key 的
+    // device_scope 可能为全形，URL 来的 deviceId 可能为裸形。
     const binding = core.getBinding(deviceId);
-    return !!(binding && binding.account_id === key.account_id);
+    if (!binding || binding.account_id !== key.account_id) return false;
+    if (key.device_scope && bareNodeId(key.device_scope) !== bareNodeId(deviceId)) return false;
+    return true;
   }
 
   // ---- 查 job / 取消 job ----
@@ -772,7 +837,7 @@ function createLeaRoutes(core, channel, deps) {
     if (!a || !a.user) { fail(res, 401, 'UNAUTHORIZED', '请先登录。'); return null; }
     return a;
   }
-  async function passwordConfirm(req, res, user) {
+  async function passwordConfirm(req, res, user, opts) {
     const body = await readJsonBody(req, BODY_LIMIT);
     if (body.__tooLarge) { fail(res, 400, ERR.VALIDATION, '请求体过大。'); return null; }
     const password = String(body.password || '');
@@ -786,10 +851,15 @@ function createLeaRoutes(core, channel, deps) {
     if (!ok) { fail(res, 401, 'BAD_PASSWORD', '密码不正确。'); return null; }
     // MFA 若启用则走 MFA（deps.verifyMfa 未注入 = 本站暂无 MFA 校验入口，
     // 此时仅凭密码二次确认；见 README 未完成项）。
-    if (typeof deps.verifyMfa === 'function') {
-      let mfaOk = false;
-      try { mfaOk = await deps.verifyMfa(user, String(body.mfa_code || '')); } catch (e) { mfaOk = false; }
-      if (!mfaOk) { fail(res, 401, 'BAD_MFA', 'MFA 校验未通过。'); return null; }
+    // 注意：恢复票据签发不走此处（opts.skipMfa），改走下方的全员强制
+    // MFA 门 requireRecoveryMfa（GPT 2026-11-18 裁决 §三）；Key 管理
+    // 入口保持原有口径（仅注入了 verifyMfa 时才校验 MFA）。
+    if (!opts || !opts.skipMfa) {
+      if (typeof deps.verifyMfa === 'function') {
+        let mfaOk = false;
+        try { mfaOk = await deps.verifyMfa(user, String(body.mfa_code || '')); } catch (e) { mfaOk = false; }
+        if (!mfaOk) { fail(res, 401, 'BAD_MFA', 'MFA 校验未通过。'); return null; }
+      }
     }
     return body;
   }
@@ -801,6 +871,11 @@ function createLeaRoutes(core, channel, deps) {
     const body = await passwordConfirm(req, res, a.user);
     if (!body) return;
     const deviceScope = body.device_id ? String(body.device_id) : null;
+    // D2-K1：路由层参数校验——显式 device_id 格式非法时直接 400（Core 层
+    // 同规则再拦一次，防直接调 generateKey 的旁路；真正的归属准入在 Core）。
+    if (deviceScope && typeof core.isValidDeviceIdFormat === 'function' && !core.isValidDeviceIdFormat(deviceScope)) {
+      return fail(res, 400, ERR.VALIDATION, 'device_id 格式非法。');
+    }
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s) => s === 'muse.execute' || s === DANGEROUS_SCOPE) : ['muse.execute'];
     // H06：dangerous scope 须站长先授 dangerous 授权（/grants），自助选即
     // 403；无 muse.execute 授权时生成 Key 亦拒绝（core.generateKey 同拦，
@@ -818,7 +893,21 @@ function createLeaRoutes(core, channel, deps) {
       });
     } catch (e) {
       if (e && e.code === 'QFR_MUSE_NOT_AUTHORIZED') return fail(res, 403, e.code, '该账号未授权 Muse 操作，请先请站长授予 muse.execute。');
-      if (e && e.code === 'QFR_SCOPE_DENIED') return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      if (e && e.code === 'QFR_SCOPE_DENIED') {
+        // D2-K1：同码两种拒绝须区分——归属拒绝用统一文案（不透露设备属于
+        // 谁、不区分“不存在”与“非本人设备”）；dangerous scope 拒绝保留原
+        // 有文案。归属拒绝记审计（只记请求账号与请求设备，不记设备实际归属）。
+        if (e.reason === 'device-ownership') {
+          try { core.audit('lea-key-create-denied', { account_id: a.user, device_id: deviceScope ? core.bareNodeId(deviceScope) : null, reason: 'device-ownership' }); } catch (e) {}
+          return fail(res, 403, e.code, '当前账户无权为该设备创建 API Key，请检查设备绑定状态。');
+        }
+        return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      }
+      // D2-K1：绑定确认中（仅当请求方即绑定账号本人时才返回此码）→ 409；
+      // 归属权威服务不可用 → 503；设备 id 格式非法 → 400。
+      if (e && e.code === 'QFR_LEA_BINDING_PENDING') return fail(res, 409, e.code, '设备绑定确认中，请 1 秒后重试一次。');
+      if (e && e.code === 'QFR_VISIBILITY_UNAVAILABLE') return fail(res, 503, e.code, '设备归属验证服务暂不可用，请稍后重试。');
+      if (e && e.code === 'VALIDATION') return fail(res, 400, e.code, 'device_id 格式非法。');
       // DC-A-1：无 device_scope 且无法自动取设备（未绑定／绑定多台）时
       // 拒绝发死钥，由调用方明示 device_id（路由层 body.device_id）。
       if (e && e.code === 'QFR_DEVICE_SCOPE_REQUIRED') {
@@ -859,6 +948,271 @@ function createLeaRoutes(core, channel, deps) {
     const out = core.revokeAllKeys(a.user, a.user, 'revoke-all');
     const kick = await kickAfterRevoke(out.revoked_key_ids || [], null, a.user, 'revoke-all');
     return sendJson(res, 200, { ok: true, revoked_count: out.revoked_count, kick, msg: '该账号全部 Key 已吊销，Muse 再调用将返回 401 QFR_API_KEY_REVOKED。' });
+  }
+
+  // ---- emergency_stop（GPT 2026-11-18 裁决问题 1、3、六节） ----
+  // 同步端点：设备本地停控后，main.js 凭控制台会话上报停控事件，服务
+  // 端记录停控（域外防回滚锚点）＋按 device_scope 逐个吊销该设备全部
+  // Key，返回服务端签名回执（main.js 交 LEA 验签后改 sync_status）。
+  // 口径：控制台会话＋设备归属校验，不做密码二次确认（停控本身已在
+  // 本机发生，同步只是把既成事实告诉服务端；恢复票据签发才须强认证）。
+  async function handleEmergencyStopSync(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const deviceId = core.bareNodeId(String(body.device_id || ''));
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+    const stopEventId = String(body.stop_event_id || '');
+    if (!stopEventId || !/^[A-Za-z0-9_.-]{1,128}$/.test(stopEventId)) return fail(res, 400, ERR.VALIDATION, 'stop_event_id 非法。');
+    // 设备归属：绑定须属于当前登录账号（未绑定／绑他人一律按未绑定
+    // 当前账号拒绝，不泄露存在性）。
+    const binding = core.getBinding(deviceId);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== a.user) {
+      return fail(res, 403, ERR.NOT_BOUND, '设备未绑定当前账号。');
+    }
+    if (Number.isSafeInteger(body.binding_epoch) && body.binding_epoch !== binding.binding_epoch) {
+      return fail(res, 409, ERR.BINDING_CHANGED, '绑定代次已变更，请重新登录设备后再同步。');
+    }
+    let out;
+    try {
+      out = core.emergencyStopSync({
+        accountId: a.user, deviceId,
+        stopEventId,
+        stopSeq: Number.isSafeInteger(body.stop_seq) ? body.stop_seq : 0,
+        scope: String(body.scope || 'device-control'),
+        bindingEpoch: binding.binding_epoch,
+        grantEpoch: Number.isSafeInteger(body.grant_epoch) ? body.grant_epoch : 0,
+        stoppedAt: Number.isSafeInteger(body.stopped_at) ? body.stopped_at : undefined,
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, receipt: out.receipt, revoked_key_ids: out.revoked_key_ids });
+  }
+  // 恢复票据签发端点：签发＝新授权，须控制台会话＋密码二次确认＋
+  // 全员强制 MFA（GPT 2026-11-18 裁决 §三）。auth_context 形如
+  // password+<totp|passkey>@<verified_at>，只记认证方式＋验证完成时间，
+  // 不记密码／MFA 码。票据明文只在本次响应返回一次（与 Key 明文同口径）；
+  // recovery_epoch 由服务端铸造（已见最大＋1），调用方不得自选。
+  // 恢复流程两步：①用新绑定票据＋新 Key 激活绑定（停控保留，旧 Key
+  // 保持吊销）；②凭本票据发 emergency_stop.recover 信封。
+  // 全员强制 MFA 门（requireRecoveryMfa）：必须有合格的第二因素，不因
+  // 用户未开启而跳过；未启用／冷静期／丢失各有明确拒绝＋安全恢复路径；
+  // MFA 验证与本次请求绑定、5 分钟内有效（验证记录单次使用，或同一
+  // 请求内联验码）。登录密码＋再次输入同一密码不构成 MFA。
+  async function requireRecoveryMfa(req, res, user, body) {
+    const mfa = deps.mfa;
+    if (!mfa || typeof mfa.getFactorStatus !== 'function') {
+      log({ ev: 'lea-mfa-unavailable', msg: 'MFA core not configured; recovery ticket refused' });
+      fail(res, 503, 'MFA_UNAVAILABLE', '本站 MFA 未配置，恢复票据暂不可签发。');
+      return null;
+    }
+    let st = null;
+    try { st = mfa.getFactorStatus(user); } catch (e) { st = null; }
+    if (!st) { fail(res, 503, 'MFA_UNAVAILABLE', 'MFA 状态不可用，恢复票据暂不可签发。'); return null; }
+    if (st.status === 'none') {
+      try { mfa.audit('lea-mfa-required-block', { account_id: user }); } catch (e) {}
+      sendJson(res, 403, { ok: false, code: 'MFA_REQUIRED',
+        msg: '该账号未启用 MFA，无法直接签发恢复票据。请先完成可信 MFA 注册（控制台会话＋密码二次确认），新注册的 MFA 须经过 24 小时冷静期后方可用于恢复。',
+        recovery_path: { action: 'enroll', enroll_begin: '/api/lea/v1/mfa/enroll/begin', enroll_confirm: '/api/lea/v1/mfa/enroll/confirm', note: '注册须控制台会话＋密码二次确认；新因素启用后有 24 小时冷静期。' } });
+      return null;
+    }
+    if (st.status === 'lost') {
+      let openCases = [];
+      try { openCases = mfa.listOpenCases(user); } catch (e) {}
+      sendJson(res, 403, { ok: false, code: 'MFA_LOST',
+        msg: 'MFA 设备已挂失，须走专门的账户恢复流程（站长审批后重新注册新 MFA），不降低为只输入密码。',
+        recovery_path: { action: 'account-recovery', report_lost: '/api/lea/v1/mfa/report-lost', open_cases: openCases, note: '挂失后原因素立即失效；恢复须站长审批，重新注册后仍有 24 小时冷静期。' } });
+      return null;
+    }
+    if (st.status === 'cooling-off') {
+      sendJson(res, 403, { ok: false, code: 'MFA_COOLDOWN',
+        msg: '新注册的 MFA 处于冷静期，冷静期结束前不得用于签发恢复票据。',
+        recovery_path: { action: 'wait-cooldown', cooldown_until: st.cooldown_until, cooldown_remaining_s: st.cooldown_remaining_s, note: '新因素启用须经风险核验与通知＋冷静期，防止攻击者注册自己的 MFA 后立刻解除停控。' } });
+      return null;
+    }
+    // 因素 active：凭本次请求的 mfa_code 内联验码，或消费此前 5 分钟内
+    // 签发的单次验证记录（mfa_verification_id）。
+    const verificationId = String(body.mfa_verification_id || '');
+    const code = String(body.mfa_code || '');
+    try {
+      if (verificationId) return mfa.consumeVerification(user, verificationId);
+      if (!code) {
+        fail(res, 400, 'MFA_CODE_REQUIRED', '签发恢复票据须提供 MFA 校验码，或先经 /api/lea/v1/mfa/verify 取得 5 分钟内有效的验证记录。');
+        return null;
+      }
+      return mfa.verifyCode(user, code);
+    } catch (e) {
+      if (e && e.code === 'QFR_MFA_COOLDOWN') {
+        return sendJson(res, 403, { ok: false, code: 'MFA_COOLDOWN',
+          msg: '新注册的 MFA 处于冷静期，冷静期结束前不得用于签发恢复票据。',
+          recovery_path: { action: 'wait-cooldown', cooldown_until: e.cooldown_until || 0, cooldown_remaining_s: e.cooldown_remaining_s || 0 } }), null;
+      }
+      if (e && e.code === 'QFR_MFA_LOST') {
+        return sendJson(res, 403, { ok: false, code: 'MFA_LOST', msg: 'MFA 设备已挂失，须走专门的账户恢复流程。' }), null;
+      }
+      if (e && e.code === 'QFR_MFA_NOT_ENROLLED') {
+        return sendJson(res, 403, { ok: false, code: 'MFA_REQUIRED', msg: '该账号未启用 MFA，无法直接签发恢复票据。' }), null;
+      }
+      if (e && (e.code === 'QFR_MFA_VERIFICATION_EXPIRED' || e.code === 'QFR_MFA_VERIFICATION_REUSED' || e.code === 'QFR_MFA_VERIFICATION_INVALID')) {
+        fail(res, 401, 'BAD_MFA', 'MFA 验证记录无效、已过期（5 分钟）或已被使用，请重新验证。');
+        return null;
+      }
+      if (e && e.code === 'QFR_MFA_BAD_CODE') { fail(res, 401, 'BAD_MFA', 'MFA 校验未通过。'); return null; }
+      throw e;
+    }
+  }
+  async function handleRecoveryTicket(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    // 密码二次确认（此处跳过 passwordConfirm 内可选的 MFA——恢复票据
+    // 的 MFA 由下方全员强制门单独执行，Key 管理入口口径不受影响）。
+    const body = await passwordConfirm(req, res, a.user, { skipMfa: true });
+    if (!body) return;
+    const deviceId = core.bareNodeId(String(body.device_id || ''));
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, '缺少 device_id。');
+    const stopEventId = String(body.stop_event_id || '');
+    if (!stopEventId || !/^[A-Za-z0-9_.-]{1,128}$/.test(stopEventId)) return fail(res, 400, ERR.VALIDATION, 'stop_event_id 非法。');
+    const binding = core.getBinding(deviceId);
+    if (!binding || binding.state !== 'ACTIVE' || binding.account_id !== a.user) {
+      return fail(res, 403, ERR.NOT_BOUND, '设备未绑定当前账号。');
+    }
+    const grant = core.getGrant(a.user);
+    if (!grant || grant.revoked_at || grant.scope !== 'muse.execute') {
+      return fail(res, 403, ERR.NOT_AUTHORIZED, '该账号未授权 Muse 操作，或授权已被撤销。');
+    }
+    const mfaAuth = await requireRecoveryMfa(req, res, a.user, body);
+    if (!mfaAuth) return;
+    const authContext = 'password+' + mfaAuth.method + '@' + mfaAuth.verified_at;
+    let ticket;
+    try {
+      ticket = core.issueRecoveryTicket({
+        accountId: a.user, deviceId,
+        stopEventId,
+        grantEpoch: grant.grant_epoch,
+        scope: '',
+        authContext,
+      });
+    } catch (e) {
+      if (e && e.code === 'QFR_LEA_NO_ACTIVE_EMERGENCY_STOP') return fail(res, 409, e.code, '该设备当前没有活动的紧急停控，无须恢复票据。');
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      if (e && e.code === 'QFR_LEA_NOT_BOUND') return fail(res, 403, e.code, '设备未绑定当前账号。');
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, ticket, msg: '恢复票据有效期 1 小时，一次性使用；请先用新绑定票据＋新 Key 激活绑定（停控保留），再发 emergency_stop.recover 信封。' });
+  }
+
+  // ---- MFA 注册与恢复（GPT 2026-11-18 裁决 §三） ----
+  // 边界：本组端点只服务"恢复票据签发"所需的第二因素；不要求普通用户
+  // 每次登录／连接设备时完成 MFA。注册本身须控制台会话＋密码二次确认
+  // （额外身份验证要求）；新因素启用后有 24 小时冷静期，冷静期内不得
+  // 用于签发恢复票据；丢失走专门恢复流程（挂失立案→站长审批→重新
+  // 注册＋冷静期），不降低为只输入密码。
+  function mfaOr503(res) {
+    if (!deps.mfa || typeof deps.mfa.getFactorStatus !== 'function') {
+      fail(res, 503, 'MFA_UNAVAILABLE', '本站 MFA 未配置。');
+      return null;
+    }
+    return deps.mfa;
+  }
+  function mfaCtx(req) {
+    return { ip: clientIp(req), userAgent: String((req.headers && req.headers['user-agent']) || '') };
+  }
+  async function handleMfaEnrollBegin(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    const body = await passwordConfirm(req, res, a.user, { skipMfa: true }); if (!body) return;
+    let out;
+    try { out = mfa.beginEnrollment(a.user, mfaCtx(req)); }
+    catch (e) {
+      if (e && e.code === 'QFR_MFA_ALREADY_ENROLLED') return fail(res, 409, e.code, '该账号已启用 MFA。');
+      if (e && e.code === 'QFR_MFA_RECOVERY_REQUIRED') return fail(res, 403, e.code, 'MFA 设备已挂失，须先完成账户恢复流程（站长审批）后再重新注册。');
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, enrollment_id: out.enrollment_id, method: out.method,
+      otpauth_url: out.otpauth_url, secret: out.secret, expires_at: out.expires_at, cooldown_s: out.cooldown_s,
+      msg: '请用验证器 App 扫码绑定并确认；secret 只本次返回一次。新注册的 MFA 须经过冷静期后方可用于签发恢复票据。' });
+  }
+  async function handleMfaEnrollConfirm(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    const body = await passwordConfirm(req, res, a.user, { skipMfa: true }); if (!body) return;
+    const enrollmentId = String(body.enrollment_id || '');
+    const code = String(body.mfa_code || body.code || '');
+    if (!enrollmentId || !code) return fail(res, 400, ERR.VALIDATION, '缺少 enrollment_id 或 MFA 校验码。');
+    let out;
+    try { out = mfa.confirmEnrollment(a.user, enrollmentId, code, mfaCtx(req)); }
+    catch (e) {
+      if (e && e.code === 'QFR_MFA_ENROLLMENT_INVALID') return fail(res, 400, e.code, '注册申请不存在或已过期，请重新开始注册。');
+      if (e && e.code === 'QFR_MFA_BAD_CODE') return fail(res, 401, 'BAD_MFA', 'MFA 校验码不正确。');
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, method: out.method, enrolled_at: out.enrolled_at, cooldown_until: out.cooldown_until,
+      msg: 'MFA 已启用；冷静期内不得用于签发恢复票据，冷静期结束前请勿删除验证器中的账号。' });
+  }
+  async function handleMfaVerify(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const code = String(body.mfa_code || body.code || '');
+    if (!code) return fail(res, 400, 'MFA_CODE_REQUIRED', '缺少 MFA 校验码。');
+    let v;
+    try { v = mfa.verifyCode(a.user, code); }
+    catch (e) {
+      if (e && e.code === 'QFR_MFA_NOT_ENROLLED') return fail(res, 403, 'MFA_REQUIRED', '该账号未启用 MFA，请先完成注册。');
+      if (e && e.code === 'QFR_MFA_LOST') return fail(res, 403, 'MFA_LOST', 'MFA 设备已挂失，须走账户恢复流程。');
+      if (e && e.code === 'QFR_MFA_COOLDOWN') return fail(res, 403, 'MFA_COOLDOWN', '新注册的 MFA 处于冷静期，冷静期结束前不得用于恢复。');
+      if (e && e.code === 'QFR_MFA_BAD_CODE') return fail(res, 401, 'BAD_MFA', 'MFA 校验未通过。');
+      throw e;
+    }
+    const rec = mfa.createVerification(a.user, v.method, v.verified_at);
+    return sendJson(res, 200, { ok: true, verification_id: rec.verification_id, method: rec.method,
+      verified_at: rec.verified_at, expires_at: rec.expires_at, purpose: rec.purpose,
+      msg: '验证记录 5 分钟内有效，单次使用；请在有效期内申请恢复票据。' });
+  }
+  async function handleMfaStatus(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    return sendJson(res, 200, { ok: true, factor: mfa.getFactorStatus(a.user), open_cases: mfa.listOpenCases(a.user) });
+  }
+  async function handleMfaReportLost(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    const body = await passwordConfirm(req, res, a.user, { skipMfa: true }); if (!body) return;
+    let rec;
+    try { rec = mfa.reportLost(a.user, mfaCtx(req)); }
+    catch (e) {
+      if (e && e.code === 'QFR_MFA_NOT_ENROLLED') return fail(res, 400, e.code, '该账号未启用 MFA，无须挂失。');
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, case_id: rec.case_id, status: rec.status,
+      msg: 'MFA 因素已挂失失效。恢复须站长审批通过后重新注册新 MFA（含冷静期），不降低为只输入密码。' });
+  }
+  async function handleMfaResolve(req, res) {
+    const mfa = mfaOr503(res); if (!mfa) return;
+    const a = await consoleAuth(req, res); if (!a) return;
+    if (typeof deps.isSiteAdmin !== 'function' || !deps.isSiteAdmin(a)) {
+      return fail(res, 403, ERR.SCOPE_DENIED, '仅站长可审批 MFA 恢复案件。');
+    }
+    const body = await readJsonBody(req, BODY_LIMIT);
+    if (body.__tooLarge) return fail(res, 400, ERR.VALIDATION, '请求体过大。');
+    const caseId = String(body.case_id || '');
+    const decision = String(body.decision || '');
+    if (!caseId || (decision !== 'approved' && decision !== 'rejected')) {
+      return fail(res, 400, ERR.VALIDATION, 'case_id 与 decision（approved/rejected）必填。');
+    }
+    let rec;
+    try { rec = mfa.resolveCase(caseId, a.user, decision); }
+    catch (e) {
+      if (e && e.code === 'QFR_MFA_CASE_NOT_FOUND') return fail(res, 404, e.code, '恢复案件不存在。');
+      if (e && e.code === 'QFR_MFA_CASE_CLOSED') return fail(res, 409, e.code, '恢复案件已处理。');
+      if (e && e.code === 'QFR_VALIDATION') return fail(res, 400, e.code, e.message);
+      throw e;
+    }
+    return sendJson(res, 200, { ok: true, case: { case_id: rec.case_id, account_id: rec.account_id, status: rec.status, resolved_at: rec.resolved_at, resolved_by: rec.resolved_by } });
   }
 
   // ---- RC-02：吊销即踢在线会话（D7 的 push 升级版） ----
@@ -1113,22 +1467,33 @@ function createLeaRoutes(core, channel, deps) {
     }
     // H05：换绑验设备归属／节点可见性（此前只验“绑自己或站长”，任意登录
     // 用户知道 device_id 就能把他人设备抢到自己名下并吊销原账号全部 Key）：
-    // ① 节点可见性（可选注入 deps.listVisibleDeviceIds(auth)：返回该账号
-    //    在 MeshCentral 可见的设备 id 清单；注入时强制校验；未注入时走
-    //    ②③，server.js 接入后可补注）。清单与入参均按裸 id 归一后比对
-    //    （客户端送裸 id，清单可能含全形 _id；r5 潜伏问题）。
-    if (typeof deps.listVisibleDeviceIds === 'function') {
-      let visible = null;
-      try { visible = await deps.listVisibleDeviceIds(a); } catch (e) { visible = null; }
-      if (!Array.isArray(visible) || !visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
-        try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
-        return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
-      }
+    // ① 节点可见性（D2 强制注入 deps.listVisibleDeviceIds(auth, req)：
+    //    返回该账号在 MeshCentral 可见的设备 id 清单，server.js 以控制台
+    //    会话 cookie 查 MeshCentral nodes。未注入／查询抛错／返回非数组
+    //    时一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放行；清单取回成功
+    //    但不含该设备时 403。清单与入参均按裸 id 归一后比对（客户端送裸
+    //    id，清单可能含全形 _id；r5 潜伏问题）。
+    if (typeof deps.listVisibleDeviceIds !== 'function') {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询未就绪。');
+    }
+    let visible;
+    try { visible = await deps.listVisibleDeviceIds(a, req); } catch (e) { visible = null; }
+    if (!Array.isArray(visible)) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询失败。');
+    }
+    if (!visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
+      return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
     }
     // ② 设备须真实存在（svc 通道节点清单里有；未知 id 直接 404，不透露归属）。
     //    比对前统一去 node// 前缀（客户端送裸 id，清单 _id 为全形；修前
     //    只比全形 _id，裸 id 即使节点可见也 404——r5 潜伏问题）。
-    //    通道不可达（known===null）时存在性校验跳过、归属校验照常，并记审计。
+    //    D2 修订（GPT 六项裁决 D1-2）：通道不可达（known===null）时不得
+    //    跳过存在性校验继续换绑——“记审计”不能替代验证；无其他独立可信
+    //    权威数据源确认设备归属／存在性时，一律 503
+    //    QFR_VISIBILITY_UNAVAILABLE、不换绑（fail-closed）。
     let known = null;
     try {
       const nodes = channel ? await channel.listNodes() : [];
@@ -1137,15 +1502,16 @@ function createLeaRoutes(core, channel, deps) {
     if (known === false) {
       return fail(res, 404, 'NOT_FOUND', '设备不存在。');
     }
+    if (known === null) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'existence-unverifiable-channel-down' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备存在性无法验证（通道不可达），暂不换绑。');
+    }
     // ③ 设备归属：当前已绑定他人账号时，非站长不得换绑（DESIGN §6.1
     //    “不一致则进入待站长授权，防冒领”）；未绑定／绑自己时放行。
     const cur = core.getBinding(deviceId);
     if (cur && cur.account_id !== accountId && !isAdmin) {
       try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, current_account_id: cur.account_id, reason: 'bound-to-other' }); } catch (e) {}
       return fail(res, 403, 'FORBIDDEN', '该设备已绑定其他账号，只有站长可以换绑。');
-    }
-    if (known === null) {
-      try { core.audit('lea-rebind', { device_id: deviceId, account_id: accountId, by: a.user, note: 'node-existence-unchecked-channel-down' }); } catch (e) {}
     }
     // H07：hook 传回 LEA 的 PENDING epoch（binding_epoch），服务端只许向前。
     const clientEpoch = Number.isSafeInteger(body.binding_epoch) ? body.binding_epoch : undefined;
@@ -1158,12 +1524,78 @@ function createLeaRoutes(core, channel, deps) {
     // 客户端须按缺失处理（只做无版本并集合并，不推进本机 generation），
     // 绝不把缺失静默当成最新——见 windows/main.js notifyLeaLogin。
     const revocations = core.getRevocations(deviceId);
+    // A7-whitelist：rebind 回包带吊销快照签名（C 端 keys.sync-revoked
+    // 验签用；只签当前权威台账快照）。签发失败时不带签名、不阻断
+    // rebind——C 端缺签即拒绝 sync，H21 推送仍是主同步路径。
+    try { revocations.sync_signature = core.signRevokedSync(deviceId); } catch (e) {
+      try { core.audit('lea-revocation-sign-failed', { device_id: deviceId, err: String(e && e.message).slice(0, 120) }); } catch (_) {}
+    }
     // RC-02：换绑吊销了旧 Key 时即踢其会话（仅有旧 Key 被吊销时才做，
     // 首次绑定／同账号重绑无吊销即不加延迟）。
     const kick = (out.revoked_key_ids && out.revoked_key_ids.length)
       ? await kickAfterRevoke(out.revoked_key_ids, [deviceId], accountId, 'rebind')
       : { ok: true, skipped: 'no-revoked-keys' };
     return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations, revocation_generation: revocations.generation, ticket: out.ticket, kick });
+  }
+
+  // ---- 登录证明（v3 P0-4 第二层，B3 主方案） ----
+  // 控制台会话认证；账号恒等于 a.user（无站长代签口子）；设备可见性复用
+  // rebind 的①②（节点可见性＋节点存在性）；不做已绑他人检查（证明≠绑
+  // 定，绑定决策仍在 rebind）。D2：① 为强制注入，未注入／查询失败时
+  // 503 QFR_VISIBILITY_UNAVAILABLE。签名能力非 real 时 503。证明 TTL
+  // 120 秒，客户端须立即使用；证明字段原样回给客户端，由客户端 JSON 序
+  // 列化后随 login_changed 发给本机 QFRLEA 验签。
+  async function handleLoginAttestation(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const body = await readJsonBody(req, BODY_LIMIT);
+    const deviceId = bareNodeId(String(body.device_id || ''));
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, 'device_id 必填。');
+    // ① 节点可见性（D2 强制注入 deps.listVisibleDeviceIds(auth, req)：
+    //    server.js 以控制台会话 cookie 查 MeshCentral nodes。未注入／查
+    //    询抛错／返回非数组时一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放
+    //    行；清单取回成功但不含该设备时 403。GPT D1–D4 裁决 §三建议依赖
+    //    缺失走 503；v3 原契约 403，待 GPT 最终裁决确认（见 D2 报告 §7）。
+    if (typeof deps.listVisibleDeviceIds !== 'function') {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询未就绪。');
+    }
+    let visible;
+    try { visible = await deps.listVisibleDeviceIds(a, req); } catch (e) { visible = null; }
+    if (!Array.isArray(visible)) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询失败。');
+    }
+    if (!visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'not-visible' }); } catch (e) {}
+      return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
+    }
+    // ② 设备须真实存在（通道节点清单里有；未知 id 直接 404）。
+    //    D2 修订（GPT 六项裁决 D1-2）：通道不可达（known===null）时不得
+    //    跳过存在性校验继续签发——“记审计”不能替代验证；无其他独立可信
+    //    权威数据源确认设备归属／存在性时，一律 503
+    //    QFR_VISIBILITY_UNAVAILABLE、不签发（fail-closed）。
+    let known = null;
+    try {
+      const nodes = channel ? await channel.listNodes() : [];
+      known = (nodes || []).some((x) => nodeMatchesId(x, deviceId));
+    } catch (e) { known = null; }
+    if (known === false) {
+      return fail(res, 404, 'NOT_FOUND', '设备不存在。');
+    }
+    if (known === null) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'existence-unverifiable-channel-down' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备存在性无法验证（通道不可达），暂不签发证明。');
+    }
+    let out;
+    try {
+      out = core.issueLoginAttestation(a.user, deviceId);
+    } catch (e) {
+      if (e && e.message && String(e.message).startsWith('LEA canonical field invalid')) return fail(res, 400, ERR.VALIDATION, '字段非法。');
+      if (e && e.code === 'QFR_SIGNING_UNAVAILABLE') return fail(res, 503, 'LEA_SIGNING_UNAVAILABLE', '服务端签名能力未就绪。');
+      throw e;
+    }
+    return sendJson(res, 200, Object.assign({ ok: true }, out));
   }
 
   // ---- 卸载注销（2026-11-14 站长亲定；固定契约见 lea-core deregisterDevice） ----
@@ -1244,6 +1676,7 @@ function createLeaRoutes(core, channel, deps) {
       if (req.method === 'POST' && p === '/api/lea/v1/reconnect/resume') { await handleReconnectResume(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/crash-report') { await handleCrashReport(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/self-bind/issue') { await handleSelfBindIssue(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/login-attestation') { await handleLoginAttestation(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/self-bind/complete') { await handleSelfBindComplete(req, res); return true; }
       if (req.method === 'GET' && p === '/api/lea/v1/self-bind/status') { await handleSelfBindStatus(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/self-bind/renew') { await handleSelfBindRenew(req, res); return true; }
@@ -1259,6 +1692,14 @@ function createLeaRoutes(core, channel, deps) {
       if (req.method === 'GET' && p === '/api/lea/v1/keys') { await handleListKeys(req, res); return true; }
       if (req.method === 'POST' && revokeM) { await handleRevokeKey(req, res, decodeURIComponent(revokeM[1])); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/keys/revoke-all') { await handleRevokeAllKeys(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/emergency-stop/sync') { await handleEmergencyStopSync(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/emergency-stop/recovery-ticket') { await handleRecoveryTicket(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/enroll/begin') { await handleMfaEnrollBegin(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/enroll/confirm') { await handleMfaEnrollConfirm(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/verify') { await handleMfaVerify(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/status') { await handleMfaStatus(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/report-lost') { await handleMfaReportLost(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/mfa/recovery/resolve') { await handleMfaResolve(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/grants') { await handleGrants(req, res); return true; }
       return fail(res, 404, 'NOT_FOUND', '该接口不存在。'), true;
     } catch (e) {

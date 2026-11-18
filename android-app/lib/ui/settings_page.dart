@@ -6,7 +6,7 @@ import 'theme.dart';
 import 'reduced_motion.dart';
 
 /// 主题选择：跟随系统不是一个 QfThemeMode，用独立枚举表达三态。
-enum ThemeChoice { followSystem, blue, dark }
+enum ThemeChoice { followSystem, light, dark }
 
 /// 「设置」页（2.3.0 定版样图 m11）：只放有真实后端行为的行。
 /// 样图中的「自动选择最快节点／断线自动重连开关／远程时自动横屏／意见反馈」
@@ -60,7 +60,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   String get _themeLabel => switch (_theme) {
         ThemeChoice.followSystem => '跟随系统',
-        ThemeChoice.blue => '浅色',
+        ThemeChoice.light => '浅色',
         ThemeChoice.dark => '深色',
       };
 
@@ -87,7 +87,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   title: Text(
                     switch (c) {
                       ThemeChoice.followSystem => '跟随系统',
-                      ThemeChoice.blue => '浅色',
+                      ThemeChoice.light => '浅色',
                       ThemeChoice.dark => '深色',
                     },
                     style: TextStyle(color: p.onCard, fontSize: QfScale.fs15),
@@ -131,7 +131,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     // 在选“跟随系统”时仍显示，状态不符。
                     sub: switch (_theme) {
                       ThemeChoice.followSystem => '跟随系统深浅',
-                      ThemeChoice.blue => '白底黑字',
+                      ThemeChoice.light => '白底黑字',
                       ThemeChoice.dark => '黑底白字',
                     },
                     trailing: Row(

@@ -106,6 +106,7 @@ async function main() {
   const DEV = 'node//test-device-1';
   const USER = 'alice';
   core.grantMuse(USER, 'owner'); // H06：建 Key 须先有授权
+  core.recordBinding(DEV, USER, 'test-realclient-setup'); // D2-K1：先绑定才能建 Key
   const gen = core.generateKey(USER, { device_scope: DEV });
   // F-04 正向：独立测试密钥生效，mode='real'，公钥与生成密钥对应。
   t('F-04 正向：固定测试密钥 signing 模式为 real', core.signingInfo().mode === 'real');

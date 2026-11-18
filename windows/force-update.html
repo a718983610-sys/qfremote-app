@@ -95,7 +95,7 @@
     if (t === 'dark') document.documentElement.dataset.theme = 'dark';
     else delete document.documentElement.dataset.theme;
   }
-  applyTheme(q.get('t') || 'blue');
+  applyTheme(q.get('t') || 'light');
   const fromV = q.get('from') || '—';
   const toV = q.get('to') || '—';
   document.getElementById('vFrom').textContent = '当前版本 v' + fromV;

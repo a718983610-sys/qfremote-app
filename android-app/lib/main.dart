@@ -78,7 +78,7 @@ import 'ui/features/devices/device_list_view_model.dart';
 /// 启动时先按系统亮度取初值（与旧 ThemeMode.system 一致），_boot 读到
 /// 已存偏好后由 setter 纠正。
 final ValueNotifier<QfThemeMode> _qfThemeMode = ValueNotifier<QfThemeMode>(
-  QfThemeMode.blue,
+  QfThemeMode.light,
 );
 
 /// A-04：启动必须无条件到达 runApp()——main() 里不做任何 await，
@@ -386,7 +386,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   PackageInfo? _pkg;
   // A1：主题状态唯一写口——所有 _themeMode 赋值都经此 setter，顺带把新值
   // 推给顶层 _qfThemeMode（MaterialApp 跟随），Material 层与壳永不同轨。
-  QfThemeMode _themeModeValue = QfThemeMode.blue;
+  QfThemeMode _themeModeValue = QfThemeMode.light;
   QfThemeMode get _themeMode => _themeModeValue;
   set _themeMode(QfThemeMode v) {
     _themeModeValue = v;
@@ -1603,7 +1603,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 页面已切走：下一页加载完成时再注入
     }
     // P0-2：每页加载完成都把壳主题推给 WebView（控制台／好友／聊天／论坛槽共用），
-    // 与 Web 页约定的 `qf-theme-state` 事件同契约；mode 按手动偏好（有则 'dark'/'blue'，
+    // 与 Web 页约定的 `qf-theme-state` 事件同契约；mode 按手动偏好（有则 'dark'/'light'，
     // 无则 'system'），resolved 按当前深浅。推送失败静默跳过。
     await _pushThemeToWebView(controller);
   }
@@ -4415,9 +4415,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _openShellWeb('注册新账号', SvcUrls.instance.registerUrl);
         break;
       case 'theme':
-        final next = _themeMode == QfThemeMode.blue
+        final next = _themeMode == QfThemeMode.light
             ? QfThemeMode.dark
-            : QfThemeMode.blue;
+            : QfThemeMode.light;
         setState(() => _themeMode = next);
         _settings?.setTheme(next.prefValue);
         break;
@@ -4471,7 +4471,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           palette: _palette,
           themeChoice: s.themePref == null
               ? ThemeChoice.followSystem
-              : (s.themePref == 'dark' ? ThemeChoice.dark : ThemeChoice.blue),
+              : (s.themePref == 'dark' ? ThemeChoice.dark : ThemeChoice.light),
           rememberDevice: s.rememberDevice,
           rememberPassword: s.rememberPassword,
           keepScreenOn: s.keepScreenOn,
@@ -4496,9 +4496,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         .platformBrightness,
                   );
                 });
-              case ThemeChoice.blue:
-                await settings.setTheme(QfThemeMode.blue.prefValue);
-                if (mounted) setState(() => _themeMode = QfThemeMode.blue);
+              case ThemeChoice.light:
+                await settings.setTheme(QfThemeMode.light.prefValue);
+                if (mounted) setState(() => _themeMode = QfThemeMode.light);
               case ThemeChoice.dark:
                 await settings.setTheme(QfThemeMode.dark.prefValue);
                 if (mounted) setState(() => _themeMode = QfThemeMode.dark);

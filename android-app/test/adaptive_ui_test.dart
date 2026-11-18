@@ -149,7 +149,7 @@ void main() {
   testWidgets('刘海/手势条：强更页按钮不进顶部挖孔区、不被底部手势条压', (tester) async {
     _setView(tester, const Size(390, 844));
     tester.view.padding = const FakeViewPadding(top: 47, bottom: 34);
-    final p = QfPalette(QfThemeMode.blue);
+    final p = QfPalette(QfThemeMode.light);
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(
             body: ForceUpdateView(
@@ -175,7 +175,7 @@ void main() {
     LockClient.resetMock();
     await tester.pumpWidget(MaterialApp(
         home: LockPage(
-            palette: QfPalette(QfThemeMode.blue),
+            palette: QfPalette(QfThemeMode.light),
             onNeedLogin: () {},
             client: LockClient(mock: true))));
     await tester.pump();
@@ -189,7 +189,7 @@ void main() {
     LockClient.resetMock();
     await tester.pumpWidget(MaterialApp(
         home: LockPage(
-            palette: QfPalette(QfThemeMode.blue),
+            palette: QfPalette(QfThemeMode.light),
             onNeedLogin: () {},
             client: LockClient(mock: true))));
     await tester.pump();
@@ -328,20 +328,42 @@ void main() {
           QfThemeMode.dark);
       expect(
           resolveThemeMode(
-              pref: 'blue', platformBrightness: Brightness.dark),
-          QfThemeMode.blue);
+              pref: 'light', platformBrightness: Brightness.dark),
+          QfThemeMode.light);
     });
 
-    test('没选过：跟随系统（深→深灰、浅→品牌蓝）', () {
+    test('旧存值 blue 读兼容为固定浅色（不丢用户偏好）', () {
+      expect(
+          resolveThemeMode(
+              pref: 'blue', platformBrightness: Brightness.dark),
+          QfThemeMode.light);
+      expect(
+          resolveThemeMode(
+              pref: 'blue', platformBrightness: Brightness.light),
+          QfThemeMode.light);
+    });
+
+    test('没选过：跟随系统（深→深色、浅→浅色）', () {
       expect(
           resolveThemeMode(pref: null, platformBrightness: Brightness.dark),
           QfThemeMode.dark);
       expect(
           resolveThemeMode(pref: null, platformBrightness: Brightness.light),
-          QfThemeMode.blue);
+          QfThemeMode.light);
       expect(
           resolveThemeMode(pref: '', platformBrightness: Brightness.dark),
           QfThemeMode.dark);
+    });
+
+    test('显式 system 跟随系统亮度，不被当成固定浅色', () {
+      expect(
+          resolveThemeMode(
+              pref: 'system', platformBrightness: Brightness.dark),
+          QfThemeMode.dark);
+      expect(
+          resolveThemeMode(
+              pref: 'system', platformBrightness: Brightness.light),
+          QfThemeMode.light);
     });
   });
 

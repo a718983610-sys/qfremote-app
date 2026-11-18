@@ -47,8 +47,15 @@ else
   PUBKEY_FLAG=""
 fi
 
+if [ "${QFRLEA_ALLOW_DEV_ELECTRON:-0}" = "1" ]; then
+  echo "WARNING: dev-only build (QFRLEA_ALLOW_DEV_ELECTRON=1): electron.exe parent accepted. NEVER ship this."
+  DEV_FLAG="-DQFRLEA_ALLOW_DEV_ELECTRON=1"
+else
+  DEV_FLAG=""
+fi
+
 # shellcheck disable=SC2086
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_install.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c lea_local.c lea_filewrite.c lea_appclose.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG -ladvapi32 -lcrypt32 -lwtsapi32
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o QFRLEA.exe QFRLEA.c lea_install.c lea_protocol.c lea_crypto.c lea_state.c lea_audit.c lea_local.c lea_filewrite.c lea_appclose.c $ED25519_SRCS $TEST_FLAG $PUBKEY_FLAG $DEV_FLAG -ladvapi32 -lcrypt32 -lwtsapi32
 # shellcheck disable=SC2086
 # S3：客户端用 lea_crypto.c 的 lea_b64_decode 解析 dispatch <base64>（纯 C，无需额外库）。
 # lea_crypto.c 引用 ed25519_verify，故客户端同样须链 ed25519 源文件。

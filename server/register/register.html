@@ -6,26 +6,26 @@
 <title>注册 QFRemote 账号</title>
 <style>
   :root{
-    --bg1:#E8F1FE; --bg2:#F7FAFF; --bg3:#FFFFFF;
-    --glow:rgba(63,140,255,.16);
-    --card:#FFFFFF; --card-border:rgba(13,49,112,.07);
-    --ink:#0B2B5B; --body:#243B5E; --sub:#6B7A90; --foot:#8494AC;
-    --field-bg:#FBFCFE; --field-border:#D7E1F2; --field-ink:#10294D;
+    --bg1:#F7F7F8; --bg2:#FFFFFF; --bg3:#FFFFFF;
+    --glow:rgba(0,0,0,.06);
+    --card:#FFFFFF; --card-border:rgba(0,0,0,.07);
+    --ink:#000000; --body:#09090B; --sub:#52525B; --foot:#71717A;
+    --field-bg:#FFFFFF; --field-border:#E4E4E7; --field-ink:#09090B;
     --ok-ink:#12753C; --ok-bg:#E7F8EE; --ok-border:#B7E8C8;
     --bad-ink:#D92D20; --bad-bg:#FDECEA; --bad-border:#F3B8B2; --bad-field:#E5484D;
-    --ring:rgba(36,112,224,.15);
-    --shadow:0 12px 40px rgba(13,49,112,.12);
+    --ring:rgba(0,0,0,.15);
+    --shadow:0 12px 40px rgba(0,0,0,.12);
   }
   @media (prefers-color-scheme: dark){
     :root{
-      --bg1:#0D1420; --bg2:#12161D; --bg3:#171B23;
-      --glow:rgba(36,112,224,.22);
-      --card:#22262E; --card-border:rgba(255,255,255,.07);
-      --ink:#EAF1FD; --body:#EDF2F9; --sub:#9AA7BC; --foot:#77839A;
-      --field-bg:#2B3038; --field-border:#3A4150; --field-ink:#EDF2F9;
+      --bg1:#08090A; --bg2:#111113; --bg3:#18181B;
+      --glow:rgba(255,255,255,.08);
+      --card:#111113; --card-border:rgba(255,255,255,.07);
+      --ink:#FFFFFF; --body:#F7F7F8; --sub:#A1A1AA; --foot:#71717A;
+      --field-bg:#1F2023; --field-border:#27272A; --field-ink:#F7F7F8;
       --ok-ink:#5EEAA0; --ok-bg:#173527; --ok-border:#265C40;
       --bad-ink:#FF9D8F; --bad-bg:#3A2320; --bad-border:#6E3A33; --bad-field:#FF8A7A;
-      --ring:rgba(63,140,255,.25);
+      --ring:rgba(255,255,255,.25);
       --shadow:0 12px 40px rgba(0,0,0,.45);
     }
   }
@@ -48,7 +48,7 @@
   }
   .wrap { width:100%; max-width:448px; position:relative; }
   .brand { text-align:center; }
-  .brand .logo { width:56px; height:56px; margin:0 auto; filter:drop-shadow(0 8px 20px rgba(13,49,112,.28)); }
+  .brand .logo { width:56px; height:56px; margin:0 auto; filter:drop-shadow(0 8px 20px rgba(0,0,0,.28)); }
   .brand .logo svg { display:block; width:100%; height:100%; }
   h1 { margin:16px 0 0; font-size:26px; font-weight:800; letter-spacing:.4px; color:var(--ink); }
   .ds { margin-top:8px; font-size:14px; line-height:1.6; color:var(--sub); }
@@ -67,7 +67,7 @@
     -webkit-appearance:none; appearance:none;
   }
   input::placeholder { color:var(--sub); opacity:.75; }
-  input:focus { border-color:#2470E0; box-shadow:0 0 0 4px var(--ring); }
+  input:focus { border-color:#000000; box-shadow:0 0 0 4px var(--ring); }
   input.invalid { border-color:var(--bad-field); }
   input.invalid:focus { box-shadow:0 0 0 4px rgba(229,72,77,.16); }
   .hint { font-size:12.5px; color:var(--sub); margin:7px 2px 0; line-height:1.6; }
@@ -77,14 +77,16 @@
     width:100%; height:52px; margin-top:24px; border:none; cursor:pointer; font-family:inherit;
     font-size:16.5px; font-weight:600; color:#fff; letter-spacing:1px;
     border-radius:12px;
-    background:linear-gradient(180deg,#3F8CFF,#2470E0);
-    box-shadow:0 10px 22px rgba(20,90,220,.35), inset 0 1px 0 rgba(255,255,255,.35);
+    background:#000000;
+    box-shadow:0 10px 22px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.35);
   }
   .btn:active { transform:scale(.99); }
   .btn:disabled { opacity:.6; cursor:default; transform:none; }
   .agree { margin-top:14px; text-align:center; font-size:12.5px; line-height:1.7; color:var(--sub); }
-  .agree a { color:#2470E0; text-decoration:none; font-weight:600; }
-  @media (prefers-color-scheme: dark){ .agree a { color:#7FB8F5; } }
+  .agree a { color:#09090B; text-decoration:none; font-weight:600; }
+  @media (prefers-color-scheme: dark){ .agree a { color:#FFFFFF; } }
+  /* 2026-11-18 黑白收口：品牌底＋白字按钮在深色下反为白底黑字 */
+  @media (prefers-color-scheme: dark){ .btn{ background:#FFFFFF; color:#000000; box-shadow:0 10px 22px rgba(0,0,0,.45); } .buykey{ background:#FFFFFF !important; color:#000000 !important; } .qk, .sup{ color:#FFFFFF !important; } }
   .res { display:none; margin-top:18px; padding:12px 14px; border-radius:12px;
          font-size:14px; line-height:1.65; text-align:center; border:1px solid transparent; }
   .res.show { display:block; }
@@ -140,11 +142,11 @@
     <button class="btn" id="go">注册</button>
     <div class="agree">注册即代表同意《<a id="lnkTerms" href="/terms#agreement" target="_blank" rel="noopener">用户协议</a>》与《<a id="lnkPrivacy" href="/terms#privacy" target="_blank" rel="noopener">隐私说明</a>》</div>
     <div class="res" id="res"></div>
-    <a href="/purchase" style="display:block;text-align:center;background:#111;color:#fff;font-size:14px;font-weight:600;border-radius:9px;padding:11px 6px;margin-top:14px;text-decoration:none">购买密钥</a>
-    <div style="text-align:center;padding-top:8px"><a href="/license/status" style="color:#2470E0;font-size:13.5px;text-decoration:none">查询密钥</a></div>
+    <a class="buykey" href="/purchase" style="display:block;text-align:center;background:#000000;color:#fff;font-size:14px;font-weight:600;border-radius:9px;padding:11px 6px;margin-top:14px;text-decoration:none">购买密钥</a>
+    <div style="text-align:center;padding-top:8px"><a class="qk" href="/license/status" style="color:#09090B;font-size:13.5px;text-decoration:none">查询密钥</a></div>
   </div>
 
-  <div class="foot">注册遇到问题？<a href="/support" style="color:#2470E0;text-decoration:none;font-weight:600">智能客服</a> 可以帮您解答，也可以转人工。</div>
+  <div class="foot">注册遇到问题？<a class="sup" href="/support" style="color:#09090B;text-decoration:none;font-weight:600">智能客服</a> 可以帮您解答，也可以转人工。</div>
   <div class="foot">注册失败次数过多，本设备今日将暂停注册，次日自动恢复。<br>注册成功后，请打开 QFRemote 软件，使用新注册的账号和密码登录。</div>
 </div>
 

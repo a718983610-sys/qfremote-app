@@ -66,6 +66,7 @@ const PROBE_INTERVAL_MS = { normal: 1000, weak: 500, hidden: 5000 };
 const WEAK_WINDOW_AFTER_SWITCH_MS = 10000; // 档位切换后 10s 内探针 500ms
 const UPGRADE_REFUSAL_MESSAGES = {
   AT_TOP: '已是最高档',
+  FORBIDDEN: '会话不属于当前用户',
   NO_HEALTH_WINDOW: '健康窗口样本不足（需 20s 健康样本，≥5 个）',
   NOT_HEALTHY: '网络未持续健康 20s，暂不升档',
   PINGPONG_COOLDOWN: '该档近期反复升降，冷却中'

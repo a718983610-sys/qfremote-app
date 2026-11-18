@@ -32,6 +32,13 @@ extern "C" {
 int lea_file_write_atomic(const char *target, const unsigned char *data,
                           size_t len, char *detail, size_t detail_size);
 
+/* 同卷替换 tmp -> target（成功返回 1，失败返回 0 且目标原文件不动）。
+ * Windows 用 MoveFileExA(REPLACE_EXISTING | WRITE_THROUGH)（具替换语义，
+ * 不先删旧目标）；POSIX 用 rename（原生原子替换）。绝不要在调用方写
+ * “先 remove(target) 再 rename”的两步替换——中间空窗一旦 rename 失败
+ * 旧文件即丢失（A9：idem 快照与 binding.dat 均曾因此丢文件）。 */
+int lea_file_replace(const char *tmp, const char *target);
+
 #ifdef __cplusplus
 }
 #endif

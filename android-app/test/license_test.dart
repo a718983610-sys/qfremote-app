@@ -569,7 +569,7 @@ void main() {
       var rechecks = 0;
       await tester.pumpWidget(MaterialApp(
         home: LicenseGatePage(
-          palette: const QfPalette(QfThemeMode.blue),
+          palette: const QfPalette(QfThemeMode.light),
           username: 'qflic2510a',
           copy: gateCopyFor(
               const LicenseDecision(allow: false, code: 'G1', enforce: true))!,
@@ -604,7 +604,7 @@ void main() {
       for (final emptyUser in ['', '   ']) {
         await tester.pumpWidget(MaterialApp(
           home: LicenseGatePage(
-            palette: const QfPalette(QfThemeMode.blue),
+            palette: const QfPalette(QfThemeMode.light),
             username: emptyUser,
             copy: gateCopyFor(const LicenseDecision(
                 allow: false, code: 'G1', enforce: true))!,
@@ -625,7 +625,7 @@ void main() {
       var rebinds = 0;
       await tester.pumpWidget(MaterialApp(
         home: LicenseGatePage(
-          palette: const QfPalette(QfThemeMode.blue),
+          palette: const QfPalette(QfThemeMode.light),
           username: 'u1',
           copy: gateCopyFor(const LicenseDecision(
               allow: false, code: 'G3', enforce: true))!,
@@ -648,7 +648,7 @@ void main() {
     testWidgets('封禁态：申诉主按钮＋申诉入口可达、无激活框', (tester) async {
       await tester.pumpWidget(MaterialApp(
         home: LicenseGatePage(
-          palette: const QfPalette(QfThemeMode.blue),
+          palette: const QfPalette(QfThemeMode.light),
           username: 'u1',
           copy: gateCopyFor(const LicenseDecision(
               allow: false, code: 'BAN_PERM', enforce: true))!,
@@ -673,7 +673,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => LicenseMe(
                 planName: 'QFRemote 试用套餐',
                 maskedKey: 'QFR8K-•••••-•••••-•••••-V5YQZ',
@@ -708,7 +708,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => null,
               onBind: (_) async => null,
               onClaim: (_) async => null,
@@ -730,7 +730,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => const LicenseMe(
                 planName: 'QFRemote 永久套餐',
                 displayStatus: '正常',
@@ -765,7 +765,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => LicenseMe(
                 planName: 'QFRemote 按天套餐',
                 displayStatus: '正常',
@@ -813,7 +813,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => LicenseMe(displayStatus: '未激活'),
               onBind: (_) async => null,
               onClaim: (_) async => null,
@@ -861,7 +861,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => LicenseMe(displayStatus: '未激活'),
               onBind: (_) async => null,
               onClaim: (_) async => null,
@@ -882,7 +882,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async => null,
               authDead: true,
               onRelogin: () => reloginTaps++,
@@ -908,7 +908,7 @@ void main() {
       var reloginTaps = 0;
       await tester.pumpWidget(MaterialApp(
         home: MePage(
-          palette: const QfPalette(QfThemeMode.blue),
+          palette: const QfPalette(QfThemeMode.light),
           currentVersion: '2.4.5',
           hasUpdate: false,
           updateVersion: null,
@@ -937,7 +937,7 @@ void main() {
         home: Scaffold(
           body: SingleChildScrollView(
             child: LicenseSection(
-              palette: const QfPalette(QfThemeMode.blue),
+              palette: const QfPalette(QfThemeMode.light),
               fetchLicense: () async {
                 fetches++;
                 return null;

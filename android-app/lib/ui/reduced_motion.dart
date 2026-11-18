@@ -187,7 +187,7 @@ class QfSheetHandle extends StatelessWidget {
     final p = QfPalette(
       Theme.of(context).brightness == Brightness.dark
           ? QfThemeMode.dark
-          : QfThemeMode.blue,
+          : QfThemeMode.light,
     );
     return Container(
       width: 36,

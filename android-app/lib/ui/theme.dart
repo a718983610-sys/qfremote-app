@@ -15,14 +15,19 @@ import 'package:flutter/physics.dart';
 /// 登出红 #DC2626（浅）／#F87171（深）；信息色不用蓝，用中性灰。
 /// 深色阴影一律 none（平涂口径）；动效强调色仅黑白与中性灰。
 /// 链接不用蓝：主文字色＋始终下划线（见 link／linkUnderline）。
-/// 注意：`blue` 是历史名＝浅色模式（偏好存值 'blue' 已落用户设备，
-/// 改名会丢用户偏好，故只改含义不改名；见 A1 偏好链）。
-enum QfThemeMode { blue, dark }
+/// 注意：2026-11-18 主题三态迁移（GPT 新材料回复裁决）：枚举里的 `blue`
+/// 已改为 `light`；旧偏好存值 'blue' 已落用户设备，读时在 fromPref／
+/// resolveThemeMode 里兼容为 light，不丢用户偏好（见 A1 偏好链）。
+enum QfThemeMode { light, dark }
 
 extension QfThemeModeX on QfThemeMode {
-  String get prefValue => this == QfThemeMode.blue ? 'blue' : 'dark';
-  static QfThemeMode fromPref(String? v) =>
-      v == 'dark' ? QfThemeMode.dark : QfThemeMode.blue;
+  /// 持久化存值：新写入一律 'light'／'dark'；读时 'blue'（旧版存值）兼容为 light。
+  String get prefValue => this == QfThemeMode.light ? 'light' : 'dark';
+  static QfThemeMode fromPref(String? v) {
+    if (v == 'dark') return QfThemeMode.dark;
+    if (v == 'light' || v == 'blue') return QfThemeMode.light; // 'blue' 为旧持久化值，读兼容
+    return QfThemeMode.light; // 未知旧值按浅色（与旧行为一致：非 dark 一律浅色）
+  }
 }
 
 /// 初始主题裁决（纯函数）：用户手动选过（偏好非空）永远听用户的；
@@ -37,21 +42,25 @@ QfThemeMode resolveThemeMode({
   String? pref,
   required Brightness platformBrightness,
 }) {
-  if (pref != null && pref.isNotEmpty) return QfThemeModeX.fromPref(pref);
+  if (pref == 'dark') return QfThemeMode.dark;
+  if (pref == 'light' || pref == 'blue') return QfThemeMode.light; // 'blue' 为旧持久化值，读兼容
+  // null / '' / 'system' / 未知：跟随系统亮度（显式 'system' 不得先被映射成固定浅色）。
   return platformBrightness == Brightness.dark
       ? QfThemeMode.dark
-      : QfThemeMode.blue;
+      : QfThemeMode.light;
 }
 
 /// P0-2：向已加载 WebView 推送壳主题的 JS 片段（纯函数）。
 /// 与 Web 页约定的窗口事件 `qf-theme-state` 同契约：
-/// detail 为 {resolved: 'dark'|'blue', mode: 'system'|'blue'|'dark'}，
-/// 其中 'blue' 是浅色历史键名，不对应蓝色。mode 非法值一律按 'system' 算。
+/// detail 为 {resolved: 'dark'|'light', mode: 'system'|'light'|'dark'}，
+/// 旧 'blue' 读兼容归一化为 'light'。mode 非法值一律按 'system' 算。
 String buildThemeStateEventJs({required bool isDark, String? mode}) {
-  final resolved = isDark ? 'dark' : 'blue';
-  final m = (mode == 'dark' || mode == 'blue' || mode == 'system')
-      ? mode!
-      : 'system';
+  final resolved = isDark ? 'dark' : 'light';
+  final m = mode == 'blue'
+      ? 'light'
+      : (mode == 'dark' || mode == 'light' || mode == 'system')
+          ? mode!
+          : 'system';
   return "window.dispatchEvent(new CustomEvent('qf-theme-state',{detail:{resolved:'$resolved',mode:'$m'}}));";
 }
 
@@ -750,7 +759,7 @@ class QfPageTransitionsBuilder extends PageTransitionsBuilder {
 /// 壳内自绘面（顶栏／卡片／列表行）仍走 QfPalette 令牌，口径一致。
 class QfTheme {
   static ThemeData dark() => _build(const QfPalette(QfThemeMode.dark));
-  static ThemeData light() => _build(const QfPalette(QfThemeMode.blue));
+  static ThemeData light() => _build(const QfPalette(QfThemeMode.light));
 
   static ThemeData _build(QfPalette p) {
     final onCard = p.onCard;

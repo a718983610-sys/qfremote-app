@@ -173,11 +173,12 @@ test('P0-2 主题：无存储偏好时跟随系统；壳手动优先；壳手动
   out.D_afterToggleClick = { ...clickRes, dataTheme: await page.evaluate(() => document.documentElement.getAttribute('data-theme')), stored: await page.evaluate(() => { try { return localStorage.getItem('qf-theme'); } catch (e) { return null; } }), before };
   // E：壳切回跟随系统（mode=system，系统浅）＋无本机存储时，须回浅色。
   await page.evaluate(() => { try { localStorage.removeItem('qf-theme'); } catch (e) {} });
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent('qf-theme-state', { detail: { resolved: 'blue', mode: 'system' } })));
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('qf-theme-state', { detail: { resolved: 'light', mode: 'system' } })));
   await page.waitForTimeout(300);
   out.E_shellSystem_noStored = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
-  // F：无 mode 的推送（Windows console-preload 'qf-theme-state' 只带 resolved，cb(t,null)）
-  // 不得把主题闪回本机偏好/系统：先置壳手动深色，再发 mode 缺失的 resolved=blue 推送。
+  // F：无 mode 的推送（旧 Windows console-preload 'qf-theme-state' 只带 resolved，cb(t,null)；
+  // A10 已修新壳不再发，但旧壳／旧值 'blue' 仍须被正确处理）不得把主题闪回本机偏好/系统：
+  // 先置壳手动深色，再发 mode 缺失的 resolved=blue（旧值，读兼容为 light）推送。
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('qf-theme-state', { detail: { resolved: 'dark', mode: 'dark' } })));
   await page.waitForTimeout(200);
   const fBefore = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));

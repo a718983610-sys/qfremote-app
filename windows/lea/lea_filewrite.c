@@ -14,8 +14,12 @@ static void set_detail(char *detail, size_t detail_size, const char *s) {
     if (detail && detail_size > 0) snprintf(detail, detail_size, "%s", s);
 }
 
-/* 同卷替换：成功返回 1，失败返回 0（目标原文件不动）。 */
-static int replace_file(const char *tmp, const char *target) {
+/* 同卷替换：成功返回 1，失败返回 0（目标原文件不动）。
+ * Windows 用 MoveFileExA 具替换语义的原子替换（不先删旧目标——
+ * mingw／Wine 下 rename 不覆盖已存在目标，旧代码为此先删旧文件
+ * 再改名，中间空窗一旦改名失败旧文件即丢失，A9 修掉）；POSIX
+ * 用 rename（原生原子替换）。 */
+int lea_file_replace(const char *tmp, const char *target) {
 #ifdef _WIN32
     return MoveFileExA(tmp, target,
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
@@ -74,7 +78,7 @@ int lea_file_write_atomic(const char *target, const unsigned char *data,
         return 0;
     }
     /* 成功才替换目标；替换失败同样删 tmp、保留旧文件、报失败。 */
-    if (!replace_file(tmp, target)) {
+    if (!lea_file_replace(tmp, target)) {
         remove(tmp);
         set_detail(detail, detail_size, "file-replace-failed");
         return 0;

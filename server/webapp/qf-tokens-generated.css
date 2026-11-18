@@ -1,13 +1,19 @@
 /* 由 design-tokens/generate.dart 从 design-tokens/tokens.json 生成，
    不要手工改本文件。S-029：设计 token 单一来源的 CSS 侧产物。
-   只含已对齐 token；分歧 token（brand／textPrimary／textSecondary 等）
-   不在此生成、不覆盖任何一边，统一等 S-132 方案裁决。*/
+   S-132 已裁决（2026-11-18）：全部颜色 token 均已定值并在此生成。*/
 :root{
 --success:#16a34a;
 --danger:#dc2626;
 --warning:#ea580c;
 --info:#3f3f46;
 --surface-0:#ffffff;
+--brand:#000000;
+--link:#09090b;
+--link-underline:#a1a1aa;
+--surface-1:#f7f7f8;
+--text-1:#09090b;
+--text-2:#52525b;
+--line:#e4e4e7;
 --fs11:11px;
 --fs12:12px;
 --fs13:13px;
@@ -41,4 +47,11 @@
 --warning:#fb923c;
 --info:#d4d4d8;
 --surface-0:#08090a;
+--brand:#ffffff;
+--link:#ffffff;
+--link-underline:#52525b;
+--surface-1:#111113;
+--text-1:#f7f7f8;
+--text-2:#a1a1aa;
+--line:#27272a;
 }

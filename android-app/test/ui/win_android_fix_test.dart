@@ -11,7 +11,7 @@ import 'package:qfremote/ui/toolbar.dart';
 /// Windows 侧（W1/W2/W4–W10）无 Flutter 渲染，走 node 单测＋Playwright
 /// 实测（见 WIN-ANDROID-FIX-REPORT.md），不在本文件断言。
 void main() {
-  const light = QfPalette(QfThemeMode.blue);
+  const light = QfPalette(QfThemeMode.light);
   const dark = QfPalette(QfThemeMode.dark);
 
   group('A1 顶栏 token：浅色白顶栏＋深色卡片，禁纯黑顶栏', () {
@@ -249,7 +249,7 @@ void main() {
     });
 
     testWidgets('浅色→“白底黑字”', (tester) async {
-      await pumpSettings(tester, ThemeChoice.blue);
+      await pumpSettings(tester, ThemeChoice.light);
       expect(find.text('白底黑字'), findsOneWidget);
     });
 

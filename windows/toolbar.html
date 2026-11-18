@@ -238,26 +238,26 @@
   qfNav.getVersion().then(v => { document.getElementById('ver').textContent = 'v' + String(v).replace(/\.0$/, ''); }).catch(() => {});
 
   // ---------- 主题（三态：跟随系统 → 浅色 → 深色；W1 定夺，2026-11-14） ----------
-  // 内容页只认识解析后的 'dark'/'blue'（qf-theme-state 不动）；工具栏按钮要
+  // 内容页只认识解析后的 'dark'/'light'（qf-theme-state 不动）；工具栏按钮要
   // 区分 mode 与 resolved（qf-theme-mode {mode, resolved}）。三态图标：
-  // system＝半圆（现成）、blue＝太阳、dark＝月亮。
+  // system＝半圆（现成）、light＝太阳、dark＝月亮。
   const themeBtn = document.getElementById('themeBtn');
   const THEME_ICONS = {
     system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>',
-    blue: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"/></svg>',
+    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"/></svg>',
     dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5z"/></svg>'
   };
   let themeModeCur = 'system'; // 当前档（由 qf-theme-mode / getUiState 回填；未知时默认 system）
   function renderThemeBtn(mode, resolved) {
-    const m = (mode === 'system' || mode === 'blue' || mode === 'dark') ? mode : 'system';
-    const r = resolved === 'dark' ? 'dark' : 'blue';
+    const m = (mode === 'system' || mode === 'light' || mode === 'dark') ? mode : (mode === 'blue' ? 'light' : 'system');
+    const r = resolved === 'dark' ? 'dark' : 'light';
     themeModeCur = m;
     if (r === 'dark') document.documentElement.dataset.theme = 'dark';
     else delete document.documentElement.dataset.theme;
     themeBtn.innerHTML = THEME_ICONS[m];
     // 文案实时明确当前档＋下一档动作（定夺原文口径）：
-    const next = m === 'system' ? '浅色' : m === 'blue' ? '深色' : '跟随系统';
-    const cur = m === 'system' ? '跟随系统（当前' + (r === 'dark' ? '深色' : '浅色') + '）' : m === 'blue' ? '浅色' : '深色';
+    const next = m === 'system' ? '浅色' : m === 'light' ? '深色' : '跟随系统';
+    const cur = m === 'system' ? '跟随系统（当前' + (r === 'dark' ? '深色' : '浅色') + '）' : m === 'light' ? '浅色' : '深色';
     const label = '主题：' + cur + '，点击切换到' + next;
     themeBtn.title = label;
     themeBtn.setAttribute('aria-label', label);

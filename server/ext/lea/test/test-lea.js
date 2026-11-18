@@ -39,6 +39,26 @@ core.grantMuse('alice', 'owner'); // H06：生成 Key 须先有授权；§1 的�
 const DEV = 'node//test-device-1';
 const USER = 'alice';
 const OTHER = 'bob';
+// D2-K1：可见性测试桩按账号返回受控清单（裁决要求：不得对所有账号返回
+// 同一清单）。本测试世界：alice 可见 DEV＋ghost；站长可见 DEV＋ghost＋
+// test-device-2；其余账号可见空清单。ghost 在清单内但不在通道节点里，
+// 使 rebind 404 分支可达。
+function testVisibleList(auth) {
+  const u = auth && auth.user;
+  if (u === '718983610') return [DEV, 'node//ghost', 'node//test-device-2'];
+  if (u === USER) return [DEV, 'node//ghost'];
+  return [];
+}
+// D2-K1：直接改写 keys.json 里某条记录的字段（与 D2 B7 同款手法）。
+// 用途：构造“生成时已被 K1 拒绝、但须保留下来验 admit／读路径分支”的
+// 旧态 Key——只能由测试夹具写，不得用于生产。dir 缺省为主台账 tmpDir。
+function rewriteKeyRecord(keyId, patch, dir) {
+  const d = dir || tmpDir;
+  const st = JSON.parse(fs.readFileSync(path.join(d, 'keys.json'), 'utf8'));
+  const rec = st.keys.find((k) => k && k.key_id === keyId);
+  Object.assign(rec, patch);
+  fs.writeFileSync(path.join(d, 'keys.json'), JSON.stringify(st));
+}
 
 function bearerHeaders(plain, extra) {
   return Object.assign({
@@ -113,7 +133,10 @@ const genBound = core.generateKey(USER, { device_scope: DEV });
 let adm = core.admit({ key: core.findKeyById(genBound.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('绑定+授权齐全 → 准入通过', adm.ok === true);
 // scope：device_scope 不一致
-const genOther = core.generateKey(USER, { device_scope: 'node//other-device' });
+// D2-K1：scope 指向未绑定设备的 Key 生成时已被拒绝——为保留 admit 的
+// scope 分支断言，先合法生成再直接改写台账 scope（与 D2 B7 同款手法）。
+const genOther = core.generateKey(USER, { device_scope: DEV });
+rewriteKeyRecord(genOther.record.key_id, { device_scope: 'node//other-device' });
 adm = core.admit({ key: core.findKeyById(genOther.record.key_id), deviceId: DEV, command: 'ui.click' });
 t('device_id 与 Key 绑定不一致 → 403 QFR_SCOPE_DENIED', adm.ok === false && adm.status === 403 && adm.code === 'QFR_SCOPE_DENIED');
 // 未授权账号：H06 之后无授权建不出 Key——先授 carol、换绑、建 Key，再撤销
@@ -129,7 +152,10 @@ t('账号授权已撤销 → 403 QFR_GRANT_REVOKED', adm.ok === false && adm.cod
   // DC-A-1：device_scope 为空的 Key 现由 generateKey 自动取设备，
   // 此处须显式给未绑定设备域才能走到 NOT_BOUND 分支）
 core.grantMuse('carol', 'owner'); // 重新授予，genNoScope 才能建出
-const genNoScope = core.generateKey('carol', { device_scope: 'node//never-bound' });
+// D2-K1：同上——先为 carol 合法生成（DEV 此时绑 carol），再改写 scope
+// 为未绑定设备域，使断言走到 NOT_BOUND 分支。
+const genNoScope = core.generateKey('carol', { device_scope: DEV });
+rewriteKeyRecord(genNoScope.record.key_id, { device_scope: 'node//never-bound' });
 adm = core.admit({ key: core.findKeyById(genNoScope.record.key_id), deviceId: 'node//never-bound', command: 'ui.click' });
 t('设备未绑定 → 403 QFR_LEA_NOT_BOUND', adm.ok === false && adm.code === 'QFR_LEA_NOT_BOUND');
 // 危险命令 scope
@@ -935,6 +961,9 @@ const mockChannel = {
     verifyPassword: async (u, p) => p === 'correct-password',
     resolveConsoleAuth: async () => ({ user: USER, siteadmin: 0 }),
     isSiteAdmin: (a) => a.user === '718983610',
+    // D2：可见性依赖强制注入（server.js 真实注入的测试桩；清单含 DEV 与
+    // ghost——ghost 在清单内但不在通道节点里，使 rebind 404 分支可达）。
+    listVisibleDeviceIds: async (a) => testVisibleList(a),
   });
   function mkReq(method, url, headers, body) {
     return { method, url, headers: headers || {}, _body: body || {}, socket: { remoteAddress: '127.0.0.1' } };
@@ -1183,7 +1212,10 @@ const mockChannel = {
   r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(g6.key));
   t('路由查 job 200', r.code === 200 && r.obj.job.job_id === jobId);
   core.grantMuse(OTHER, 'owner'); // H06：bob 建 Key 须先有授权
-  r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(core.generateKey(OTHER, { device_scope: DEV }).key));
+  // D2-K1：bob 不能再为 alice 的 DEV 建 Key——给他自己的绑定设备建 Key
+  // （job 归属只验 account_id，与 scope 无关）。
+  core.recordBinding('node//bob-device', OTHER, 'test-job-owner');
+  r = await callRoute('GET', '/api/lea/v1/jobs/' + jobId, bearerHeaders(core.generateKey(OTHER, { device_scope: 'node//bob-device' }).key));
   t('他人 job 查不到 → 404（不泄露存在性）', r.code === 404);
   // 设备状态
   r = await callRoute('GET', '/api/lea/v1/devices/' + encodeURIComponent(DEV) + '/status', bearerHeaders(g6.key));
@@ -1265,7 +1297,10 @@ const mockChannel = {
   adm14 = core.admit({ key: core.findKeyById(postRegrant.record.key_id), deviceId: DEV2, command: 'ui.click' });
   t('T07 重复 grant 后在用 Key 仍可准入', adm14.ok === true);
   // H22：绑定前生成的 Key（binding_epoch 0），绑定后按不匹配拒绝
-  const preBind = core.generateKey(USER2, { device_scope: 'node//test-device-3' });
+  // D2-K1：epoch 0 的 Key 生成时已被拒绝——为保留 admit 的代次分支断言，
+  // 先合法生成再直接改写台账（scope＋binding_epoch 0，与 D2 B7 同款手法）。
+  const preBind = core.generateKey(USER2, { device_scope: DEV2 });
+  rewriteKeyRecord(preBind.record.key_id, { device_scope: 'node//test-device-3', binding_epoch: 0 });
   core.recordBinding('node//test-device-3', USER2, 'test-h22');
   const adm22 = core.admit({ key: core.findKeyById(preBind.record.key_id), deviceId: 'node//test-device-3', command: 'ui.click' });
   t('H22 binding_epoch 0 的 Key 绑定后 → 409 QFR_BINDING_CHANGED', adm22.ok === false && adm22.code === 'QFR_BINDING_CHANGED');
@@ -1449,6 +1484,9 @@ const mockChannel = {
     verifyPassword: async (u, p) => p === 'correct-password',
     resolveConsoleAuth: async () => ({ user: '718983610', siteadmin: 1 }),
     isSiteAdmin: (a) => a.user === '718983610',
+    // D2-K1：可见性桩按账号返回（站长可见 DEV＋ghost＋test-device-2；
+    // ghost 在清单内但不在通道节点里，使 rebind 404 分支可达）。
+    listVisibleDeviceIds: async (a) => testVisibleList(a),
   });
   async function callAdminRoute(method, url, headers, body) {
     sent.length = 0;
@@ -1489,6 +1527,7 @@ const mockChannel = {
     const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lea-test-legacy-'));
     const legacyCore = createLeaCore({ signingKeyFile: testKeyFile, dir: legacyDir, enableSweeps: false });
     legacyCore.grantMuse(USER, 'owner');
+    legacyCore.recordBinding(DEV, USER, 'test-legacy-setup'); // D2-K1：先绑定才能建 Key
     const legacyKey = legacyCore.generateKey(USER, { device_scope: DEV });
     const legacyKeysPath = path.join(legacyDir, 'keys.json');
     const legacyPlainPrefix = legacyKey.key.slice(0, 12);
@@ -1565,6 +1604,9 @@ const mockChannel = {
       verifyPassword: async (u, p) => p === 'correct-password',
       resolveConsoleAuth: async () => ({ user: USER, siteadmin: 0 }),
       isSiteAdmin: (a) => a.user === '718983610',
+      // D2：可见性依赖强制注入（server.js 真实注入的测试桩；本路由不走
+      // rebind，桩仅为满足强制依赖、不影响断言）。
+      listVisibleDeviceIds: async (a) => testVisibleList(a),
     });
     async function callRoute1r(method, url, headers, body) {
       sent.length = 0;
@@ -1659,6 +1701,9 @@ const mockChannel = {
       verifyPassword: async (u, p) => p === 'correct-password',
       resolveConsoleAuth: async () => ({ user: USER, siteadmin: 0 }),
       isSiteAdmin: (a) => a.user === '718983610',
+      // D2：可见性依赖强制注入（server.js 真实注入的测试桩；本路由不走
+      // rebind，桩仅为满足强制依赖、不影响断言）。
+      listVisibleDeviceIds: async (a) => testVisibleList(a),
     });
     async function callRoute5(method, url, headers, body) {
       sent.length = 0;
@@ -2539,7 +2584,10 @@ const mockChannel = {
     t('RC-04 他人 Key 代签发 → QFR_API_KEY_REVOKED',
       codeOf(() => coreR.issueReconnectTicket({ accountId: USER, deviceId: DEV, keyId: gBob.record.key_id, sessionId: S2 })) === 'QFR_API_KEY_REVOKED');
     // 未进白名单设备签发 → admit 透传 403
-    const gNW = coreR.generateKey(USER, { device_scope: 'node//test-device-3' });
+    // D2-K1：未绑定设备的 Key 生成时已被拒绝——先合法生成再直接改写台账
+    // scope（与 D2 B7 同款手法；本 core 台账在 dirR）。
+    const gNW = coreR.generateKey(USER, { device_scope: DEV });
+    rewriteKeyRecord(gNW.record.key_id, { device_scope: 'node//test-device-3' }, dirR);
     t('RC-04 未进白名单设备签发 → QFR_DEVICE_NOT_WHITELISTED',
       codeOf(() => coreR.issueReconnectTicket({ accountId: USER, deviceId: 'node//test-device-3', keyId: gNW.record.key_id, sessionId: S2 })) === 'QFR_DEVICE_NOT_WHITELISTED');
     // 正常核验 tk1b（消费掉，后面不再用）

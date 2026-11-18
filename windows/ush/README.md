@@ -42,10 +42,12 @@ QFSysHelper 要接用户态 Electron 应用故放行 AU，USH 只接 LEA 服务�
 安装目录下的 `QFRLEA.exe`（LEA 服务）与自身 `QFUserHelper.exe`
 （仅 `ui.ping` 自探活），其余一律拒绝；LEA 来的请求须带与 USH 内存
 token 一致的 `ush_token`（USH 每启动随机生成 32 字节 hex，写
-`%ProgramData%\QFR\LEA\ush-tokens\<sessionid>.txt` 供 LEA 读取，
-`<sessionid>` 为活动控制台会话 id，H03 第二轮与 LEA 同源，RDP／多
-会话下不错配；无活动控制台会话时（RDP-only）USH 不写 token 文件，
-LEA 读不到 token，UI 命令 fail-closed），
+`%ProgramData%\QFR\LEA\ush-tokens\<sessionid>\token.txt` 供 LEA 读取，
+`<sessionid>` 为 USH 自身会话 id（H03 第三轮），LEA 按发来命令的
+客户端所在会话读 token，两端同源；取不到自身会话 id 时 USH 不写
+token 文件，LEA 读不到 token，UI 命令 fail-closed），v3 每会话子目
+录由 SYSTEM 服务创建并授 DACL（父目录只留 SY/BA，子目录 Logon SID
+最小权限，见 QFRLEA.c ush_token_session_dir_ensure），
 定长比对，不符回 `QFR_USH_UNAUTHORIZED`。）
 
 请求（LEA 转来的已校验信封；USH 不做准入、不验签名、不存密钥——
@@ -113,6 +115,10 @@ LEA 读不到 token，UI 命令 fail-closed），
   复：旧版先写 token 再查互斥＋靠 pipe 探活裁决，触发器 backfill 与应用
   登录同秒拉起时双进程并存、token 互串、失败方每秒刷 pipe-create-failed；
   管道层另有兜底，CreateNamedPipe 报 5／231 且探活成功即停整个进程）。
+  多会话限制（P1-2 文档口径）：USH 管道是机器全局单名，首个启动的
+  USH 独占，后起会话的 USH 探活成功即退出；故 UI 命令／自助绑定仅第
+  一个 USH 所在会话可用，其余会话转发因 token 对不上而 fail-closed，
+  不静默错发到别的会话。单用户部署不受影响。
   无持久状态，进程死则管道句柄由系统回收，不留僵尸管道；计划任务
   失败自动重启（1 分钟间隔，最多 3 次）。
 - **红线**：不做内核驱动、不做进程注入；不执行任意脚本／命令；USH 只信 LEA

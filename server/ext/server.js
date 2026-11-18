@@ -106,6 +106,34 @@ const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: 
   // reconcile 的「一审已落定」标记同源同口径）；非 order 类型恒放行。
   // payOrders 已于上一行先行实例化，无时序问题。
   resolveGuard: (type, refId) => { if (type !== 'order') return true; const o = payOrders.getRaw(refId); return !!(o && o.review1); } });
+// D2：设备可见性查询（供 LEA 路由注入，GPT D1–D4 裁决 §三；全面复审
+// §二.1／整改第 2 步）。数据来源＝该账号用自己的控制台会话向 MeshCentral
+// 请求的 nodes 清单：mcFetchNodes 以用户自己的 xid/xid.sig 开控制通道，
+// MeshCentral 按该账号的用户组过滤，只含其可见设备（5 秒共享缓存＋单飞，
+// 见 mcFetchNodes）。绝不用请求体自报的设备列表，也不用服务账号的全局
+// 节点清单——lea-channel 的 listNodes 是服务账号视角，含全部设备，当可
+// 见性源会把全部设备暴露给任一账号。站长（siteadmin）天然可见全部节点，
+// 与 MeshCentral 口径一致。返回裸 id 清单（flattenMeshNodes 的 nodeid 已
+// 去 node// 前缀；路由层再以 bareNodeId 归一比对）。
+// 查询失败／超时／返回异常时抛错，调用方一律按不可用处理（fail-closed，
+// 路由层回 503 QFR_VISIBILITY_UNAVAILABLE），不得放行。注意：取回成功但
+// 清单为空（账号确实无可见设备）时返回 []，路由层按“确认不可见”回 403，
+// 与后端故障的 503 区分——MeshCentral 对无设备账号与异常回包都可能给空
+// 对象，两者都拒绝，仅状态码不同，不存在放行窗口。
+async function listVisibleDeviceIds(auth, req) {
+  const cookieHeader = req && req.headers ? (req.headers.cookie || '') : '';
+  if (!auth || !auth.user || !cookieHeader) throw new Error('visibility-source-unavailable');
+  const nodes = await mcFetchNodesBudgeted(cookieHeader, clientIpFromReq(req), auth.user, 8000);
+  if (!nodes || typeof nodes !== 'object') throw new Error('visibility-source-unavailable');
+  const flat = flattenMeshNodes(nodes);
+  if (!Array.isArray(flat)) throw new Error('visibility-source-unavailable');
+  const out = [];
+  for (const n of flat) {
+    if (!n || !n.nodeid) continue;
+    out.push(String(n.nodeid));
+  }
+  return out;
+}
 // ===== LEA 本地代理（Stage 1 MVP，DESIGN.md §8）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行 =====
 // server.js 只加本段实例化与下方路由注册行，不改既有逻辑。
 let leaCore = null, leaChannel = null, leaRoutes = null;
@@ -113,22 +141,29 @@ try {
   const _leaCoreMod = require('./lea/lea-core');
   const _leaChannelMod = require('./lea/lea-channel');
   const _leaRoutesMod = require('./lea/lea-routes');
+  const _leaMfaMod = require('./lea/mfa-core');
   leaCore = _leaCoreMod.createLeaCore({ dir: process.env.QFEXT_LEA_DIR || path.join(DATA_DIR, 'lea'), log, signingKeyFile: process.env.QFEXT_LEA_SIGNING_KEY_FILE || path.join(MC_DATA_DIR, 'lea-signing-key.b64') });
   leaChannel = _leaChannelMod.createLeaChannel({ log });
+  const leaMfa = _leaMfaMod.createMfaCore({ dir: process.env.QFEXT_LEA_DIR || path.join(DATA_DIR, 'lea'), log });
   leaRoutes = _leaRoutesMod.createLeaRoutes(leaCore, leaChannel, {
     sendJson, readJsonBody, log,
     verifyPassword: (u, p) => verifyAccountPassword(u, p),
-    // T31：本站暂无 MFA 校验入口（全仓无 TOTP/MFA 实现；VERIFY-STAGE1 已列
-    // 为已知未完成项），故显式声明 verifyMfa: null，不注入伪造的校验函数——
-    // 恒真会虚构 MFA 校验、恒假会锁死 Key 生成／全部吊销，两者都不可接受。
-    // lea-routes 未注入时只走密码二次确认（confirmMethod='password'，见
-    // server/ext/lea/README.md 未完成项第 5 条）。MFA 上线后在此注入真实
-    // 校验函数即可。
+    // MFA（GPT 2026-11-18 裁决 §三）：恢复票据签发全员强制 MFA，由
+    // deps.mfa（mfa-core，TOTP）执行。verifyMfa 仍为 null——Key 生成／
+    // 吊销等操作按裁决边界只须密码二次确认，不强制 MFA；恢复票据不走
+    // verifyMfa，改走 requireRecoveryMfa 全员强制门。
     verifyMfa: null,
+    mfa: leaMfa,
     resolveConsoleAuth: (req) => validateConsoleCookie(req.headers.cookie || '', clientIpFromReq(req)),
     isSiteAdmin: (a) => isAdmin(a),
+    // D2：显式注入设备可见性查询（GPT D1–D4 裁决 §三；必注）。路由层
+    // 对 login-attestation／rebind 的可见性校验为 fail-closed：本函数
+    // 未注入、查询失败、返回异常时对应接口回 503 QFR_VISIBILITY_UNAVAILABLE。
+    // req 须透传——函数要拿该账号的控制台会话 cookie 向 MeshCentral 取
+    // 其可见节点；只传 auth（{user, siteadmin}）取不到会话，无法查询。
+    listVisibleDeviceIds: (a, req) => listVisibleDeviceIds(a, req),
   });
-  log({ ev: 'lea-mfa-unavailable', msg: 'no MFA verifier configured; LEA key operations use password-only confirmation' });
+  log({ ev: 'lea-mfa-ready', msg: 'MFA core loaded; recovery ticket issuance requires a qualified second factor' });
 } catch (e) { log({ ev: 'lea-unavailable', err: String(e && e.message || e) }); }
 // 订单一审秒审（主通道）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行，订单走人工链
 let instantReview = null;
@@ -187,14 +222,38 @@ try {
   const qualityMod = require('./quality-core');
   const transferMod = require('./transfer-core');
   const recordingMod = require('./recording-core');
-  const qualitySessions = new Map(); // sessionId -> quality session（每会话参数快照）
-  const idrGate = idrMod.createIdrGate({ log });
+  const qualitySessions = new Map(); // sessionId -> { qs, owner, createdAt, lastSeenAt }（U2：owner=创建者登录用户）
+  // U3：IDR agent 归属校验器——LEA 绑定台账为准（leaCore.getBinding）。
+  // 绑定须存在、account_id 等于登录用户、state 为 ACTIVE；任一不满足即拒绝；
+  // leaCore 不可用（LEA 模块未加载）时一律拒绝（fail-closed）。台账读失败
+  // 按未通过处理（不把异常当放行）。
+  const verifyIdrAgent = (userId, agentId) => {
+    if (!leaCore) return false;
+    try {
+      const b = leaCore.getBinding(agentId);
+      return !!(b && b.account_id === String(userId) && b.state === 'ACTIVE');
+    } catch (e) { return false; }
+  };
+  const idrGate = idrMod.createIdrGate({ log, verifyAgent: verifyIdrAgent });
   const transferCore = transferMod.createTransferCore({ dir: LIC_DIR, log, stageBuffer: fileStage.stageBuffer, limits: fileStage.limits });
   const recordingCore = recordingMod.createRecordingCore({ dir: LIC_DIR, log, readConfig: () => lic.readConfig() || {} });
+  // U2/U3 闲置过期（默认值；测试可用环境变量调小以便端到端验证过期行为）：
+  const QUALITY_SESSION_IDLE_MS = Number(process.env.QFEXT_QUALITY_IDLE_MS) > 0 ? Number(process.env.QFEXT_QUALITY_IDLE_MS) : 10 * 60 * 1000;
+  const IDR_BINDING_IDLE_MS = Number(process.env.QFEXT_IDR_IDLE_MS) > 0 ? Number(process.env.QFEXT_IDR_IDLE_MS) : 30 * 60 * 1000;
+  const L5_SWEEP_MS = Number(process.env.QFEXT_L5_SWEEP_MS) > 0 ? Number(process.env.QFEXT_L5_SWEEP_MS) : 60000;
   const l5SweepTimer = setInterval(() => {
     try { transferCore.sweep(Date.now()); } catch (e) { log({ ev: 'l5-transfer-sweep-error', err: String(e && e.message || e) }); }
     try { recordingCore.sweep(Date.now()); } catch (e) { log({ ev: 'l5-recording-sweep-error', err: String(e && e.message || e) }); }
-  }, 60000);
+    try {
+      const nowS = Date.now();
+      let droppedQ = 0;
+      for (const [sid, ent] of qualitySessions) {
+        if (nowS - (ent.lastSeenAt || ent.createdAt) > QUALITY_SESSION_IDLE_MS) { qualitySessions.delete(sid); droppedQ++; }
+      }
+      if (droppedQ) log({ ev: 'quality-sweep', dropped: droppedQ });
+      idrGate.sweep(nowS, IDR_BINDING_IDLE_MS);
+    } catch (e) { log({ ev: 'l5-quality-idr-sweep-error', err: String(e && e.message || e) }); }
+  }, L5_SWEEP_MS);
   if (l5SweepTimer && typeof l5SweepTimer.unref === 'function') l5SweepTimer.unref();
   l5 = { relayMod, idrMod, qualityMod, transferMod, recordingMod, qualitySessions, idrGate, transferCore, recordingCore };
   log({ ev: 'l5-modules-loaded', items: ['RC-03', 'RC-07', 'RC-08', 'RC-09', 'RC-10'] });
@@ -1190,7 +1249,7 @@ function readJsonBody(req, maxBytes) {
 }
 function forbiddenPage(res) {
   sendHtml(res, 403, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>无法打开 · QFRemote</title>'
-    + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#0B2B5B;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#43536a}</style></head>'
+    + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F7F7F8;color:#09090B}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#000000;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#52525B}</style></head>'
     + '<body><div class="wrap"><div class="card"><h1>本页面仅站长可打开</h1><p>请先使用站长账号登录 QFRemote，再从软件中打开站长管理页。普通账号没有此权限。</p></div></div></body></html>');
 }
 
@@ -2799,14 +2858,23 @@ const server = http.createServer(async (req, res) => {
       // RC-09：探针上报＋降档决策＋背压（POST /license/api/session/probe）
       if (req.method === 'POST' && p === '/license/api/session/probe') {
         if (!l5Guard(res)) return;
+        if (denyIfBanned(res, auth.user)) return;
         const body = await readJsonBody(req);
         const sessionId = String(body.sessionId || '');
         if (!sessionId) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '缺少 sessionId。' });
-        let qs = l5.qualitySessions.get(sessionId);
-        if (!qs) {
-          qs = l5.qualityMod.createQualitySession({ log, initialTier: String(body.tier || ''), tierTable: (lic.readConfig() || {}).qualityTiers });
-          l5.qualitySessions.set(sessionId, qs);
+        // U2：会话首次创建即绑定 owner=当前登录用户；他人 sessionId 一律拒绝，
+        // 不创建、不摄入（跨用户干扰）。过期后重建为全新会话（旧档位/待 ACK 不复活）。
+        let ent = l5.qualitySessions.get(sessionId);
+        if (!ent) {
+          const qs = l5.qualityMod.createQualitySession({ log, initialTier: String(body.tier || ''), tierTable: (lic.readConfig() || {}).qualityTiers });
+          ent = { qs, owner: auth.user, createdAt: now, lastSeenAt: now };
+          l5.qualitySessions.set(sessionId, ent);
+        } else if (ent.owner !== auth.user) {
+          log({ ev: 'quality-forbidden', sessionId, owner: ent.owner, caller: auth.user });
+          return sendJson(res, 200, { ok: false, code: 'FORBIDDEN', msg: '会话不属于当前用户。' });
         }
+        ent.lastSeenAt = now;
+        const qs = ent.qs;
         const out = qs.ingestProbe(body.probe || {}, now);
         const bp = qs.backpressure(body.probe || {}, body.serverSignal || null, now);
         qs.sweepAcks(now);
@@ -2815,29 +2883,47 @@ const server = http.createServer(async (req, res) => {
       // RC-09：手动升档 / 档位决策 ACK
       if (req.method === 'POST' && p === '/license/api/session/quality/upgrade') {
         if (!l5Guard(res)) return;
+        if (denyIfBanned(res, auth.user)) return;
         const body = await readJsonBody(req);
-        const qs = l5.qualitySessions.get(String(body.sessionId || ''));
-        if (!qs) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在（须先上报探针）。' });
-        return sendJson(res, 200, qs.requestUpgrade(now));
+        const ent = l5.qualitySessions.get(String(body.sessionId || ''));
+        if (!ent) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在（须先上报探针）。' });
+        if (ent.owner !== auth.user) {
+          log({ ev: 'quality-forbidden', sessionId: String(body.sessionId || ''), owner: ent.owner, caller: auth.user });
+          return sendJson(res, 200, { ok: false, code: 'FORBIDDEN', msg: '会话不属于当前用户。' });
+        }
+        ent.lastSeenAt = now;
+        return sendJson(res, 200, ent.qs.requestUpgrade(now));
       }
       if (req.method === 'POST' && p === '/license/api/session/quality/ack') {
         if (!l5Guard(res)) return;
+        if (denyIfBanned(res, auth.user)) return;
         const body = await readJsonBody(req);
-        const qs = l5.qualitySessions.get(String(body.sessionId || ''));
-        if (!qs) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在。' });
-        return sendJson(res, 200, qs.ack(String(body.decisionId || ''), now));
+        const ent = l5.qualitySessions.get(String(body.sessionId || ''));
+        if (!ent) return sendJson(res, 200, { ok: false, code: 'NOT_FOUND', msg: '会话不存在。' });
+        if (ent.owner !== auth.user) {
+          log({ ev: 'quality-forbidden', sessionId: String(body.sessionId || ''), owner: ent.owner, caller: auth.user });
+          return sendJson(res, 200, { ok: false, code: 'FORBIDDEN', msg: '会话不属于当前用户。' });
+        }
+        ent.lastSeenAt = now;
+        return sendJson(res, 200, ent.qs.ack(String(body.decisionId || ''), now));
       }
       // RC-03：IDR 请求准入（POST /license/api/session/idr-request）
-      // 绑定说明：首次见到的 sessionId 按“先到先得”绑定到当前用户＋
-      // body.agentId，此后只认该绑定（防客户端指定任意 sessionId）；
-      // 权威绑定（agent 侧注册）待 agent 通道落地后以 LEA/控制通道为准。
+      // 绑定说明（U3；GPT A4）：绑定只认服务端验证过的身份——agentId 须经 LEA
+      // 绑定台账校验（绑定存在、account_id 等于登录用户、state 为 ACTIVE），
+      // 否则不建立绑定（idrGate.bind 返回 null → AGENT_NOT_BOUND）；每次请求
+      // 重验归属（换绑/解绑后旧绑定立即失效）；闲置过期后重建须重新校验。
+      // 先到先得只发生在“同一 (sessionId, user, agent)”之内，不接受自报
+      // agent 抢占他人会话。业务拒绝一律回 200＋结构化 code（与 L5 其余端点
+      // 同口径；Windows 客户端按 code 查表，不按 HTTP 状态判拒绝原因）。
       if (req.method === 'POST' && p === '/license/api/session/idr-request') {
         if (!l5Guard(res)) return;
+        if (denyIfBanned(res, auth.user)) return;
         const body = await readJsonBody(req);
         const sessionId = String(body.sessionId || '');
-        const agentId = String(body.agentId || '');
+        const agentId = normalizeNodeId(String(body.agentId || ''));
         if (!sessionId || !agentId) return sendJson(res, 200, { ok: false, code: 'VALIDATION', msg: '缺少 sessionId/agentId。' });
-        l5.idrGate.bind(sessionId, auth.user, agentId, now);
+        const bound = l5.idrGate.bind(sessionId, auth.user, agentId, now);
+        if (!bound) return sendJson(res, 200, { ok: false, code: 'AGENT_NOT_BOUND', msg: '设备归属校验未通过（设备未绑定到当前账号，或绑定已失效）。' });
         const out = l5.idrGate.request({ sessionId, userId: auth.user, agentId, seq: Number(body.seq), reason: String(body.reason || ''), nowMs: now });
         return sendJson(res, 200, Object.assign({ ok: out.decision === 'forward' || out.decision === 'coalesced' }, out));
       }
@@ -3117,7 +3203,7 @@ const server = http.createServer(async (req, res) => {
       const entry = ssoTokens.get(token);
       if (entry) ssoTokens.delete(token); // 单次使用：取到即作废
       if (!entry || Date.now() > entry.exp) {
-        return sendHtml(res, 401, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F4F7FB"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#0B2B5B">这个入口链接已经失效</h1><p style="line-height:1.8;color:#43536a">入口链接只能用一次，而且只有一分钟有效。请回到 QFRemote 软件里重新打开站长管理页。</p></div></body></html>');
+        return sendHtml(res, 401, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>链接已失效 · QFRemote</title></head><body style="font-family:sans-serif;background:#F7F7F8"><div style="max-width:430px;margin:40px auto;background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:24px 20px"><h1 style="font-size:18px;color:#000000">这个入口链接已经失效</h1><p style="line-height:1.8;color:#52525B">入口链接只能用一次，而且只有一分钟有效。请回到 QFRemote 软件里重新打开站长管理页。</p></div></body></html>');
       }
       issueSession(res, entry);
       res.writeHead(302, { Location: '/admin', 'Cache-Control': 'no-store' });
@@ -3136,7 +3222,7 @@ const server = http.createServer(async (req, res) => {
       destroySession(req, res);
       log({ ev: 'admin-logout' });
       return sendHtml(res, 200, '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>已退出 · QFRemote</title>'
-        + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F4F7FB;color:#1c2733}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #DFE7F2;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#0B2B5B;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#43536a}a{color:#2470E0}</style></head>'
+        + '<style>body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#F7F7F8;color:#09090B}.wrap{max-width:430px;margin:0 auto;padding:40px 16px}.card{background:#fff;border:1px solid #E4E4E7;border-radius:14px;padding:24px 20px}h1{font-size:18px;color:#000000;margin:0 0 10px}p{font-size:14px;line-height:1.8;color:#52525B}a{color:#09090B}</style></head>'
         + '<body><div class="wrap"><div class="card"><h1>已退出站长管理</h1><p>本次登录已经结束。需要再进来时，请回到 QFRemote 软件里重新打开站长管理页。</p><p><a href="/">返回控制台</a></p></div></div></body></html>');
     }
 
@@ -3693,4 +3779,4 @@ if (!process.env.QFEXT_NO_LISTEN) {
 }
 
 // 供本地单测使用（生产路径不依赖）
-module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName, resolvePresence, observeNodesForPresence, presenceObsFor, PRESENCE_FRESH_MS, PRESENCE_STALE_MS, savePointsSoon };
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName, resolvePresence, observeNodesForPresence, presenceObsFor, PRESENCE_FRESH_MS, PRESENCE_STALE_MS, savePointsSoon, listVisibleDeviceIds };

@@ -163,7 +163,7 @@ String buildLoginBridgeJs({
   final hasSaved =
       (savedUsername ?? '').isNotEmpty && (savedPassword ?? '').isNotEmpty;
   final buyBg = isDark ? '#111113' : '#000000';
-  final pal = QfPalette(isDark ? QfThemeMode.dark : QfThemeMode.blue);
+  final pal = QfPalette(isDark ? QfThemeMode.dark : QfThemeMode.light);
   final buyBorder = '2px solid ${pal.brandCssHex}';
   // 查询／换绑文字链走链接色（定夺 §3.3：不用蓝，主文字色＋下划线）：
   // 浅 #09090B＋下划线 #A1A1AA／深 #FFFFFF＋下划线 #52525B。

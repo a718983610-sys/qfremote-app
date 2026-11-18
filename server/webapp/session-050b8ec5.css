@@ -66,17 +66,14 @@
      S-073：--glass-* 是语义 token（不复制基础字面量，现已用 var 别名指向全局
      --surface-*/--border/--shadow-none，定性为语义层，保留）。 */
   --glass-bg: var(--surface-3);
-  --glass-blur: none;
   --glass-bd: var(--border);
   --glass-inner: var(--shadow-none);
   --dark-glass-bg: var(--dark-surface-1);
-  --dark-glass-blur: none;
   --dark-glass-bd: var(--dark-border-hover);
   --dark-glass-inner: var(--shadow-none);
   --inset-bg: var(--brand-soft);
   --sheet-bg: var(--surface-2);
   --scrim: var(--overlay-scrim);
-  --scrim-blur: none;
 
   /* 色（会话为深色画布：表面／文字走 --dark-* 常量，语义走全局语义 token）
      2026-11-13 黑白化实测：--brand: var(--brand) / --brand-lt: var(--brand-lt) /
@@ -242,8 +239,6 @@
   border-radius: var(--r-full);
   background: var(--glass-10);
   border: 1px solid var(--dark-glass-bd);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   color: var(--on-dark);
   font-size: var(--fs-4);
   font-weight: var(--fw-4);
@@ -293,8 +288,6 @@
   padding: 0 var(--bar-px);
   border-radius: var(--r-20);
   background: var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-bd);
   box-shadow: var(--sh-chrome), var(--sh-inset-hi), var(--glass-inner);
   transition:
@@ -550,8 +543,6 @@
   height: 200px;
   border-radius: var(--r-24);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   border: 1px solid var(--dark-glass-bd);
   box-shadow: var(--sh-card), var(--dark-glass-inner);
   z-index: -1;
@@ -599,8 +590,6 @@
   padding: 0 var(--sp-7) 0 var(--sp-5);
   border-radius: var(--r-full);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   border: 1px solid var(--dark-glass-bd);
   box-shadow: var(--sh-card), var(--dark-glass-inner);
   color: var(--on-dark);
@@ -650,8 +639,6 @@
   place-items: center;
   padding: var(--sp-8);
   background: var(--scrim);
-  -webkit-backdrop-filter: var(--scrim-blur);
-  backdrop-filter: var(--scrim-blur);
   opacity: 1;
   transition: opacity var(--dur-3) var(--ease-std);
 }
@@ -766,8 +753,6 @@
   padding: 0 var(--tools-px);
   border-radius: var(--r-22);
   background: var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-bd);
   box-shadow: var(--sh-chrome), var(--sh-inset-hi), var(--glass-inner);
   transition:
@@ -887,8 +872,6 @@
   padding: 0 var(--sp-4) 0 var(--sp-7);
   border-radius: var(--r-18);
   background: var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-bd);
   box-shadow: var(--sh-chrome), var(--sh-inset-hi), var(--glass-inner);
   transition:
@@ -946,8 +929,6 @@
   overflow: hidden;
   border-radius: var(--r-24);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   border: 1px solid var(--dark-glass-bd);
   box-shadow: var(--sh-card), var(--dark-glass-inner);
 }
@@ -1001,8 +982,6 @@
   overflow: hidden;
   border-radius: var(--r-22);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   border: 1px solid var(--dark-glass-bd);
   box-shadow: var(--sh-card), var(--dark-glass-inner);
 }
@@ -1119,8 +1098,6 @@
   overflow: hidden;
   border-radius: var(--r-22);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   border: 1px solid var(--dark-glass-bd);
   box-shadow: var(--sh-card), var(--dark-glass-inner);
   transition:
@@ -1184,8 +1161,6 @@
   align-items: flex-end;
   justify-content: center;
   background: var(--scrim);
-  -webkit-backdrop-filter: var(--scrim-blur);
-  backdrop-filter: var(--scrim-blur);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-3) var(--ease-std);
@@ -1710,8 +1685,6 @@
   border: 1px solid var(--dark-glass-bd);
   border-radius: var(--r-full);
   background: var(--dark-glass-bg);
-  -webkit-backdrop-filter: var(--dark-glass-blur);
-  backdrop-filter: var(--dark-glass-blur);
   box-shadow: var(--dark-glass-inner), var(--sh-1);
   color: var(--on-dark);
   font-family: var(--font-sans);

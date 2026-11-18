@@ -9,7 +9,7 @@
     'use strict';
     var FRIENDS_KEY = 'qfFriendsUrl';
     var FRIENDS_DIRECT = 'https://' + location.hostname + ':8445/friends'; // 好友服务直连（8445 独立服务，与控制台同主机；2.4.2 起按当前主机名拼，不写死 IP）
-    var PEOPLE_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232470E0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='3.6'/%3E%3Cpath d='M3.2 19.4c.7-3 2.9-4.6 5.8-4.6s5.1 1.6 5.8 4.6'/%3E%3Ccircle cx='17' cy='9' r='2.7'/%3E%3Cpath d='M16.4 14.9c2.3.2 3.9 1.6 4.4 4'/%3E%3C/svg%3E";
+    var PEOPLE_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='3.6'/%3E%3Cpath d='M3.2 19.4c.7-3 2.9-4.6 5.8-4.6s5.1 1.6 5.8 4.6'/%3E%3Ccircle cx='17' cy='9' r='2.7'/%3E%3Cpath d='M16.4 14.9c2.3.2 3.9 1.6 4.4 4'/%3E%3C/svg%3E";
 
     /* 同框包装（2.3.0 M 线）：控制台内入口一律进同源包装页 /qf-wrap.html，
        目标页在包装页的 iframe 里打开，自有顶栏与返回入口保持在位，
@@ -61,18 +61,18 @@
         return true;
     }
     function qfPanelCssText() {
-        return '#qfPanel{position:fixed;left:0;right:0;bottom:0;z-index:40000;display:none;flex-direction:column;background:#F4F7FB;font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif}'
+        return '#qfPanel{position:fixed;left:0;right:0;bottom:0;z-index:40000;display:none;flex-direction:column;background:#F7F7F8;font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif}'
             + '#qfPanel.on{display:flex}'
-            + '#qfPanel .qf-p-bar{display:flex;align-items:center;gap:4px;height:46px;padding:0 10px;background:#fff;border-bottom:1px solid #DFE7F2;flex:0 0 auto}'
-            + '#qfPanel .qf-p-back{height:32px;padding:0 12px;border:1px solid #DFE7F2;border-radius:14px;background:#fff;color:#2470E0;font-size:14px;cursor:pointer}'
-            + '#qfPanel .qf-p-tab{height:32px;padding:0 14px;border:0;border-bottom:3px solid transparent;border-radius:0;background:none;color:#1F2D47;font-size:15px;cursor:pointer}'
-            + '#qfPanel .qf-p-tab.on{color:#2470E0;border-bottom-color:#2470E0;font-weight:600}'
-            + '#qfPanel .qf-p-close{margin-left:auto;width:32px;height:32px;border:0;border-radius:14px;background:none;color:#6B7A90;font-size:16px;cursor:pointer}'
+            + '#qfPanel .qf-p-bar{display:flex;align-items:center;gap:4px;height:46px;padding:0 10px;background:#fff;border-bottom:1px solid #E4E4E7;flex:0 0 auto}'
+            + '#qfPanel .qf-p-back{height:32px;padding:0 12px;border:1px solid #E4E4E7;border-radius:14px;background:#fff;color:#09090B;font-size:14px;cursor:pointer}'
+            + '#qfPanel .qf-p-tab{height:32px;padding:0 14px;border:0;border-bottom:3px solid transparent;border-radius:0;background:none;color:#09090B;font-size:15px;cursor:pointer}'
+            + '#qfPanel .qf-p-tab.on{color:#000000;border-bottom-color:#000000;font-weight:600}'
+            + '#qfPanel .qf-p-close{margin-left:auto;width:32px;height:32px;border:0;border-radius:14px;background:none;color:#52525B;font-size:16px;cursor:pointer}'
             + '#qfPanel .qf-p-frames{position:relative;flex:1 1 auto}'
             + '#qfPanel .qf-p-frames iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#fff}'
             + '#qfPanel .qf-p-frames iframe.on{display:block}'
-            + '#qfPanel .qf-p-note{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#6B7A90;font-size:14px;pointer-events:none}'
-            + '@media (prefers-color-scheme: dark){#qfPanel{background:#17191F}#qfPanel .qf-p-bar{background:#22262E;border-bottom-color:#3A4152}#qfPanel .qf-p-back{background:#22262E;border-color:#3A4152;color:#7FB0FF}#qfPanel .qf-p-tab{color:#E8ECF4}#qfPanel .qf-p-frames iframe{background:#17191F}}';
+            + '#qfPanel .qf-p-note{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#52525B;font-size:14px;pointer-events:none}'
+            + '@media (prefers-color-scheme: dark){#qfPanel{background:#08090A}#qfPanel .qf-p-bar{background:#111113;border-bottom-color:#27272A}#qfPanel .qf-p-back{background:#111113;border-color:#27272A;color:#FFFFFF}#qfPanel .qf-p-tab{color:#F7F7F8}#qfPanel .qf-p-frames iframe{background:#08090A}}';
     }
     function qfBuildPanel() {
         if (qfPanelEl) return;
@@ -186,7 +186,7 @@
         mh.insertBefore(a, mh.firstChild);
     }
 
-    var HOME_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232470E0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5L12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h14V9.5'/%3E%3C/svg%3E";
+    var HOME_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5L12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h14V9.5'/%3E%3C/svg%3E";
     function injectDesktopHome() {
         var bar = document.querySelector('#page_leftbar');
         if (!bar || bar.querySelector('.qf-home-nav')) return;
@@ -311,7 +311,7 @@
     /* ===== v6 内页补改：帐户页卡片行/品牌头像/设备组图标/对话框状态块（只改呈现） ===== */
     function svgIcon(paths, color) {
         return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='" +
-            (color || '%232470E0') + "' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E" + paths + "%3C/svg%3E";
+            (color || '%23000000') + "' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E" + paths + "%3C/svg%3E";
     }
     var ICONS = {
         globe: svgIcon("%3Ccircle cx='12' cy='12' r='8.6'/%3E%3Cpath d='M3.4 12h17.2M12 3.4c2.5 2.4 3.7 5.3 3.7 8.6s-1.2 6.2-3.7 8.6c-2.5-2.4-3.7-5.3-3.7-8.6S9.5 5.8 12 3.4z'/%3E"),
@@ -327,10 +327,10 @@
         trash: svgIcon("%3Cpath d='M4.6 6.4h14.8M9.4 6.2V4.4A1.2 1.2 0 0 1 10.6 3.2h2.8a1.2 1.2 0 0 1 1.2 1.2v1.8M6.8 6.4l.8 13a1.4 1.4 0 0 0 1.4 1.3h6a1.4 1.4 0 0 0 1.4-1.3l.8-13'/%3E", '%23D92D20'),
         check: svgIcon("%3Ccircle cx='12' cy='12' r='8.6'/%3E%3Cpath d='M8.4 12.4l2.5 2.5 4.8-5.2'/%3E"),
         token: svgIcon("%3Crect x='4' y='4' width='16' height='16' rx='3.4'/%3E%3Cpath d='M8.6 12h6.8M12 8.6v6.8'/%3E"),
-        dot: svgIcon("%3Ccircle cx='12' cy='12' r='3' fill='%232470E0' stroke='none'/%3E")
+        dot: svgIcon("%3Ccircle cx='12' cy='12' r='3' fill='%23000000' stroke='none'/%3E")
     };
-    var AVATAR_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='52' fill='%230B2B5B'/%3E%3Ccircle cx='128' cy='128' r='64' fill='none' stroke='white' stroke-width='17' stroke-dasharray='330 74' transform='rotate(38 128 128)'/%3E%3Ccircle cx='186' cy='72' r='14' fill='%23FF8A1E'/%3E%3C/svg%3E";
-    var MONITOR_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none' stroke='%232470E0' stroke-width='2.6' stroke-linecap='round'%3E%3Crect x='6' y='9' width='36' height='25' rx='5' fill='%23EEF3FB'/%3E%3Cpath d='M24 34v6M15 41h18'/%3E%3C/svg%3E";
+    var AVATAR_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='52' fill='%23000000'/%3E%3Ccircle cx='128' cy='128' r='64' fill='none' stroke='white' stroke-width='17' stroke-dasharray='330 74' transform='rotate(38 128 128)'/%3E%3C/svg%3E";
+    var MONITOR_SVG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none' stroke='%23000000' stroke-width='2.6' stroke-linecap='round'%3E%3Crect x='6' y='9' width='36' height='25' rx='5' fill='%23EFEFF1'/%3E%3Cpath d='M24 34v6M15 41h18'/%3E%3C/svg%3E";
 
     function iconForLink(a) {
         var oc = (a.getAttribute('onclick') || '') + ' ' + (a.textContent || '');
@@ -393,7 +393,7 @@
         // 文件页页眉写死的底子头像图（user-50.png 装饰图）换平涂文件夹图标
         document.querySelectorAll('#p5 > table img').forEach(function (im) {
             if ((im.getAttribute('src') || '').indexOf('user-50') >= 0) {
-                im.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none' stroke='%232470E0' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 13.5A2.5 2.5 0 0 1 7.5 11h9l4 4.5h20A2.5 2.5 0 0 1 43 18v16.5a2.5 2.5 0 0 1-2.5 2.5h-33A2.5 2.5 0 0 1 5 34.5z' fill='%23EEF3FB'/%3E%3C/svg%3E";
+                im.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none' stroke='%23000000' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 13.5A2.5 2.5 0 0 1 7.5 11h9l4 4.5h20A2.5 2.5 0 0 1 43 18v16.5a2.5 2.5 0 0 1-2.5 2.5h-33A2.5 2.5 0 0 1 5 34.5z' fill='%23EFEFF1'/%3E%3C/svg%3E";
             }
         });
         // 对话框：以前的登录状态块（底子 #BBD1BB 绿）打类改浅绿圆角
@@ -495,12 +495,12 @@
         if (document.getElementById('qfLogoutMask')) return;
         var mask = document.createElement('div');
         mask.id = 'qfLogoutMask';
-        mask.setAttribute('style', 'position:fixed;inset:0;background:rgba(15,35,70,.45);z-index:99999;display:flex;align-items:center;justify-content:center;');
-        mask.innerHTML = '<div style="background:#fff;border-radius:14px;max-width:400px;width:calc(100% - 48px);padding:22px 22px 16px;box-shadow:0 18px 50px rgba(10,40,90,.35);font-family:inherit;">' +
-            '<div style="font-size:16px;font-weight:700;color:#1d2b3a;margin-bottom:10px;">退出登录</div>' +
-            '<div style="font-size:14px;line-height:1.65;color:#43536a;">' + QF_LOGOUT_TEXT + '</div>' +
+        mask.setAttribute('style', 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;display:flex;align-items:center;justify-content:center;');
+        mask.innerHTML = '<div style="background:#fff;border-radius:14px;max-width:400px;width:calc(100% - 48px);padding:22px 22px 16px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-family:inherit;">' +
+            '<div style="font-size:16px;font-weight:700;color:#09090B;margin-bottom:10px;">退出登录</div>' +
+            '<div style="font-size:14px;line-height:1.65;color:#52525B;">' + QF_LOGOUT_TEXT + '</div>' +
             '<div style="display:flex;gap:10px;margin-top:18px;">' +
-            '<button id="qfLogoutCancel" style="flex:1;height:42px;border-radius:10px;border:1px solid #cfdceE;background:#fff;color:#2c3e55;font-size:14px;cursor:pointer;">取消</button>' +
+            '<button id="qfLogoutCancel" style="flex:1;height:42px;border-radius:10px;border:1px solid #D4D4D8;background:#fff;color:#52525B;font-size:14px;cursor:pointer;">取消</button>' +
             '<button id="qfLogoutOk" style="flex:1;height:42px;border-radius:10px;border:0;background:#d43a3a;color:#fff;font-size:14px;font-weight:700;cursor:pointer;">退出登录</button>' +
             '</div></div>';
         document.body.appendChild(mask);

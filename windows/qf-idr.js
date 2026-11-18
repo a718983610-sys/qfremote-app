@@ -41,6 +41,7 @@ const JOIN_WINDOW_MS = 10000;
 const REJECTED_CODES = {
   NO_SESSION: { retryableNextTrigger: false, note: '会话未绑定；检查 sessionId 是否传错，不得重试刷请求' },
   NOT_BOUND: { retryableNextTrigger: false, note: '会话不属于当前用户/agent；停止请求，走重新绑定/重新登录' },
+  AGENT_NOT_BOUND: { retryableNextTrigger: false, note: '设备归属校验未通过（设备未绑定到当前账号，或绑定已失效）；停止请求，走重新绑定/重新登录' },
   BAD_REASON: { retryableNextTrigger: false, note: 'reason 非法；客户端 bug，不得重试' },
   REPLAY: { retryableNextTrigger: true, note: 'seq 非单调递增；下一次触发时用新 seq 再发，不得原样重发' },
   COOLDOWN: { retryableNextTrigger: true, note: '连续超限冷却中；等冷却结束后再发' },

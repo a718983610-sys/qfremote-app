@@ -21,7 +21,7 @@ import 'package:qfremote/ui/theme.dart';
 /// 放大 1.3/2.0 档下逐个构建——不溢出、不截断关键文字、层级在最前；
 /// 更新类弹窗另验进度百分比实时显示与失败提示＋重试（不无声卡死）。
 void main() {
-  final palette = QfPalette(QfThemeMode.blue);
+  final palette = QfPalette(QfThemeMode.light);
   const longNotes = '本次更新内容：修复了若干已知问题，优化了连接稳定性与界面显示效果；'
       '建议所有用户尽快更新到最新版本，以便获得更好的使用体验与安全保障。';
 

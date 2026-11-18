@@ -11,21 +11,21 @@ import 'package:qfremote/ui/theme.dart';
 void main() {
   group('主色（定夺值：浅纯黑／深纯白，品牌蓝已退役）', () {
     test('QfPalette.brand 是实例 token：浅 #000000、深 #FFFFFF', () {
-      expect(const QfPalette(QfThemeMode.blue).brand,
+      expect(const QfPalette(QfThemeMode.light).brand,
           const Color(0xFF000000));
       expect(const QfPalette(QfThemeMode.dark).brand,
           const Color(0xFFFFFFFF));
-      expect(const QfPalette(QfThemeMode.blue).onBrand,
+      expect(const QfPalette(QfThemeMode.light).onBrand,
           const Color(0xFFFFFFFF));
       expect(const QfPalette(QfThemeMode.dark).onBrand,
           const Color(0xFF000000));
     });
 
     test('brandCssHex 由 brand 派生', () {
-      expect(const QfPalette(QfThemeMode.blue).brandCssHex, '#000000');
+      expect(const QfPalette(QfThemeMode.light).brandCssHex, '#000000');
       expect(const QfPalette(QfThemeMode.dark).brandCssHex, '#FFFFFF');
       // 派生关系：改 brand 则 CSS hex 跟着变（不许第二处字面量）。
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       final hex = light.brand
           .toARGB32()
           .toRadixString(16)
@@ -37,7 +37,7 @@ void main() {
     test('两套 ThemeData 用显式 ColorScheme：primary 即主文字黑／白（禁蓝）', () {
       // A 重做 §3.3：不用 fromSeed 推导——fromSeed 会按色调推导 primary
       // （≠主色原值）；primary 直接映射主文字（浅 #09090B／深 #F7F7F8）。
-      const lightPal = QfPalette(QfThemeMode.blue);
+      const lightPal = QfPalette(QfThemeMode.light);
       const darkPal = QfPalette(QfThemeMode.dark);
       expect(QfTheme.light().colorScheme.primary, lightPal.textPrimary);
       expect(QfTheme.dark().colorScheme.primary, darkPal.textPrimary);
@@ -71,7 +71,7 @@ void main() {
     });
 
     test('浅色表面阶梯与文字（定夺 token）', () {
-      const p = QfPalette(QfThemeMode.blue);
+      const p = QfPalette(QfThemeMode.light);
       expect(p.pageColor, const Color(0xFFFFFFFF));
       expect(p.cardColor, Colors.white);
       expect(p.surface1, const Color(0xFFF7F7F8));
@@ -86,7 +86,7 @@ void main() {
 
     test('状态色按 2026-11-15 定稿 B 组：成功绿 #16A34A／#22C55E、未激活橙、登出红', () {
       const dark = QfPalette(QfThemeMode.dark);
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       expect(dark.success, const Color(0xFF22C55E));
       expect(light.success, const Color(0xFF16A34A));
       expect(dark.warning, const Color(0xFFFB923C));
@@ -112,7 +112,7 @@ void main() {
 
     test('链接不用蓝：主文字色＋下划线色；信息色用中性灰', () {
       const dark = QfPalette(QfThemeMode.dark);
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       expect(light.link, const Color(0xFF09090B));
       expect(dark.link, const Color(0xFFFFFFFF));
       expect(light.linkUnderline, const Color(0xFFA1A1AA));
@@ -289,7 +289,7 @@ void main() {
     test('灰阶合并：深色图标片并入卡片色 #111113，浅色 #F7F7F8 不动', () {
       expect(const QfPalette(QfThemeMode.dark).iconChipColor,
           const Color(0xFF111113));
-      expect(const QfPalette(QfThemeMode.blue).iconChipColor,
+      expect(const QfPalette(QfThemeMode.light).iconChipColor,
           const Color(0xFFF7F7F8));
     });
 
@@ -297,7 +297,7 @@ void main() {
       for (final theme in [QfTheme.dark(), QfTheme.light()]) {
         final p = theme.brightness == Brightness.dark
             ? const QfPalette(QfThemeMode.dark)
-            : const QfPalette(QfThemeMode.blue);
+            : const QfPalette(QfThemeMode.light);
         final enabled = theme.inputDecorationTheme.enabledBorder
             as OutlineInputBorder;
         expect(enabled.borderSide.color, p.lineDefault);
@@ -310,7 +310,7 @@ void main() {
       for (final theme in [QfTheme.dark(), QfTheme.light()]) {
         final p = theme.brightness == Brightness.dark
             ? const QfPalette(QfThemeMode.dark)
-            : const QfPalette(QfThemeMode.blue);
+            : const QfPalette(QfThemeMode.light);
         final track =
             theme.switchTheme.trackColor?.resolve({WidgetState.selected});
         expect(track, p.onCardDim);
@@ -321,7 +321,7 @@ void main() {
       for (final theme in [QfTheme.dark(), QfTheme.light()]) {
         final p = theme.brightness == Brightness.dark
             ? const QfPalette(QfThemeMode.dark)
-            : const QfPalette(QfThemeMode.blue);
+            : const QfPalette(QfThemeMode.light);
         final filledBg = theme.filledButtonTheme.style?.backgroundColor
             ?.resolve({WidgetState.disabled});
         expect(filledBg, p.lineDefault);
@@ -354,7 +354,7 @@ void main() {
       );
       expect(
         resolveThemeMode(pref: null, platformBrightness: Brightness.light),
-        QfThemeMode.blue,
+        QfThemeMode.light,
       );
     });
   });
@@ -366,10 +366,16 @@ void main() {
         "window.dispatchEvent(new CustomEvent('qf-theme-state',{detail:{resolved:'dark',mode:'dark'}}));",
       );
     });
-    test('浅色＋未选偏好派 resolved blue / mode system', () {
+    test('浅色＋未选偏好派 resolved light / mode system', () {
       expect(
         buildThemeStateEventJs(isDark: false, mode: 'system'),
-        "window.dispatchEvent(new CustomEvent('qf-theme-state',{detail:{resolved:'blue',mode:'system'}}));",
+        "window.dispatchEvent(new CustomEvent('qf-theme-state',{detail:{resolved:'light',mode:'system'}}));",
+      );
+    });
+    test('旧 mode blue 读兼容归一化为 light', () {
+      expect(
+        buildThemeStateEventJs(isDark: false, mode: 'blue'),
+        "window.dispatchEvent(new CustomEvent('qf-theme-state',{detail:{resolved:'light',mode:'light'}}));",
       );
     });
     test('mode 省略与非法值一律落 system', () {

@@ -231,7 +231,7 @@
     if (t === 'dark') document.documentElement.dataset.theme = 'dark';
     else delete document.documentElement.dataset.theme;
   }
-  applyTheme(q.get('t') || 'blue');
+  applyTheme(q.get('t') || 'light');
   document.getElementById('rVer').textContent = 'v' + (q.get('v') || '—').replace(/\.0$/, '');
   document.getElementById('rDate').textContent = q.get('d') || '—';
   document.getElementById('rUrl').textContent = (q.get('u') || '').replace(/\/$/, '');

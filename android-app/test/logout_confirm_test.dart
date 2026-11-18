@@ -6,7 +6,7 @@ import 'package:qfremote/ui/settings_page.dart';
 import 'package:qfremote/ui/theme.dart';
 
 void main() {
-  final palette = QfPalette(QfThemeMode.blue);
+  final palette = QfPalette(QfThemeMode.light);
 
   test('确认文案与站长拟稿逐字一致', () {
     expect(kLogoutConfirmText, '退出后将清除本机保存的登录信息，下次使用需重新登录。是否继续？');

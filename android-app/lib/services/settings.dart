@@ -2,7 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// 本地设置与计数（与 Windows 版 qf-settings.json 对应的键尽量同名）。
 class QfSettings {
-  static const _kTheme = 'theme'; // 'blue' | 'dark'
+  static const _kTheme = 'theme'; // 'light' | 'dark'（旧 'blue' 读兼容，见 theme.dart）
   static const _kPendingUpdate = 'pending_update_version';
   static const _kOfflineCount = 'stats_offline_count';
   static const _kWatchdogReconnects = 'stats_watchdog_reconnects';
@@ -31,7 +31,7 @@ class QfSettings {
   static Future<QfSettings> load() async =>
       QfSettings(await SharedPreferences.getInstance());
 
-  String get theme => _prefs.getString(_kTheme) ?? 'blue';
+  String get theme => _prefs.getString(_kTheme) ?? 'light';
 
   /// 原始主题偏好：没手动选过时为 null（初始主题跟随系统深浅）。
   String? get themePref => _prefs.getString(_kTheme);

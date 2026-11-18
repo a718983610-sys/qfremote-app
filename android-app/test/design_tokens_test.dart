@@ -28,7 +28,7 @@ double contrast(Color a, Color b) {
 void main() {
   group('S-029：tokens.json 单一来源——Dart 常量与 QfPalette／QfScale 对齐', () {
     test('状态色（已对齐）与生成常量逐值相等，深浅两端', () {
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       const dark = QfPalette(QfThemeMode.dark);
       expect(light.success, QfDesignTokens.successLight);
       expect(dark.success, QfDesignTokens.successDark);
@@ -43,7 +43,7 @@ void main() {
     });
 
     test('链接与下划线色与生成常量逐值相等（S-040 同一 token）', () {
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       const dark = QfPalette(QfThemeMode.dark);
       expect(light.link, QfDesignTokens.linkLight);
       expect(dark.link, QfDesignTokens.linkDark);
@@ -68,7 +68,7 @@ void main() {
     });
 
     test('链接色对页面底对比度过 4.5:1（深浅两端，S-033 连带）', () {
-      const light = QfPalette(QfThemeMode.blue);
+      const light = QfPalette(QfThemeMode.light);
       const dark = QfPalette(QfThemeMode.dark);
       expect(contrast(light.link, light.pageColor), greaterThanOrEqualTo(4.5));
       expect(contrast(dark.link, dark.pageColor), greaterThanOrEqualTo(4.5));

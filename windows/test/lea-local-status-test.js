@@ -125,6 +125,37 @@ function fullResp() {
     trust.assertTrustedSender(mkEvent('file:///home/x/windows/toolbar.html'), 'qf-lea-local-status', mkCtx()) === false);
 }
 
+// ---------- H. emergency_stop 字段（GPT 2026-11-18 裁决问题 1） ----------
+{
+  const r = fullResp();
+  r.result.emergency_stopped = true;
+  r.result.emergency_stop_event_id = 'estop-3-1763412000';
+  r.result.emergency_sync_status = 'pending';
+  const p = leaStatus.parseLeaStatusResponse(r);
+  ok('H1_emergency_fields', p.emergency_stopped === true &&
+    p.emergency_stop_event_id === 'estop-3-1763412000' &&
+    p.emergency_sync_status === 'pending');
+  // 缺字段即默认（未停控）；类型错按默认。
+  const p2 = leaStatus.parseLeaStatusResponse(fullResp());
+  ok('H2_emergency_defaults', p2.emergency_stopped === false &&
+    p2.emergency_stop_event_id === '' && p2.emergency_sync_status === '');
+  const r3 = fullResp();
+  r3.result.emergency_stopped = 'yes';
+  r3.result.emergency_sync_status = 42;
+  const p3 = leaStatus.parseLeaStatusResponse(r3);
+  ok('H3_emergency_wrong_types_default', p3.emergency_stopped === false &&
+    p3.emergency_sync_status === '');
+  // main.js 接线：triggerEmergencyStop／syncEmergencyStop 存在；状态轮询
+  // 见已停控且未同步时后台触发同步（不阻塞响应）。
+  const mainSrc = fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
+  ok('H4_main_trigger_fn', /async function triggerEmergencyStop\(\)/.test(mainSrc) &&
+    mainSrc.includes("cmd: 'lea.emergency-stop'"));
+  ok('H5_main_sync_fn', /async function syncEmergencyStop\(/.test(mainSrc) &&
+    mainSrc.includes('/api/lea/v1/emergency-stop/sync') &&
+    mainSrc.includes("cmd: 'lea.emergency-stop-sync'"));
+  ok('H6_main_status_hook', /syncEmergencyStop\(st\)\.catch/.test(mainSrc));
+}
+
 result.pass = Object.values(result.cases).every((c) => c.pass);
 try { fs.mkdirSync(path.dirname(OUT), { recursive: true }); } catch (e) { /* ignore */ }
 try { fs.writeFileSync(OUT, JSON.stringify(result, null, 2)); } catch (e) { /* ignore */ }

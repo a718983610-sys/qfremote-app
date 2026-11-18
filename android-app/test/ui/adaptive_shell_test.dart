@@ -13,7 +13,7 @@ import 'package:qfremote/ui/theme.dart';
 /// 记账规则；SystemBackGate 的拦截／回退／兜底三级。
 /// 不覆盖：真机平板／横屏观感与 rail 实际手感（待 ECS 真机验）。
 
-final _palette = QfPalette(QfThemeMode.blue);
+final _palette = QfPalette(QfThemeMode.light);
 
 const _headerKey = Key('shell-header');
 const _contentKey = Key('shell-content');

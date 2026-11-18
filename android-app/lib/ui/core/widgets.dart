@@ -70,7 +70,7 @@ class QfOutlinedButton extends StatelessWidget {
 QfThemeMode _modeOf(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
         ? QfThemeMode.dark
-        : QfThemeMode.blue;
+        : QfThemeMode.light;
 
 /// 状态点（在线绿/离线灰/警告橙/错误红——状态色已定保持彩色，2026-11-14
 /// 站长亲定，不改纯黑白）。
