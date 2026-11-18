@@ -33,6 +33,7 @@
 #include "../lea_install.h" /* A1：首装服务子命令纯函数（版本比较／清单解析） */
 #include "../lea_local.h" /* S-021：本机控制状态（暂停／授权／撤销／状态查询） */
 #include "../lea_appclose.h" /* batch1-fix2：app.close 全量核对（纯逻辑可单测） */
+#include "../lea_diag.h" /* A16-S2：结构化调用方拒绝诊断（纯逻辑可单测） */
 #include "../whitelist.h" /* H16：app.open 白名单 hash（W_USH_EXE_SHA256）须与发版 USH 一致 */
 
 static int g_pass = 0, g_fail = 0;
@@ -4625,6 +4626,151 @@ int main(void) {
                       "{\"process_name\":\"QFRemote.exe\",\"process_id\":\"1234\"}",
                       "process_id", &v) == -1,
                   "appclose-params-pid-string-rejected");
+        }
+    }
+
+    /* ---- A16-S2：结构化调用方拒绝诊断（裁决 §四） ----
+     * 覆盖纯 C 层：会话状态名映射（10 个 WTS_CONNECTSTATE_CLASS 值＋未
+     * 知值）／诊断行九字段齐全／未知字段打 unknown／含空格路径加引号／
+     * 小缓冲截断仍 NUL 结尾。QFRLEA.c 内逻辑（lea_collect_caller_identity
+     * 的会话状态关、internal_caller_allowed 的记行）不在单测覆盖内，须
+     * Windows 真机按 test/a16s2-session-vectors.ps1 的 8 向量补验。 */
+    {
+        /* 会话状态名：10 个枚举值逐一映射，未知值打 unknown。 */
+        CHECK_STR_EQ(lea_session_state_name(0), "WTSActive", "diag-state-active");
+        CHECK_STR_EQ(lea_session_state_name(1), "WTSConnected", "diag-state-connected");
+        CHECK_STR_EQ(lea_session_state_name(2), "WTSConnectQuery", "diag-state-connectquery");
+        CHECK_STR_EQ(lea_session_state_name(3), "WTSShadow", "diag-state-shadow");
+        CHECK_STR_EQ(lea_session_state_name(4), "WTSDisconnected", "diag-state-disconnected");
+        CHECK_STR_EQ(lea_session_state_name(5), "WTSIdle", "diag-state-idle");
+        CHECK_STR_EQ(lea_session_state_name(6), "WTSListen", "diag-state-listen");
+        CHECK_STR_EQ(lea_session_state_name(7), "WTSReset", "diag-state-reset");
+        CHECK_STR_EQ(lea_session_state_name(8), "WTSDown", "diag-state-down");
+        CHECK_STR_EQ(lea_session_state_name(9), "WTSInit", "diag-state-init");
+        CHECK_STR_EQ(lea_session_state_name(99), "unknown", "diag-state-unknown-value");
+        CHECK_STR_EQ(lea_session_state_name(LEA_DIAG_UNKNOWN_ID), "unknown",
+                     "diag-state-unknown-sentinel");
+        /* 断开 RDP 向量：九字段齐全，reason 与 reject_stage 同为
+         * session-disconnected，会话态为 WTSDisconnected。 */
+        {
+            lea_caller_diag_t d;
+            char line[1024];
+            memset(&d, 0, sizeof(d));
+            d.client_pid = 5032;
+            d.parent_pid = 1148;
+            d.client_image = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\QFRemote\\LEA\\qf-lea-client.exe";
+            d.parent_image = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\QFRemote\\QFRemote.exe";
+            d.client_session_id = 2;
+            d.parent_session_id = 2;
+            d.session_state = 4; /* WTSDisconnected */
+            d.reason = "session-disconnected";
+            d.win32_error = 0;
+            CHECK(lea_format_caller_diag(line, sizeof(line), &d),
+                  "diag-disconnected-formatted");
+            CHECK(strstr(line, "internal-allow: reject ") == line,
+                  "diag-disconnected-prefix");
+            CHECK(strstr(line, "reason=session-disconnected") != NULL,
+                  "diag-disconnected-reason");
+            CHECK(strstr(line, "reject_stage=session-disconnected") != NULL,
+                  "diag-disconnected-stage");
+            CHECK(strstr(line, "client_pid=5032") != NULL, "diag-disconnected-cpid");
+            CHECK(strstr(line, "parent_pid=1148") != NULL, "diag-disconnected-ppid");
+            CHECK(strstr(line, "client_image=\"C:\\Users\\Administrator\\AppData\\Local\\Programs\\QFRemote\\LEA\\qf-lea-client.exe\"") != NULL,
+                  "diag-disconnected-cimage");
+            CHECK(strstr(line, "parent_image=\"C:\\Users\\Administrator\\AppData\\Local\\Programs\\QFRemote\\QFRemote.exe\"") != NULL,
+                  "diag-disconnected-pimage");
+            CHECK(strstr(line, "client_session_id=2") != NULL, "diag-disconnected-csess");
+            CHECK(strstr(line, "parent_session_id=2") != NULL, "diag-disconnected-psess");
+            CHECK(strstr(line, "session_state=WTSDisconnected") != NULL,
+                  "diag-disconnected-state");
+            CHECK(strstr(line, "win32_error=0") != NULL, "diag-disconnected-winerr");
+        }
+        /* 会话失配向量：父子会话不同，win32_error 为 API 失败值。 */
+        {
+            lea_caller_diag_t d;
+            char line[1024];
+            memset(&d, 0, sizeof(d));
+            d.client_pid = 6000;
+            d.parent_pid = 5032;
+            d.client_image = "C:\\QFRemote\\LEA\\qf-lea-client.exe";
+            d.parent_image = "C:\\QFRemote\\QFRemote.exe";
+            d.client_session_id = 2;
+            d.parent_session_id = 1;
+            d.session_state = 0; /* WTSActive */
+            d.reason = "session-mismatch";
+            d.win32_error = 0;
+            CHECK(lea_format_caller_diag(line, sizeof(line), &d),
+                  "diag-mismatch-formatted");
+            CHECK(strstr(line, "reason=session-mismatch") != NULL,
+                  "diag-mismatch-reason");
+            CHECK(strstr(line, "client_session_id=2") != NULL, "diag-mismatch-csess");
+            CHECK(strstr(line, "parent_session_id=1") != NULL, "diag-mismatch-psess");
+            CHECK(strstr(line, "session_state=WTSActive") != NULL,
+                  "diag-mismatch-state");
+        }
+        /* 未采集到的字段：父 PID／父镜像／父会话未知时打 unknown／空串，
+         * 不与真实会话 0 混淆（image-mismatch 在父进程发现前即拒）。 */
+        {
+            lea_caller_diag_t d;
+            char line[1024];
+            memset(&d, 0, sizeof(d));
+            d.client_pid = 6000;
+            d.parent_pid = 0;
+            d.client_image = "C:\\Temp\\qf-lea-client.exe";
+            d.parent_image = NULL;
+            d.client_session_id = 2;
+            d.parent_session_id = LEA_DIAG_UNKNOWN_ID;
+            d.session_state = LEA_DIAG_UNKNOWN_ID;
+            d.reason = "image-mismatch";
+            d.win32_error = 0;
+            CHECK(lea_format_caller_diag(line, sizeof(line), &d),
+                  "diag-unknown-formatted");
+            CHECK(strstr(line, "parent_pid=0") != NULL, "diag-unknown-ppid");
+            CHECK(strstr(line, "parent_image=\"\"") != NULL, "diag-unknown-pimage");
+            CHECK(strstr(line, "parent_session_id=unknown") != NULL,
+                  "diag-unknown-psess");
+            CHECK(strstr(line, "session_state=unknown") != NULL,
+                  "diag-unknown-state");
+            CHECK(strstr(line, "parent_session_id=0") == NULL,
+                  "diag-unknown-no-fake-session0");
+        }
+        /* 含空格路径：镜像值加双引号，不截断字段。 */
+        {
+            lea_caller_diag_t d;
+            char line[1024];
+            memset(&d, 0, sizeof(d));
+            d.client_pid = 1;
+            d.parent_pid = 2;
+            d.client_image = "C:\\Program Files\\QFRemote\\LEA\\qf-lea-client.exe";
+            d.parent_image = "C:\\Program Files\\QFRemote\\QFRemote.exe";
+            d.client_session_id = 1;
+            d.parent_session_id = 1;
+            d.session_state = 0;
+            d.reason = "ok";
+            d.win32_error = 0;
+            CHECK(lea_format_caller_diag(line, sizeof(line), &d),
+                  "diag-space-path-formatted");
+            CHECK(strstr(line, "client_image=\"C:\\Program Files\\QFRemote\\LEA\\qf-lea-client.exe\"") != NULL,
+                  "diag-space-path-quoted");
+        }
+        /* 小缓冲：截断仍 NUL 结尾、返回 0；NULL／0 长缓冲 fail-closed。 */
+        {
+            lea_caller_diag_t d;
+            char line[1024];
+            char tiny[16];
+            memset(&d, 0, sizeof(d));
+            d.client_pid = 5032;
+            d.reason = "session-disconnected";
+            CHECK(lea_format_caller_diag(line, sizeof(line), &d),
+                  "diag-full-buffer-ok");
+            CHECK(!lea_format_caller_diag(tiny, sizeof(tiny), &d) &&
+                  tiny[sizeof(tiny) - 1] == '\0',
+                  "diag-tiny-buffer-truncated-nul");
+            CHECK(!lea_format_caller_diag(NULL, sizeof(line), &d),
+                  "diag-null-out-rejected");
+            CHECK(!lea_format_caller_diag(line, 0, &d), "diag-zero-size-rejected");
+            CHECK(!lea_format_caller_diag(line, sizeof(line), NULL),
+                  "diag-null-diag-rejected");
         }
     }
 

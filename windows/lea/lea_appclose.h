@@ -8,8 +8,9 @@
  * 修法（本模块＋QFRLEA.c app.close 分支）：
  *   1) 核对四元组——PID（可选指定时才钉死）、用户 SID、Windows Session ID、
  *      进程完整路径，全部通过才允许触碰；任一未知／失配即拒绝（fail-closed）。
- *   2) 只限当前被授权的会话＝活动控制台会话（WTSGetActiveConsoleSessionId，
- *      与 H01 parent_is_main_app 同一口径）；会话 0（服务）永不授权。
+ *   2) 只限当前被授权的会话＝请求方客户端所在会话（v3 改：原“活动控制
+ *      台会话”在 RDP 会话真机上无定义，见 B1；QFRLEA.c app.close 分支
+ *      取 item->client_session）；会话 0（服务）永不授权。
  *   3) 完整路径以被授权用户自己的安装位置为准（其 HKCU 卸载注册表
  *      InstallLocation，即安装器写入的 $INSTDIR\QFRemote.exe；取不到时
  *      回退 ProfileImagePath 下默认位置；两者都取不到即拒绝，不猜路径）。
@@ -47,7 +48,7 @@ typedef struct {
  * 全部合法实例）；pid!=0 表示只许碰该 PID。create_time==0 表示不核对
  * 创建时刻；!=0 时必须精确相等（强制结束前的 PID 复用防护用）。 */
 typedef struct {
-    unsigned long session_id;                  /* 活动控制台会话 ID */
+    unsigned long session_id;                  /* 请求方客户端所在会话 ID */
     char user_sid[LEA_APPCLOSE_SID_MAX];       /* 该会话用户的 SID 字符串 */
     char image_path[LEA_APPCLOSE_PATH_MAX];    /* 该用户安装位置的 QFRemote.exe 全路径 */
     unsigned long pid;
@@ -70,7 +71,8 @@ int lea_appclose_probe(unsigned long pid, lea_appclose_candidate_t *out);
 
 /* 解析被授权会话的身份：会话用户的 SID 字符串＋其安装位置的
  * QFRemote.exe 全路径。任一解析失败返回 0（调用方拒绝执行、不杀任何进程）。
- * session_id 为 WTSGetActiveConsoleSessionId() 的返回值。 */
+ * session_id 为请求方客户端所在会话 id（QFRLEA.c app.close 分支传
+ * item->client_session；v3 前的“活动控制台会话”口径已废弃）。 */
 int lea_appclose_authorized_identity(unsigned long session_id,
                                      char *sid_out, size_t sid_size,
                                      char *image_out, size_t image_size);

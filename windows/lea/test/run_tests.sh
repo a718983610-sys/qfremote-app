@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 
 ED25519_SRCS="../ed25519/verify.c ../ed25519/ge.c ../ed25519/fe.c ../ed25519/sc.c ../ed25519/sha512.c"
 # S-021：LEA 核心源（含 lea_local.c 本机控制）；三构建＋mingw 行均用此变量。
-LEA_SRCS="../lea_install.c ../lea_protocol.c ../lea_crypto.c ../lea_state.c ../lea_audit.c ../lea_local.c ../lea_filewrite.c ../lea_appclose.c $ED25519_SRCS"
+LEA_SRCS="../lea_install.c ../lea_protocol.c ../lea_crypto.c ../lea_state.c ../lea_audit.c ../lea_local.c ../lea_filewrite.c ../lea_appclose.c ../lea_diag.c $ED25519_SRCS"
 LEA_TEST_PUBKEY_HEX=03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8
 
 echo "== [1/5] core tests (test build: TEST-UNSIGNED accepted, no pubkey) =="

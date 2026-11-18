@@ -40,7 +40,9 @@
  *     或开发构建（QFRLEA_ALLOW_DEV_ELECTRON，默认关闭）里的
  *     <安装根目录>\node_modules\electron\dist\electron.exe；
  *     2026-11-17 v2，P0-3：不再比 basename），且调用方会话须等于父
- *     进程会话、两者均非 0（P0-2，堵父进程伪造与跨会话注入）。
+ *     进程会话、两者均非 0（P0-2，堵父进程伪造与跨会话注入），且该
+ *     会话须为 WTSActive（A16-S2，2026-11-18：断开 RDP 拒绝，
+ *     session-disconnected；查不到会话态即 fail-closed）。
  *     2026-11-17 修：旧口径“活动控制台会话”在 Server＋RDP 上恒失败，
  *     见 lea_collect_caller_identity。H01 第二轮——只验镜像不够，任意用户都
  *     能直接运行合法客户端。
@@ -118,6 +120,7 @@
 #include "lea_install.h"
 #include "lea_local.h" /* S-021：本机控制状态（暂停／授权／撤销／状态查询） */
 #include "lea_appclose.h" /* batch1-fix2：app.close 全量核对＋优雅退出 */
+#include "lea_diag.h" /* A16-S2：结构化调用方拒绝诊断（裁决 §四） */
 #include "whitelist.h"
 
 #define SERVICE_NAME_W L"QFRLEA"
@@ -813,6 +816,14 @@ typedef struct {
     BYTE caller_logon_sid[SECURITY_MAX_SID_SIZE]; /* TokenGroups SE_GROUP_LOGON_ID */
     DWORD caller_logon_sid_len;
     int has_logon_sid;
+    /* A16-S2 结构化诊断（裁决 §四）：拒绝时由 internal_caller_allowed
+     * 一行记出；会话 id 取不到时为 LEA_DIAG_UNKNOWN_ID（0xFFFFFFFF），
+     * 与真实会话 0 区分。win32_error 仅在 Win32 API 本身失败时填
+     * GetLastError()，纯逻辑失配时为 0。 */
+    char caller_image[MAX_PATH];
+    char parent_image[MAX_PATH];
+    DWORD session_state; /* WTS_CONNECTSTATE_CLASS，UNKNOWN = 未查到 */
+    DWORD win32_error;
 } lea_caller_identity_t;
 
 static int token_user_sid_bytes(HANDLE hProc, BYTE *sid_buf) {
@@ -978,16 +989,27 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     int ok = 0;
     if (reason) snprintf(reason, reason_size, "%s", "no-client-pid");
     memset(out, 0, sizeof(*out));
-    if (!GetNamedPipeClientProcessId(pipe, &pid) || pid == 0) return 0;
+    /* A16-S2：会话 id／会话状态取不到时保持 UNKNOWN 哨兵，诊断行据此
+     * 打 "unknown"，不与真实会话 0 混淆。 */
+    out->caller_session = LEA_DIAG_UNKNOWN_ID;
+    out->parent_session = LEA_DIAG_UNKNOWN_ID;
+    out->session_state = LEA_DIAG_UNKNOWN_ID;
+    if (!GetNamedPipeClientProcessId(pipe, &pid)) {
+        out->win32_error = GetLastError();
+        return 0;
+    }
+    if (pid == 0) return 0;
     out->caller_pid = pid;
     /* 调用方只开一次句柄，后续镜像／令牌／会话／创建时间全从该句柄取。 */
     hCaller = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!hCaller) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "open-process-failed");
         return 0;
     }
     /* 关 1：调用方镜像须等于安装目录下的 qf-lea-client.exe（全路径）。 */
     if (!QueryFullProcessImageNameW(hCaller, 0, img, &n) || n == 0) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "image-query-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1006,8 +1028,12 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
         CloseHandle(hCaller);
         return 0;
     }
+    /* 镜像已验过：记入诊断（A16-S2 裁决 §四 client_image）。 */
+    snprintf(out->caller_image, sizeof(out->caller_image), "%s", img_u8);
     /* 调用方会话（须非 0）与创建时间。 */
     if (!ProcessIdToSessionId(pid, &out->caller_session)) {
+        out->caller_session = LEA_DIAG_UNKNOWN_ID;
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "caller-session-query-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1017,7 +1043,37 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
         CloseHandle(hCaller);
         return 0;
     }
+    /* A16-S2 会话状态关（裁决 §三契约后半句）：只比会话 id 相等不够，
+     * 还须单独验证该会话为 WTSActive。断开的 RDP 会话（WTSDisconnected）
+     * 里父子会话 id 仍相等，必须拒绝；其他非活动态（WTSConnected 等）
+     * 同样拒绝。查不到会话态即 fail-closed。查态失败／非活动态都在此
+     * 拒，后续拒绝行的 session_state 字段即为此处查到的值。 */
+    {
+        WTS_CONNECTSTATE_CLASS *pstate = NULL;
+        DWORD bytes = 0;
+        if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
+                                         out->caller_session,
+                                         WTSConnectState,
+                                         (LPWSTR *)&pstate, &bytes) ||
+            !pstate || bytes < sizeof(DWORD)) {
+            if (pstate) WTSFreeMemory(pstate);
+            out->win32_error = GetLastError();
+            if (reason) snprintf(reason, reason_size, "%s", "session-state-query-failed");
+            CloseHandle(hCaller);
+            return 0;
+        }
+        out->session_state = (DWORD)*pstate;
+        WTSFreeMemory(pstate);
+        if (out->session_state != WTSActive) {
+            if (reason) snprintf(reason, reason_size, "%s",
+                out->session_state == WTSDisconnected ? "session-disconnected"
+                                                      : "session-not-active");
+            CloseHandle(hCaller);
+            return 0;
+        }
+    }
     if (!proc_create_time(hCaller, &caller_ct)) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "caller-time-query-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1025,6 +1081,7 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     /* 调用方令牌：用户 SID、登录 LUID、Logon SID（token 三件一次取齐）。 */
     if (!token_user_sid_bytes(hCaller, out->caller_sid) ||
         !token_logon_luid(hCaller, &out->caller_logon)) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "caller-token-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1034,6 +1091,7 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     /* 父进程：快照只用来发现父 PID；打开后全部核对都从该句柄上做。 */
     parent = caller_parent_pid(pid);
     if (!parent) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "parent-check-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1041,6 +1099,7 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
     out->parent_pid = parent;
     hParent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, parent);
     if (!hParent) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "parent-open-failed");
         CloseHandle(hCaller);
         return 0;
@@ -1051,6 +1110,21 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
         CloseHandle(hParent);
         CloseHandle(hCaller);
         return 0;
+    }
+    /* 父镜像已验过：记入诊断（A16-S2 裁决 §四 parent_image；与上一步
+     * 同一 hParent 句柄重查，失败只留空、不改变已通过的判定）。 */
+    {
+        WCHAR pimg[MAX_PATH];
+        DWORD pn = MAX_PATH;
+        if (QueryFullProcessImageNameW(hParent, 0, pimg, &pn) && pn > 0) {
+            char pimg_u8[MAX_PATH];
+            utf16_to_utf8(pimg, pimg_u8, sizeof(pimg_u8));
+            {
+                char *p;
+                for (p = pimg_u8; *p; p++) if (*p == '/') *p = '\\';
+            }
+            snprintf(out->parent_image, sizeof(out->parent_image), "%s", pimg_u8);
+        }
     }
     /* 父进程创建时间须不晚于调用方（真父进程必先于子进程创建；等值只源
      * 于时间戳粒度，放行；晚于即 PID 复用信号，拒绝）。 */
@@ -1076,6 +1150,7 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
      * 跨用户／跨登录伪造到此为止；同会话同用户伪造由登录证明兜底）。 */
     if (!token_user_sid_bytes(hParent, out->parent_sid) ||
         !token_logon_luid(hParent, &out->parent_logon)) {
+        out->win32_error = GetLastError();
         if (reason) snprintf(reason, reason_size, "%s", "parent-token-failed");
         CloseHandle(hParent);
         CloseHandle(hCaller);
@@ -1104,10 +1179,25 @@ static int lea_collect_caller_identity(HANDLE pipe, lea_caller_identity_t *out,
 static int internal_caller_allowed(HANDLE pipe, lea_caller_identity_t *ident_out) {
     lea_caller_identity_t ident;
     char reason[64] = { 0 };
-    DWORD pid = 0;
     if (!lea_collect_caller_identity(pipe, &ident, reason, sizeof(reason))) {
-        (void)GetNamedPipeClientProcessId(pipe, &pid);
-        svc_log("internal-allow: reject %s pid=%lu", reason, (unsigned long)pid);
+        /* A16-S2 结构化拒绝诊断（裁决 §四）：一行记全九字段；行首
+         * "internal-allow: reject" 与旧格式兼容（旧行只含 reason＋pid，
+         * 本行全含）。ident 在失败时仍保留已采集到的部分身份，诊断行
+         * 据此填值，未采集到的字段为 unknown／空串。 */
+        lea_caller_diag_t diag;
+        char line[1024];
+        memset(&diag, 0, sizeof(diag));
+        diag.client_pid = ident.caller_pid;
+        diag.parent_pid = ident.parent_pid;
+        diag.client_image = ident.caller_image;
+        diag.parent_image = ident.parent_image;
+        diag.client_session_id = ident.caller_session;
+        diag.parent_session_id = ident.parent_session;
+        diag.session_state = ident.session_state;
+        diag.reason = reason;
+        diag.win32_error = ident.win32_error;
+        (void)lea_format_caller_diag(line, sizeof(line), &diag);
+        svc_log("%s", line);
         return 0;
     }
     if (ident_out) *ident_out = ident;
@@ -1129,11 +1219,13 @@ static DWORD pipe_client_session(HANDLE pipe) {
 /* ---------- emergency_stop 专用 admission（GPT 2026-11-18 裁决问题 1） ----------
  * 与 H01 内部命令面严格隔离：lea.emergency-stop／lea.emergency-stop-sync
  * 不进 handle_internal（S-021 五命令在那里拒绝），只走本函数。
- * 与 H01 的区别只有一个：会话谓词不同——H01 要求父进程在活动控制台
- * 会话里（A1 根因：RDP 会话不是控制台会话，腾讯机上 H01 恒拒）；
- * 紧急停控必须在 RDP 会话里也能用（用户正在 RDP 里发现异常才要停），
- * 故此处只要求调用方会话＝父进程会话（任意交互会话），不要求控制台
- * 会话。待 A1 落地后两处会话谓词统一复核。
+ * 与 H01 的区别只有一个：会话谓词不同——H01（v3＋A16-S2）要求调用方
+ * 会话＝父进程会话且该会话为 WTSActive（断开 RDP 拒绝，见
+ * lea_collect_caller_identity），不要求控制台会话；紧急停控必须在
+ * RDP 会话里也能用（用户正在 RDP 里发现异常才要停），故此处只要求
+ * 调用方会话＝父进程会话（任意交互会话），不要求控制台会话、也不查
+ * 会话连接态（A16-S2 未决：emergency-stop 是否同样须限 WTSActive，
+ * 待裁决，不在本 commit 自决）。
  * 四项全过才放行，任一步取不到信息即拒绝（fail-closed）：
  * ①调用方镜像全路径＝安装目录 qf-lea-client.exe；
  * ②父进程镜像名＝QFRemote.exe 或 electron.exe；
