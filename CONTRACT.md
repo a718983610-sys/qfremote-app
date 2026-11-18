@@ -128,7 +128,7 @@
 
 - 设备端：每次真实状态变更 `revision + 1`（或取 ACK 传入的更大值）；同态转移不 +1；旧 `revision` 的 ACK 一律拒收（`ACK_STALE_REVISION`）；`setDesired` 不动 `revision`；`buildStatus()` 原样写进 status.json。
 - 服务端：设备上报 `revision` 旧于服务端记录 → `RECOVERY_REQUIRED`（`revision-conflict`）；挑战绑定签发时 `revision`，期间变化即挑战失效（桥映射 `revision-stale`，409）；disable 提交校验冻结 `revision`，不一致回 409 `revision-stale`。
-- **v2 缺 `revision` 视为异常（P3-04 定夺，B 的建议，本线采纳）**：自称 v2 的设备（status 含 `actual_state`，或 `version` 主版本 ≥ 2）上报缺 `revision` 或 `revision` 非数字时，服务端视为异常，进 `RECOVERY_REQUIRED`（`revision-missing`），不静默跳过。**v1 设备（无 `actual_state`、主版本 < 2）仍按“无则跳过”处理。** 该规则 C 代码待 P3-05 实现（见 §14 R-7）。
+- **v2 缺 `revision` 视为异常（P3-04 定夺，B 的建议，本线采纳）**：自称 v2 的设备（status 含 `actual_state`）上报缺 `revision` 或 `revision` 非数字时，服务端视为异常，进 `RECOVERY_REQUIRED`（`revision-missing`），不静默跳过。**v1 设备（无 `actual_state`）仍按“无则跳过”处理。** 该规则 C 代码待 P3-05 实现（见 §14 R-7）。（v2.0.0 勘误 2026-11-19，P3-06：删“或 `version` 主版本 ≥ 2”／“主版本 < 2”判据，见 VERIFY-P3E §3 裁决——旧 Go `ComponentVersion` 同为 2.x，version 判据无法区分 v1 Go 与 v2；仅以 `actual_state` 是否出现为准。）
 
 ### 信封去重与操作编号（#8）
 

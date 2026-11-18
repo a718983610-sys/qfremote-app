@@ -1257,7 +1257,13 @@ function createLockBridge(deps) {
           if (status.state !== 'Locked') {
             const r0 = lockState.reconcileRecord(rec0, status, { op_id: disableOpId, by: me });
             if (r0.record) lockRecordStore.upsert(r0.record);
-            if (r0.decision === 'to-unlocked' && r0.evidence === 'strong') {
+            // P3-06：幂等成功的判定须覆盖“记录已被前置读路径翻成 UNLOCKED”的情形——
+            // 标准流程（读设备→取挑战→提交）里，前置 GET /lock/devices 或取挑战时的
+            // reconcileFromRead 已凭强证据把记录翻成 UNLOCKED（decision 'confirmed'），
+            // 提交时再按旧条件（只认 'to-unlocked'）会误判 409 alreadyOff。
+            // 'confirmed'＋强证据＋记录已是 UNLOCKED 同样是已确认解锁，须幂等成功；
+            // 弱证据或非 UNLOCKED 记录仍走原拒绝路径（不放宽）。
+            if ((r0.decision === 'to-unlocked' || r0.decision === 'confirmed') && r0.evidence === 'strong' && r0.record.actual_state === 'UNLOCKED') {
               const out = { lockState: 'UNLOCKED', revision: r0.record.revision, alreadyUnlocked: true };
               opStore.store(disableOpId, out);
               log('lock', 'disarm 幂等：设备已确认解锁（' + r0.reason + '），op=' + disableOpId + ' by ' + me + '（risk=' + risk.level + '，agentGrant=' + (agentGrantUsed ? 'yes' : 'no') + '）');
@@ -1304,6 +1310,15 @@ function createLockBridge(deps) {
             op_id: disableOpId, by: me, to_state: 'UNLOCKED',
             reason: 'disarm-reconciled:' + env.id, evidence: 'strong',
           });
+          // M-1（P3-06，VERIFY-P3C §4）：applyCorrection 失败时桥必须不报成功。
+          // 旧代码无条件回 200 UNLOCKED，记录悄悄卡在 UNLOCKING，成功结果还被
+          // opStore 缓存——同一编号重试永远返回假成功。失败时：记录若已是
+          // UNLOCKED（此前修正已落地，幂等）仍报成功；否则 409 state-conflict、
+          // 不缓存操作编号（可重试），失败原因记日志（不含挑战／密码原文）。
+          if (!fin.ok && cur.actual_state !== 'UNLOCKED') {
+            log('lock', 'disarm 记录修正失败：' + node.name + ' by ' + me + '（op=' + disableOpId + '，reason=' + fin.reason + '，记录仍为 ' + cur.actual_state + '，不报成功、不缓存）');
+            failCode(res, 409, ERR.stateConflict, 'state-conflict'); return true;
+          }
           const finalRec = fin.ok ? lockRecordStore.upsert(fin.record) : cur;
           const out = { lockState: 'UNLOCKED', revision: finalRec.revision };
           opStore.store(disableOpId, out);
