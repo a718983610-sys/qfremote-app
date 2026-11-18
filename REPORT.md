@@ -122,6 +122,6 @@
 
 ## 附录：提交与复核
 
-- 提交号：（见最终回复；本报告提交后以 `git log a16s2-lockfix-b` 为准）
+- 提交号：`217506f`（分支 `a16s2-lockfix-b`，`git log` 实跑核对；22 个文件，+2441 行）
 - 复核命令：`git show --stat HEAD`（文件清单）、`node windows/test/lock-v2-state-test.js` 等 6 个测试逐个实跑。
 - 回滚：本分支未动生产服务、未动基线文件；废弃本分支即回滚。
