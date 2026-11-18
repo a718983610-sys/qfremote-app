@@ -54,9 +54,12 @@
 #include "ush_uia.h"
 #include "ush_snapshot.h"
 #include "ush_selfbind.h" /* C1：自助绑定（设备签名调 complete 换凭据） */
+#include "../lea/lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源 */
 
 #define USH_VERSION "1.0.0-mvp"
-#define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1"
+/* A+：USH 管道名取自实例身份。生产：\\.\pipe\QFR\LEA\UserHelper\v1；
+ * TEST：\\.\pipe\QFR\LEA-TEST\UserHelper\v1，与生产管道彻底分开。 */
+#define PIPE_NAME_W LEA_USH_PIPE_NAME_W
 #define PIPE_SDDL L"D:(A;;GA;;;SY)(A;;GA;;;BA)"
 
 static volatile LONG g_running = 1;
@@ -228,8 +231,9 @@ static int ush_token_write_file(void) {
     DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return 0;
     WCHAR wpath[MAX_PATH];
-    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\token.txt",
-               wpd, (unsigned long)session_id);
+    /* A+：token 路径叶名取自实例身份（TEST：…\QFR\LEA-TEST\ush-tokens\…）。 */
+    _snwprintf(wpath, MAX_PATH, L"%s\\QFR\\%s\\ush-tokens\\%lu\\token.txt",
+               wpd, LEA_INSTANCE_LEAF_W, (unsigned long)session_id);
     wcsncpy(g_ush_token_path, wpath, MAX_PATH - 1);
     g_ush_token_path[MAX_PATH - 1] = L'\0';
     unsigned char rnd[4] = { 0 };
@@ -238,8 +242,8 @@ static int ush_token_write_file(void) {
         tmp_tag = (unsigned long)(((unsigned long)rnd[0] << 24) | ((unsigned long)rnd[1] << 16) |
                                   ((unsigned long)rnd[2] << 8) | (unsigned long)rnd[3]);
     WCHAR wtmp[MAX_PATH];
-    _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
-               wpd, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
+    _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\%s\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
+               wpd, LEA_INSTANCE_LEAF_W, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
     /* 临时文件独占创建（CREATE_NEW）：随机名＋独占创建，预置占位即碰
      * 撞，重试换名；建好立即用句柄收紧临时文件 DACL（写内容之前），
      * 不留“先写内容、后收紧”的暴露窗口。注意：文件以共享模式 0 独占
@@ -254,8 +258,8 @@ static int ush_token_write_file(void) {
             if (BCryptGenRandom(NULL, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0)
                 tmp_tag = (unsigned long)(((unsigned long)rnd[0] << 24) | ((unsigned long)rnd[1] << 16) |
                                           ((unsigned long)rnd[2] << 8) | (unsigned long)rnd[3]);
-            _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\LEA\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
-                       wpd, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
+            _snwprintf(wtmp, MAX_PATH, L"%s\\QFR\\%s\\ush-tokens\\%lu\\%lu.tmp-%08lx.txt",
+                       wpd, LEA_INSTANCE_LEAF_W, (unsigned long)session_id, (unsigned long)session_id, tmp_tag);
         }
         htmp = CreateFileW(wtmp, GENERIC_WRITE | WRITE_DAC, 0, NULL, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, NULL);
@@ -696,7 +700,13 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
-    ush_log_event("pipe-listening", "pipe=\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");
+    /* A+：监听日志写实例管道名（TEST：…\QFR\LEA-TEST\UserHelper\v1）；
+     * 保持旧格式 "pipe=<管道名>"，生产输出逐字节不变。 */
+    {
+        char pipe_detail[128];
+        snprintf(pipe_detail, sizeof(pipe_detail), "pipe=%s", LEA_USH_PIPE_NAME_A);
+        ush_log_event("pipe-listening", pipe_detail);
+    }
     static char req_buf[USH_MAX_REQUEST + 1];
     char *resp_buf = (char *)malloc(USH_MAX_RESPONSE);
     if (!resp_buf) {
@@ -851,7 +861,7 @@ int main(int argc, char **argv) {
         ush_log_event("ush-token-init-failed", "token generation failed; LEA commands will be refused");
     if (debug) {
         fprintf(stderr, "QFUserHelper %s debug mode: pipe %s\n", USH_VERSION,
-            "\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");
+            LEA_USH_PIPE_NAME_A);
     }
 
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);

@@ -47,8 +47,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lea_crypto.h" /* S3：dispatch 用 lea_b64_decode（纯 C，无 Win32 依赖） */
+#include "lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源，见该文件头注 */
 
-#define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
+#define PIPE_NAME_W LEA_PIPE_NAME_W
 #define CONNECT_TIMEOUT_MS 2000
 /* B1（2026-11-13，PLAN §2 B1）：客户端硬时限——ACK 2 秒、结果 6 秒。
  * 连接 2 秒＋结果 6 秒＝最迟 8 秒退出（验收“8 秒内退出”）；任一时限到
@@ -58,7 +59,20 @@
 #define RESULT_TIMEOUT_MS 6000
 #define MAX_ENVELOPE 65536
 #define MAX_RESPONSE 65536
-#define LEA_INBOX_DIR "C:\\ProgramData\\QFR\\LEA\\inbox"
+/* A+：inbox 目录按实例身份运行时解析（%ProgramData%\QFR\<叶名>\inbox；
+ * 旧实现写死 C:\ProgramData\QFR\LEA\inbox，TEST 客户端会误读生产
+ * inbox）。ProgramData 环境变量缺失时回退 C:\ProgramData（与服务端
+ * ensure_dirs 同款回退）。 */
+static int lea_inbox_dir(char *out, size_t out_size) {
+    char pd[MAX_PATH] = { 0 };
+    DWORD n = GetEnvironmentVariableA("ProgramData", pd, sizeof(pd));
+    if (n == 0 || n >= sizeof(pd)) {
+        if (snprintf(pd, sizeof(pd), "%s", "C:\\ProgramData") < 0) return 0;
+    }
+    if (snprintf(out, out_size, "%s\\QFR\\%s\\inbox", pd, LEA_INSTANCE_LEAF) < 0)
+        return 0;
+    return 1;
+}
 
 static void print_error_json(const char *code, const char *detail) {
     printf("{\"ok\":false,\"code\":\"%s\",\"request_id\":\"\",\"retryable\":false,"
@@ -221,8 +235,10 @@ static int resolve_apply_path(const char *arg, char *out, size_t out_size) {
         snprintf(out, out_size, "%s", arg);
         return 1;
     }
-    if (strlen(LEA_INBOX_DIR) + 1 + strlen(arg) >= out_size) return 0;
-    snprintf(out, out_size, "%s\\%s", LEA_INBOX_DIR, arg);
+    char inbox_dir[MAX_PATH] = { 0 };
+    if (!lea_inbox_dir(inbox_dir, sizeof(inbox_dir))) return 0;
+    if (strlen(inbox_dir) + 1 + strlen(arg) >= out_size) return 0;
+    snprintf(out, out_size, "%s\\%s", inbox_dir, arg);
     return 1;
 }
 

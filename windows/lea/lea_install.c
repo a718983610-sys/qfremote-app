@@ -1,5 +1,6 @@
 /* QFRLEA 首装服务安装子命令（A1，2026-11-13）。接口见 lea_install.h。 */
 #include "lea_install.h"
+#include "lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源，见该文件头注 */
 #include "lea_local.h" /* S-021：lea_is_local_control_subcommand */
 
 #include <stdio.h>
@@ -135,10 +136,12 @@ int lea_is_service_subcommand(const char *arg) {
 #ifdef _WIN32
 /* ---------- Windows 专属 ---------- */
 
-#define LEA_SVC_NAME_W L"QFRLEA"
-#define LEA_SVC_DISPLAY_W L"QFRemote \u672c\u5730\u6267\u884c\u4ee3\u7406"
-#define LEA_REG_KEY_W L"SOFTWARE\\QFR\\LEA"
-#define LEA_REG_COMPAT_W L"SOFTWARE\\QFRemote\\LEA"
+/* A+：服务名／显示名取自 lea_instance.h；注册表键（LEA_REG_KEY_W／
+ * LEA_REG_COMPAT_W）同样由该头文件定义，这里不再重定义。生产构建与
+ * 旧版逐字节一致；TEST 构建用 QFRLEA-TEST 服务名与
+ * SOFTWARE\QFR\LEA-TEST 注册表键，绝不碰生产服务注册与生产注册表键。 */
+#define LEA_SVC_NAME_W LEA_SERVICE_NAME_W
+#define LEA_SVC_DISPLAY_W LEA_SERVICE_DISPLAY_W
 #define LEA_DATA_SDDL_A "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
 static void log_line(const char *fmt, ...) {
@@ -412,7 +415,8 @@ static int ensure_data_dirs(void) {
     if (n == 0 || n >= MAX_PATH) wcscpy_s(wpd, MAX_PATH, L"C:\\ProgramData");
     utf16_to_utf8(wpd, pd, sizeof(pd));
     char base[MAX_PATH], sub[MAX_PATH];
-    snprintf(base, sizeof(base), "%s\\QFR\\LEA", pd);
+    /* A+：数据根目录叶名取自实例身份（TEST：LEA-TEST；生产：LEA）。 */
+    snprintf(base, sizeof(base), "%s\\QFR\\%s", pd, LEA_INSTANCE_LEAF);
     {
         char qfr[MAX_PATH];
         snprintf(qfr, sizeof(qfr), "%s\\QFR", pd);
@@ -541,7 +545,9 @@ int lea_service_install(int repair) {
     {
         SERVICE_DESCRIPTIONW desc;
         WCHAR wdesc[256];
-        wcscpy_s(wdesc, 256, L"QFRemote \u672c\u5730\u6267\u884c\u4ee3\u7406\uff1a\u670d\u52a1\u7aef\u7b7e\u540d\u7684\u6307\u4ee4\u7ecf\u672c\u673a\u6267\u884c\uff0cUI \u7c7b\u8f6c\u7528\u6237\u4f1a\u8bdd\u52a9\u624b\u3002");
+        /* A+：描述以实例显示名开头（TEST 构建即带“（测试）”，服务列表可辨）。 */
+        wcscpy_s(wdesc, 256, LEA_SVC_DISPLAY_W);
+        wcscat_s(wdesc, 256, L"\uff1a\u670d\u52a1\u7aef\u7b7e\u540d\u7684\u6307\u4ee4\u7ecf\u672c\u673a\u6267\u884c\uff0cUI \u7c7b\u8f6c\u7528\u6237\u4f1a\u8bdd\u52a9\u624b\u3002");
         desc.lpDescription = wdesc;
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
         SC_ACTION actions[3];

@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ush_log.h"
+#include "../lea/lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源 */
 
 static char g_log_dir[MAX_PATH] = {0};
 
@@ -21,7 +22,9 @@ static void ensure_log_dir(void) {
     wcscpy_s(parent, MAX_PATH, dir);
     wcscat_s(parent, MAX_PATH, L"\\QFR");
     CreateDirectoryW(parent, NULL);
-    wcscat_s(parent, MAX_PATH, L"\\LEA");
+    /* A+：日志目录叶名取自实例身份（TEST：…\QFR\LEA-TEST\logs）。 */
+    wcscat_s(parent, MAX_PATH, L"\\");
+    wcscat_s(parent, MAX_PATH, LEA_INSTANCE_LEAF_W);
     CreateDirectoryW(parent, NULL);
     wcscat_s(parent, MAX_PATH, L"\\logs");
     CreateDirectoryW(parent, NULL);
@@ -89,7 +92,10 @@ static void json_escape_into(const char *in, char *out, size_t out_size) {
 
 void ush_log_init(void) {
     ensure_log_dir();
-    ush_log_event("ush-started", "pipe=\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1");
+    /* A+：启动日志写实例管道名，保持旧格式 "pipe=<管道名>"，生产输出逐字节不变。 */
+    char pipe_detail[128];
+    snprintf(pipe_detail, sizeof(pipe_detail), "pipe=%s", LEA_USH_PIPE_NAME_A);
+    ush_log_event("ush-started", pipe_detail);
 }
 
 void ush_log_event(const char *event, const char *detail) {

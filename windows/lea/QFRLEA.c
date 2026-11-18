@@ -95,6 +95,10 @@
  *   只认本地命令行，绝不经 LEA API／qf-lea-client 远程调用。
  * 测试冒烟构建（仅单测／真机冒烟，生产绝不启用）：
  *   加 -DLEA_TEST_UNSIGNED=1 后 signature "TEST-UNSIGNED" 放行。
+ * A+ TEST 实例构建（见 build-test.sh）：加 -DQFR_LEA_TEST_BUILD=1，
+ *   服务名 QFRLEA-TEST、管道 \\.\pipe\QFR\LEA-TEST\v1、数据根目录
+ *   %ProgramData%\QFR\LEA-TEST，与生产资源全隔离；启动时校验失败即
+ *   fail-closed，绝不回退生产路径。
  */
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
@@ -118,15 +122,19 @@
 #include "lea_audit.h"
 #include "lea_filewrite.h" /* batch1-fix3：file.write 原子写入（P0） */
 #include "lea_install.h"
+#include "lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源，见该文件头注 */
 #include "lea_local.h" /* S-021：本机控制状态（暂停／授权／撤销／状态查询） */
 #include "lea_appclose.h" /* batch1-fix2：app.close 全量核对＋优雅退出 */
 #include "lea_diag.h" /* A16-S2：结构化调用方拒绝诊断（裁决 §四） */
 #include "whitelist.h"
 
-#define SERVICE_NAME_W L"QFRLEA"
-#define SERVICE_DISPLAY_W L"QFRemote 本地执行代理"
-#define PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\v1"
-#define USH_PIPE_NAME_W L"\\\\.\\pipe\\QFR\\LEA\\UserHelper\\v1"
+/* A+：服务名／显示名／主 IPC／USH 管道一律取自 lea_instance.h（实例身份
+ * 唯一来源）。生产构建与旧版逐字节一致；TEST 构建带 -TEST 后缀，绝不
+ * 与生产共用服务名或管道名。 */
+#define SERVICE_NAME_W LEA_SERVICE_NAME_W
+#define SERVICE_DISPLAY_W LEA_SERVICE_DISPLAY_W
+#define PIPE_NAME_W LEA_PIPE_NAME_W
+#define USH_PIPE_NAME_W LEA_USH_PIPE_NAME_W
 #define PIPE_SDDL_W L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)"
 /* r10：与 set_sys_admin_acl() 同步带 OICI（本宏当前未被引用，留作防复发；
  * 无继承标志时服务启动会把数据目录可继承 ACE 剥掉，子项得空 DACL）。 */
@@ -392,13 +400,62 @@ static void set_ushtokens_acl(const char *path_utf8) {
     LocalFree(sd);
 }
 
-static void ensure_dirs(void) {
+/* A+：实例隔离校验（启动 fail-closed）。在建任何目录／写任何文件之前
+ * 核对解析出的数据根目录与管道名是否与本构建的实例身份一致：
+ *   ① 数据根目录尾段必须恰为本实例叶名（TEST：…\QFR\LEA-TEST；
+ *      生产：…\QFR\LEA）；
+ *   ② 主管道名必须含同一叶名（防宏配错导致管道与目录身份不一致）；
+ *   ③ TEST 构建：由本实例路径去掉 -TEST 后缀派生的生产对照路径必须
+ *      与本实例路径不同（对照路径由字符串派生，不在二进制里嵌生产
+ *      资源名字面量）。
+ * 任一不符返回 0——调用方拒绝启动，绝不回退生产默认值，绝不把 TEST
+ * 数据写进生产目录。本函数不写任何文件（日志路径尚未建立），失败只
+ * 写 stderr；服务形态下 SCM 记录服务启动失败即为可见信号。 */
+static int lea_instance_verify_isolation(void) {
+    char expect_suffix[MAX_PATH];
+    if (snprintf(expect_suffix, sizeof(expect_suffix), "\\QFR\\%s",
+                 LEA_INSTANCE_LEAF) < 0)
+        return 0;
+    size_t blen = strlen(g_base_dir);
+    size_t slen = strlen(expect_suffix);
+    if (blen < slen) return 0;
+    if (_stricmp(g_base_dir + blen - slen, expect_suffix) != 0) return 0;
+    {
+        char expect_pipe[MAX_PATH];
+        if (snprintf(expect_pipe, sizeof(expect_pipe), "\\QFR\\%s\\v1",
+                     LEA_INSTANCE_LEAF) < 0)
+            return 0;
+        if (strstr(LEA_PIPE_NAME_A, expect_pipe) == NULL) return 0;
+    }
+#if LEA_INSTANCE_IS_TEST
+    {
+        /* TEST 构建：g_base_dir 必须以 -TEST 结尾，去掉后缀即生产对照路径。 */
+        char prod_base[MAX_PATH];
+        size_t plen = strlen(g_base_dir);
+        if (plen < 5 || strcmp(g_base_dir + plen - 5, "-TEST") != 0) return 0;
+        if (plen - 5 + 1 > sizeof(prod_base)) return 0;
+        memcpy(prod_base, g_base_dir, plen - 5);
+        prod_base[plen - 5] = '\0';
+        if (_stricmp(prod_base, g_base_dir) == 0) return 0;
+    }
+#endif
+    return 1;
+}
+
+static int ensure_dirs(void) {
     char pd[MAX_PATH] = { 0 };
     WCHAR wpd[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"ProgramData", wpd, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(wpd, MAX_PATH, L"C:\\ProgramData");
     utf16_to_utf8(wpd, pd, sizeof(pd));
-    snprintf(g_base_dir, sizeof(g_base_dir), "%s\\QFR\\LEA", pd);
+    snprintf(g_base_dir, sizeof(g_base_dir), "%s\\QFR\\%s", pd, LEA_INSTANCE_LEAF);
+    /* A+：建任何目录之前先校验实例隔离；不符即拒绝启动（返回 0），
+     * 绝不在此写任何文件、绝不回退生产默认值。 */
+    if (!lea_instance_verify_isolation()) {
+        fprintf(stderr, "FATAL instance isolation check failed: base_dir=%s instance=%s\n",
+                g_base_dir, LEA_INSTANCE_LEAF);
+        return 0;
+    }
     /* 逐级建目录 */
     {
         char tmp[MAX_PATH];
@@ -441,6 +498,7 @@ static void ensure_dirs(void) {
         if (slash) *slash = L'\0';
         utf16_to_utf8(mod, g_install_dir, sizeof(g_install_dir));
     }
+    return 1;
 }
 
 /* ---------- 审计 ---------- */
@@ -6393,22 +6451,44 @@ static DWORD WINAPI pipe_loop(LPVOID unused) {
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
-    svc_log("START pipe listening \\\\.\\pipe\\QFR\\LEA\\v1");
+    svc_log("START pipe listening %s", LEA_PIPE_NAME_A);
+    /* A+（GPT 建议，项 9）：首个管道实例独占保护。第一次创建带
+     * FILE_FLAG_FIRST_PIPE_INSTANCE：同名管道已被另一服务端持有时
+     * 创建失败（ERROR_ACCESS_DENIED／ERROR_PIPE_BUSY），即有第二个
+     * 同名服务端在跑——fail-closed 停服，不与之共享命名空间。
+     * 注意：该标志只用于本服务首次创建；同一服务后续合法创建的其余
+     * 实例（PIPE_MAX_INSTANCES=8，循环里逐个创建）不带此标志，否则
+     * 自身第 2 个实例创建即因第 1 个实例仍存在而失败（USH 管道是
+     * 单实例串行，可全程带标志；LEA 多实例并发，不可照搬）。 */
+    int first_pipe_instance = 1;
     while (InterlockedCompareExchange(&g_running, 1, 1) == 1) {
         /* #14：实例以 FILE_FLAG_OVERLAPPED 创建，连接与读写一律走重叠 I/O，
          * 读行才有总 deadline 可言（同步句柄的 ReadFile 无法设超时）。 */
         HANDLE pipe = CreateNamedPipeW(PIPE_NAME_W,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+                (first_pipe_instance ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
             /* #27：PIPE_REJECT_REMOTE_CLIENTS——远程客户端纵有管理员凭据
              * 也连不上本机管道（旧实现只靠 SY+BA+AU 的 ACL，远程仍可尝试
              * 建连；USH 管道已设此标志，LEA 补齐）。 */
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_MAX_INSTANCES, LEA_MAX_ENVELOPE, LEA_MAX_ENVELOPE, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
-            svc_log("ERROR CreateNamedPipe failed %lu", (unsigned long)GetLastError());
+            DWORD en = GetLastError();
+            /* A+：首次创建即被拒＝同名管道已有另一服务端持有，fail-closed
+             * 停服（不循环重试、不共享命名空间）。 */
+            if (first_pipe_instance && (en == ERROR_ACCESS_DENIED || en == ERROR_PIPE_BUSY)) {
+                svc_log("FATAL pipe %s already owned by another server (error=%lu), refusing to share namespace",
+                        LEA_PIPE_NAME_A, (unsigned long)en);
+                InterlockedExchange(&g_running, 0);
+                if (g_stop_event) SetEvent(g_stop_event);
+                LocalFree(sd);
+                return 1;
+            }
+            svc_log("ERROR CreateNamedPipe failed %lu", (unsigned long)en);
             Sleep(1000);
             continue;
         }
+        first_pipe_instance = 0;
         /* 重叠等连接（监听线程阻塞；连接后另起线程处理）。
          * 停止时 service_main 用一次本地客户端连接自唤醒（同 QFSysHelper）。 */
         HANDLE cev = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -6484,7 +6564,9 @@ static int lea_service_init(void) {
     lea_handshake_init(&g_handshake); /* RC-01：握手态初始为未完成 */
     lea_batch_seq_init(&g_batch_seq);
     g_queue_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ensure_dirs();
+    /* A+：目录未就绪即拒绝启动（实例隔离校验失败时 ensure_dirs 返回 0，
+     * 此时一个文件都还没写，绝不继续加载绑定／吊销状态）。 */
+    if (!ensure_dirs()) return 0;
     binding_load();
     revocation_startup_init(); /* F-01：吊销表启动初始化（条件式，见上） */
     /* emergency_stop 启动对账（GPT 裁决六节）：标记文件丢失时凭审计
@@ -6507,7 +6589,7 @@ static int lea_service_init(void) {
     lea_idem_prune(&g_idem, now_unix());
     idem_persist_locked();
     LeaveCriticalSection(&g_lock);
-    svc_log("QFRLEA init done version=%s install_dir=%s", LEA_VERSION_STR, g_install_dir);
+    svc_log("%s init done version=%s install_dir=%s", LEA_SERVICE_NAME_A, LEA_VERSION_STR, g_install_dir);
     return 1;
 }
 
@@ -6521,7 +6603,11 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
         report_status(SERVICE_STOPPED, 0);
         return;
     }
-    lea_service_init();
+    /* A+：初始化失败（含实例隔离校验失败）即停止服务，不报 RUNNING。 */
+    if (!lea_service_init()) {
+        report_status(SERVICE_STOPPED, 0);
+        return;
+    }
     svc_log("SERVICE started");
     report_status(SERVICE_RUNNING, 0);
     HANDLE worker = CreateThread(NULL, 0, worker_loop, NULL, 0, NULL);
@@ -6563,7 +6649,8 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv) {
  * 备份恢复）；迁移成功写 .gen＋标记（同款 ACL）并记日志；失败不写残集。
  * 服务正在跑时也可迁移：下次吊销检查通过即自动脱离 DEGRADED，无需重启。 */
 static int lea_migrate_revoked_cmd(int argc, char **argv) {
-    ensure_dirs();
+    /* A+：实例隔离校验失败时拒绝迁移（ensure_dirs 返回 0），不写任何文件。 */
+    if (!ensure_dirs()) return 1;
     long long generation = 1;
     int accept_empty = 0;
     for (int i = 2; i < argc; i++) {
@@ -6657,14 +6744,16 @@ int main(int argc, char **argv) {
     }
     if (argc > 1 && strcmp(argv[1], "debug") == 0) {
         g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-        lea_service_init();
+        /* A+：初始化失败（含实例隔离校验失败）即退出 1，不监听管道。 */
+        if (!lea_service_init()) return 1;
         svc_log("DEBUG mode start");
         HANDLE worker = CreateThread(NULL, 0, worker_loop, NULL, 0, NULL);
         g_watchdog_thread = CreateThread(NULL, 0, watchdog_loop, NULL, 0, NULL); /* B1 */
-        pipe_loop(NULL);
+        /* A+：管道循环致命失败（如首实例被另一服务端抢占）即退出 1。 */
+        DWORD pipe_rc = pipe_loop(NULL);
         if (worker) WaitForSingleObject(worker, 5000);
         if (g_watchdog_thread) WaitForSingleObject(g_watchdog_thread, 5000); /* B1 */
-        return 0;
+        return pipe_rc ? 1 : 0;
     }
     SERVICE_TABLE_ENTRYW table[] = {
         { (LPWSTR)SERVICE_NAME_W, service_main },

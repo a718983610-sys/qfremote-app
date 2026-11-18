@@ -16,8 +16,9 @@
 #include <time.h>
 #include "ush_selfbind.h"
 #include "ush_json.h"
+#include "../lea/lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源 */
 
-#define SB_KEY_NAME L"QFR-LEA-DeviceKey"
+#define SB_KEY_NAME (LEA_INSTANCE_IS_TEST ? L"QFR-LEA-TEST-DeviceKey" : L"QFR-LEA-DeviceKey")
 #define SB_SERVER_DEFAULT "https://app.qfremote.top"
 #define SB_CRED_FILE L"ush-credential.bin"
 #define SB_META_FILE L"ush-credential.json"
@@ -29,14 +30,16 @@ static void sb_zero(void *p, size_t n) {
     if (p && n) { volatile unsigned char *v = (volatile unsigned char *)p; while (n--) *v++ = 0; }
 }
 
-/* %ProgramData%\QFR\LEA（USH 日志／token 同目录）；不存在即建。 */
+/* %ProgramData%\QFR\<叶名>（USH 日志／token 同目录）；不存在即建。
+ * A+：叶名取自实例身份（TEST：LEA-TEST；生产：LEA），自助绑定凭据与
+ * 元数据文件随实例隔离，TEST 凭据绝不写进生产目录。 */
 static int sb_lea_dir_w(wchar_t *out, size_t out_chars) {
     wchar_t pd[MAX_PATH] = { 0 };
     DWORD n = GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) {
         if (wcscpy_s(pd, MAX_PATH, L"C:\\ProgramData") != 0) return 0;
     }
-    if (_snwprintf_s(out, out_chars, _TRUNCATE, L"%s\\QFR\\LEA", pd) < 0) return 0;
+    if (_snwprintf_s(out, out_chars, _TRUNCATE, L"%s\\QFR\\%s", pd, LEA_INSTANCE_LEAF_W) < 0) return 0;
     return 1;
 }
 static int sb_path_w(wchar_t *out, size_t out_chars, const wchar_t *file) {

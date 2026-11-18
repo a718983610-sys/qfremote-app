@@ -5,6 +5,7 @@
  * 失败保留旧文件。旧 atomic_write（先删旧目标再 rename、二次
  * fclose）已删除，不得恢复。 */
 #include "lea_local.h"
+#include "lea_instance.h" /* A+：实例身份（生产／TEST）唯一来源，见该文件头注 */
 #include "lea_filewrite.h"
 
 #include <stdio.h>
@@ -39,8 +40,11 @@ int lea_local_base_dir(const char *base_dir, char *out, size_t out_size) {
     {
         const char *pd = getenv("ProgramData");
         if (!pd || !pd[0]) return 0;
-        if (snprintf(out, out_size, "%s\\QFR\\LEA", pd) < 0 ||
-            strlen(pd) + strlen("\\QFR\\LEA") >= out_size) return 0;
+        /* A+：回退数据根目录叶名取自实例身份（TEST：LEA-TEST；生产：LEA）。
+         * 旧实现写死 \QFR\LEA，TEST 二进制跑本地控制子命令时会误读写
+         * 生产状态文件。 */
+        if (snprintf(out, out_size, "%s\\QFR\\%s", pd, LEA_INSTANCE_LEAF) < 0 ||
+            strlen(pd) + strlen("\\QFR\\") + strlen(LEA_INSTANCE_LEAF) >= out_size) return 0;
         return 1;
     }
 #else

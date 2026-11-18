@@ -10,15 +10,19 @@
   USH 以当前登录用户权限运行，不提权、不存凭据。
 .PARAMETER ExePath
   QFUserHelper.exe 的绝对路径（默认：本脚本所在目录下的 QFUserHelper.exe）。
+.PARAMETER TaskName
+  计划任务名（默认 "QFRLEA User Helper"）。A+ TEST 部署传
+  "QFRLEA-TEST User Helper"，避免 TEST 注册删掉生产任务（本脚本
+  注册前会先删同名已存在任务，任务名撞名即删生产任务）。
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File register-ush.ps1 -ExePath "C:\Program Files\QFRemote\LEA\QFUserHelper.exe"
 #>
 param(
-    [string]$ExePath = (Join-Path $PSScriptRoot "QFUserHelper.exe")
+    [string]$ExePath = (Join-Path $PSScriptRoot "QFUserHelper.exe"),
+    [string]$TaskName = "QFRLEA User Helper"
 )
 
 $ErrorActionPreference = "Stop"
-$TaskName = "QFRLEA User Helper"
 
 if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "QFUserHelper.exe not found: $ExePath"
