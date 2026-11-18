@@ -39,7 +39,7 @@
  * 决定重试，必须同时满足：本次调用来自已核验的主程序链路（由调用方
  * 保证，本模块只认注入的依赖）、本地实际会话为 WTSConnected、IPC 回
  * 通用调用方拒绝、账户／设备／Session／登录事件世代仍一致。进入等
- * 待时只记“caller-not-allowed-while-connected”，绝不武断记为“服务
+ * 待时只记 wait-wts-active 事件，不记录任何原因串，绝不武断记为“服务
  * 端已确认 session-not-active”——真正原因仍以 QFRLEA 内部审计为准。
  * 若实际原因是路径错误或 SID 错误，转 WTSActive 后仍会被拒：此时
  * 直接终局，不无限重试。
@@ -146,14 +146,28 @@ function normStr(v) { return (v === undefined || v === null) ? '' : String(v); }
 function normNum(v) { return (typeof v === 'number' && Number.isSafeInteger(v)) ? v : null; }
 
 /* begin() 的身份快照与当前身份比对：账号／设备／会话／SID／世代
- * 任一不同即作废。null 与 null 视为相等（会话／SID 尚未查到时）。 */
+ * 任一不同即作废。O-8：会话／SID 预取失败时快照为 null（未知），稍
+ * 后查到真实值只是“未知→已知”，不是身份变了——任一值为未知时该字
+ * 段不参与判定，仅当两值均已知且不同时才判变化。账号／设备／世代
+ * 保持严格比对（begin 时必有值）。 */
 function identityEqual(a, b) {
   if (!a || !b) return false;
   return normStr(a.accountId) === normStr(b.accountId)
     && normStr(a.deviceId) === normStr(b.deviceId)
-    && normNum(a.windowsSessionId) === normNum(b.windowsSessionId)
-    && normStr(a.windowsUserSid) === normStr(b.windowsUserSid)
+    && nullableNumEqual(a.windowsSessionId, b.windowsSessionId)
+    && nullableStrEqual(a.windowsUserSid, b.windowsUserSid)
     && normNum(a.loginGeneration) === normNum(b.loginGeneration);
+}
+/* 任一未知（null／空串）→ 该字段不判变化；两值均已知且不同 → 变化。 */
+function nullableNumEqual(x, y) {
+  const nx = normNum(x), ny = normNum(y);
+  if (nx === null || ny === null) return true;
+  return nx === ny;
+}
+function nullableStrEqual(x, y) {
+  const sx = normStr(x), sy = normStr(y);
+  if (sx === '' || sy === '') return true;
+  return sx === sy;
 }
 
 function defaultSleep(ms) {
@@ -207,9 +221,11 @@ function createLeaLoginRetry(deps, opts) {
   let cancelled = false;
   let cancelReason = '';
   let outcomeResolve = null;
-  let runToken = 0;      // 事件代次：新 begin 递增，旧事件循环见代次不符即
-  // 静默退出（不结算、不发包）。没有它，supersede 后旧循环会在新
-  // begin 已重置 cancelled 标志后继续跑，造成重复发送。
+  let runToken = 0;      // 事件代次：新 begin 与 cancel() 都递增，旧事件
+  // 循环见代次不符即静默退出（不结算、不发包、不调终局回调）。没有
+  // 它，supersede 后旧循环会在新 begin 已重置 cancelled 标志后继续
+  // 跑，造成重复发送；取消后旧循环也会在 await 之后继续发包、甚至
+  // 把已取消事件翻回接受（D-1）。
   let pendingDelay = null; // { timer, resolve }：等待可被 cancel 唤醒
 
   function log(ev, detail) {
@@ -301,15 +317,20 @@ function createLeaLoginRetry(deps, opts) {
    * 终局 info（已 settle）。proof 只活在局部变量。 */
   async function doAttempt(myToken) {
     if (myToken !== runToken) return 'abandoned';
-    if (cancelled) return finishTerminal(cancelReason || 'cancelled', STATES.CANCELLED, { cancelled: true });
+    /* D-1：取消后静默退出。cancel() 本身已结算 outcome 并调过一次
+     * onTerminalFailure，循环只须停下，绝不再调 finishTerminal／
+     * finishAccepted（否则终局回调重复、状态还可能被翻回接受）。 */
+    if (cancelled) return 'abandoned';
     if (ttlExpired()) return finishTerminal('ttl-expired', STATES.EXPIRED);
     const idNow = await safeGetIdentity();
     if (myToken !== runToken) return 'abandoned';
+    if (cancelled) return 'abandoned';
     if (idNow && !identityEqual(idNow, identity)) {
       return finishTerminal('identity-changed', STATES.CANCELLED, { cancelled: true });
     }
     const proofRes = await safeFetchProof();
     if (myToken !== runToken) return 'abandoned';
+    if (cancelled) return 'abandoned';
     if (!proofRes.ok) {
       /* 定夺 §2.2 行为 8：证明缺失是非暂态错误，终止，不重试。 */
       return finishTerminal(proofRes.reason, STATES.FAILED);
@@ -327,6 +348,7 @@ function createLeaLoginRetry(deps, opts) {
     const timeoutP = sleep(attemptTimeoutMs).then(() => { if (!settled) { settled = true; return { ok: false, reason: 'timeout', timeout: true }; } return { ok: false, reason: 'late-result-ignored', ignored: true }; });
     const res = await Promise.race([sendP, timeoutP]);
     if (myToken !== runToken) return 'abandoned';
+    if (cancelled) return 'abandoned'; // D-1：取消后迟到的成功回包也不接受
     if (res.ignored) return finishTerminal('attempt-race-error', STATES.FAILED);
     if (res.timeout === true || res.reason === 'timeout') {
       /* 竞态 B：服务可能已接收请求。先确认，未确认前绝不重发。 */
@@ -334,6 +356,7 @@ function createLeaLoginRetry(deps, opts) {
       state = STATES.UNKNOWN_OUTCOME;
       const conf = await safeConfirmOutcome({ attemptStartedAtUnix: attemptStartedAtUnix, accountId: identity.accountId, deviceId: identity.deviceId });
       if (myToken !== runToken) return 'abandoned';
+      if (cancelled) return 'abandoned'; // D-1：取消后确认上了也不接受
       if (conf.confirmed === true) {
         log('unknown-outcome-confirmed', { attempt: attemptNo });
         return finishAccepted(null, { confirmedViaStatus: true });
@@ -347,11 +370,12 @@ function createLeaLoginRetry(deps, opts) {
     const code = normStr(res.code) || normStr(res.reason);
     if (code === CALLER_NOT_ALLOWED) {
       /* 竞态 A 严格条件：本地实际会话须为 WTSConnected，且身份仍一致。
-       * 注意：此处只记 caller-not-allowed-while-connected，绝不记
+       * 注意：此处只记 wait-wts-active 事件，不记录原因串，绝不记
        * “服务端已确认 session-not-active”。 */
       const st = await safeGetSessionState();
       const idNow2 = await safeGetIdentity();
       if (myToken !== runToken) return 'abandoned';
+      if (cancelled) return 'abandoned'; // D-1：取消后不再进等待、不再终局
       if (idNow2 && !identityEqual(idNow2, identity)) {
         return finishTerminal('identity-changed', STATES.CANCELLED, { cancelled: true });
       }
@@ -387,15 +411,19 @@ function createLeaLoginRetry(deps, opts) {
     for (;;) {
       await delay(pollIntervalMs);
       if (myToken !== runToken) return 'abandoned';
-      if (cancelled) return finishTerminal(cancelReason || 'cancelled', STATES.CANCELLED, { cancelled: true });
+      /* D-1／O-2：取消后静默退出，不再调 finishTerminal（cancel() 已
+       * 结算 outcome 并调过一次 onTerminalFailure，再调即重复回调）。 */
+      if (cancelled) return 'abandoned';
       if (ttlExpired()) return finishTerminal('ttl-expired', STATES.EXPIRED);
       const idNow = await safeGetIdentity();
       if (myToken !== runToken) return 'abandoned';
+      if (cancelled) return 'abandoned';
       if (idNow && !identityEqual(idNow, identity)) {
         return finishTerminal('identity-changed', STATES.CANCELLED, { cancelled: true });
       }
       const st = await safeGetSessionState();
       if (myToken !== runToken) return 'abandoned';
+      if (cancelled) return 'abandoned';
       if (!st || st.state === 'unknown') continue; // 查不到就继续等到 TTL
       if (st.state === SESSION_STATES.ACTIVE) {
         retriesUsed++;
@@ -460,9 +488,12 @@ function createLeaLoginRetry(deps, opts) {
       return p;
     },
     /* 切换账户／退出登录／窗口退出时取消在途事件。已终局时无操作。
-     * cancel 立即把在途事件的 begin Promise 以
-     * { accepted:false, cancelled:true } 结算（旧循环随后见代次不符
-     * 静默退出，不再发包）。 */
+     * cancel 是已取消事件的唯一终局点：置 CANCELLED、调一次
+     * onTerminalFailure、以 { accepted:false, cancelled:true } 结算
+     * begin Promise；同时递增 runToken，使在途循环在下一个代次检查
+     * 点静默退出（不再发包、不再调 finishTerminal／finishAccepted、
+     * 不再调终局回调）。D-1：此前 cancel 不递增代次，旧循环在 await
+     * 之后看不到取消，仍会发包甚至把状态从 CANCELLED 翻回接受。 */
     cancel: function (reason) {
       const r = (typeof reason === 'string' && reason) ? reason : 'cancelled';
       if (state === STATES.DONE || state === STATES.CANCELLED || state === STATES.EXPIRED ||
@@ -471,6 +502,7 @@ function createLeaLoginRetry(deps, opts) {
       }
       cancelled = true;
       cancelReason = r;
+      runToken++; // D-1：代次递增，在途循环下个检查点即静默退出
       state = STATES.CANCELLED;
       wakeDelay();
       log('cancel', { reason: r });

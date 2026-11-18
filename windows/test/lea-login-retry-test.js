@@ -13,6 +13,8 @@
  *     切换身份立即作废／markBindingFinalize／markBindingDone 记账；
  *  F. main.js 接线（文本断言）：require、retry.begin 接入、登出与
  *     before-quit 取消、package.json asar 清单、qwinsta 会话查询。
+ *  G. D-1 回归：发送／取证明挂起时取消，放行后仍不接受、不发包、
+ *     状态保持 CANCELLED、绑定记账不放行。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  * 说明：本文件只验模块纯逻辑与 main.js 接线文本；WTS 状态变化与
  * 真实 IPC 拒绝只能在 Windows 真机上验收，沙箱结果不得写成真机通过。
@@ -340,6 +342,61 @@ try {
   ok('F9-single-flight-guard', mainSrc.includes("reason: 'already-in-flight'"));
   ok('F10-no-powershell-pipe-send', !/powershell.*session\.login_changed/i.test(mainSrc) &&
     !/session\.login_changed.*powershell/i.test(mainSrc));
+
+  // ---- G. D-1 回归：取消在途事件（发送／取证明挂起时取消） ----
+  {
+    // G1：发送挂起时取消，放行后仍不接受、状态保持 CANCELLED、绑定不放行。
+    let releaseSend;
+    const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+    let sends = 0, accepted = 0, terminalCalls = 0;
+    const deps = {
+      getSessionState: async () => ({ sessionId: 1, state: 'WTSConnected', stateName: 'Conn', source: 'qwinsta' }),
+      getCurrentIdentity: async () => Object.assign({}, BASE_ID),
+      fetchLoginProof: async () => ({ ok: true, proof: 'proof-1' }),
+      sendLoginAttempt: async () => { sends++; await sendGate; return { ok: true, result: { binding_epoch: 7 } }; },
+      confirmOutcome: async () => ({ confirmed: false, reason: 'n/a' }),
+      onAccepted: () => { accepted++; },
+      onTerminalFailure: () => { terminalCalls++; },
+      logEvent: () => {},
+    };
+    const retry = createLeaLoginRetry(deps, { pollIntervalMs: 10, attemptTimeoutMs: 5000, ttlMs: 60000, maxRetries: 2 });
+    const p = retry.begin(Object.assign({}, BASE_ID));
+    const t0 = Date.now();
+    while (sends < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 5));
+    const cancelled = retry.cancel('identity-changed');
+    const out = await withTimeout(p, 5000, 'G1');
+    releaseSend();
+    await new Promise((r) => setTimeout(r, 50)); // 给旧循环一个 tick 走到代次检查点
+    ok('T-cancel-during-send', cancelled === true && out.accepted === false && out.cancelled === true &&
+      out.reason === 'identity-changed' && retry.getState() === 'cancelled' &&
+      sends === 1 && accepted === 0 && terminalCalls === 1 && retry.markBindingFinalize() === false);
+  }
+  {
+    // G2：证明获取挂起时取消，放行后全程零发送。
+    let releaseProof;
+    const proofGate = new Promise((resolve) => { releaseProof = resolve; });
+    let proofCalls = 0, sends = 0, accepted = 0, terminalCalls = 0;
+    const deps = {
+      getSessionState: async () => ({ sessionId: 1, state: 'WTSConnected', stateName: 'Conn', source: 'qwinsta' }),
+      getCurrentIdentity: async () => Object.assign({}, BASE_ID),
+      fetchLoginProof: async () => { proofCalls++; await proofGate; return { ok: true, proof: 'proof-1' }; },
+      sendLoginAttempt: async () => { sends++; return { ok: true, result: {} }; },
+      confirmOutcome: async () => ({ confirmed: false, reason: 'n/a' }),
+      onAccepted: () => { accepted++; },
+      onTerminalFailure: () => { terminalCalls++; },
+      logEvent: () => {},
+    };
+    const retry = createLeaLoginRetry(deps, { pollIntervalMs: 10, attemptTimeoutMs: 5000, ttlMs: 60000, maxRetries: 2 });
+    const p = retry.begin(Object.assign({}, BASE_ID));
+    const t0 = Date.now();
+    while (proofCalls < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 5));
+    const cancelled = retry.cancel('identity-changed');
+    const out = await withTimeout(p, 5000, 'G2');
+    releaseProof();
+    await new Promise((r) => setTimeout(r, 50));
+    ok('T-cancel-during-proof', cancelled === true && out.accepted === false && out.cancelled === true &&
+      retry.getState() === 'cancelled' && sends === 0 && proofCalls === 1 && accepted === 0 && terminalCalls === 1);
+  }
 } catch (e) {
   result.error = String((e && e.stack) || e);
 }
