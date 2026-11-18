@@ -109,6 +109,9 @@ function tick(n) {
   t('M0 弹窗初始隐藏且不在 #list 内（重渲染碰不到它）', q('#lockConfirmModal').hidden === true
     && !q('#list').contains(q('#lockConfirmModal')));
   t('M0 源码无自动取消定时器（无 setTimeout/setInterval 调用）', !/setTimeout\s*\(|setInterval\s*\(/.test(html));
+  // P3-05 R-10：暂停期横幅出示 PAUSE_NOTICE 原文（裁决 §2.2，一字不改）。
+  t('M0p 暂停期横幅出示 PAUSE_NOTICE 原文', q('#lockPauseNotice')
+    && q('#lockPauseNotice').textContent === '当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。');
 
   // ---- 1. 打开弹窗 ----
   const offBtn = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent === '关闭隐私锁');

@@ -130,6 +130,13 @@ test('网页端关闭确认弹窗：60 秒＋刷新存活、重复提交一次�
   const offBtn = doc.querySelector('#lk-off');
   assert.ok(offBtn, '已锁定设备应有关闭按钮');
   assert.match(doc.querySelector('#lockBody').textContent, /已锁定/);
+  // P3-05 R-10：暂停期横幅出示 PAUSE_NOTICE 原文（裁决 §2.2，一字不改），
+  // 且多次 initLockPanel 重建后仍只留一份（插在 #lockBody 之外）。
+  assert.equal(doc.querySelector('#lk-pause-note').textContent,
+    '当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。');
+  await window.initLockPanel(view, '本机');
+  await tick(12);
+  assert.equal(doc.querySelectorAll('#lk-pause-note').length, 1, '横幅不重复插入');
 
   // 1. 打开弹窗
   offBtn.click();

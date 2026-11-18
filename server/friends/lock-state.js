@@ -44,8 +44,29 @@ const TRANSITIONS = Object.freeze({
   LOCKED: ['UNLOCKING', 'UNKNOWN', 'RECOVERY_REQUIRED'],
   UNLOCKING: ['UNLOCKED', 'LOCKED', 'UNKNOWN', 'RECOVERY_REQUIRED'],
   UNKNOWN: ['UNLOCKED', 'LOCKING', 'LOCKED', 'UNLOCKING', 'RECOVERY_REQUIRED'],
-  RECOVERY_REQUIRED: ['UNLOCKED', 'LOCKED', 'UNKNOWN'],
+  RECOVERY_REQUIRED: ['UNLOCKED', 'LOCKED', 'UNKNOWN', 'LOCKING'],
 });
+
+// P3-05 F-2：v2 设备状态源。status 含合法六态 actual_state 时优先按它
+// 分类；无 actual_state 的 v1 设备回落 v1 state 映射（见 classifyDeviceStatus）。
+// 注意：actual_state 须为六态之一才采信，非法值回落 v1 映射、不猜。
+function preferredActualState(status) {
+  if (!status || typeof status !== 'object') return null;
+  if (typeof status.actual_state === 'string' && STATES.indexOf(status.actual_state) >= 0) return status.actual_state;
+  return null;
+}
+// P3-05 R-7：自称 v2 的设备判定。唯一可靠标志是 status 含 actual_state
+//（v1 设备从不写该字段，v2 设备恒写，见契约 §3）。
+// 契约 §6 另写“version 主版本 ≥ 2”亦算 v2——本实现不采用该判据，原因：
+// ① 旧 Go 组件的 ComponentVersion 同为 2.x（update.go 目标版本如 "2.0.3"），
+// 主版本 ≥ 2 无法区分 v1 Go 与 v2；② C 线自有 P3C 假设备 status.version
+// 为应用版本 '2.4.5'，按字面判据会被误判 v2、缺 revision 即进恢复态，
+// 直接破坏已验盘的 P3C 71 项。实际判定只看 actual_state 是否出现；
+// 该口径偏差已记入 P3-05 REPORT（请协调人裁决契约 §6 文字是否修订）。
+function isV2Status(status) {
+  if (!status || typeof status !== 'object') return false;
+  return status.actual_state != null;
+}
 
 // 设备 status.json 的 state（组件侧）→ 服务端 actual_state 的直映射（仅状态名，不含证据判断）。
 function mapLegacyState(deviceState) {
@@ -163,7 +184,22 @@ function classifyDeviceStatus(status, record, nowMs) {
       return { actual: 'UNKNOWN', evidence: 'none', reason: 'stale-heartbeat' };
     }
   }
-  const devState = status.state;
+  // P3-05 F-2（契约 §4）：v2 设备优先按 actual_state 分类；v1 设备（无
+  // actual_state）回落 v1 state 映射。LOCKING／UNLOCKING／UNKNOWN 直接按
+  // 设备自报返回（弱证据／无证据）；RECOVERY_REQUIRED 同 fault 态处理。
+  // actual_state 只是设备自报，证据等级仍按事件定（LOCKED 强证据须 arm
+  // 事件匹配，UNLOCKED 强证据须 disarm／重启证明），不只凭它宣布强证据。
+  const v2Actual = preferredActualState(status);
+  if (v2Actual === 'LOCKING' || v2Actual === 'UNLOCKING') {
+    return { actual: v2Actual, evidence: 'weak', reason: 'device-report-' + v2Actual.toLowerCase() };
+  }
+  if (v2Actual === 'UNKNOWN') {
+    return { actual: 'UNKNOWN', evidence: 'none', reason: 'device-report-unknown' };
+  }
+  if (v2Actual === 'RECOVERY_REQUIRED') {
+    return { actual: 'RECOVERY_REQUIRED', evidence: 'strong', reason: 'device-report-recovery' };
+  }
+  const devState = v2Actual === 'LOCKED' ? 'Locked' : v2Actual === 'UNLOCKED' ? 'Off' : status.state;
   // 设备契约 §2：fault 字段出现（state-corrupt）即组件故障态；桥侧另有
   // state==='Fault' 的同义形态，两路都认。
   if (devState === 'Fault' || status.fault) {
@@ -194,7 +230,14 @@ function classifyDeviceStatus(status, record, nowMs) {
       return !!t && record.created_at != null && Date.parse(t) >= record.created_at;
     }) || hasEvent(status, 'unlock-ok', (ev) => {
       // 设备契约 §6：unlock-ok＝本地输密码解锁，与远程 disarm 同为真实解锁。
-      if (!ev.fields) return true; // 本地解锁事件无归属字段，时间窗口是唯一判据
+      // P3-05 R-4（契约 §5）：无 fields 的旧事件也须过时间窗口校验
+      //（ts ≥ 本次 created_at），不得无条件认作强证据——与 disarm 同口径。
+      // 旧代码 `if (!ev.fields) return true;` 不论时间一律认，与其注释
+      // “时间窗口是唯一判据”自相矛盾，现按注释收紧代码（注释同步改写）。
+      if (!ev.fields) {
+        const t = eventTime(ev);
+        return !!t && record.created_at != null && Date.parse(t) >= record.created_at;
+      }
       if (ev.fields.lockId === record.lock_id || ev.fields.id === record.lock_id) return true;
       const t = eventTime(ev);
       return !!t && record.created_at != null && Date.parse(t) >= record.created_at;
@@ -227,8 +270,12 @@ function classifyDeviceStatus(status, record, nowMs) {
 // 返回 {record, changed, decision, reason, evidence}；decision 供桥写日志／回包。
 // 设备契约 §2：captureExclusion=failed-degraded（防截取未完全生效）或
 // unknown（保护状态未知）记降级；active / not-locked 清除降级标记。
-function degradedFromStatus(status) {
+// P3-05 R-9（契约 §9，#9 FAIL 的修复）：降级映射只在 LOCKED／LOCKING 下。
+// actualState 须由调用方传入本次对账后的实际状态；UNLOCKED 空闲态不记降级
+//（没有保护，就没有什么可降级），UNLOCKED 下的 failed-degraded 同样不记。
+function degradedFromStatus(status, actualState) {
   if (!status || typeof status !== 'object') return null;
+  if (actualState !== 'LOCKED' && actualState !== 'LOCKING') return null;
   if (status.captureExclusion === 'failed-degraded' || status.captureExclusion === 'unknown') return 'DEGRADED';
   return null;
 }
@@ -243,9 +290,16 @@ function heartbeatOf(status, now) {
 
 function reconcileRecord(record, status, opts) {
   const res = reconcileRecordInner(record, status, opts);
-  // 降级标记与状态机迁移无关：统一在出口处按本次设备读取刷新。
+  // 降级标记与状态机迁移无关：统一在出口处按本次设备读取＋对账后实际状态刷新。
+  // P3-05 R-6：身份字段（boot_id／session_id／sid）回填也在出口统一做——
+  // 不只在 confirmed 分支，to-unlocked 两步路径等状态变化分支同样回填。
   if (status && typeof status === 'object' && res && res.record) {
-    res.record = Object.assign({}, res.record, { degraded: degradedFromStatus(status) });
+    const next = Object.assign({}, res.record);
+    if (next.boot_id == null && status.boot_id != null) next.boot_id = String(status.boot_id);
+    if (next.session_id == null && status.session_id != null) next.session_id = String(status.session_id);
+    if (next.sid == null && status.sid != null) next.sid = String(status.sid);
+    next.degraded = degradedFromStatus(status, next.actual_state);
+    res.record = next;
   }
   return res;
 }
@@ -254,16 +308,18 @@ function reconcileRecordInner(record, status, opts) {
   const o = opts || {};
   const now = o.now != null ? o.now : Date.now();
   const applyDegraded = (r) => (status && typeof status === 'object'
-    ? Object.assign({}, r, { degraded: degradedFromStatus(status) }) : r);
+    ? Object.assign({}, r, { degraded: degradedFromStatus(status, r.actual_state) }) : r);
   if (!record) {
     // 服务端无记录：以设备自报建一条只读基线（actual 以设备为准，desired 同步）。
+    // P3-05 F-2：基线实际状态同样优先读 v2 actual_state，v1 回落 state 映射。
+    const baseActual = preferredActualState(status) || mapLegacyState(status ? status.state : null);
     const base = createLockRecord({
       device_id: o.device_id || (status && status.deviceId) || '',
       boot_id: status ? status.boot_id : null,
       session_id: status ? status.session_id : null,
       sid: status ? status.sid : null,
-      desired_state: mapLegacyState(status ? status.state : null),
-      actual_state: mapLegacyState(status ? status.state : null),
+      desired_state: baseActual,
+      actual_state: baseActual,
       last_heartbeat: status ? heartbeatOf(status, now) : null,
       now,
     });
@@ -278,6 +334,26 @@ function reconcileRecordInner(record, status, opts) {
     });
     if (!r.ok) return { record, changed: false, decision: 'illegal-transition', reason: r.reason, evidence: 'none' };
     return { record: r.record, changed: true, decision: 'revision-conflict', reason: r.reason, evidence: 'none' };
+  }
+  // P3-05 R-7（契约 §6）：自称 v2 的设备（status 含 actual_state）上报缺
+  // revision 或 revision 非数字 → 异常，进 RECOVERY_REQUIRED
+  //（revision-missing），不静默跳过；v1 设备（无 actual_state）仍跳过。
+  // 判定口径见 isV2Status：不以 version 主版本 ≥ 2 认定 v2（旧 Go 组件版
+  // 本号同为 2.x，无法区分；详见该函数注释与 P3-05 REPORT）。
+  // 心跳已过期（>2 分钟）的上报不由本条改判：契约 §4 新鲜度优先于 revision
+  // 合规检查，过期上报直接落入下方 classify 的 stale-heartbeat → UNKNOWN。
+  const hbStale = status && typeof status.updatedAt === 'string' && status.updatedAt
+    ? (!isNaN(Date.parse(status.updatedAt)) && (now - Date.parse(status.updatedAt)) > HEARTBEAT_FRESH_MS) : false;
+  if (status && typeof status === 'object' && isV2Status(status) && typeof status.revision !== 'number' && !hbStale) {
+    if (record.actual_state === 'RECOVERY_REQUIRED') {
+      const next = Object.assign({}, record, { last_error: 'revision-missing', updated_at: now });
+      return { record: next, changed: false, decision: 'still-recovery', reason: 'revision-missing', evidence: 'none' };
+    }
+    const r = transition(record, 'RECOVERY_REQUIRED', {
+      now, op_id: o.op_id || null, by: o.by || null, action: 'reconcile:revision-missing', reason: 'revision-missing',
+    });
+    if (!r.ok) return { record, changed: false, decision: 'illegal-transition', reason: r.reason, evidence: 'none' };
+    return { record: r.record, changed: true, decision: 'to-recovery', reason: 'revision-missing', evidence: 'none' };
   }
   const c = classifyDeviceStatus(status, record, now);
   if (c.actual === 'UNKNOWN') {
@@ -303,10 +379,8 @@ function reconcileRecordInner(record, status, opts) {
   }
   // LOCKED / UNLOCKED：与当前 actual 一致即只刷新心跳；不一致按迁移表走。
   if (c.actual === record.actual_state) {
+  // P3-05 R-6：身份回填已移到 reconcileRecord 出口统一做，此处不再单做。
     const next = Object.assign({}, record, { last_heartbeat: heartbeatOf(status, now), updated_at: now });
-    if (status && status.boot_id != null && next.boot_id == null) next.boot_id = String(status.boot_id);
-    if (status && status.session_id != null && next.session_id == null) next.session_id = String(status.session_id);
-    if (status && status.sid != null && next.sid == null) next.sid = String(status.sid);
     return { record: next, changed: false, decision: 'confirmed', reason: c.reason, evidence: c.evidence };
   }
   // 强证据的真实解锁（本地输密码解锁／重启后清锁）从 LOCKED 到 UNLOCKED
@@ -732,7 +806,7 @@ function createLockRecordStore(opts) {
 module.exports = {
   STATES, DEGRADED_REASONS, TRANSITIONS, HEARTBEAT_FRESH_MS,
   LOCK_REMEDIATION_PAUSE, isLockRemediationPaused,
-  mapLegacyState, newLockId, newOpId, wasLocked,
+  mapLegacyState, newLockId, newOpId, wasLocked, preferredActualState, isV2Status,
   createLockRecord, transition, classifyDeviceStatus, reconcileRecord, applyCorrection, appendAudit,
   createOperationStore, createChallengeStore, createLockRecordStore,
   classifyUnlockRisk, createEnhancedAuthStore, createAgentGrantStore,

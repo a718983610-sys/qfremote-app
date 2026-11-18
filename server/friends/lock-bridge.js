@@ -114,6 +114,19 @@ function hasEvent(status, type, pred) {
   if (!status || !Array.isArray(status.lastEvents)) return false;
   return status.lastEvents.some((raw) => { const ev = normalizeEvent(raw); return ev && ev.type === type && pred(ev); });
 }
+// P3-05 R-3（契约 §5）：disable 等待谓词与 classifyDeviceStatus 同口径——
+// disarm 事件优先按 lockId 匹配（本次锁记录的 lock_id），不命中才回落时间
+// 窗口（事件时间 ≥ disarm 信封签发时间 - 5s）；无 lockId 也无可解析时间
+// 的事件一律不放行。旧谓词只用时间窗口且 `!ev.time` 使无时间戳事件也放
+// 行，旧 disarm 事件可能放行新 disarm。
+// lockId 为空（无服务端记录的基线情形）时只走时间窗口。
+function disarmWaitPredicate(lockId, since) {
+  return (st) => st.state === 'Off' && hasEvent(st, 'disarm', (ev) => {
+    if (ev.fields && lockId && (ev.fields.lockId === lockId || ev.fields.id === lockId)) return true;
+    const t = eventTime(ev);
+    return !!t && Date.parse(t) >= since;
+  });
+}
 
 /* ---------- H28：/lock/reset 验登录密码速率限制 ----------
 // 背景：/lock/reset 验登录密码（deps.mcConnect 向 MeshCentral 做一次真登录）
@@ -1270,7 +1283,9 @@ function createLockBridge(deps) {
           const env = envelope.buildEnvelope(dispatcherKey, { op: 'disarm', nodeId: node._id, by: me });
           await deliverEnvelope(node._id, env);
           const since = Date.parse(env.issuedAt) - 5000;
-          const r = await reconcile(node._id, env, (st) => st.state === 'Off' && hasEvent(st, 'disarm', (ev) => !ev.time || Date.parse(ev.time) >= since));
+          // P3-05 R-3：等待谓词与 classifyDeviceStatus 同口径（lockId 优先，
+          // 见 disarmWaitPredicate）；旧谓词只用时间窗口、无时间戳也放行。
+          const r = await reconcile(node._id, env, disarmWaitPredicate(rec.lock_id, since));
           if (!r.ok) {
             if (r.reason === 'timeout') {
               // 写路径超时：记录翻 UNKNOWN（不判 UNLOCKED），操作编号不缓存、可重试。
@@ -1389,4 +1404,4 @@ function createLockBridge(deps) {
   return { handle, purgeUser, _stores: { challengeStore, opStore, lockRecordStore, agentGrantStore } };
 }
 
-module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, extractStatusPayload, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey, LOCK_PAUSE_CODE: lockState.LOCK_REMEDIATION_PAUSE.code, isLockRemediationPaused: lockState.isLockRemediationPaused } };
+module.exports = { createLockBridge, _test: { eventName, eventTime, normalizeEvent, findRejectedEvent, hasEvent, disarmWaitPredicate, extractStatusPayload, STATUS_TTL_NONOWNER_MS, READ_PATH_BUDGET_MS, createResetPwLimiter, RESET_PW_MAX_FAILS, RESET_PW_WINDOW_MS, RESET_PW_LOCK_MS, createDevicePinStore, fingerprintPublicKey, LOCK_PAUSE_CODE: lockState.LOCK_REMEDIATION_PAUSE.code, isLockRemediationPaused: lockState.isLockRemediationPaused } };

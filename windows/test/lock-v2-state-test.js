@@ -66,6 +66,21 @@ const ok = (name, cond, extra) => { result.cases[name] = Object.assign({ pass: !
   const bad = store.load();
   ok('C3_corrupt_not_unlocked', bad.ok === false && bad.corrupt === true, { error: bad.error });
 
+  // E（P3-05 F-1：契约 §1 并集表，B 线补 3 条边；RECOVERY_REQUIRED→UNLOCKING 不纳入）
+  const mE1 = new LockStateMachine({ deviceId: 'dev-1', bootId: 'boot-1', actualState: 'UNLOCKED' });
+  mE1.transition('RECOVERY_REQUIRED', { reason: 'probe' });
+  ok('E1_unlocked_to_recovery', mE1.actualState === 'RECOVERY_REQUIRED');
+  const mE2 = new LockStateMachine({ deviceId: 'dev-1', bootId: 'boot-1', actualState: 'UNLOCKING' });
+  mE2.transition('LOCKED', { reason: 'probe' });
+  ok('E2_unlocking_to_locked', mE2.actualState === 'LOCKED');
+  const mE3 = new LockStateMachine({ deviceId: 'dev-1', bootId: 'boot-1', actualState: 'UNKNOWN' });
+  mE3.transition('UNLOCKING', { reason: 'probe' });
+  ok('E3_unknown_to_unlocking', mE3.actualState === 'UNLOCKING');
+  let e4 = false;
+  const mE4 = new LockStateMachine({ deviceId: 'dev-1', bootId: 'boot-1', actualState: 'RECOVERY_REQUIRED' });
+  try { mE4.transition('UNLOCKING', { reason: 'probe' }); } catch (err) { e4 = err instanceof LockStateError && err.code === 'INVALID_TRANSITION'; }
+  ok('E4_recovery_to_unlocking_still_illegal', e4 && mE4.actualState === 'RECOVERY_REQUIRED');
+
   result.pass = Object.values(result.cases).every((c) => c.pass);
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, JSON.stringify(result, null, 2));

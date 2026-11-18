@@ -2575,6 +2575,21 @@ async function webLockConfirmSubmit() {
 async function initLockPanel(view, deviceName) {
   const body = $('#lockBody', view); if (!body) return;
   let busy = false;
+  // P3-05 R-10：暂停期横幅（GPT 三项定夺 §2.2 原文，一字不改）。插在 #lockCard
+  // 层（#lockBody 之外），initLockPanel 重建 #lockBody 时不被洗掉；只作风险
+  // 告知，不是安全控制的替代品。解除暂停时须按统一受控流程同步撤下本横幅。
+  const PAUSE_NOTICE = '当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。';
+  const lockCardTop = $('#lockCard', view);
+  let pauseNote = lockCardTop ? $('#lk-pause-note', lockCardTop) : null;
+  if (!pauseNote && lockCardTop) {
+    pauseNote = document.createElement('p');
+    pauseNote.id = 'lk-pause-note';
+    pauseNote.className = 'note warn';
+    pauseNote.style.margin = '0 0 10px';
+    pauseNote.textContent = PAUSE_NOTICE;
+    const lb = $('#lockBody', view);
+    if (lb) lockCardTop.insertBefore(pauseNote, lb);
+  }
   const nm = await fetchNodeMap();
   if (!body.isConnected) return;
   if (nm.lockStatus === 'needlogin') {

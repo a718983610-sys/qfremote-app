@@ -37,6 +37,13 @@
     margin:16px 24px 0; padding:16px 20px; border-radius:12px; font-size:13px; line-height:20px;
     background: var(--bg2); border:1px solid var(--line); color:var(--text-1);
   }
+  /* P3-05 R-10：暂停期横幅（裁决 §2.2 原文）。警示色只做左边框＋文字加粗，
+     不做大面积色块（跟随系统主题，浅深两态均可读）。 */
+  .pause-notice {
+    margin:12px 24px 0; padding:12px 16px; border-radius:12px; font-size:13px; line-height:20px;
+    background: var(--bg2); border:1px solid var(--line); border-left:4px solid var(--warning);
+    color:var(--text-1); font-weight:600;
+  }
   .dev {
     margin:16px 24px 0; padding:16px 20px; border-radius:12px;
     background: var(--bg2);
@@ -146,6 +153,12 @@
   </div>
 
   <div class="intro">打开后，这台电脑屏幕变黑、只留输密码的框，坐在跟前的人看不见也动不了，必须输对密码才能用。远程控制不受影响。密码只用这一次：本地解锁成功后自动作废，下次打开重新设置。不想锁就不打开，关着一切照常。</div>
+
+  <!-- P3-05 R-10：暂停期横幅（GPT 三项定夺 §2.2 原文，一字不改）。暂停是写死在
+       服务端代码里的常量守卫（LOCK_REMEDIATION_PAUSE），本横幅只作风险告知，
+       不是安全控制的替代品——拦不住用户双击自有旧 EXE 副本。解除暂停时须按
+       统一受控流程同步撤下本横幅。 -->
+  <div class="pause-notice" id="lockPauseNotice">当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。</div>
 
   <div class="statebox" id="stateBox">正在读取设备…</div>
   <div id="list"></div>

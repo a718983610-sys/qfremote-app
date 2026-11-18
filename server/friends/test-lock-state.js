@@ -31,7 +31,8 @@ function lockedRecord(over) {
 t('A1 UNLOCKED->LOCKING 合法', S.transition(S.createLockRecord({ device_id: DEV, actual_state: 'UNLOCKED', now: NOW }), 'LOCKING', { now: NOW }).ok === true);
 t('A2 LOCKED->UNLOCKED 直接迁移非法（须经 UNLOCKING）', S.transition(lockedRecord(), 'UNLOCKED', { now: NOW }).ok === false);
 t('A3 UNKNOWN->LOCKED 合法（证据到达可恢复）', S.transition(S.createLockRecord({ device_id: DEV, actual_state: 'UNKNOWN', now: NOW }), 'LOCKED', { now: NOW }).ok === true);
-t('A4 RECOVERY_REQUIRED->LOCKING 非法', S.transition(S.createLockRecord({ device_id: DEV, actual_state: 'RECOVERY_REQUIRED', now: NOW }), 'LOCKING', { now: NOW }).ok === false);
+t('A4 RECOVERY_REQUIRED->LOCKING 合法（P3-05 F-1：契约 §1 并集表补边，原判非法）', S.transition(S.createLockRecord({ device_id: DEV, actual_state: 'RECOVERY_REQUIRED', now: NOW }), 'LOCKING', { now: NOW }).ok === true);
+t('A4b RECOVERY_REQUIRED->UNLOCKING 仍非法（并集表不纳入，P3-05 F-1）', S.transition(S.createLockRecord({ device_id: DEV, actual_state: 'RECOVERY_REQUIRED', now: NOW }), 'UNLOCKING', { now: NOW }).ok === false);
 t('A5 未知状态名拒绝', S.transition(lockedRecord(), 'BOGUS', { now: NOW }).ok === false);
 t('A6 迁移 revision+1 且留审计', (() => {
   const r = S.transition(lockedRecord(), 'UNLOCKING', { now: NOW, op_id: 'op-x', by: 'alice', reason: 'user-disable' });
