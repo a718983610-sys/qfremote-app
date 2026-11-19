@@ -46,6 +46,9 @@
  * 竞态 B（定夺 §2.3）：单发 30 秒超时、服务可能已接收请求时，进
  * UNKNOWN_OUTCOME，先经 confirmOutcome（获授权的 lea.status 查询）
  * 确认结果；未能确认前不重发登录通知、不再次 rebind。
+ * D-1b（2026-11-19）：确认等待期（真机上最长 10 秒，main.js 的
+ * leaNotifyInternalAsync(..., 10000)）内状态保持 login-pending，
+ * 不提前置 UNKNOWN_OUTCOME——终态只在确认结算时落。
  *
  * 会话状态来源（定夺 §2.1）：正式 RC 优先用 Windows WTS API 读会话
  * 状态；本模块不内置读法——getSessionState 由 main.js 注入。main.js
@@ -351,9 +354,15 @@ function createLeaLoginRetry(deps, opts) {
     if (cancelled) return 'abandoned'; // D-1：取消后迟到的成功回包也不接受
     if (res.ignored) return finishTerminal('attempt-race-error', STATES.FAILED);
     if (res.timeout === true || res.reason === 'timeout') {
-      /* 竞态 B：服务可能已接收请求。先确认，未确认前绝不重发。 */
+      /* 竞态 B：服务可能已接收请求。先确认，未确认前绝不重发。
+       * D-1b（2026-11-19）：确认等待期内状态保持 login-pending（非终
+       * 态），绝不提前置 UNKNOWN_OUTCOME——提前置终态曾使等待期内
+       * 的 cancel() 被终态早退拒绝、begin() 不取代旧事件、main.js 单
+       * 飞守门误判旧事件已终局而放行新一轮（两轮绑定确认交错，同
+       * 根）。终态只在确认结算时落 finishAccepted／
+       * finishTerminal('unknown-outcome')。 */
       log('attempt-timeout', { attempt: attemptNo });
-      state = STATES.UNKNOWN_OUTCOME;
+      log('unknown-outcome-confirming', { attempt: attemptNo });
       const conf = await safeConfirmOutcome({ attemptStartedAtUnix: attemptStartedAtUnix, accountId: identity.accountId, deviceId: identity.deviceId });
       if (myToken !== runToken) return 'abandoned';
       if (cancelled) return 'abandoned'; // D-1：取消后确认上了也不接受
