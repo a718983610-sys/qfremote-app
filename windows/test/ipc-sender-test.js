@@ -169,8 +169,8 @@ const pkg = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));
   const regHandle = (mainSrc.match(/trustedHandle\('(qf-[^']+)'/g) || []).map((m) => m.match(/'(qf-[^']+)'/)[1]);
   const regOn = (mainSrc.match(/trustedOn\('(qf-[^']+)'/g) || []).map((m) => m.match(/'(qf-[^']+)'/)[1]);
   const registered = regHandle.concat(regOn);
-  ok('E1_registered_36_29', regHandle.length === 36 && regOn.length === 29, { handle: regHandle.length, on: regOn.length });
-  ok('E2_registered_total_65', registered.length === 65 && new Set(registered).size === 65, { total: registered.length, unique: new Set(registered).size });
+  ok('E1_registered_36_29', regHandle.length === 37 && regOn.length === 29, { handle: regHandle.length, on: regOn.length });
+  ok('E2_registered_total_65', registered.length === 66 && new Set(registered).size === 66, { total: registered.length, unique: new Set(registered).size });
   const bareHandle = (mainSrc.match(/ipcMain\.handle\(/g) || []).length;
   const bareOn = (mainSrc.match(/ipcMain\.on\(/g) || []).length;
   ok('E3_no_bare_ipcMain', bareHandle === 1 && bareOn === 1, { handle: bareHandle, on: bareOn });
@@ -179,7 +179,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));
   const regSorted = Array.from(new Set(registered)).sort();
   ok('E5_table_eq_registered', JSON.stringify(tableKeys) === JSON.stringify(regSorted),
     { tableOnly: tableKeys.filter((k) => regSorted.indexOf(k) < 0), regOnly: regSorted.filter((k) => tableKeys.indexOf(k) < 0) });
-  ok('E6_table_65_keys', tableKeys.length === 65, { keys: tableKeys.length });
+  ok('E6_table_65_keys', tableKeys.length === 66, { keys: tableKeys.length });
   ok('E7_pkg_files_has_ipc_trust', pkg.build && Array.isArray(pkg.build.files) && pkg.build.files.indexOf('ipc-trust.js') >= 0);
   ok('E8_main_requires_ipc_trust', /require\('\.\/ipc-trust'\)/.test(mainSrc));
 }
