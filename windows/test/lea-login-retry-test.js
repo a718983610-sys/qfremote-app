@@ -13,8 +13,10 @@
  *     切换身份立即作废／markBindingFinalize／markBindingDone 记账；
  *  F. main.js 接线（文本断言）：require、retry.begin 接入、登出与
  *     before-quit 取消、package.json asar 清单、qwinsta 会话查询。
- *  G. D-1 回归：发送／取证明挂起时取消，放行后仍不接受、不发包、
- *     状态保持 CANCELLED、绑定记账不放行。
+ *  G. D-1 回归：取消在途事件（发送／取证明挂起时取消）、
+ *     状态保持 CANCELLED、绑定记账不放行；
+ *  H. D-1b 回归：确认等待期内 cancel 生效、终态后 cancel 无操作、
+ *     确认等待期内新 begin 取代旧事件、等待期状态非终态。
  * 结果写 JSON 到 QFTEST_OUT，退出码 0=通过。
  * 说明：本文件只验模块纯逻辑与 main.js 接线文本；WTS 状态变化与
  * 真实 IPC 拒绝只能在 Windows 真机上验收，沙箱结果不得写成真机通过。
@@ -96,6 +98,7 @@ function makeHarness(cfg) {
     },
     confirmOutcome: c.noConfirm ? undefined : async (args) => {
       calls.confirms.push({ attemptStartedAtUnix: args.attemptStartedAtUnix, deviceId: args.deviceId });
+      if (c.confirmGate) { const v = await c.confirmGate; return v; } // D-1b：测试用门控，挂住确认等待期
       if (c.confirmOk) return { confirmed: true };
       return { confirmed: false, reason: c.confirmReason || 'last-result-not-ok' };
     },
@@ -396,6 +399,83 @@ try {
     await new Promise((r) => setTimeout(r, 50));
     ok('T-cancel-during-proof', cancelled === true && out.accepted === false && out.cancelled === true &&
       retry.getState() === 'cancelled' && sends === 0 && proofCalls === 1 && accepted === 0 && terminalCalls === 1);
+  }
+
+  // ---- H. D-1b 回归：UNKNOWN_OUTCOME 确认等待期内 cancel／取代 ----
+  // 确认等待期 = 单发超时后 await confirmOutcome 的一段（真机上最长 10 秒，
+  // main.js leaNotifyInternalAsync(..., 10000)）。修复前：等待期内状态已被
+  // 提前置为 unknown-outcome，cancel() 被终态早退拒绝（返回 false），
+  // 新 begin() 也不取代旧事件，确认成功放行后还会翻为接受。
+  {
+    // H1：等待期内 cancel（确认会失败）→ 立即结算 cancelled，放行后不翻转。
+    let releaseConfirm;
+    const gate = new Promise((resolve) => { releaseConfirm = resolve; });
+    const h = makeHarness({ sendHang: true, attemptTimeoutMs: 100, confirmGate: gate });
+    const p = h.begin();
+    await withTimeout(waitForState(h.retry, 'login-pending', 2000).then((v) => { if (!v) throw new Error('not pending'); }), 5000, 'H1-pending');
+    const t0 = Date.now();
+    while (h.calls.confirms.length < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 5));
+    if (h.calls.confirms.length < 1) throw new Error('confirm never called');
+    const stateDuringWait = h.retry.getState();
+    const cancelled = h.retry.cancel('identity-changed');
+    const out = await withTimeout(p, 5000, 'H1');
+    const terminalAfterCancel = h.calls.terminal;
+    releaseConfirm({ confirmed: false, reason: 'last-result-not-ok' });
+    await new Promise((r) => setTimeout(r, 50)); // 给旧循环一个 tick 走到代次检查点
+    ok('H1-cancel-during-confirm', cancelled === true && out.accepted === false && out.cancelled === true &&
+      out.reason === 'identity-changed' && out.state === 'cancelled' && h.retry.getState() === 'cancelled' &&
+      h.calls.sends.length === 1 && h.calls.confirms.length === 1 && h.calls.accepted !== true &&
+      h.calls.terminal === terminalAfterCancel);
+    ok('H5-confirm-wait-not-terminal', stateDuringWait === 'login-pending' &&
+      !['done', 'cancelled', 'expired', 'unknown-outcome', 'failed'].includes(stateDuringWait));
+  }
+  {
+    // H2：确认结算后（终态 unknown-outcome）再 cancel → 无操作。
+    const h = makeHarness({ sendHang: true, attemptTimeoutMs: 100, confirmOk: false });
+    const out = await withTimeout(h.begin(), 5000, 'H2');
+    const terminalBefore = h.calls.terminal;
+    const cancelled = h.retry.cancel('identity-changed');
+    await new Promise((r) => setTimeout(r, 20));
+    ok('H2-cancel-after-terminal-noop', out.accepted === false && out.reason === 'unknown-outcome' &&
+      out.state === 'unknown-outcome' && cancelled === false && h.retry.getState() === 'unknown-outcome' &&
+      h.calls.terminal === terminalBefore);
+  }
+  {
+    // H3：等待期内 cancel（确认会成功）→ 不接受，放行后仍保持 cancelled。
+    let releaseConfirm;
+    const gate = new Promise((resolve) => { releaseConfirm = resolve; });
+    const h = makeHarness({ sendHang: true, attemptTimeoutMs: 100, confirmGate: gate });
+    const p = h.begin();
+    const t0 = Date.now();
+    while (h.calls.confirms.length < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 5));
+    if (h.calls.confirms.length < 1) throw new Error('confirm never called');
+    const cancelled = h.retry.cancel('identity-changed');
+    const out = await withTimeout(p, 5000, 'H3');
+    releaseConfirm({ confirmed: true });
+    await new Promise((r) => setTimeout(r, 50));
+    ok('H3-cancel-during-confirm-blocks-accept', cancelled === true && out.accepted === false && out.cancelled === true &&
+      out.state === 'cancelled' && h.retry.getState() === 'cancelled' && h.calls.accepted !== true &&
+      h.calls.sends.length === 1);
+  }
+  {
+    // H4：等待期内新 begin() 取代旧事件（同根：main.js 单飞守门误判的另一面）。
+    let releaseConfirm;
+    const gate = new Promise((resolve) => { releaseConfirm = resolve; });
+    const h = makeHarness({ sendHang: true, attemptTimeoutMs: 100, confirmGate: gate });
+    const p1 = h.begin();
+    const t0 = Date.now();
+    while (h.calls.confirms.length < 1 && Date.now() - t0 < 2000) await new Promise((r) => setTimeout(r, 5));
+    if (h.calls.confirms.length < 1) throw new Error('confirm never called');
+    const id2 = Object.assign({}, BASE_ID, { accountId: 'u2', loginGeneration: 2 });
+    h.deps.getCurrentIdentity = async () => Object.assign({}, id2);
+    const p2 = h.begin(id2);
+    const out1 = await withTimeout(p1, 5000, 'H4-old');
+    releaseConfirm({ confirmed: true });
+    const out2 = await withTimeout(p2, 5000, 'H4-new');
+    await new Promise((r) => setTimeout(r, 50));
+    ok('H4-supersede-during-confirm', out1.accepted === false && out1.cancelled === true && out1.reason === 'superseded' &&
+      out2.accepted === true && out2.confirmedViaStatus === true && h.calls.sends.length === 2 &&
+      h.calls.accepted === true && h.retry.getState() === 'login-accepted');
   }
 } catch (e) {
   result.error = String((e && e.stack) || e);
