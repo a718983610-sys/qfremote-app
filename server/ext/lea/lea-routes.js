@@ -15,9 +15,13 @@
  *   deps.resolveConsoleAuth(req) -> Promise<{user, siteadmin}|null>
  *     （控制台会话校验，复用 validateConsoleCookie）
  *   deps.isSiteAdmin(auth) -> boolean（复用 isAdmin）
- *   deps.listVisibleDeviceIds(auth) -> Promise<[deviceId]>（可选；H05 换绑
- *     节点可见性校验：返回该账号在 MeshCentral 可见的设备 id 清单。
- *     未注入时换绑只做“设备存在＋当前归属”校验，server.js 接入后可补注）
+ *   deps.listVisibleDeviceIds(auth, req) -> Promise<[deviceId]>（强制；D2：
+ *     H05 换绑与 login-attestation 的节点可见性校验，返回该账号在
+ *     MeshCentral 可见的设备 id 清单。未注入／查询失败／返回异常时对应
+ *     接口一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放行；清单取回成功
+ *     但不含该设备时按“确认不可见”回 403。server.js 以控制台会话
+ *     cookie 查 MeshCentral nodes（auth.user 的账号视角），不得用请求体
+ *     自报的设备列表。）
  * deps 缺失时对应接口 fail-closed（503/401），绝不放行。
  *
  * 路由（DESIGN §8.1）：
@@ -33,6 +37,7 @@
  *   POST /api/lea/v1/keys/revoke-all    一键吊销全部
  *   POST /api/lea/v1/grants             站长授予/撤销 muse.execute
  *   POST /api/lea/v1/devices/{device_id}/rebind 换绑（触发旧 Key 失效）
+ *   POST /api/lea/v1/login-attestation  签发登录证明（控制台会话；v3 P0-4 第二层，供客户端随 session.login_changed 发给本机 QFRLEA 验签）
  */
 const crypto = require('crypto');
 const { bareNodeId, nodeMatchesId } = require('./lea-channel');
@@ -353,15 +358,21 @@ function createLeaRoutes(core, channel, deps) {
     return sendJson(res, 202, { ok: true, async: true, request_id: requestId, job_id: job.job_id, batch_id: batchId, status: 'RUNNING', msg: '批量执行中，请用 job_id 轮询。' });
   }
 
-  // DC-A-3：设备状态／吊销快照只许“绑定归属账号的 Key”或“该设备域的 Key”
-  // 读——此前 device_scope 为空的任意有效 Key 可读任意设备的绑定账号／
-  // 在线态／吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。未绑定设备
-  // 一律 403（不以 404 区分“不存在”与“非本人设备”，防存在性预言）。
+  // DC-A-3：设备状态／吊销快照只许“绑定归属账号的 Key”读——此前
+  // device_scope 为空的任意有效 Key 可读任意设备的绑定账号／在线态／
+  // 吊销 key_id（跨账号信息泄露，与桥 V-1 同源）。D2：device_scope
+  // 匹配不再单独放行，须同时是绑定归属账号（scope 是归属之内的进一
+  // 步收窄，不是归属的替代）。未绑定设备一律 403（不以 404 区分“不存
+  // 在”与“非本人设备”，防存在性预言）。
   function deviceVisibleTo(key, deviceId) {
-    // 归一后比对：Key 的 device_scope 可能为全形，URL 来的 deviceId 可能为裸形。
-    if (key.device_scope && bareNodeId(key.device_scope) === bareNodeId(deviceId)) return true;
+    // D2（全面复审 §二.1／整改第 2 步）：读路径归属必验。设备须当前绑
+    // 定到该 Key 的账号；device_scope 若已设定须同时匹配（未设定时归属
+    // 匹配即足够，兼容 DC-A-1 之前无 scope 旧 Key）。归一后比对：Key 的
+    // device_scope 可能为全形，URL 来的 deviceId 可能为裸形。
     const binding = core.getBinding(deviceId);
-    return !!(binding && binding.account_id === key.account_id);
+    if (!binding || binding.account_id !== key.account_id) return false;
+    if (key.device_scope && bareNodeId(key.device_scope) !== bareNodeId(deviceId)) return false;
+    return true;
   }
 
   // ---- 查 job / 取消 job ----
@@ -451,6 +462,11 @@ function createLeaRoutes(core, channel, deps) {
     const body = await passwordConfirm(req, res, a.user);
     if (!body) return;
     const deviceScope = body.device_id ? String(body.device_id) : null;
+    // D2-K1：路由层参数校验——显式 device_id 格式非法时直接 400（Core 层
+    // 同规则再拦一次，防直接调 generateKey 的旁路；真正的归属准入在 Core）。
+    if (deviceScope && typeof core.isValidDeviceIdFormat === 'function' && !core.isValidDeviceIdFormat(deviceScope)) {
+      return fail(res, 400, ERR.VALIDATION, 'device_id 格式非法。');
+    }
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s) => s === 'muse.execute' || s === DANGEROUS_SCOPE) : ['muse.execute'];
     // H06：dangerous scope 须站长先授 dangerous 授权（/grants），自助选即
     // 403；无 muse.execute 授权时生成 Key 亦拒绝（core.generateKey 同拦，
@@ -468,7 +484,21 @@ function createLeaRoutes(core, channel, deps) {
       });
     } catch (e) {
       if (e && e.code === 'QFR_MUSE_NOT_AUTHORIZED') return fail(res, 403, e.code, '该账号未授权 Muse 操作，请先请站长授予 muse.execute。');
-      if (e && e.code === 'QFR_SCOPE_DENIED') return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      if (e && e.code === 'QFR_SCOPE_DENIED') {
+        // D2-K1：同码两种拒绝须区分——归属拒绝用统一文案（不透露设备属于
+        // 谁、不区分“不存在”与“非本人设备”）；dangerous scope 拒绝保留原
+        // 有文案。归属拒绝记审计（只记请求账号与请求设备，不记设备实际归属）。
+        if (e.reason === 'device-ownership') {
+          try { core.audit('lea-key-create-denied', { account_id: a.user, device_id: deviceScope ? core.bareNodeId(deviceScope) : null, reason: 'device-ownership' }); } catch (e) {}
+          return fail(res, 403, e.code, '当前账户无权为该设备创建 API Key，请检查设备绑定状态。');
+        }
+        return fail(res, 403, e.code, 'muse.execute.dangerous 须站长审批授权后才能生成，请联系站长。');
+      }
+      // D2-K1：绑定确认中（仅当请求方即绑定账号本人时才返回此码）→ 409；
+      // 归属权威服务不可用 → 503；设备 id 格式非法 → 400。
+      if (e && e.code === 'QFR_LEA_BINDING_PENDING') return fail(res, 409, e.code, '设备绑定确认中，请 1 秒后重试一次。');
+      if (e && e.code === 'QFR_VISIBILITY_UNAVAILABLE') return fail(res, 503, e.code, '设备归属验证服务暂不可用，请稍后重试。');
+      if (e && e.code === 'VALIDATION') return fail(res, 400, e.code, 'device_id 格式非法。');
       // DC-A-1：无 device_scope 且无法自动取设备（未绑定／绑定多台）时
       // 拒绝发死钥，由调用方明示 device_id（路由层 body.device_id）。
       if (e && e.code === 'QFR_DEVICE_SCOPE_REQUIRED') {
@@ -547,22 +577,33 @@ function createLeaRoutes(core, channel, deps) {
     }
     // H05：换绑验设备归属／节点可见性（此前只验“绑自己或站长”，任意登录
     // 用户知道 device_id 就能把他人设备抢到自己名下并吊销原账号全部 Key）：
-    // ① 节点可见性（可选注入 deps.listVisibleDeviceIds(auth)：返回该账号
-    //    在 MeshCentral 可见的设备 id 清单；注入时强制校验；未注入时走
-    //    ②③，server.js 接入后可补注）。清单与入参均按裸 id 归一后比对
-    //    （客户端送裸 id，清单可能含全形 _id；r5 潜伏问题）。
-    if (typeof deps.listVisibleDeviceIds === 'function') {
-      let visible = null;
-      try { visible = await deps.listVisibleDeviceIds(a); } catch (e) { visible = null; }
-      if (!Array.isArray(visible) || !visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
-        try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
-        return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
-      }
+    // ① 节点可见性（D2 强制注入 deps.listVisibleDeviceIds(auth, req)：
+    //    返回该账号在 MeshCentral 可见的设备 id 清单，server.js 以控制台
+    //    会话 cookie 查 MeshCentral nodes。未注入／查询抛错／返回非数组
+    //    时一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放行；清单取回成功
+    //    但不含该设备时 403。清单与入参均按裸 id 归一后比对（客户端送裸
+    //    id，清单可能含全形 _id；r5 潜伏问题）。
+    if (typeof deps.listVisibleDeviceIds !== 'function') {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询未就绪。');
+    }
+    let visible;
+    try { visible = await deps.listVisibleDeviceIds(a, req); } catch (e) { visible = null; }
+    if (!Array.isArray(visible)) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询失败。');
+    }
+    if (!visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'not-visible' }); } catch (e) {}
+      return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
     }
     // ② 设备须真实存在（svc 通道节点清单里有；未知 id 直接 404，不透露归属）。
     //    比对前统一去 node// 前缀（客户端送裸 id，清单 _id 为全形；修前
     //    只比全形 _id，裸 id 即使节点可见也 404——r5 潜伏问题）。
-    //    通道不可达（known===null）时存在性校验跳过、归属校验照常，并记审计。
+    //    D2 修订（GPT 六项裁决 D1-2）：通道不可达（known===null）时不得
+    //    跳过存在性校验继续换绑——“记审计”不能替代验证；无其他独立可信
+    //    权威数据源确认设备归属／存在性时，一律 503
+    //    QFR_VISIBILITY_UNAVAILABLE、不换绑（fail-closed）。
     let known = null;
     try {
       const nodes = channel ? await channel.listNodes() : [];
@@ -571,15 +612,16 @@ function createLeaRoutes(core, channel, deps) {
     if (known === false) {
       return fail(res, 404, 'NOT_FOUND', '设备不存在。');
     }
+    if (known === null) {
+      try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, reason: 'existence-unverifiable-channel-down' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备存在性无法验证（通道不可达），暂不换绑。');
+    }
     // ③ 设备归属：当前已绑定他人账号时，非站长不得换绑（DESIGN §6.1
     //    “不一致则进入待站长授权，防冒领”）；未绑定／绑自己时放行。
     const cur = core.getBinding(deviceId);
     if (cur && cur.account_id !== accountId && !isAdmin) {
       try { core.audit('lea-rebind-denied', { device_id: deviceId, account_id: accountId, by: a.user, current_account_id: cur.account_id, reason: 'bound-to-other' }); } catch (e) {}
       return fail(res, 403, 'FORBIDDEN', '该设备已绑定其他账号，只有站长可以换绑。');
-    }
-    if (known === null) {
-      try { core.audit('lea-rebind', { device_id: deviceId, account_id: accountId, by: a.user, note: 'node-existence-unchecked-channel-down' }); } catch (e) {}
     }
     // H07：hook 传回 LEA 的 PENDING epoch（binding_epoch），服务端只许向前。
     const clientEpoch = Number.isSafeInteger(body.binding_epoch) ? body.binding_epoch : undefined;
@@ -593,6 +635,66 @@ function createLeaRoutes(core, channel, deps) {
     // 绝不把缺失静默当成最新——见 windows/main.js notifyLeaLogin。
     const revocations = core.getRevocations(deviceId);
     return sendJson(res, 200, { ok: true, device_id: out.device_id, account_id: out.account_id, binding_epoch: out.binding_epoch, revoked_keys: out.revoked_keys, revoked_key_ids: out.revoked_key_ids || [], revocations, revocation_generation: revocations.generation, ticket: out.ticket });
+  }
+
+  // ---- 登录证明（v3 P0-4 第二层，B3 主方案） ----
+  // 控制台会话认证；账号恒等于 a.user（无站长代签口子）；设备可见性复用
+  // rebind 的①②（节点可见性＋节点存在性）；不做已绑他人检查（证明≠绑
+  // 定，绑定决策仍在 rebind）。D2：① 为强制注入，未注入／查询失败时
+  // 503 QFR_VISIBILITY_UNAVAILABLE。签名能力非 real 时 503。证明 TTL
+  // 120 秒，客户端须立即使用；证明字段原样回给客户端，由客户端 JSON 序
+  // 列化后随 login_changed 发给本机 QFRLEA 验签。
+  async function handleLoginAttestation(req, res) {
+    const a = await consoleAuth(req, res);
+    if (!a) return;
+    const body = await readJsonBody(req, BODY_LIMIT);
+    const deviceId = bareNodeId(String(body.device_id || ''));
+    if (!deviceId) return fail(res, 400, ERR.VALIDATION, 'device_id 必填。');
+    // ① 节点可见性（D2 强制注入 deps.listVisibleDeviceIds(auth, req)：
+    //    server.js 以控制台会话 cookie 查 MeshCentral nodes。未注入／查
+    //    询抛错／返回非数组时一律 503 QFR_VISIBILITY_UNAVAILABLE，不得放
+    //    行；清单取回成功但不含该设备时 403。GPT D1–D4 裁决 §三建议依赖
+    //    缺失走 503；v3 原契约 403，待 GPT 最终裁决确认（见 D2 报告 §7）。
+    if (typeof deps.listVisibleDeviceIds !== 'function') {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询未就绪。');
+    }
+    let visible;
+    try { visible = await deps.listVisibleDeviceIds(a, req); } catch (e) { visible = null; }
+    if (!Array.isArray(visible)) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'visibility-unavailable' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备可见性查询失败。');
+    }
+    if (!visible.map((v) => bareNodeId(String(v))).includes(bareNodeId(deviceId))) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'not-visible' }); } catch (e) {}
+      return fail(res, 403, 'FORBIDDEN', '设备不在该账号可见范围内。');
+    }
+    // ② 设备须真实存在（通道节点清单里有；未知 id 直接 404）。
+    //    D2 修订（GPT 六项裁决 D1-2）：通道不可达（known===null）时不得
+    //    跳过存在性校验继续签发——“记审计”不能替代验证；无其他独立可信
+    //    权威数据源确认设备归属／存在性时，一律 503
+    //    QFR_VISIBILITY_UNAVAILABLE、不签发（fail-closed）。
+    let known = null;
+    try {
+      const nodes = channel ? await channel.listNodes() : [];
+      known = (nodes || []).some((x) => nodeMatchesId(x, deviceId));
+    } catch (e) { known = null; }
+    if (known === false) {
+      return fail(res, 404, 'NOT_FOUND', '设备不存在。');
+    }
+    if (known === null) {
+      try { core.audit('lea-login-attestation-denied', { device_id: deviceId, account_id: a.user, by: a.user, reason: 'existence-unverifiable-channel-down' }); } catch (e) {}
+      return fail(res, 503, 'QFR_VISIBILITY_UNAVAILABLE', '设备存在性无法验证（通道不可达），暂不签发证明。');
+    }
+    let out;
+    try {
+      out = core.issueLoginAttestation(a.user, deviceId);
+    } catch (e) {
+      if (e && e.message && String(e.message).startsWith('LEA canonical field invalid')) return fail(res, 400, ERR.VALIDATION, '字段非法。');
+      if (e && e.code === 'QFR_SIGNING_UNAVAILABLE') return fail(res, 503, 'LEA_SIGNING_UNAVAILABLE', '服务端签名能力未就绪。');
+      throw e;
+    }
+    return sendJson(res, 200, Object.assign({ ok: true }, out));
   }
 
   // ---- 查本机吊销表应有快照（H21） ----
@@ -633,6 +735,7 @@ function createLeaRoutes(core, channel, deps) {
       if (req.method === 'POST' && revokeM) { await handleRevokeKey(req, res, decodeURIComponent(revokeM[1])); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/keys/revoke-all') { await handleRevokeAllKeys(req, res); return true; }
       if (req.method === 'POST' && p === '/api/lea/v1/grants') { await handleGrants(req, res); return true; }
+      if (req.method === 'POST' && p === '/api/lea/v1/login-attestation') { await handleLoginAttestation(req, res); return true; }
       return fail(res, 404, 'NOT_FOUND', '该接口不存在。'), true;
     } catch (e) {
       log({ ev: 'lea-handler-error', err: String(e && e.message) });

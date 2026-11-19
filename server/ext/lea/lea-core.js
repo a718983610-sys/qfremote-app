@@ -252,6 +252,13 @@ function createLeaCore(opts) {
   function signingInfo() {
     return { mode: signing.mode, publicKeyBase64: signing.publicKeyBase64 };
   }
+  // D1 回移植新增（v3 依赖；仓库版 lea-core.js:634-637 原样移植）：
+  // 服务端公钥指纹 = 32 字节公钥 → 标准 base64（44 字符，含 '='）→
+  // SHA-256 → 前 16 位 hex；与 C lea_server_pubkey_fingerprint 逐字节一致。
+  function signingPublicKeyFingerprint() {
+    if (!signing.publicKeyBase64) return null;
+    return crypto.createHash('sha256').update(signing.publicKeyBase64).digest('hex').slice(0, 16);
+  }
   // ---------- 规范串 v1：stable JSON / 字段校验（见 CANONICAL-SIGNING-V1.md） ----------
   // 整数索引键：符合 ^(0|[1-9]\d*)$ 且数值 ≤ 4294967294（2^32-2）。
   // 规范键序：整数索引键在前按数值升序，其余键在后按字典序升序——与
@@ -675,6 +682,54 @@ function createLeaCore(opts) {
     if (k.expires_at && now() > k.expires_at) return 'expired';
     return 'active';
   }
+  // D2-K1：造 Key 的归属校验（GPT D1＋D2 最后两项裁决 ④）。显式 device_scope
+  // 与自动取唯一设备走同一套 Core 校验；直接调 generateKey 的旁路同样受
+  // 此限（路由层不得是唯一防线）。
+  // 设备 id 格式：归一后非空、不含空白／控制字符。真实 MeshCentral 节点 id
+  // 与测试 id 均满足；含换行／空白的 id 不可能是真实设备 id（此前
+  // attestation 测试用 'node//a\nb' 作“不存在设备”的探针——造 Key 路径上
+  // 此类 id 一律 400，不进入归属判定）。
+  function isValidDeviceIdFormat(deviceId) {
+    const bare = bareNodeId(String(deviceId || ''));
+    return bare.length > 0 && !/[\s\x00-\x1f\x7f]/.test(bare);
+  }
+  // 归属权威＝绑定台账（getBinding）：造 Key 发生在绑定之后（DC-A-1 已要
+  // 求先绑定），台账即归属的权威来源；MeshCentral 可见性是运行时视图，
+  // 造 Key 不依赖它——设备离线不得因此拒绝合法拥有者，MeshCentral 故障
+  // 也不得阻塞造 Key（使用阶段 admit ③＋nodeOnline 仍会复核）。拒绝时抛
+  // 带 code 的错，路由层按码转 HTTP 状态；对外文案一律不透露设备属于谁、
+  // 不区分“不存在”与“非本人设备”（防存在性预言）：
+  //   无绑定／绑他人／状态非 ACTIVE（非 PENDING）→ QFR_SCOPE_DENIED（403）
+  //   绑本人但状态 PENDING → QFR_LEA_BINDING_PENDING（409；仅当请求方确
+  //     有权查看该绑定状态时才返回——此处调用方即绑定账号本人）
+  //   设备 id 格式非法 → VALIDATION（400）
+  //   归属台账读取本身抛错 → QFR_VISIBILITY_UNAVAILABLE（503，fail-closed）
+  function validateKeyDeviceOwnership(accountId, deviceId) {
+    if (!isValidDeviceIdFormat(deviceId)) {
+      const e = new Error('LEA device_id format invalid');
+      e.code = ERR.VALIDATION; e.reason = 'device-id-format'; throw e;
+    }
+    let binding;
+    try {
+      binding = getBinding(deviceId);
+    } catch (e) {
+      const err = new Error('LEA ownership authority unavailable');
+      err.code = 'QFR_VISIBILITY_UNAVAILABLE'; err.reason = 'ownership-authority-unavailable'; throw err;
+    }
+    if (!binding || binding.account_id !== String(accountId)) {
+      const e = new Error('LEA device not bound to this account');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
+    if (binding.state === 'PENDING') {
+      const e = new Error('LEA device binding pending confirmation');
+      e.code = ERR.BINDING_PENDING; e.reason = 'binding-pending'; throw e;
+    }
+    if (binding.state !== 'ACTIVE') {
+      const e = new Error('LEA device binding not active');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
+    return { binding, binding_epoch: binding.binding_epoch };
+  }
   function generateKey(accountId, optsGen) {
     optsGen = optsGen || {};
     // H06：生成 Key 须已有 muse.execute 授权；dangerous scope 须站长另授
@@ -688,7 +743,7 @@ function createLeaCore(opts) {
     const wantScopes = Array.isArray(optsGen.scopes) && optsGen.scopes.length ? optsGen.scopes : ['muse.execute'];
     if (wantScopes.includes(DANGEROUS_SCOPE) && !hasDangerousGrant(accountId)) {
       const e = new Error('LEA dangerous scope requires station-admin approval');
-      e.code = 'QFR_SCOPE_DENIED'; throw e;
+      e.code = 'QFR_SCOPE_DENIED'; e.reason = 'dangerous-scope'; throw e;
     }
     // DC-A-1：device_scope 为空时不得再发 binding_epoch 0 的死钥——
     // 控制台 UI 生成 Key 从不传 device_id，此前发出的 Key 表面 active、
@@ -708,6 +763,8 @@ function createLeaCore(opts) {
         throw e;
       }
     }
+    // D2-K1：显式 scope 与自动取设备走同一套归属校验（见 validateKeyDeviceOwnership）。
+    const ownership = validateKeyDeviceOwnership(String(accountId), deviceScope);
     const plain = KEY_PREFIX + crypto.randomBytes(32).toString('base64url');
     const salt = crypto.randomBytes(16).toString('hex');
     const st = loadKeys();
@@ -724,7 +781,9 @@ function createLeaCore(opts) {
       account_id: String(accountId),
       device_scope: deviceScope, // DC-A-1：恒有值（显式传参或恰绑 1 台自动取），不再发 device_scope=null 的死钥
       scopes: wantScopes,
-      binding_epoch: currentBindingEpoch(deviceScope, String(accountId)),
+      // D2-K1：代次取自校验时新读的绑定记录，不再用“查不到即 0”的旧口径
+      // （旧口径会给他人设备盖 epoch 0，造出表面可用、准入恒拒的 Key）。
+      binding_epoch: ownership.binding_epoch,
       // T07/D1：Key 盖上生成时账号授权的 grant_epoch；admit 比对，授权撤销
       // 后重授予 epoch 已变，旧 Key 永不复活（须发新 Key）。H06 已保证生成
       // 时必有在效授权，故此处 grant_epoch 恒 ≥1。
@@ -734,6 +793,16 @@ function createLeaCore(opts) {
       revoked_at: null, revoked_by: null, revoked_by_rebind: false, revoke_reason: null,
     };
     if (optsGen.expires_in_days) rec.expires_at = now() + Math.floor(optsGen.expires_in_days) * 24 * 3600 * 1000;
+    // D2-K1：提交前复核——校验与写入之间若绑定已变（换绑／状态变更），不得
+    // 按旧代次发 Key。Node 单线程内 generateKey 同步执行，本次调用内无交错
+    // 窗口；此处复核是结构性防线（防后续异步重构引入窗口），与 admit ③ 的
+    // 使用阶段复核形成两层。复核失败时不写台账、不记生成审计、不返回明文。
+    const finalBinding = getBinding(deviceScope);
+    if (!finalBinding || finalBinding.account_id !== String(accountId)
+      || finalBinding.state !== 'ACTIVE' || finalBinding.binding_epoch !== rec.binding_epoch) {
+      const e = new Error('LEA device binding changed during key issuance');
+      e.code = ERR.SCOPE_DENIED; e.reason = 'device-ownership'; throw e;
+    }
     st.keys.push(rec);
     saveKeys(st);
     audit('lea-key-generated', {
@@ -853,11 +922,6 @@ function createLeaCore(opts) {
   // ---------- 绑定（DESIGN §6.1：跟随当前登录账号） ----------
   function getBinding(deviceId) {
     return loadBindings().bindings[bareNodeId(deviceId)] || null;
-  }
-  function currentBindingEpoch(deviceId, accountId) {
-    const b = deviceId ? getBinding(deviceId) : null;
-    if (b && b.account_id === String(accountId)) return b.binding_epoch;
-    return 0;
   }
   // T07：生成 Key 时盖上的授权代次（无授权记录时为 0）。
   function currentGrantEpoch(accountId) {
@@ -1401,6 +1465,47 @@ function createLeaCore(opts) {
     }
     return { ok: false };
   }
+  // 登录证明（v3 P0-4 第二层，B3 主方案）：服务端签发、Ed25519 签名，
+  // 供 Windows 客户端随 session.login_changed 发给本机 QFRLEA 服务验签。
+  // 规范串（与 C lea_login_proof_canonical 逐字节一致）：
+  //   qfr-lea-login-v1\n<key_id>\n<account_id>\n<device_id>\n<issued_at>\n<expires_at>
+  // key_id = 服务端公钥指纹前 16 hex（signingPublicKeyFingerprint，与 C
+  // lea_server_pubkey_fingerprint 同定义）。账号恒等于控制台会话认证
+  // 账号（路由层取 a.user），无站长代签口子；设备可见性校验在路由层复
+  // 用 rebind 的①②（节点可见性＋节点存在性），不做已绑他人检查（证明
+  // ≠绑定，绑定决策仍在 rebind——登录事件发生在绑定之前，绑 ACTIVE
+  // 才能签证明是鸡生蛋）。TTL 120 秒；签名能力非 real 时 503 拒绝
+  // （不签无密钥证明）。无 nonce／jti：120 秒 TTL＋本机重放集合兜底，
+  // challenge-response 列 3.1 后续。
+  const LEA_LOGIN_PROOF_TTL_S = 120;
+  const LEA_LOGIN_PROOF_VERSION = 'qfr-lea-login-v1';
+  function issueLoginAttestation(accountId, deviceId) {
+    accountId = String(accountId || '');
+    deviceId = bareNodeId(String(deviceId || ''));
+    checkIdField(accountId, 'account_id');
+    checkIdField(deviceId, 'device_id');
+    if (signing.mode !== 'real' || !signing.privateKey) {
+      const e = new Error('LEA signing disabled: no signing key configured');
+      e.code = 'QFR_SIGNING_UNAVAILABLE'; throw e;
+    }
+    const keyId = signingPublicKeyFingerprint();
+    if (!keyId) {
+      const e = new Error('LEA signing public key unavailable');
+      e.code = 'QFR_SIGNING_UNAVAILABLE'; throw e;
+    }
+    const issuedAt = nowSec();
+    const expiresAt = issuedAt + LEA_LOGIN_PROOF_TTL_S;
+    const canonical = [LEA_LOGIN_PROOF_VERSION, keyId, accountId, deviceId,
+                       String(issuedAt), String(expiresAt)].join('\n');
+    const signature = crypto.sign(null, Buffer.from(canonical, 'utf8'), signing.privateKey).toString('base64url');
+    audit('lea-login-attestation-issued', {
+      account_id: accountId, device_id: deviceId, key_id: keyId,
+      issued_at: issuedAt, expires_at: expiresAt,
+    });
+    return { version: LEA_LOGIN_PROOF_VERSION, key_id: keyId,
+             account_id: accountId, device_id: deviceId,
+             issued_at: issuedAt, expires_at: expiresAt, signature };
+  }
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
   return {
@@ -1408,8 +1513,10 @@ function createLeaCore(opts) {
     COMMANDS, ERR, KEY_PREFIX, IDEM_NS,
     signingInfo, signEnvelope, verifyEnvelope, envelopeSigningBytes,
     ticketSigningBytes, signTicket, verifyTicket, issueBindingTicket,
+    // v3：登录证明（issue；供 Windows 客户端随 session.login_changed 发给本机 QFRLEA 验签）
+    issueLoginAttestation, LEA_LOGIN_PROOF_TTL_S, LEA_LOGIN_PROOF_VERSION,
     generateKey, revokeKey, revokeAllKeys, listKeys, findKeyById, keyPublicView, keyStatus, maskKey,
-    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId,
+    grantMuse, revokeGrant, hasGrant, hasDangerousGrant, getGrant, isWhitelisted, bareNodeId, isValidDeviceIdFormat,
     recordBinding, getBinding,
     authenticate, admit, nonceCheck, idemLookup, idemRecord,
     buildEnvelope, dispatchEnvelope, parseClientOutput, leaClientCmd, leaInboxWriteCmd, leaInboxPath,

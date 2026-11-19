@@ -106,6 +106,34 @@ const reviewEvents = createEventsCore({ dataDir: DATA_DIR, log, tokenPlainFile: 
   // reconcile 的「一审已落定」标记同源同口径）；非 order 类型恒放行。
   // payOrders 已于上一行先行实例化，无时序问题。
   resolveGuard: (type, refId) => { if (type !== 'order') return true; const o = payOrders.getRaw(refId); return !!(o && o.review1); } });
+// D2：设备可见性查询（供 LEA 路由注入，GPT D1–D4 裁决 §三；全面复审
+// §二.1／整改第 2 步）。数据来源＝该账号用自己的控制台会话向 MeshCentral
+// 请求的 nodes 清单：mcFetchNodes 以用户自己的 xid/xid.sig 开控制通道，
+// MeshCentral 按该账号的用户组过滤，只含其可见设备（5 秒共享缓存＋单飞，
+// 见 mcFetchNodes）。绝不用请求体自报的设备列表，也不用服务账号的全局
+// 节点清单——lea-channel 的 listNodes 是服务账号视角，含全部设备，当可
+// 见性源会把全部设备暴露给任一账号。站长（siteadmin）天然可见全部节点，
+// 与 MeshCentral 口径一致。返回裸 id 清单（flattenMeshNodes 的 nodeid 已
+// 去 node// 前缀；路由层再以 bareNodeId 归一比对）。
+// 查询失败／超时／返回异常时抛错，调用方一律按不可用处理（fail-closed，
+// 路由层回 503 QFR_VISIBILITY_UNAVAILABLE），不得放行。注意：取回成功但
+// 清单为空（账号确实无可见设备）时返回 []，路由层按“确认不可见”回 403，
+// 与后端故障的 503 区分——MeshCentral 对无设备账号与异常回包都可能给空
+// 对象，两者都拒绝，仅状态码不同，不存在放行窗口。
+async function listVisibleDeviceIds(auth, req) {
+  const cookieHeader = req && req.headers ? (req.headers.cookie || '') : '';
+  if (!auth || !auth.user || !cookieHeader) throw new Error('visibility-source-unavailable');
+  const nodes = await mcFetchNodesBudgeted(cookieHeader, clientIpFromReq(req), auth.user, 8000);
+  if (!nodes || typeof nodes !== 'object') throw new Error('visibility-source-unavailable');
+  const flat = flattenMeshNodes(nodes);
+  if (!Array.isArray(flat)) throw new Error('visibility-source-unavailable');
+  const out = [];
+  for (const n of flat) {
+    if (!n || !n.nodeid) continue;
+    out.push(String(n.nodeid));
+  }
+  return out;
+}
 // ===== LEA 本地代理（Stage 1 MVP，DESIGN.md §8）：A1 隔离——require/实例化失败一律降级为 null，ext 照常运行 =====
 // server.js 只加本段实例化与下方路由注册行，不改既有逻辑。
 let leaCore = null, leaChannel = null, leaRoutes = null;
@@ -127,6 +155,12 @@ try {
     verifyMfa: null,
     resolveConsoleAuth: (req) => validateConsoleCookie(req.headers.cookie || '', clientIpFromReq(req)),
     isSiteAdmin: (a) => isAdmin(a),
+    // D2：显式注入设备可见性查询（GPT D1–D4 裁决 §三；必注）。路由层
+    // 对 login-attestation／rebind 的可见性校验为 fail-closed：本函数
+    // 未注入、查询失败、返回异常时对应接口回 503 QFR_VISIBILITY_UNAVAILABLE。
+    // req 须透传——函数要拿该账号的控制台会话 cookie 向 MeshCentral 取
+    // 其可见节点；只传 auth（{user, siteadmin}）取不到会话，无法查询。
+    listVisibleDeviceIds: (a, req) => listVisibleDeviceIds(a, req),
   });
   log({ ev: 'lea-mfa-unavailable', msg: 'no MFA verifier configured; LEA key operations use password-only confirmation' });
 } catch (e) { log({ ev: 'lea-unavailable', err: String(e && e.message || e) }); }
@@ -3495,4 +3529,4 @@ if (!process.env.QFEXT_NO_LISTEN) {
 }
 
 // 供本地单测使用（生产路径不依赖）
-module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName, resolvePresence, observeNodesForPresence, presenceObsFor, PRESENCE_FRESH_MS, PRESENCE_STALE_MS, savePointsSoon };
+module.exports = { buildUsersList, guardCheck, adminGuardCheck, decideAppeal, validateConsoleCookie, loadDb, ACCOUNT_RE, validateCache, pruneValidateCache, revokeSingleXid, noteQfclashLogin, qfclashLogins: () => qfclashLogins, revokedXids: () => revokedXids, normalizeNodeId, flattenMeshNodes, resolveDeviceByName, resolvePresence, observeNodesForPresence, presenceObsFor, PRESENCE_FRESH_MS, PRESENCE_STALE_MS, savePointsSoon, listVisibleDeviceIds };
