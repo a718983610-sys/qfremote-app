@@ -472,30 +472,60 @@ function applyCorrection(record, correction) {
 // ---------- 操作编号幂等存储 ----------
 // 成功结果才缓存：失败（超时／拒绝）不缓存，同一 operationId 可重试真操作；
 // 缓存命中即直接返回旧结果，不产生第二次真实操作。
+// LOCK-SEC-P3-REPLAY（GPT opStore 定夺 §2.2，2026-11-19）：缓存记录须绑
+// 定可信主体信封（binding），操作编号仅作识别、不作授权凭证；无信封的
+// 旧记录一律不得直接返回原始成功结果（桥在重放前另行鉴权，见 lock-bridge
+// authorizeReplay）。store 的第三参 binding 可选——旧调用（无 binding）
+// 仍兼容，写出 legacy 条目。
 function createOperationStore(opts) {
   const o = opts || {};
   const nowFn = typeof o.now === 'function' ? o.now : Date.now;
   const ttlMs = o.ttlMs != null ? o.ttlMs : 24 * 60 * 60 * 1000;
-  const table = new Map(); // opId -> { result, at }
+  const table = new Map(); // opId -> { result, at, binding }
   function prune() {
     const now = nowFn();
     for (const [k, v] of table) { if (now - v.at > ttlMs) table.delete(k); }
   }
   return {
+    // 只返成功结果（兼容旧调用）。注意：直接返回 result 不等于授权重放——
+    // 桥必须先经 lookupEntry 取完整条目并完成归属鉴权，才能向外返回。
     lookup(opId) {
       if (typeof opId !== 'string' || !opId) return null;
       prune();
       const e = table.get(opId);
       return e ? e.result : null;
     },
-    store(opId, result) {
+    // 返回完整条目 { result, at, binding }（binding 为 null 即 legacy 旧记录）。
+    lookupEntry(opId) {
+      if (typeof opId !== 'string' || !opId) return null;
+      prune();
+      const e = table.get(opId);
+      return e || null;
+    },
+    // binding（可选）：{ account_id, device_id, lock_id, operation_type,
+    //   request_fingerprint, revision, completed_at }——身份字段须来自受信任
+    //   的服务端认证和已验证请求（桥的 replayBinding 构造），不得取自客户端原文。
+    store(opId, result, binding) {
       if (typeof opId !== 'string' || !opId) return false;
       if (table.has(opId)) return false;
-      table.set(opId, { result, at: nowFn() });
+      table.set(opId, {
+        result, at: nowFn(),
+        binding: binding && typeof binding === 'object' ? binding : null,
+      });
       return true;
     },
     size() { prune(); return table.size; },
   };
+}
+
+// LOCK-SEC-P3-REPLAY：disable 重放请求的确定性身份指纹。只含操作类型＋
+// 设备＋锁实例（不含 revision——重放请求带的是冻结旧 revision；不含登录
+// 密码 presence——重试可能省略密码）。同一编号＋同一指纹才是同一操作；
+// 指纹不同即不同操作，须拒绝冲突（409 operation-conflict）。
+function fingerprintDisableRequest(input) {
+  const deviceId = String((input && input.deviceId) || '');
+  const lockId = (input && input.lockId != null) ? String(input.lockId) : '';
+  return 'disarm|' + deviceId + '|' + lockId;
 }
 
 // ---------- 短期操作挑战 ----------
@@ -809,5 +839,6 @@ module.exports = {
   mapLegacyState, newLockId, newOpId, wasLocked, preferredActualState, isV2Status,
   createLockRecord, transition, classifyDeviceStatus, reconcileRecord, applyCorrection, appendAudit,
   createOperationStore, createChallengeStore, createLockRecordStore,
+  fingerprintDisableRequest,
   classifyUnlockRisk, createEnhancedAuthStore, createAgentGrantStore,
 };

@@ -22,6 +22,10 @@ const WebSocket = require('ws');
 const S = require('./lock-state');
 const { createLockBridge, _test: BT } = require('./lock-bridge');
 
+// LOCK-SEC-P3-REPLAY（GPT opStore 定夺 §2.3）：假 K1 归属台账——node-1
+// 登记为 alice ACTIVE。重放鉴权查此台账；不注入时桥走文件直读，沙箱读不
+// 到生产台账会判归属不可用、P03-11 重放按 MISS（必败）。
+
 let pass = 0, fail = 0;
 function t(name, cond, extra) {
   if (cond) { pass++; console.log('ok  -', name); }
@@ -242,6 +246,9 @@ function makeBridge(mcPort, opts) {
     bridgeCfgPath,
     lockRecordsPath: path.join(tmp, 'lock-records.json'),
     enhancedAuthPath: o.enhancedAuthPath || path.join(tmp, 'enhanced-auth-missing.json'),
+    getDeviceBinding: (deviceId) => (deviceId === 'node-1'
+      ? { device_id: 'node-1', account_id: 'alice', binding_epoch: 1, state: 'ACTIVE', updated_at: '2026-11-19T00:00:00Z', trigger: 'test' }
+      : null),
     isBanLinked: () => false,
     isSiteAdmin: (u) => !!siteAdminUser && u === siteAdminUser,
   });

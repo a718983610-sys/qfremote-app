@@ -138,6 +138,17 @@
 - 服务端：操作编号只缓存**成功**结果 24 小时，失败不缓存、同一编号可重试；重复提交返回首次成功结果。操作挑战 5 分钟有效、单次消费，验过即删表。
 - 效果一致性口径：旧 Go 第二次仍进 `Disarm` 但无副作用；v2 先查先拒。C 不应依赖设备端拒绝点，只依赖“无重复副作用”这一结果。
 
+### 幂等重放归属鉴权（LOCK-SEC-P3-REPLAY，GPT opStore 定夺 §2，2026-11-19）
+
+- **顺序不变**：`/lock/disable` 内 `opStore.lookup` 仍在挑战校验之前（保留离线重放能力）；但 lookup 只做内部查询，此时不向调用方返回缓存内容或存在性信息。缓存 HIT 时先做独立归属鉴权，通过才返回历史结果；MISS 时走原有挑战校验＋设备机主核对与执行流程。
+- **缓存记录绑定可信主体信封**：`{ account_id, device_id, lock_id, operation_type, request_fingerprint, revision, completed_at }`。身份字段只取服务端认证与已验证请求／服务端记录，绝不取客户端原文；`operationId` 仅作识别，不作授权凭证。成功入库时两处写入点（已确认解锁幂等分支／正常成功分支）均带信封。无信封的旧记录（legacy）一律不得直接返回原始成功结果；无法证明归属时拒绝重放内容（可走正常流程重新验证），不猜测所属用户。
+- **请求指纹**：`disarm|<device_id>|<lock_id>`（纯函数 `fingerprintDisableRequest`）。不含 revision（重放带冻结旧 revision）与登录密码 presence（重试可省略密码）。
+- **每次缓存命中重新确认当前权限（六项）**：①当前登录账号有效且有权查看；②记录账号与当前账号一致；③当前账号仍拥有设备有效归属或明确授权；④请求的 device_id、lock_id、操作类型与缓存记录一致；⑤request_fingerprint 一致；⑥封禁／权限撤销／设备转移后旧编号失效。
+- **归属权威**：服务端独立权威设备绑定台账（K1 机制，`<lea 数据目录>/lea/bindings.json`，每次查询重读、无进程内缓存）。归属判断不依赖设备在线；台账不可用（读不到／解析失败／注入查询抛错）时 fail-closed——永不无鉴权返回缓存结果，按 MISS 继续走正常流程。台账里无此设备绑定亦拒绝重放。
+- **拒绝策略**：非机主命中（旧记录／账号不符／无绑定／非机主／绑定非 ACTIVE／台账不可用）一律按 MISS 继续（挑战校验 → 设备机主核对），响应与真实 MISS 逐字节一致（同为 409 `challenge-required`，不含 lockState／revision／replayed），不泄露编号是否存在。同一编号用于不同请求参数（换设备／换锁实例／换操作类型／指纹不符）时，机主可见 409 `operation-conflict`（仅机主可达本分支：账号与归属检查已先排除非机主，故不构成存在性预言机）。
+- **边界**：历史结果不等于当前锁状态——重放只返回历史结果原文（`{ok, replayed: true, lockState, revision, completed_at}`），不写锁记录、不覆盖服务端当前状态；`completed_at` 为新增附加字段（旧客户端忽略未知字段可兼容，P03-11 只断言子集字段）。并发重放不产生第二次操作：同一编号同一账号两次并发只有一次实际执行，第二次等待或读最终结果；首次尚在执行不得返回伪造已成功；同一编号不同请求参数拒绝冲突。
+- **回归门**：SEC-01～SEC-12（见 `server/friends/test-lock-opstore-b.js`）12/12 PASS 方可放行；另重跑 P03-11、disable 首次执行与挑战校验、设备离线重放与超时、B/C 协议契约及前端状态更新、受本次修改影响的全部沙箱回归。
+
 ### 幂等对账修正（`applyCorrection`）
 
 - 须带 `op_id`（必填）＋ `reason`（必填）；同一 `op_id` 在同一记录的修正审计（`action` 以 `correction:` 开头）里出现过即拒绝（`op-id-replayed`），不产生第二次修正。
@@ -161,7 +172,7 @@
 |---|---|
 | `GET /lock/challenge?id=&op=disarm[&opId=]` | 须登录＋机主核对；签发前经读路径对账建／取锁记录；回 `{ok, challenge, expiresAt, op, deviceId, lockId, revision}`；`opId` 有则绑定；日志不记挑战值 |
 | `GET /lock/devices` | 返回 `lockState, lockId, revision, lastHeartbeat, degraded`；旧字段 `locked, component, version` 不变 |
-| `POST /lock/disable` | 顺序：①幂等重放先查；②校验操作挑战（缺／伪造／过期／错绑均 409，带 `code`；revision 绑定不一致映射为 `revision-stale`）；③AI 授权（出示 `agentGrantId` 时另验，单次、15 分钟、单设备、仅 disarm，失败 409 `agent-grant-*`）；④设备实读＋机主核对；⑤校验冻结 `revision`（不一致 409 `revision-stale`）；⑥分级重新认证（§10）；⑦设备已报 `Off` 且有强证据 → 幂等成功；无证明 → 409 `state-conflict`；无记录时仍回 409 `alreadyOff`；⑧成功：记录落 `UNLOCKED`（两步审计），缓存成功结果；超时：记录翻 `UNKNOWN`，不缓存，可重试；拒绝：记录进 `RECOVERY_REQUIRED`。成功审计含 `risk／stepUp／agentGrant／op`（不含秘密） |
+| `POST /lock/disable` | 顺序：①幂等重放先查（LOCK-SEC-P3-REPLAY：HIT 须先过独立归属鉴权——记录账号／K1 绑定台账／设备／锁实例／操作类型／指纹六项重确认；未通过按 MISS 继续，不泄露 HIT/MISS 差异；同一编号不同参数机主可见 409 `operation-conflict`；旧记录无信封不直接返回原文）；②校验操作挑战（缺／伪造／过期／错绑均 409，带 `code`；revision 绑定不一致映射为 `revision-stale`）；③AI 授权（出示 `agentGrantId` 时另验，单次、15 分钟、单设备、仅 disarm，失败 409 `agent-grant-*`）；④设备实读＋机主核对；⑤校验冻结 `revision`（不一致 409 `revision-stale`）；⑥分级重新认证（§10）；⑦设备已报 `Off` 且有强证据 → 幂等成功；无证明 → 409 `state-conflict`；无记录时仍回 409 `alreadyOff`；⑧成功：记录落 `UNLOCKED`（两步审计），缓存成功结果（带可信主体信封，供重放鉴权）；超时：记录翻 `UNKNOWN`，不缓存，可重试；拒绝：记录进 `RECOVERY_REQUIRED`。成功审计含 `risk／stepUp／agentGrant／op`（不含秘密） |
 | `POST /lock/enable` | 行为不变（暂停守卫在前，503 原维护文案）；成功路径加记录落盘 |
 | `POST /lock/reset` | 成功后加审计＋`revision+1`（不改状态，用于让进行中的确认重新校验） |
 | `POST /lock/update` | 同步冻结：一律 503 `lock-remediation-paused`，0 更新副作用（§7） |
@@ -169,7 +180,7 @@
 | `POST /lock/agent-grant` | 须登录＋机主核对；签发 AI 解锁授权，单设备、仅 disarm、15 分钟内单次有效；回 `{ok, grantId, deviceId, op, expiresAt}`；日志不记 grantId 原文 |
 | `POST /lock/agent-grant/revoke` | 须登录；仅本人可撤销自己的授权；回 `{ok, revoked}`（不存在／非本人亦回 `revoked: false`，不泄露授权存在与否） |
 
-错误码（新路径）：`challenge-invalid`（缺／伪造／过期／错绑）、`challenge-revision-mismatch`（内部原因，桥映射为 `revision-stale`）、`revision-stale`、`state-conflict`、`alreadyOff`、`operation-required`；`step-up-required`（高风险／增强保护缺升级认证，403）；`agent-grant-invalid`／`agent-grant-expired`／`agent-grant-binding-mismatch`（409）；`lock-remediation-paused`（503，enable／update）；`lock-repair-not-available`（503，受控修复占位）；`revision-missing`（v2 缺 revision，见 §6，P3-05 实现后生效）；设备不可达 503 `unreachable`；未登录 401；非机主 403；封禁 403。
+错误码（新路径）：`challenge-invalid`（缺／伪造／过期／错绑）、`challenge-revision-mismatch`（内部原因，桥映射为 `revision-stale`）、`revision-stale`、`state-conflict`、`alreadyOff`、`operation-required`、`operation-conflict`（同一操作编号用于不同请求参数，LOCK-SEC-P3-REPLAY）；`step-up-required`（高风险／增强保护缺升级认证，403）；`agent-grant-invalid`／`agent-grant-expired`／`agent-grant-binding-mismatch`（409）；`lock-remediation-paused`（503，enable／update）；`lock-repair-not-available`（503，受控修复占位）；`revision-missing`（v2 缺 revision，见 §6，P3-05 实现后生效）；设备不可达 503 `unreachable`；未登录 401；非机主 403；封禁 403。
 
 ## §9 captureExclusion 与降级（8 问 #9 的统一口径）
 

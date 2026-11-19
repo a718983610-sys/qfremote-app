@@ -49,6 +49,7 @@ const ERR = {
   challengeInvalid: '操作确认信息无效或已被使用，请重新打开确认窗口。',
   challengeExpired: '操作确认信息已过期（5 分钟），请重新打开确认窗口。',
   challengeMismatch: '操作确认信息与本次操作不符，请重新打开确认窗口。',
+  operationConflict: '该操作编号已被用于其他请求参数，请重新发起操作。',
   revisionStale: '设备状态已变化，请重新打开确认窗口核对后再提交。',
   stateConflict: '这台电脑的锁状态存在冲突，须先完成状态恢复再操作。',
   stepUpRequired: '本次解锁风险较高，请重新输入登录密码完成验证后再试。',
@@ -312,6 +313,51 @@ function extractStatusPayload(out) {
   return null;
 }
 
+/* ---------- K1 归属台账只读器（LOCK-SEC-P3-REPLAY，GPT opStore 定夺 §2.3） ----------
+   归属判断的权威来源是 LEA 绑定台账（K1 归属权威机制），不是设备在线
+   状态。读法与 lea-core.getBinding 逐次读文件一致（改文件即生效，无须
+   重启）；每次查询都重读，不做进程内缓存，避免转移／撤销后读到旧归属。
+   - 生产默认路径：<lea 数据目录>/lea/bindings.json（QFEXT_LEA_DIR 或
+     /opt/qfremote-ext/data/lea），与 lea-core 的台账同一文件；
+     deps.bindingsFile 可注入（单测传临时文件）。
+   - deps.getDeviceBinding 可注入替代查询函数（单测用假台账；生产不注入
+     时走文件直读）。注入函数抛错与文件读不到／解析失败一律按“归属来源
+     不可用”处理——桥不回退免鉴权重放，调用方按 MISS 继续（fail-closed）。
+   - 键归一化与 lea-core.bareNodeId 一致：剥 'node//' 前缀。
+   get(deviceId) → 绑定对象 { device_id, account_id, state, ... }，
+   台账里无此设备时返回 null（与“台账不可用”不同：无绑定＝拒绝重放，
+   但不走异常分支）。 */
+function createBindingLedgerReader(opts) {
+  const o = opts || {};
+  const log = typeof o.log === 'function' ? o.log : function () {};
+  const injected = typeof o.getDeviceBinding === 'function' ? o.getDeviceBinding : null;
+  const leaDir = o.extDataDir || process.env.QFEXT_LEA_DIR || '/opt/qfremote-ext/data/lea';
+  const bindingsFile = o.bindingsFile || path.join(leaDir, 'bindings.json');
+  function bareNodeId(id) {
+    const s = String(id || '');
+    return s.startsWith('node//') ? s.slice(6) : s;
+  }
+  return {
+    bindingsFile,
+    async get(deviceId) {
+      if (injected) return injected(deviceId);
+      let parsed;
+      try {
+        parsed = JSON.parse(fs.readFileSync(bindingsFile, 'utf8'));
+      } catch (e) {
+        // 读不到／解析失败＝归属来源不可用（不是“无绑定”），由调用方 fail-closed。
+        log('lock', '归属台账读取失败：' + bindingsFile + '（' + e.message + '）');
+        const err = new Error('binding-ledger-unavailable');
+        err.code = 'binding-ledger-unavailable';
+        throw err;
+      }
+      const table = (parsed && typeof parsed === 'object' && parsed.bindings && typeof parsed.bindings === 'object')
+        ? parsed.bindings : {};
+      return table[bareNodeId(deviceId)] || table[String(deviceId || '')] || null;
+    },
+  };
+}
+
 function createLockBridge(deps) {
   const cfg = deps.cfg;
   const log = typeof deps.log === 'function' ? deps.log : function () {};
@@ -347,6 +393,71 @@ function createLockBridge(deps) {
   lockRecordStore.load();
   const challengeStore = lockState.createChallengeStore();
   const opStore = lockState.createOperationStore();
+  // LOCK-SEC-P3-REPLAY（GPT opStore 定夺 §2）：幂等重放的独立归属鉴权。
+  // 顺序与判定（裁决 §2.1／§2.3／§2.4）：
+  //   ① 旧记录（无 binding）→ 不返回原始成功结果，按 MISS 继续；
+  //   ② 记录账号 ≠ 当前账号 → 按 MISS 继续（不泄露编号是否存在）；
+  //   ③ 归属台账：无绑定／非机主／非 ACTIVE／读不到 → 按 MISS 继续
+  //      （fail-closed：归属来源不可用时永不无鉴权返回缓存结果）；
+  //   ④ 设备／锁实例／操作类型／请求指纹任一不符 → 409 operation-conflict
+  //      （仅机主可达本分支：①②③ 已先排除非机主，故冲突响应不构成
+  //      存在性预言机；非机主在 ①②③ 即被挡下，响应与 MISS 逐字节一致）；
+  //   ⑤ 全部通过 → 返回历史结果（带 replayed: true 与 completed_at）。
+  // 归属台账是 K1 绑定台账（createBindingLedgerReader），不依赖设备在线。
+  const bindingLedger = createBindingLedgerReader({
+    getDeviceBinding: deps.getDeviceBinding,
+    bindingsFile: deps.bindingsFile,
+    extDataDir: deps.extDataDir,
+    log: (tag, msg) => log('lock', msg),
+  });
+  async function authorizeReplay(entry, ctx) {
+    // ctx: { account, deviceId（本次请求）, lockId（当前锁记录）, fingerprint }
+    const b = entry && entry.binding;
+    if (!b || typeof b !== 'object') return { ok: false, reason: 'legacy-record' };
+    if (String(b.account_id || '').toLowerCase() !== String(ctx.account || '').toLowerCase()) {
+      return { ok: false, reason: 'account-mismatch' };
+    }
+    let binding = null;
+    try {
+      // 以缓存记录绑定的设备为准查台账（操作所属设备），不用本次请求带的 id。
+      binding = await bindingLedger.get(b.device_id);
+    } catch (e) {
+      return { ok: false, reason: 'ownership-authority-unavailable' };
+    }
+    if (!binding) return { ok: false, reason: 'no-binding' };
+    if (String(binding.account_id || '').toLowerCase() !== String(ctx.account || '').toLowerCase()) {
+      return { ok: false, reason: 'ownership-mismatch' };
+    }
+    if (binding.state !== 'ACTIVE') return { ok: false, reason: 'binding-not-active' };
+    if (String(b.device_id || '') !== String(ctx.deviceId || '')) {
+      return { ok: false, reason: 'device-mismatch', conflict: true };
+    }
+    if (b.operation_type !== 'disarm') {
+      return { ok: false, reason: 'operation-mismatch', conflict: true };
+    }
+    if ((b.lock_id || null) !== (ctx.lockId || null)) {
+      return { ok: false, reason: 'lock-mismatch', conflict: true };
+    }
+    if (b.request_fingerprint !== ctx.fingerprint) {
+      return { ok: false, reason: 'fingerprint-mismatch', conflict: true };
+    }
+    return { ok: true };
+  }
+  // 构造缓存记录的可信主体信封：身份字段只取服务端认证（account）与已验
+  // 证请求／服务端记录（device／lock／revision），绝不取客户端原文。
+  // revision 取操作完成时的状态版本；completed_at 取服务端完成时刻。
+  function replayBinding(account, deviceId, record, revision) {
+    const lockId = record && record.lock_id != null ? String(record.lock_id) : null;
+    return {
+      account_id: String(account || '').toLowerCase(),
+      device_id: String(deviceId),
+      lock_id: lockId,
+      operation_type: 'disarm',
+      request_fingerprint: lockState.fingerprintDisableRequest({ deviceId: String(deviceId), lockId }),
+      revision: revision,
+      completed_at: Date.now(),
+    };
+  }
   const unlockAuthLimiter = createResetPwLimiter();
   // P3-03：增强保护（用户自选，运维文件登记；缺省关闭）与 AI 代理解锁
   // 独立授权（内存表，服务重启即失效—— fail-closed，见 lock-state.js）。
@@ -1133,11 +1244,39 @@ function createLockBridge(deps) {
             failCode(res, 409, ERR.challengeRequired, 'operation-required'); return true;
           }
           disableOpId = body.operationId;
-          const replayed = opStore.lookup(disableOpId);
-          if (replayed) {
-            log('lock', 'disarm 幂等重放：op=' + disableOpId + ' by ' + me + '（返回首次成功结果，未再次操作设备）');
-            sendJson(res, 200, Object.assign({ ok: true, replayed: true }, replayed));
-            return true;
+          // LOCK-SEC-P3-REPLAY（GPT opStore 定夺 §2.1）：lookup 顺序不变（仍
+          // 在挑战校验之前，保留离线重放能力），但 lookup 只做内部查询——
+          // 此时不向调用方返回缓存内容或存在性信息；HIT 须先过独立归属鉴权。
+          const replayEntry = opStore.lookupEntry(disableOpId);
+          if (replayEntry) {
+            const recNow = lockRecordStore.get(body.id);
+            const fp = lockState.fingerprintDisableRequest({
+              deviceId: body.id,
+              lockId: recNow && recNow.lock_id != null ? String(recNow.lock_id) : null,
+            });
+            const authz = await authorizeReplay(replayEntry, {
+              account: me, deviceId: body.id,
+              lockId: recNow && recNow.lock_id != null ? String(recNow.lock_id) : null,
+              fingerprint: fp,
+            });
+            if (authz.ok) {
+              log('lock', 'disarm 幂等重放：op=' + disableOpId + ' by ' + me + '（归属鉴权通过，返回首次成功结果，未再次操作设备）');
+              sendJson(res, 200, Object.assign(
+                { ok: true, replayed: true, completed_at: replayEntry.binding.completed_at },
+                replayEntry.result));
+              return true;
+            }
+            if (authz.conflict) {
+              // 仅机主可达本分支（authorizeReplay 已先排除非机主与归属
+              // 不可用）：同一编号用于不同请求参数，拒绝冲突，不返回旧结果。
+              log('lock', 'disarm 幂等重放拒绝：op=' + disableOpId + ' by ' + me + '（reason=' + authz.reason + '）');
+              failCode(res, 409, ERR.operationConflict, 'operation-conflict'); return true;
+            }
+            // 鉴权失败（旧记录／非机主／归属台账不可用／无绑定／已转移／
+            // 已封禁等）：不返回缓存内容、不泄露 HIT/MISS 差异——按 MISS
+            // 继续走正常流程（挑战校验 → 设备机主核对），由下游关口决定
+            // 拒绝。失败原因只记日志（不含操作结果原文）。
+            log('lock', 'disarm 幂等重放拒绝：op=' + disableOpId + ' by ' + me + '（reason=' + authz.reason + '，按 MISS 继续）');
           }
           if (typeof body.challenge !== 'string' || !body.challenge) {
             failCode(res, 409, ERR.challengeRequired, 'challenge-required'); return true;
@@ -1265,7 +1404,8 @@ function createLockBridge(deps) {
             // 弱证据或非 UNLOCKED 记录仍走原拒绝路径（不放宽）。
             if ((r0.decision === 'to-unlocked' || r0.decision === 'confirmed') && r0.evidence === 'strong' && r0.record.actual_state === 'UNLOCKED') {
               const out = { lockState: 'UNLOCKED', revision: r0.record.revision, alreadyUnlocked: true };
-              opStore.store(disableOpId, out);
+              // LOCK-SEC-P3-REPLAY：成功结果入库时绑定可信主体信封（供重放鉴权）。
+              opStore.store(disableOpId, out, replayBinding(me, node._id, r0.record, out.revision));
               log('lock', 'disarm 幂等：设备已确认解锁（' + r0.reason + '），op=' + disableOpId + ' by ' + me + '（risk=' + risk.level + '，agentGrant=' + (agentGrantUsed ? 'yes' : 'no') + '）');
               sendJson(res, 200, Object.assign({ ok: true }, out));
               return true;
@@ -1321,7 +1461,8 @@ function createLockBridge(deps) {
           }
           const finalRec = fin.ok ? lockRecordStore.upsert(fin.record) : cur;
           const out = { lockState: 'UNLOCKED', revision: finalRec.revision };
-          opStore.store(disableOpId, out);
+          // LOCK-SEC-P3-REPLAY：成功结果入库时绑定可信主体信封（供重放鉴权）。
+          opStore.store(disableOpId, out, replayBinding(me, node._id, finalRec, out.revision));
           log('lock', 'disarm 成功：' + node.name + ' by ' + me + '（op=' + disableOpId + '，risk=' + risk.level + '，stepUp=' + (hasLoginPw ? 'yes' : 'no') + '，agentGrant=' + (agentGrantUsed ? 'yes' : 'no') + '）');
           sendJson(res, 200, Object.assign({ ok: true }, out));
           return true;

@@ -137,6 +137,14 @@ function makeKeyMaterial(tmp) {
 
 let currentUser = 'alice';
 let siteAdminUser = null;
+// LOCK-SEC-P3-REPLAY（GPT opStore 定夺 §2.3）：假 K1 归属台账——两台假
+// 设备均登记为 alice ACTIVE。重放鉴权查此台账；单测不注入时桥走文件直读，
+// 沙箱读不到生产台账会判归属不可用、重放全部按 MISS（F-A4／P03-11 必败），
+// 故各测试脚手架必须注入。SEC-01～SEC-12 独立矩阵见 test-lock-opstore-b.js。
+const ledgerBindings = {
+  'node-1': { device_id: 'node-1', account_id: 'alice', binding_epoch: 1, state: 'ACTIVE', updated_at: '2026-11-19T00:00:00Z', trigger: 'test' },
+  'node-2': { device_id: 'node-2', account_id: 'alice', binding_epoch: 1, state: 'ACTIVE', updated_at: '2026-11-19T00:00:00Z', trigger: 'test' },
+};
 const COOKIE_A = 'qfr_frd=SESS-ALICE-A; xid=X-A';
 const COOKIE_B = 'qfr_frd=SESS-ALICE-B; xid=X-B'; // 同一账号、另一会话
 const COOKIE_MALLORY = 'qfr_frd=SESS-MALLORY; xid=X-M';
@@ -162,6 +170,7 @@ function makeBridge(mcPort, opts) {
     bridgeCfgPath,
     lockRecordsPath: o.lockRecordsPath || path.join(tmp, 'lock-records.json'),
     enhancedAuthPath: o.enhancedAuthPath || path.join(tmp, 'enhanced-auth-missing.json'),
+    getDeviceBinding: (deviceId) => ledgerBindings[deviceId] || null,
     isBanLinked: () => false,
     isSiteAdmin: (u) => !!siteAdminUser && u === siteAdminUser,
   });
