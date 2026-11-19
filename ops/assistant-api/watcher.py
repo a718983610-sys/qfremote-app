@@ -5,11 +5,31 @@
 裁定经 /assistant-api/decide 回写（由助手在处理时调用，本脚本只负责发现与落盘）。
 令牌只读 token.txt（600），从不打印。点火时以 systemd/常驻方式启动。
 """
-import datetime, json, os, subprocess, sys, time, urllib.request
+import datetime, json, os, signal, subprocess, sys, time, urllib.request
 
 def log(msg):
-    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    # D5：时间戳钉死 UTC 并带时区标记（D1 教训：旧 log() 用无时区 datetime.now()，
+    # 同一份日志曾混用 UTC/CST）。格式如 2026-11-19T15:44:00+00:00。
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     print(f"{ts} watcher[{os.getpid()}] {msg}", file=sys.stderr, flush=True)
+
+def _on_signal(signum, frame):
+    # D5 信号记录：只记一行日志，然后恢复默认处置并重新触发该信号，
+    # 让进程仍以该信号死亡（退出码 128+信号编号），绝不吞信号。
+    # 处理函数内不做任何业务逻辑（不轮询、不写游标、不碰队列）。
+    # CPython 的信号处理函数在主线程字节码边界执行，print/flush 到 stderr 是安全的。
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = "SIG%d" % signum
+    log(f"received signal {name} ({signum}); terminating")
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+def _install_signal_handlers():
+    # 只在主线程安装（main() 即主线程）。SIGKILL 无法捕获，不在此列。
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+        signal.signal(sig, _on_signal)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN = open(os.path.join(BASE_DIR, "token.txt")).read().strip()
@@ -37,6 +57,8 @@ def poll(cursor):
         return json.loads(resp.read().decode())
 
 def main():
+    _install_signal_handlers()
+    log("signal handlers installed: SIGTERM/SIGHUP/SIGINT/SIGQUIT")
     cursor = 0
     if os.path.exists(STATE):
         try:
