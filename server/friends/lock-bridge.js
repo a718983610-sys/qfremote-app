@@ -939,6 +939,10 @@ function createLockBridge(deps) {
         sendJson(res, 200, { ok: true, nodeId: node._id, name: node.name || '', recordedOwner: recorded || null, recordedOwnerHash: ownerNameHash(recorded), matches, pin: pinState, reachable: true });
         return true;
       }
+      // LOCK-P0 pause (2026-11-19, GPT lock-bug ruling s1.1): new privacy-lock activations paused for maintenance.
+      // Only /lock/enable is stopped; /lock/disable, /lock/reset, /lock/devices and normal remote control are unaffected.
+      // Rollback: delete this block, then restart qfremote-friends.service.
+      if (req.method === 'POST' && p === '/lock/enable') { fail(res, 503, '隐私锁功能正在维护，暂时无法开启新的锁定。已锁定的设备仍可正常关闭。'); return true; }
       if (req.method === 'POST' && (p === '/lock/enable' || p === '/lock/disable' || p === '/lock/reset' || p === '/lock/update')) {
         const body = await readJsonBody(req);
         if (!body || typeof body.id !== 'string') { fail(res, 400, ERR.badReq); return true; }
