@@ -1130,6 +1130,10 @@ function main() {
         const cookies = parseCookies(req);
         const tok = cookies.qfr_frd;
         if (tok) { delete state.sessions[crypto.createHash('sha256').update(tok).digest('hex')]; saveState(); }
+        // P3-03：退出登录即吊销该账号未使用的锁操作挑战与 AI 解锁授权
+        // （GPT 三项定夺 §3.3：退出登录后未使用挑战必须失效；purgeUser 内
+        // 另清 xid 桥缓存）。lockBridge 未就绪时不阻塞登出本身。
+        try { if (typeof lockBridge.purgeUser === 'function') lockBridge.purgeUser(me); } catch (e) {}
         // 手动退出：服务端会话作废 + 浏览器里的会话 cookie 一并清掉 +
         // 落「手动退出」标记，防单点登录在同一控制台会话内自动带回。
         const mark = xidHash(cookies);

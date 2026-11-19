@@ -62,9 +62,21 @@ function createMockBridge() {
   ];
   const byId = (id) => devices.find(d => d.id === id);
   const delay = () => new Promise(r => setTimeout(r, 180));
+  // Mock 挑战与幂等：与服务端同语义（单次挑战、操作编号去重），供弹窗单测与截图。
+  const mockChallenges = new Map(); // challenge -> { id, used }
+  const mockSeenOps = new Map(); // operationId -> result
+  let mockChSeq = 0;
   return {
     mock: true,
     async listDevices() { await delay(); return devices.map(d => Object.assign({}, d)); },
+    async challenge(id) {
+      await delay();
+      const d = byId(id);
+      if (!d) throw lockError('未找到这台电脑。');
+      const ch = 'mock-ch-' + (++mockChSeq);
+      mockChallenges.set(ch, { id, used: false });
+      return { ok: true, challenge: ch, expiresAt: Date.now() + 5 * 60 * 1000, op: 'disarm', deviceId: id };
+    },
     async enable(id, password) {
       await delay();
       const d = byId(id);
@@ -76,13 +88,23 @@ function createMockBridge() {
       d.locked = true;
       return { ok: true, locked: true };
     },
-    async disable(id) {
+    async disable(id, opts) {
       await delay();
+      const o = opts || {};
       const d = byId(id);
       if (!d) throw lockError('未找到这台电脑。');
       if (!d.owner) throw lockError('仅设备所有者可管理这台电脑的隐私锁。');
-      d.locked = false;
-      return { ok: true, locked: false };
+      if (!o.operationId) throw lockError('缺少操作编号，请重新打开确认窗口。');
+      const seen = mockSeenOps.get(o.operationId);
+      if (seen) return Object.assign({ ok: true, replayed: true }, seen);
+      const rec = mockChallenges.get(o.challenge);
+      if (!rec || rec.used || rec.id !== id) throw lockError('操作确认信息无效或已被使用，请重新打开确认窗口。');
+      rec.used = true;
+      let out;
+      if (!d.locked) out = { locked: false, alreadyUnlocked: true, lockState: 'UNLOCKED' };
+      else { d.locked = false; out = { locked: false, lockState: 'UNLOCKED' }; }
+      mockSeenOps.set(o.operationId, out);
+      return Object.assign({ ok: true }, out);
     },
     async reset(id, loginPassword, newPassword) {
       await delay();
@@ -173,7 +195,9 @@ function createLockBridge(getSession, opts) {
             return;
           }
           if (res.statusCode < 200 || res.statusCode >= 300) {
-            reject(lockError((data && data.error) || '隐私锁服务暂时无法处理本次请求，请稍后再试。'));
+            // C 线：服务端新路径带机器可读 code（如 revision-stale / challenge-*），
+            // 原样透传给弹窗做分支（刷新快照 vs 仅显示错误）；旧错误无 code 即 null。
+            reject(lockError((data && data.error) || '隐私锁服务暂时无法处理本次请求，请稍后再试。', (data && data.code) || null));
             return;
           }
           resolve(data || {});
@@ -200,10 +224,26 @@ function createLockBridge(getSession, opts) {
         name: String(d.name || d.id || '未命名电脑'),
         owner: !!d.owner,
         locked: !!d.locked,
+        // C 线：服务端新字段直传（缺失即未知，不猜）：lockState 为权威锁状态，
+        // lockId/revision 供关闭确认弹窗冻结快照用。
+        lockState: typeof d.lockState === 'string' ? d.lockState : (d.locked ? 'LOCKED' : 'UNLOCKED'),
+        lockId: typeof d.lockId === 'string' ? d.lockId : null,
+        revision: typeof d.revision === 'number' ? d.revision : 0,
+        lastHeartbeat: d.lastHeartbeat != null ? d.lastHeartbeat : null,
+        degraded: typeof d.degraded === 'string' ? d.degraded : null,
         // W-11③：component 字段缺失即未知（null），面板显示「状态未知」，
         // 不再缺省当已装。
         component: d.component === false ? false : (d.component === true ? true : null)
       })).filter(d => d.id);
+    },
+    // C 线：关闭确认弹窗打开时取短期操作挑战（5 分钟、单次、绑定设备）。
+    // P3-03：把弹窗打开时生成的操作编号随取挑战请求带上（opId），服务端
+    // 把挑战与该编号绑定，提交时编号不符即拒绝（防挑战被挪用到另一操作）。
+    async challenge(id, op, operationId) {
+      let q = '/challenge?id=' + encodeURIComponent(id) + '&op=' + encodeURIComponent(op || 'disarm');
+      if (typeof operationId === 'string' && operationId) q += '&opId=' + encodeURIComponent(operationId);
+      const r = await request('GET', q);
+      return { ok: true, challenge: r.challenge, expiresAt: r.expiresAt, op: r.op, deviceId: r.deviceId };
     },
     async enable(id, password) {
       const bad = validateLockPassword(password);
@@ -211,9 +251,18 @@ function createLockBridge(getSession, opts) {
       const r = await request('POST', '/enable', { id, password });
       return { ok: true, locked: r.locked !== false };
     },
-    async disable(id) {
-      await request('POST', '/disable', { id });
-      return { ok: true, locked: false };
+    // C 线：disable 必须带操作编号＋挑战＋冻结 revision（见 lock.html 弹窗）；
+    // loginPassword 可选，填了即做短时重新认证。服务端返回 replayed /
+    // alreadyUnlocked 时直接透传，不当作错误。
+    async disable(id, opts) {
+      const o = opts || {};
+      if (!o.operationId) throw lockError('缺少操作编号，请重新打开确认窗口。');
+      if (!o.challenge) throw lockError('缺少操作确认信息，请重新打开确认窗口。');
+      if (typeof o.revision !== 'number') throw lockError('缺少设备状态版本，请重新打开确认窗口。');
+      const body = { id, challenge: o.challenge, operationId: o.operationId, revision: o.revision };
+      if (typeof o.loginPassword === 'string' && o.loginPassword) body.loginPassword = o.loginPassword;
+      const r = await request('POST', '/disable', body);
+      return { ok: true, locked: false, replayed: !!r.replayed, alreadyUnlocked: !!r.alreadyUnlocked, lockState: r.lockState || 'UNLOCKED', revision: r.revision };
     },
     async reset(id, loginPassword, newPassword) {
       if (!loginPassword) throw lockError('请输入登录密码。');

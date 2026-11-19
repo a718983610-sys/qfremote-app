@@ -38,7 +38,12 @@ function applyLockDevices(devices) {
   const nm = ensureNodeMap();
   const list = [];
   (devices || []).forEach(d => {
-    const dev = { id: String(d.id || ''), name: String(d.name || ''), owner: !!d.owner, locked: !!d.locked, component: d.component !== false };
+    // C 线：服务端新字段直传（lockState 为权威锁状态，lockId/revision 供关闭确认弹窗冻结快照用；缺失即按 locked 布尔回落）。
+    const dev = { id: String(d.id || ''), name: String(d.name || ''), owner: !!d.owner, locked: !!d.locked, component: d.component !== false,
+      lockState: typeof d.lockState === 'string' ? d.lockState : (d.locked ? 'LOCKED' : 'UNLOCKED'),
+      lockId: typeof d.lockId === 'string' ? d.lockId : null,
+      degraded: typeof d.degraded === 'string' ? d.degraded : null,
+      revision: typeof d.revision === 'number' ? d.revision : 0 };
     if (!dev.id) return;
     list.push(dev);
     if (dev.name) nm.byName.set(dev.name, dev.id);
@@ -2394,9 +2399,197 @@ function setDevConnState(view, name, online) {
 /* 屏幕锁面板（四态：未锁/已锁/未装组件/他人设备；三操作：arm/reset/disarm）。
    形态照安卓 LockPage 与电脑端 lock.html：未锁时点开关先在卡内展开设密码
    表单、提交成功才真正上锁；已锁时可关锁（二次确认）或用登录密码重设。 */
+/* C 线 · 网页端关闭确认独立弹窗（定夺 §4.4，LOCK-P1-01）：
+   弹窗写进 #modalRoot（应用级弹窗层，与 #view 平级），initLockPanel 重建
+   #lockBody 时碰不到它；会话对象模块级保存，面板 5 秒补拉／refresh 重渲染
+   都不重置；无自动过期定时器（旧实现“再次点击＋3.5 秒自动取消”即缺陷根源）。
+   打开时冻结 device_id／lockId／revision＋操作挑战＋操作编号；提交中按钮
+   禁用；revision-stale 时留在弹窗内刷新快照＋取新挑战；超时／掉线只显示
+   准确错误，不改写成“未锁定”。不用通用 showModal——它点任何按钮都会关
+   弹窗，失败态留不住。 */
+let webLockConfirm = null; // {view, deviceName, dev, lockId, revision, challenge, expiresAt, operationId, busy, token}
+function webLockStateText(ls, locked, degraded) {
+  let t;
+  switch (ls) {
+    case 'LOCKED': t = '已锁定'; break;
+    case 'UNLOCKED': t = '未锁定'; break;
+    case 'LOCKING': t = '正在锁定…'; break;
+    case 'UNLOCKING': t = '正在解除…'; break;
+    case 'RECOVERY_REQUIRED': t = '状态冲突，需恢复'; break;
+    case 'UNKNOWN': t = '状态未知'; break;
+    default: t = locked ? '已锁定' : '未锁定';
+  }
+  if (degraded) t += '（保护降级）';
+  return t;
+}
+function webLockNewOpId() {
+  try { if (window.crypto && typeof window.crypto.randomUUID === 'function') return 'op-' + window.crypto.randomUUID(); } catch (e) {}
+  return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+function webLockConfirmStateLine(s) {
+  return '设备：' + s.dev.name + '　状态：' + webLockStateText(s.dev.lockState, s.dev.locked, s.dev.degraded)
+    + '（' + (s.lockId || '—') + '，版本 ' + s.revision + '）';
+}
+function closeWebLockConfirm() {
+  webLockConfirm = null;
+  const root = $('#modalRoot');
+  if (root) root.innerHTML = '';
+}
+function webLockConfirmErr(text) {
+  const el = $('#lk-cf-err');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+function webLockConfirmModalAlive(token) {
+  return !!webLockConfirm && webLockConfirm.token === token && !!document.querySelector('#modalRoot .modal');
+}
+async function webLockFetchChallenge(s) {
+  // P3-03：把弹窗打开时生成的操作编号随取挑战请求带上（opId），服务端把
+  // 挑战与该编号绑定，提交时编号不符即拒绝（防挑战被挪用到另一操作）。
+  const r = await lockApi('GET', '/challenge?id=' + encodeURIComponent(s.dev.id) + '&op=disarm&opId=' + encodeURIComponent(s.operationId));
+  if (r.json && r.json.ok && r.json.challenge) return { ok: true, challenge: r.json.challenge, expiresAt: r.json.expiresAt };
+  return { ok: false, error: apiErrText(r, '操作确认信息获取失败，请重新打开确认窗口。') };
+}
+async function openWebLockConfirm(view, dev, deviceName) {
+  const token = webLockNewOpId();
+  webLockConfirm = { view, deviceName, dev, lockId: dev.lockId || '', revision: typeof dev.revision === 'number' ? dev.revision : 0,
+    challenge: null, expiresAt: 0, operationId: token, busy: false, token };
+  const s = webLockConfirm;
+  const root = $('#modalRoot');
+  if (!root) return;
+  root.innerHTML = `<div class="mask"><div class="modal" role="dialog" aria-modal="true" aria-label="关闭屏幕锁"><h3 tabindex="-1">关闭屏幕锁</h3><div class="mbody">`
+    + `<p id="lk-cf-state">${esc(webLockConfirmStateLine(s))}</p>`
+    + `<p>确定解除这台设备的屏幕锁吗？关闭后，本地人员可能重新看到并操作电脑。当前临时解锁密码将作废。</p>`
+    + `<div class="field"><label for="lk-cf-pw">登录密码（重新认证，可选填）</label><input id="lk-cf-pw" type="password" autocomplete="current-password" placeholder="填了会再次验证登录密码"></div>`
+    + `<div id="lk-cf-err" class="note err my-10" hidden></div>`
+    + `</div><div class="mops">`
+    + `<button class="btn grey" id="lk-cf-cancel">取消</button>`
+    + `<button class="btn danger solid" id="lk-cf-go" disabled>正在确认…</button>`
+    + `</div></div></div>`;
+  const goBtn = $('#lk-cf-go', root);
+  const cancelBtn = $('#lk-cf-cancel', root);
+  if (cancelBtn) cancelBtn.onclick = () => closeWebLockConfirm();
+  if (goBtn) goBtn.onclick = () => webLockConfirmSubmit();
+  const ch = await webLockFetchChallenge(s);
+  if (!webLockConfirmModalAlive(token)) return; // 期间已取消／Esc 关闭
+  if (ch.ok) {
+    s.challenge = ch.challenge;
+    s.expiresAt = ch.expiresAt;
+    goBtn.disabled = false;
+    goBtn.textContent = '确认关闭';
+    goBtn.focus();
+  } else {
+    webLockConfirmErr(ch.error);
+    goBtn.disabled = false;
+    goBtn.textContent = '重新获取';
+  }
+}
+async function webLockConfirmSubmit() {
+  const s = webLockConfirm;
+  if (!s || s.busy) return;
+  const token = s.token;
+  const goBtn = $('#lk-cf-go');
+  if (!s.challenge) { // 挑战未取到时点“重新获取”
+    if (goBtn) { goBtn.disabled = true; goBtn.textContent = '正在确认…'; }
+    const ch = await webLockFetchChallenge(s);
+    if (!webLockConfirmModalAlive(token)) return;
+    if (ch.ok) {
+      s.challenge = ch.challenge; s.expiresAt = ch.expiresAt;
+      webLockConfirmErr('');
+      goBtn.disabled = false; goBtn.textContent = '确认关闭'; goBtn.focus();
+    } else {
+      webLockConfirmErr(ch.error);
+      goBtn.disabled = false; goBtn.textContent = '重新获取';
+    }
+    return;
+  }
+  if (Date.now() >= s.expiresAt) {
+    webLockConfirmErr('操作确认信息已过期（5 分钟），请重新打开确认窗口。');
+    return;
+  }
+  s.busy = true;
+  if (goBtn) goBtn.disabled = true;
+  const pwEl = $('#lk-cf-pw');
+  const body = { id: s.dev.id, challenge: s.challenge, operationId: s.operationId, revision: s.revision };
+  if (pwEl && pwEl.value) body.loginPassword = pwEl.value;
+  const r = await lockApi('POST', '/disable', body);
+  if (pwEl) pwEl.value = '';
+  s.busy = false;
+  if (!webLockConfirmModalAlive(token)) { // 期间弹窗已被 Esc 关闭：只按结果 toast／刷新，不碰弹窗
+    if (r.json && r.json.ok) { toast('屏幕锁已关闭，本次密码已作废。', 'ok'); invalidateNodeMap(); initLockPanel(s.view, s.deviceName); }
+    else toast(apiErrText(r, '关闭失败，请稍后再试。'), 'err');
+    return;
+  }
+  if (r.json && r.json.ok) {
+    const view = s.view, deviceName = s.deviceName;
+    closeWebLockConfirm();
+    toast('屏幕锁已关闭，本次密码已作废。', 'ok');
+    invalidateNodeMap();
+    initLockPanel(view, deviceName);
+    return;
+  }
+  if (r.json && r.json.code === 'revision-stale') {
+    // 状态已变化：弹窗不消失，显示错误，后台重取设备刷新冻结快照＋取新挑战，等用户重新确认。
+    webLockConfirmErr(apiErrText(r, '设备状态已变化，请核对后再提交。'));
+    if (goBtn) { goBtn.disabled = true; goBtn.textContent = '正在确认…'; }
+    try {
+      const nm = await fetchNodeMap({ force: true });
+      const fd = nm.lockDevices.find((x) => x.id === s.dev.id);
+      if (fd && webLockConfirmModalAlive(token)) {
+        s.dev = fd;
+        s.lockId = fd.lockId || s.lockId;
+        s.revision = typeof fd.revision === 'number' ? fd.revision : s.revision;
+        const st = $('#lk-cf-state');
+        if (st) st.textContent = webLockConfirmStateLine(s);
+      }
+    } catch (e) { /* 快照刷新失败不挡取新挑战，服务端提交时仍会再校验 revision */ }
+    const ch = await webLockFetchChallenge(s);
+    if (!webLockConfirmModalAlive(token)) return;
+    if (ch.ok) {
+      s.challenge = ch.challenge;
+      s.expiresAt = ch.expiresAt;
+      s.operationId = webLockNewOpId();
+      webLockConfirmErr('设备状态已变化，已更新为最新状态，请核对后重新确认。');
+      if (goBtn) { goBtn.disabled = false; goBtn.textContent = '确认关闭'; }
+    } else {
+      webLockConfirmErr('设备状态已变化，且未能重新获取确认信息，请关闭后重试。');
+      if (goBtn) { goBtn.disabled = false; goBtn.textContent = '重新获取'; }
+      s.challenge = null;
+    }
+    return;
+  }
+  if (r.json && r.json.code === 'step-up-required') {
+    // P3-03：高风险／增强保护须升级认证——弹窗不消失，提示用户在上方密码栏
+    // 输入登录密码后重新确认，绝不降级为普通确认。
+    webLockConfirmErr(apiErrText(r, '本次解锁风险较高，请重新输入登录密码。'));
+    if (pwEl) pwEl.focus();
+    if (goBtn) goBtn.disabled = false;
+    return;
+  }
+  // 超时／掉线／拒绝：留在弹窗里显示准确错误，不改写成“未锁定”，不自动关闭。
+  webLockConfirmErr(apiErrText(r, '关闭失败，请稍后再试。'));
+  if (goBtn) goBtn.disabled = false;
+}
+
 async function initLockPanel(view, deviceName) {
   const body = $('#lockBody', view); if (!body) return;
   let busy = false;
+  // P3-05 R-10：暂停期横幅（GPT 三项定夺 §2.2 原文，一字不改）。插在 #lockCard
+  // 层（#lockBody 之外），initLockPanel 重建 #lockBody 时不被洗掉；只作风险
+  // 告知，不是安全控制的替代品。解除暂停时须按统一受控流程同步撤下本横幅。
+  const PAUSE_NOTICE = '当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。';
+  const lockCardTop = $('#lockCard', view);
+  let pauseNote = lockCardTop ? $('#lk-pause-note', lockCardTop) : null;
+  if (!pauseNote && lockCardTop) {
+    pauseNote = document.createElement('p');
+    pauseNote.id = 'lk-pause-note';
+    pauseNote.className = 'note warn';
+    pauseNote.style.margin = '0 0 10px';
+    pauseNote.textContent = PAUSE_NOTICE;
+    const lb = $('#lockBody', view);
+    if (lb) lockCardTop.insertBefore(pauseNote, lb);
+  }
   const nm = await fetchNodeMap();
   if (!body.isConnected) return;
   if (nm.lockStatus === 'needlogin') {
@@ -2478,7 +2671,20 @@ async function initLockPanel(view, deviceName) {
     };
     return;
   }
-  // 已锁定：关锁（二次确认）＋忘记密码重设（保持锁定，只换密码）
+  // 已锁定：关锁（独立确认弹窗，定夺 §4.4）＋忘记密码重设（保持锁定，只换密码）
+  // C 线：状态 pill 按权威 lockState 显示；非 LOCKED（未知／冲突）时不提供
+  // 关锁入口（不猜状态），只给重新加载。
+  const ls = dev.lockState || (dev.locked ? 'LOCKED' : 'UNLOCKED');
+  const lsText = webLockStateText(ls, dev.locked, dev.degraded);
+  if (ls !== 'LOCKED') {
+    body.innerHTML = `
+    <div class="dev dev-flat2"><span><b>当前状态</b><small>${esc(lsText)}</small></span><span class="ops"><span class="pill off">${esc(lsText)}</span></span></div>
+    <p class="text-sub fs-13x5 mt-8">锁状态暂无法确认（${esc(lsText)}），请稍后刷新重试；不要凭旧的“已锁定”显示操作。</p>
+    <p class="flex-row mt-12"><button class="btn grey" id="lk-retry2">重新加载</button></p>
+    <div id="lk-msg"></div>`;
+    const rb = $('#lk-retry2', body); if (rb) rb.onclick = () => refresh();
+    return;
+  }
   body.innerHTML = `
     <div class="dev dev-flat2"><span><b>当前状态</b><small>已锁定 · 远程控制不受影响</small></span><span class="ops"><span class="pill warn">已锁定</span></span></div>
     <p class="flex-row mt-12"><button class="btn danger" id="lk-off">关闭屏幕锁</button><button class="btn grey" id="lk-reset-open">忘记密码？用登录密码重设</button></p>
@@ -2489,20 +2695,11 @@ async function initLockPanel(view, deviceName) {
       <button class="btn block" id="lk-reset-go">重设密码（设备保持锁定）</button>
     </div>
     <div id="lk-msg"></div>`;
-  let armed = false, armTimer = null;
+  // C 线：关锁走独立确认弹窗（定夺 §4.4），不再用“再次点击＋3.5 秒过期”。
   const offBtn = $('#lk-off', body);
-  offBtn.onclick = async () => {
+  offBtn.onclick = () => {
     if (busy) return;
-    if (!armed) {
-      armed = true; offBtn.textContent = '再次点击确认关闭（本次密码立即作废）';
-      armTimer = setTimeout(() => { armed = false; offBtn.textContent = '关闭屏幕锁'; }, 3500);
-      return;
-    }
-    clearTimeout(armTimer);
-    setBusy(true, '正在关闭屏幕锁，请稍候…');
-    const r = await lockApi('POST', '/disable', { id: dev.id });
-    if (r.json && r.json.ok) { toast('屏幕锁已关闭，本次密码已作废。', 'ok'); refresh(); }
-    else { setBusy(false); offBtn.textContent = '关闭屏幕锁'; armed = false; fail(r, '关闭失败，请稍后再试。'); }
+    openWebLockConfirm(view, dev, deviceName);
   };
   $('#lk-reset-open', body).onclick = () => {
     const f = $('#lk-reset-form', body); f.hidden = !f.hidden;

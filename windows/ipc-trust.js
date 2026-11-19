@@ -105,6 +105,7 @@ const IPC_CAPABILITIES = {
   'qf-lock-devices': [{ file: 'lock.html' }],
   'qf-lock-enable': [{ file: 'lock.html' }],
   'qf-lock-disable': [{ file: 'lock.html' }],
+  'qf-lock-challenge': [{ file: 'lock.html' }], // C 线：关闭确认弹窗取短期操作挑战
   'qf-lock-reset': [{ file: 'lock.html' }],
   'qf-lock-close': [{ file: 'lock.html' }],
   'qf-lock-repair': [{ file: 'lock.html' }],

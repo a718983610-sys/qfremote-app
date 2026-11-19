@@ -37,6 +37,13 @@
     margin:16px 24px 0; padding:16px 20px; border-radius:12px; font-size:13px; line-height:20px;
     background: var(--bg2); border:1px solid var(--line); color:var(--text-1);
   }
+  /* P3-05 R-10：暂停期横幅（裁决 §2.2 原文）。警示色只做左边框＋文字加粗，
+     不做大面积色块（跟随系统主题，浅深两态均可读）。 */
+  .pause-notice {
+    margin:12px 24px 0; padding:12px 16px; border-radius:12px; font-size:13px; line-height:20px;
+    background: var(--bg2); border:1px solid var(--line); border-left:4px solid var(--warning);
+    color:var(--text-1); font-weight:600;
+  }
   .dev {
     margin:16px 24px 0; padding:16px 20px; border-radius:12px;
     background: var(--bg2);
@@ -115,6 +122,23 @@
   .statebox .btn { max-width:260px; margin-left:auto; margin-right:auto; }
   .foot { margin-top:auto; padding:16px 24px; text-align:center;
     font-size:12px; color:var(--text-2); }
+  /* C 线 · 关闭确认独立弹窗（定夺 §4.4，LOCK-P1-01）：弹窗是 body 的直接子节点，
+     在 #list / #stateBox 之外，renderDevices / load 重渲染面板时不会碰到它；
+     无自动过期定时器，只有关闭／取消／提交成功才离开。 */
+  .modal-veil { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:10; }
+  .modal-veil[hidden] { display:none; }
+  .modal { width:440px; max-width:calc(100vw - 48px); background:var(--bg2); border:1px solid var(--line); border-radius:12px; padding:20px 22px; box-sizing:border-box; }
+  .modal h2 { font-size:17px; line-height:24px; margin:0 0 8px; color:var(--text-1); }
+  .modal .mstate { font-size:13px; line-height:20px; color:var(--text-2); margin-bottom:8px; }
+  .modal .mnote { font-size:13px; line-height:20px; color:var(--text-1); }
+  .modal label { display:block; font-size:12px; font-weight:500; line-height:18px; color:var(--text-2); margin:12px 0 4px; }
+  .modal input { width:100%; height:40px; box-sizing:border-box; padding:8px 12px; border-radius:var(--radius-1); font-size:14px; line-height:22px; border:1px solid var(--line); background:var(--surface-3); color:var(--text-1); outline:none; font-family:inherit; }
+  .modal input:focus { border-color:var(--brand); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--text-1); }
+  .modal .merr { font-size:13px; line-height:20px; min-height:20px; margin-top:8px; color:var(--text-1); font-weight:600; }
+  .modal .merr:empty { display:none; }
+  .modal .merr::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--danger); margin-right:6px; vertical-align:middle; }
+  .modal .mrow { display:flex; gap:10px; margin-top:12px; }
+  .modal .mrow .btn { margin-top:0; }
 
 </style>
 </head>
@@ -130,9 +154,31 @@
 
   <div class="intro">打开后，这台电脑屏幕变黑、只留输密码的框，坐在跟前的人看不见也动不了，必须输对密码才能用。远程控制不受影响。密码只用这一次：本地解锁成功后自动作废，下次打开重新设置。不想锁就不打开，关着一切照常。</div>
 
+  <!-- P3-05 R-10：暂停期横幅（GPT 三项定夺 §2.2 原文，一字不改）。暂停是写死在
+       服务端代码里的常量守卫（LOCK_REMEDIATION_PAUSE），本横幅只作风险告知，
+       不是安全控制的替代品——拦不住用户双击自有旧 EXE 副本。解除暂停时须按
+       统一受控流程同步撤下本横幅。 -->
+  <div class="pause-notice" id="lockPauseNotice">当前屏幕锁功能因兼容性故障暂停使用。请勿手动运行旧版 QFLockUI.exe。正常远程控制功能不受此项暂停影响。</div>
+
   <div class="statebox" id="stateBox">正在读取设备…</div>
   <div id="list"></div>
   <div class="msg" id="msg"></div>
+
+  <!-- C 线 · 关闭确认独立弹窗（定夺 §4.4）：与 #list 平级，不随面板重渲染重建 -->
+  <div class="modal-veil" id="lockConfirmModal" hidden role="dialog" aria-modal="true" aria-labelledby="lockConfirmTitle">
+    <div class="modal">
+      <h2 id="lockConfirmTitle">关闭屏幕锁</h2>
+      <div class="mstate" id="lockConfirmState"></div>
+      <div class="mnote">确定解除这台设备的屏幕锁吗？关闭后，本地人员可能重新看到并操作电脑。当前临时解锁密码将作废。</div>
+      <label for="lockConfirmLoginPw">登录密码（重新认证，可选填）</label>
+      <input type="password" id="lockConfirmLoginPw" autocomplete="off" placeholder="填了会再次验证登录密码">
+      <div class="merr" id="lockConfirmErr"></div>
+      <div class="mrow">
+        <button class="btn ghost" id="lockConfirmCancel">取消</button>
+        <button class="btn danger" id="lockConfirmGo">确认关闭</button>
+      </div>
+    </div>
+  </div>
 
   <div class="foot">QFRemote 远程控制 · 隐私锁</div>
 
@@ -145,13 +191,174 @@
   applyTheme(q.get('t') || 'light');
   qfLock.onTheme(applyTheme);
   document.getElementById('close').addEventListener('click', () => qfLock.close());
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') qfLock.close(); });
+  document.addEventListener('keydown', (e) => {
+    // C 线：确认弹窗打开时 Esc 只关弹窗（弹窗自己有独立的 Esc 处理），不关整个窗口。
+    if (e.key === 'Escape') {
+      const m = document.getElementById('lockConfirmModal');
+      if (m && !m.hidden) return;
+      qfLock.close();
+    }
+  });
 
   const stateBox = document.getElementById('stateBox');
   const listEl = document.getElementById('list');
   const msgEl = document.getElementById('msg');
   let devices = [];
   let busy = false;
+
+  // ---------- C 线 · 关闭确认独立弹窗（定夺 §4.4，LOCK-P1-01） ----------
+  // 弹窗状态与设备列表渲染完全独立：renderDevices 只重建 #list，load 只重读
+  // 设备，弹窗节点与本会话对象都不在重建范围内；没有自动取消定时器
+  // （旧实现“再次点击确认＋3.5 秒自动取消”即本次要修的缺陷，已删除）。
+  // 打开时冻结 device_id／lockId／revision＋操作挑战＋操作编号；提交前
+  // 服务端再校验 revision；提交中按钮禁用，重复点击不产生第二次真实请求。
+  const modalEl = document.getElementById('lockConfirmModal');
+  const modalStateEl = document.getElementById('lockConfirmState');
+  const modalErrEl = document.getElementById('lockConfirmErr');
+  const modalLoginPwEl = document.getElementById('lockConfirmLoginPw');
+  const modalGoEl = document.getElementById('lockConfirmGo');
+  const modalCancelEl = document.getElementById('lockConfirmCancel');
+  let confirmSession = null; // {device, lockId, revision, challenge, expiresAt, operationId}
+  let confirmBusy = false;
+  function newOperationId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return 'op-' + window.crypto.randomUUID();
+    return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+  function lockStateText(d) {
+    let t;
+    switch (d.lockState) {
+      case 'LOCKED': t = '已锁定'; break;
+      case 'UNLOCKED': t = '未锁定'; break;
+      case 'LOCKING': t = '正在锁定…'; break;
+      case 'UNLOCKING': t = '正在解除…'; break;
+      case 'RECOVERY_REQUIRED': t = '状态冲突，需恢复'; break;
+      case 'UNKNOWN': t = '状态未知'; break;
+      default: t = d.locked ? '已锁定' : '未锁定';
+    }
+    if (d.degraded) t += '（保护降级）';
+    return t;
+  }
+  function modalStateText(s) {
+    return '设备：' + s.device.name + '　状态：' + lockStateText(s.device)
+      + '（' + s.lockId + '，版本 ' + s.revision + '）';
+  }
+  function showModalErr(text) { modalErrEl.textContent = text || ''; }
+  function closeDisableConfirm() {
+    confirmSession = null;
+    confirmBusy = false;
+    modalLoginPwEl.value = '';
+    showModalErr('');
+    modalGoEl.disabled = false;
+    modalGoEl.textContent = '确认关闭';
+    modalEl.hidden = true;
+  }
+  async function openDisableConfirm(d) {
+    // 冻结快照（打开瞬间的值，提交时服务端再校验 revision）
+    confirmSession = {
+      device: d,
+      lockId: d.lockId || '',
+      revision: typeof d.revision === 'number' ? d.revision : 0,
+      challenge: null, expiresAt: 0, operationId: newOperationId(),
+    };
+    modalStateEl.textContent = modalStateText(confirmSession);
+    showModalErr('');
+    modalLoginPwEl.value = '';
+    modalGoEl.disabled = true;
+    modalGoEl.textContent = '正在确认…';
+    modalEl.hidden = false;
+    modalGoEl.focus();
+    let ch;
+    try { ch = await qfLock.challenge(d.id, 'disarm', confirmSession.operationId); } catch (e) { ch = { ok: false, error: String(e && e.message || e) }; }
+    if (!confirmSession || confirmSession.device.id !== d.id) return; // 期间已取消
+    if (ch && ch.ok && ch.challenge) {
+      confirmSession.challenge = ch.challenge;
+      confirmSession.expiresAt = ch.expiresAt;
+      modalGoEl.disabled = false;
+      modalGoEl.textContent = '确认关闭';
+    } else {
+      showModalErr((ch && ch.error) || '操作确认信息获取失败，请重新打开确认窗口。');
+      modalGoEl.disabled = false;
+      modalGoEl.textContent = '重新获取';
+    }
+  }
+  modalCancelEl.addEventListener('click', closeDisableConfirm);
+  modalGoEl.addEventListener('click', async () => {
+    if (!confirmSession || confirmBusy) return;
+    if (!confirmSession.challenge) { // 挑战未取到时点“重新获取”
+      const d = confirmSession.device;
+      closeDisableConfirm();
+      openDisableConfirm(d);
+      return;
+    }
+    if (Date.now() >= confirmSession.expiresAt) {
+      showModalErr('操作确认信息已过期（5 分钟），请重新打开确认窗口。');
+      return;
+    }
+    confirmBusy = true; modalGoEl.disabled = true;
+    const payload = {
+      challenge: confirmSession.challenge,
+      operationId: confirmSession.operationId,
+      revision: confirmSession.revision,
+    };
+    const lp = modalLoginPwEl.value;
+    if (lp) payload.loginPassword = lp;
+    let r;
+    try { r = await qfLock.disable(confirmSession.device.id, payload); } catch (e) { r = { ok: false, error: String(e && e.message || e), code: (e && e.code) || null }; }
+    modalLoginPwEl.value = '';
+    confirmBusy = false; modalGoEl.disabled = false;
+    if (r && r.ok) {
+      closeDisableConfirm();
+      // 先等面板刷新完再写成功提示：load() 开头会清消息，顺序反了提示就被吞掉。
+      await load();
+      say('<span class="ok">已关闭。</span>本次密码已作废。');
+      return;
+    }
+    if (r && r.code === 'revision-stale') {
+      // 状态已变化：弹窗不消失，显示错误，后台重取设备刷新冻结快照＋取新挑战，
+      // 等用户重新确认（不自动提交）。
+      showModalErr((r && r.error) || '设备状态已变化，请核对后再提交。');
+      modalGoEl.disabled = true;
+      modalGoEl.textContent = '正在确认…';
+      let fresh = null;
+      try { fresh = await qfLock.devices(); } catch (e) { fresh = null; }
+      const fd = fresh && fresh.ok && (fresh.devices || []).find((x) => x.id === confirmSession.device.id);
+      if (fd) {
+        confirmSession.device = fd;
+        confirmSession.lockId = fd.lockId || confirmSession.lockId;
+        confirmSession.revision = typeof fd.revision === 'number' ? fd.revision : confirmSession.revision;
+        modalStateEl.textContent = modalStateText(confirmSession);
+      }
+      let ch = null;
+      try { ch = await qfLock.challenge(confirmSession.device.id, 'disarm', confirmSession.operationId); } catch (e) { ch = null; }
+      if (ch && ch.ok && ch.challenge) {
+        confirmSession.challenge = ch.challenge;
+        confirmSession.expiresAt = ch.expiresAt;
+        confirmSession.operationId = newOperationId();
+        // 保留“状态已变化”的提醒（改写为已更新），不要清掉让用户以为无事发生。
+        showModalErr('设备状态已变化，已更新为最新状态，请核对后重新确认。');
+        modalGoEl.disabled = false;
+        modalGoEl.textContent = '确认关闭';
+      } else {
+        showModalErr('设备状态已变化，且未能重新获取确认信息，请关闭后重试。');
+        modalGoEl.disabled = false;
+        modalGoEl.textContent = '重新获取';
+        confirmSession.challenge = null;
+      }
+      return;
+    }
+    if (r && r.code === 'step-up-required') {
+      // P3-03：高风险／增强保护须升级认证——弹窗不消失，提示用户在上方
+      // 密码栏输入登录密码后重新确认，绝不降级为普通确认。
+      showModalErr((r && r.error) || '本次解锁风险较高，请重新输入登录密码完成验证后再试。');
+      if (modalLoginPwEl) modalLoginPwEl.focus();
+      return;
+    }
+    // 超时／掉线／拒绝：留在弹窗里显示准确错误，不改写成“未锁定”，不自动关闭。
+    showModalErr((r && r.error) || '关闭失败，请稍后再试。');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalEl && !modalEl.hidden) closeDisableConfirm();
+  });
 
   function say(html, bad) {
     msgEl.innerHTML = html || '';
@@ -212,7 +419,7 @@
       nm.className = 'dname'; nm.textContent = d.name;
       const st = document.createElement('div');
       st.className = 'dstat' + (d.locked ? ' locked' : '');
-      st.textContent = d.locked ? '已锁定' : '未锁定';
+      st.textContent = lockStateText(d);
       row.appendChild(nm); row.appendChild(st);
 
       const manageable = d.owner && d.component === true;
@@ -255,7 +462,7 @@
         ops.appendChild(off); ops.appendChild(forgot); ops.appendChild(rform);
         card.appendChild(ops);
 
-        let armed = false;
+        // C 线：旧 armed 二次确认已删（见上方 off 处理，改走独立弹窗）。
         sw.addEventListener('click', () => {
           if (busy) return;
           if (d.locked) {
@@ -280,19 +487,10 @@
           if (r && r.ok) { say('<span class="ok">已开启。</span>本机屏幕已锁定，须在本机输入正确密码后使用。'); load(); }
           else say('<span class="bad">' + esc((r && r.error) || '打开失败，请稍后再试。') + '</span>', true);
         });
-        off.addEventListener('click', async () => {
+        // C 线：关锁走独立确认弹窗（定夺 §4.4），不再用“再次点击＋3.5 秒过期”。
+        off.addEventListener('click', () => {
           if (busy) return;
-          if (!armed) {
-            armed = true;
-            off.textContent = '再次点击确认关闭（本次密码立即作废）';
-            setTimeout(() => { armed = false; off.textContent = '关闭隐私锁'; }, 3500);
-            return;
-          }
-          busy = true; off.disabled = true;
-          const r = await qfLock.disable(d.id);
-          busy = false; off.disabled = false;
-          if (r && r.ok) { say('<span class="ok">已关闭。</span>本次密码已作废。'); load(); }
-          else say('<span class="bad">' + esc((r && r.error) || '关闭失败，请稍后再试。') + '</span>', true);
+          openDisableConfirm(d);
         });
         forgot.addEventListener('click', () => rform.classList.toggle('show'));
         rgo.addEventListener('click', async () => {
@@ -374,6 +572,8 @@
       renderState('retry', (r && r.error) || '暂时无法连接隐私锁服务，请检查网络后重试。');
     }
   }
+  // C 线测试钩子：面板刷新入口（自动化 60 秒弹窗测试用；生产行为不变）。
+  window.__lockPanelRefresh = load;
   load();
 </script>
 </body>
