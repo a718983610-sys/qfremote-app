@@ -57,10 +57,22 @@ console.log('build-test-main: client-sha256=' + clientSha);
 
 const pkg = JSON.parse(fs.readFileSync(path.join(windowsDir, 'package.json'), 'utf8'));
 const files = pkg.build.files || [];
+// 2026-11-19（已合入仓内脚本）：build.files 含 glob 条目 lock-v2/**/*
+// （B 线 217506f 引入），原脚本按字面路径处理会报缺文件。此处把含 *
+// 的条目展开为相对路径文件列表（仅文件、排序稳定）。
+const expandedFiles = [];
+for (const f of files) {
+  if (!f.includes('*')) { expandedFiles.push(f); continue; }
+  const hits = fs.globSync(f, { cwd: windowsDir })
+    .filter((h) => fs.statSync(path.join(windowsDir, h)).isFile()).sort();
+  if (!hits.length) die('glob 无匹配：' + f);
+  expandedFiles.push(...hits);
+}
+console.log('build-test-main: glob 展开后 files=' + expandedFiles.length + '（原 ' + files.length + ' 条）');
 const srcDir = path.join(outDir, 'asar-src');
 fs.rmSync(srcDir, { recursive: true, force: true });
 const missing = [];
-for (const f of files) {
+for (const f of expandedFiles) {
   const s = path.join(windowsDir, f);
   if (!fs.existsSync(s)) { missing.push(f); continue; }
   const d = path.join(srcDir, f);
@@ -109,9 +121,9 @@ if (list.status !== 0) die('asar list 失败 exit=' + list.status);
 const listed = list.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   .map((s) => s.replace(/^\//, ''));
 const listedSet = new Set(listed);
-const missingInAsar = files.filter((f) => !listedSet.has(f));
+const missingInAsar = expandedFiles.filter((f) => !listedSet.has(f));
 if (missingInAsar.length) die('asar 内缺文件：' + JSON.stringify(missingInAsar));
-console.log('build-test-main: asar files=' + listed.length + '（staging ' + files.length + '，缺 0）');
+console.log('build-test-main: asar files=' + listed.length + '（staging ' + expandedFiles.length + '，缺 0）');
 
 const extractDir = path.join(outDir, 'asar-verify');
 fs.rmSync(extractDir, { recursive: true, force: true });
