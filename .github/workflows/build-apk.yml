@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       build_date:
-        description: '构建日期（YYYY-MM-DD），固定且可验证的溯源输入；留空则用运行当天日期（Asia/Shanghai）'
+        description: '构建日期（YYYY-MM-DD），固定且可验证的溯源输入；留空则用运行当天日期（UTC）'
         required: false
         type: string
   pull_request:
@@ -146,6 +146,11 @@ jobs:
       - name: 读版本（pubspec.yaml）并写入构建日期
         shell: bash
         working-directory: android-app
+        # build_date 输入安全（GPT 2026-11-20 重问版第二节，合并前硬门）：
+        # 手动输入不得直接插进 Bash 脚本——GitHub 先做表达式替换再让 Shell
+        # 执行，事后格式校验来不及。改走 env 传递再校验。
+        env:
+          REQUESTED_BUILD_DATE: ${{ inputs.build_date }}
         run: |
           VER=$(grep '^version:' pubspec.yaml | sed 's/version: *//;s/[[:space:]]*$//')
           echo "APP_VERSION=${VER%%+*}" >> "$GITHUB_ENV"
@@ -153,16 +158,20 @@ jobs:
           echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
           echo "pubspec version: $VER"
           # 构建日期输入（GPT 建议）：workflow_dispatch 可传固定 build_date
-          # （YYYY-MM-DD，固定且可验证）；留空或 PR 触发时仍用运行当天日期，
-          # 不改构建语义。日期与来源记入 sidecar 供溯源。
-          if [ -n "${{ inputs.build_date }}" ]; then
-            D="${{ inputs.build_date }}"
+          # （YYYY-MM-DD，固定且可验证）；留空或 PR 触发时仍用运行当天日期
+          # （UTC），不改构建语义。日期与来源记入 sidecar 供溯源。
+          if [ -n "$REQUESTED_BUILD_DATE" ]; then
+            D="$REQUESTED_BUILD_DATE"
             BUILD_DATE_SOURCE="workflow_dispatch input"
           else
-            D=$(TZ=Asia/Shanghai date +%F)
-            BUILD_DATE_SOURCE="run date (Asia/Shanghai)"
+            D=$(date -u +%F)
+            BUILD_DATE_SOURCE="run date (UTC)"
           fi
+          # ① 格式校验：YYYY-MM-DD
           echo "$D" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || { echo "::error::build_date 格式须为 YYYY-MM-DD，当前：$D"; exit 1; }
+          # ② 存在性校验：GNU date 会把 2026-02-31 归一化成 2026-03-03，
+          #    故比对回绕后的日期与输入是否一致，不一致即拒绝。
+          [ "$(date -d "$D" +%F 2>/dev/null)" = "$D" ] || { echo "::error::build_date 不是真实存在的日期：$D"; exit 1; }
           echo "BUILD_DATE=$D" >> "$GITHUB_ENV"
           echo "BUILD_DATE_SOURCE=$BUILD_DATE_SOURCE" >> "$GITHUB_ENV"
           echo "kBuildDate: $D（来源：$BUILD_DATE_SOURCE）"
