@@ -208,13 +208,19 @@ jobs:
             exit 1
           fi
           echo "未签名断言通过：APK 顶层 META-INF 内无 v1 签名块"
-          # apksigner 应校验失败（未签名是预期状态，只记录，不当作错误）。
-          if "$ANDROID_HOME/build-tools/$BT/apksigner" verify "$APK" 2>&1; then
-            echo "::error::apksigner 竟校验通过，产物并非未签名，拒绝上传"
-            exit 1
-          else
-            echo "apksigner 校验失败（符合未签名预期）"
-          fi
+          # apksigner 必须校验失败（未签名是预期状态，覆盖 v1/v2/v3/v4）。
+          # 注意（试跑 44725118334 实证）：Windows 的 build-tools 里只有
+          # apksigner.bat、没有 apksigner 可执行文件；直接调 apksigner
+          # 会报 No such file（退出 127），旧写法把“命令不存在”误读成
+          # “校验失败”——那一轮的 apksigner 证据无效。因此先断言二进制
+          # 存在，再要求输出含 DOES NOT VERIFY，两项缺一不可；缺二进制或
+          # 输出不对都直接失败，绝不把“没跑起来”当成“未签名”。
+          APKSIGNER="$ANDROID_HOME/build-tools/$BT/apksigner.bat"
+          test -f "$APKSIGNER" || { echo "::error::找不到 apksigner.bat：$APKSIGNER"; exit 1; }
+          VERIFY_OUT=$("$APKSIGNER" verify "$APK" 2>&1 || true)
+          echo "$VERIFY_OUT"
+          echo "$VERIFY_OUT" | grep -q "DOES NOT VERIFY" || { echo "::error::apksigner 输出不含 DOES NOT VERIFY，无法证明未签名，拒绝上传"; exit 1; }
+          echo "apksigner 校验失败（DOES NOT VERIFY，符合未签名预期）"
           SHA=$(sha256sum "$APK" | awk '{print $1}')
           SIZE=$(stat -c%s "$APK")
           echo "SHA-256: $SHA"
@@ -223,7 +229,7 @@ jobs:
           echo "APK_SIZE=$SIZE" >> "$GITHUB_ENV"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk"
           cat > "build/app/outputs/flutter-apk/build-unsigned.json" <<EOF
-          {"version": "$APP_VERSION", "channel": "unsigned", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "sha256": "$SHA", "size_bytes": $SIZE, "note": "未签名 release APK，须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。"}
+          {"version": "$APP_VERSION", "channel": "unsigned", "commit": "$GITHUB_SHA", "built_at": "$(date -u +%FT%TZ)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "sha256": "$SHA", "size_bytes": $SIZE, "note": "未签名 release APK，须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。"}
           EOF
           cat build/app/outputs/flutter-apk/build-unsigned.json
 
