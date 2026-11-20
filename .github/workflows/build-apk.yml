@@ -1,0 +1,218 @@
+name: Android 未签名构建（Windows）
+
+# QFRemote 安卓控制端：长期编译走 GitHub Actions 免费 Runner（公开仓库标准
+# Runner 免费、分钟不限量；windows-latest 为 4 核 16GB，远强于 2 核 2GB
+# 的腾讯云 CVM）。站长 2026-11-20 拍板；GPT 构建方向裁决（2026-11-20）
+# 批准“云端构建、可信设备签名”的分工。
+#
+# 本工作流只做一件事：在 windows-latest 上编出未签名 release APK 并作为
+# artifact 上传。Runner 上绝不出现签名密钥、key.properties 与任何口令；
+# 签名在可信设备另行做（未签名 APK → 验 SHA → zipalign → apksigner）。
+#
+# 触发方式：仅手动（workflow_dispatch）。自动触发（push/PR）须在分支与
+# 签名配置问题定夺后再加，不要擅自加上。
+#
+# 重要限制（2026-11-20 实测）：
+# - main 分支的 build.gradle.kts 在无 key.properties 时会回退 debug 签名，
+#   本工作流在 Runner 内临时把 release signingConfig 改为 null（只改
+#   Runner 的工作副本，不提交进仓库），产出真正的未签名 APK；改动与核对
+#   都写进日志，改不成功就直接失败，绝不静默出 debug 签名包。
+# - RC 合并树（a16s2-merge-20261119，e2f6425）的 build.gradle.kts 有
+#   站长 2026-11-16 终局拍板的签名硬门（taskGraph 门，无完整签名即拒绝
+#   构建）。本工作流检测到该硬门时直接失败、拒绝绕过；在 RC 分支上跑
+#   未签名构建，须先经 GPT/站长批准专门的未签名构建配置。
+# - 本工作流不读 version.json（main 上没有该文件）；版本取自
+#   android-app/pubspec.yaml（3.0.0+30000）。
+on:
+  workflow_dispatch:
+
+# 最小权限。actions: write 是上传构建产物所必需的最小写权限。
+permissions:
+  contents: read
+  actions: write
+
+env:
+  FLUTTER_VERSION: '3.47.8'        # 腾讯机第 5 轮成功构建的版本（Dart 3.13.7）
+  JAVA_VERSION: '21.0.13+9'        # Temurin JDK，腾讯机成功构建的版本
+  BUILD_TOOLS_VERSION: '36.0.0'    # Android SDK build-tools，腾讯机成功构建的版本
+  ANDROID_PLATFORM: 'android-36'   # compileSdk = flutter.compileSdkVersion = 36
+
+jobs:
+  build-unsigned:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      # 第三方 action 固定到已审查的完整 commit SHA（注释为对应版本）。
+      # checkout/setup-java/flutter-action/upload-artifact 的 SHA 与
+      # .github/workflows/android.yml（RC 树）一致；actions/cache 的 SHA
+      # 为 v4 标签对应的 commit（gh api 核验）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Java ${{ env.JAVA_VERSION }}（Temurin）
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: 安装 Android SDK 包
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/build-tools" || true
+          SD KM=""
+          if [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" ]; then
+            SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat"
+          else
+            SD KM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager.bat 2>/dev/null | sort -V | tail -1)
+          fi
+          [ -n "$SDKM" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "platforms;$ANDROID_PLATFORM" "build-tools;$BUILD_TOOLS_VERSION"
+          echo "已装 build-tools："
+          ls "$ANDROID_HOME/build-tools"
+
+      - name: Flutter ${{ env.FLUTTER_VERSION }}（Dart 3.13.7）
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 缓存 Gradle
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-windows-${{ hashFiles('android-app/android/gradle/wrapper/gradle-wrapper.properties', 'android-app/android/settings.gradle.kts', 'android-app/android/app/build.gradle.kts', 'android-app/pubspec.lock') }}
+          restore-keys: |
+            gradle-windows-
+
+      - name: 工具链自检
+        shell: bash
+        run: |
+          flutter --version
+          java -version 2>&1
+          python --version
+          flutter doctor -v || true
+
+      - name: 读版本（pubspec.yaml）并写入构建日期
+        shell: bash
+        working-directory: android-app
+        run: |
+          VER=$(grep '^version:' pubspec.yaml | sed 's/version: *//;s/[[:space:]]*$//')
+          echo "APP_VERSION=${VER%%+*}" >> "$GITHUB_ENV"
+          echo "APP_BUILD=${VER##*+}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          echo "pubspec version: $VER"
+          D=$(TZ=Asia/Shanghai date +%F)
+          sed -i "s/const String kBuildDate = '.*';/const String kBuildDate = '$D';/" lib/build_info.dart
+          grep kBuildDate lib/build_info.dart
+
+      - name: 配置未签名 release 构建（Runner 内临时修改，不提交）
+        shell: bash
+        working-directory: android-app/android
+        run: |
+          python - <<'PYEOF'
+          import sys
+          p = 'app/build.gradle.kts'
+          s = open(p, encoding='utf-8').read()
+          # RC 树签名硬门：检测到即拒绝，须另行批准未签名构建配置。
+          if 'Release signing is missing' in s or 'releaseSigningComplete' in s:
+              print('::error::检测到 RC 树签名硬门（taskGraph 门）。本工作流未获授权绕过；')
+              print('::error::须先经 GPT/站长批准“未签名 release 构建配置”后才能在该分支上跑。')
+              sys.exit(1)
+          old = '''        release {
+                      signingConfig = if (keystorePropertiesFile.exists()) {
+                          signingConfigs.getByName("release")
+                      } else {
+                          signingConfigs.getByName("debug")
+                      }
+                  }'''
+          new = '''        release {
+                      // CI 未签名构建（本工作流只产未签名包，签名在可信设备另行做）：
+                      // 明确拒绝 debug 签名回退；signingConfig = null 生成真正未签名 APK。
+                      signingConfig = null
+                  }'''
+          if old not in s:
+              print('::error::未识别的 build.gradle.kts release 配置，拒绝继续（防静默出 debug 签名包）。')
+              sys.exit(1)
+          s = s.replace(old, new, 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          s2 = open(p, encoding='utf-8').read()
+          assert 'signingConfig = null' in s2, '补丁未生效'
+          assert 'getByName("debug")' not in s2, 'debug 签名回退仍在'
+          print('已将 release signingConfig 改为 null（Runner 内临时修改，不提交）。')
+          PYEOF
+          git diff -- app/build.gradle.kts
+
+      - name: 拉依赖
+        shell: bash
+        working-directory: android-app
+        run: flutter pub get
+
+      - name: 静态检查
+        shell: bash
+        working-directory: android-app
+        run: flutter analyze
+
+      - name: 单元测试
+        shell: bash
+        working-directory: android-app
+        run: flutter test
+
+      - name: 构建未签名 release APK
+        shell: bash
+        working-directory: android-app
+        run: flutter build apk --release
+
+      - name: 验包（未签名断言 + 版本 + SHA）
+        shell: bash
+        working-directory: android-app
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          test -f "$APK" || { echo "::error::未找到产物 $APK"; exit 1; }
+          ls -la "$APK"
+          BT="$BUILD_TOOLS_VERSION"
+          echo "build-tools: $BT"
+          BADGING=$("$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$APK")
+          echo "$BADGING" | head -3
+          echo "$BADGING" | grep -q "package: name='com.qfremote.android'" || { echo "::error::包名不符"; exit 1; }
+          echo "$BADGING" | grep -q "versionCode='30000'" || { echo "::error::versionCode 不符（期望 30000）"; exit 1; }
+          echo "$BADGING" | grep -q "versionName='3.0.0'" || { echo "::error::versionName 不符（期望 3.0.0）"; exit 1; }
+          # 未签名断言：APK 内不得有任何签名块（META-INF/*.RSA/*.DSA/*.EC/*.SF/*.MF）。
+          # 注意：META-INF/*.kotlin_module 等非签名文件是允许的，不在此列。
+          if unzip -l "$APK" | grep -qE 'META-INF/.*\.(RSA|DSA|EC|SF|MF)'; then
+            echo "::error::产物含签名块，不是未签名包，拒绝上传"
+            unzip -l "$APK" | grep -E 'META-INF/' || true
+            exit 1
+          fi
+          echo "未签名断言通过：APK 内无签名块"
+          # apksigner 应校验失败（未签名是预期状态，只记录，不当作错误）。
+          if "$ANDROID_HOME/build-tools/$BT/apksigner" verify "$APK" 2>&1; then
+            echo "::error::apksigner 竟校验通过，产物并非未签名，拒绝上传"
+            exit 1
+          else
+            echo "apksigner 校验失败（符合未签名预期）"
+          fi
+          SHA=$(sha256sum "$APK" | awk '{print $1}')
+          SIZE=$(stat -c%s "$APK")
+          echo "SHA-256: $SHA"
+          echo "大小: $SIZE 字节"
+          echo "APK_SHA256=$SHA" >> "$GITHUB_ENV"
+          echo "APK_SIZE=$SIZE" >> "$GITHUB_ENV"
+          cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk"
+          cat > "build/app/outputs/flutter-apk/build-unsigned.json" <<EOF
+          {"version": "$APP_VERSION", "channel": "unsigned", "commit": "$GITHUB_SHA", "built_at": "$(TZ=Asia/Shanghai date +%FT%T%z)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "sha256": "$SHA", "size_bytes": $SIZE, "note": "未签名 release APK，须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。"}
+          EOF
+          cat build/app/outputs/flutter-apk/build-unsigned.json
+
+      - name: 上传未签名产物
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: QFRemote-v${{ env.APP_VERSION }}-unsigned-${{ env.SHORT_SHA }}-apk
+          path: |
+            android-app/build/app/outputs/flutter-apk/QFRemote-v${{ env.APP_VERSION }}-unsigned-${{ env.SHORT_SHA }}.apk
+            android-app/build/app/outputs/flutter-apk/build-unsigned.json
+          if-no-files-found: error
