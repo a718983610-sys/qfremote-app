@@ -45,6 +45,9 @@ env:
                                    # 写 '21.0.13+9' 会报 No matching version（2026-11-20 试跑实证）
   BUILD_TOOLS_VERSION: '36.0.0'    # Android SDK build-tools，腾讯机成功构建的版本
   ANDROID_PLATFORM: 'android-36'   # compileSdk = flutter.compileSdkVersion = 36
+  PYTHONIOENCODING: 'utf-8'        # Windows 的 Python 默认 stdout 是 cp1252，打印中文即
+                                   # UnicodeEncodeError 崩（试跑 44721581221 实证：补丁本身已
+                                   # 生效，只因最后一行中文 print 崩掉整步）；强制 UTF-8。
 
 jobs:
   build-unsigned:
@@ -54,7 +57,7 @@ jobs:
       # 第三方 action 固定到已审查的完整 commit SHA（注释为对应版本）。
       # checkout/setup-java/flutter-action/upload-artifact 的 SHA 与
       # .github/workflows/android.yml（RC 树）一致；actions/cache 的 SHA
-      # 为 v4 标签对应的 commit（gh api 核验）。
+      # 为 v5 标签对应的 commit（gh api 核验，v5.1.0）。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Java ${{ env.JAVA_VERSION }}（Temurin）
@@ -89,7 +92,7 @@ jobs:
           cache: true
 
       - name: 缓存 Gradle
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.gradle/caches
