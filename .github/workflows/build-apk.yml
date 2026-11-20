@@ -9,8 +9,10 @@ name: Android 未签名构建（Windows）
 # artifact 上传。Runner 上绝不出现签名密钥、key.properties 与任何口令；
 # 签名在可信设备另行做（未签名 APK → 验 SHA → zipalign → apksigner）。
 #
-# 触发方式：仅手动（workflow_dispatch）。自动触发（push/PR）须在分支与
-# 签名配置问题定夺后再加，不要擅自加上。
+# 触发方式：手动（workflow_dispatch）为主；PR 触碰本文件时跑一次，供合并前
+# 审查（GitHub 规定：workflow_dispatch 只能触发已存在于默认分支 main 上
+# 的工作流，因此新工作流的首次真实试跑须走 PR 触发；自动触发（push/PR
+# 改动产品代码）须在分支与签名配置问题定夺后再加，不要擅自加上）。
 #
 # 重要限制（2026-11-20 实测）：
 # - main 分支的 build.gradle.kts 在无 key.properties 时会回退 debug 签名，
@@ -25,6 +27,10 @@ name: Android 未签名构建（Windows）
 #   android-app/pubspec.yaml（3.0.0+30000）。
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-apk.yml'
 
 # 最小权限。actions: write 是上传构建产物所必需的最小写权限。
 permissions:
