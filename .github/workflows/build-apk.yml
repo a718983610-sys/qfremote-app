@@ -9,6 +9,11 @@ name: Android 未签名构建（Windows）
 # artifact 上传。Runner 上绝不出现签名密钥、key.properties 与任何口令；
 # 签名在可信设备另行做（未签名 APK → 验 SHA → zipalign → apksigner）。
 #
+# GPT 2026-11-20 PR #1 裁决：有条件批准合并，先修 4 项再合并——PR-1 最小权限
+# （只留 contents: read，复跑实证 upload-artifact）、PR-2 构建溯源（六字段）、
+# PR-3 未签名判定加强（三层）、PR-4 两项非阻断告警登记；另加 workflow_dispatch
+# 的 build_date 固定输入（PR 触发时仍用运行当天日期，不改构建语义）。
+#
 # 触发方式：手动（workflow_dispatch）为主；PR 触碰本文件时跑一次，供合并前
 # 审查（GitHub 规定：workflow_dispatch 只能触发已存在于默认分支 main 上
 # 的工作流，因此新工作流的首次真实试跑须走 PR 触发；自动触发（push/PR
@@ -27,15 +32,21 @@ name: Android 未签名构建（Windows）
 #   android-app/pubspec.yaml（3.0.0+30000）。
 on:
   workflow_dispatch:
+    inputs:
+      build_date:
+        description: '构建日期（YYYY-MM-DD），固定且可验证的溯源输入；留空则用运行当天日期（Asia/Shanghai）'
+        required: false
+        type: string
   pull_request:
     branches: [main]
     paths:
       - '.github/workflows/build-apk.yml'
 
-# 最小权限。actions: write 是上传构建产物所必需的最小写权限。
+# 最小权限（GPT PR-1 裁决，2026-11-20）：只保留 contents: read，
+# actions: write 已去掉；upload-artifact 是否仍成功由本轮复跑实证——
+# 若确有新的 API 权限要求，再按官方权限契约单独授予最小范围。
 permissions:
   contents: read
-  actions: write
 
 env:
   FLUTTER_VERSION: '3.47.8'        # 腾讯机第 5 轮成功构建的版本（Dart 3.13.7）
@@ -59,6 +70,29 @@ jobs:
       # .github/workflows/android.yml（RC 树）一致；actions/cache 的 SHA
       # 为 v5 标签对应的 commit（gh api 核验，v5.1.0）。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: 记录构建溯源（修改前，GPT PR-2）
+        shell: bash
+        run: |
+          # 溯源身份必须在 Runner 修改任何源码前采集：本步之后，
+          # “读版本”步会改 lib/build_info.dart（kBuildDate），
+          # “配置未签名构建”步会改 app/build.gradle.kts。
+          # pull_request 事件检出的是测试合并提交（GITHUB_SHA），
+          # 不是 PR 真实 HEAD——两者都要分别记录，不能只记一个。
+          CHECKED_OUT=$(git rev-parse HEAD)
+          SOURCE_TREE=$(git rev-parse HEAD^{tree})
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          BASE="${{ github.event.pull_request.base.sha }}"
+          [ -z "$PR_HEAD" ] && PR_HEAD="not-a-pr-run"
+          [ -z "$BASE" ] && BASE="not-a-pr-run"
+          echo "CHECKED_OUT_COMMIT=$CHECKED_OUT" >> "$GITHUB_ENV"
+          echo "PR_HEAD_COMMIT=$PR_HEAD" >> "$GITHUB_ENV"
+          echo "BASE_COMMIT=$BASE" >> "$GITHUB_ENV"
+          echo "SOURCE_TREE_SHA=$SOURCE_TREE" >> "$GITHUB_ENV"
+          echo "checked_out_commit: $CHECKED_OUT"
+          echo "pr_head_commit: $PR_HEAD"
+          echo "base_commit: $BASE"
+          echo "source_tree_sha: $SOURCE_TREE"
 
       - name: Java ${{ env.JAVA_VERSION }}（Temurin）
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -118,7 +152,20 @@ jobs:
           echo "APP_BUILD=${VER##*+}" >> "$GITHUB_ENV"
           echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
           echo "pubspec version: $VER"
-          D=$(TZ=Asia/Shanghai date +%F)
+          # 构建日期输入（GPT 建议）：workflow_dispatch 可传固定 build_date
+          # （YYYY-MM-DD，固定且可验证）；留空或 PR 触发时仍用运行当天日期，
+          # 不改构建语义。日期与来源记入 sidecar 供溯源。
+          if [ -n "${{ inputs.build_date }}" ]; then
+            D="${{ inputs.build_date }}"
+            BUILD_DATE_SOURCE="workflow_dispatch input"
+          else
+            D=$(TZ=Asia/Shanghai date +%F)
+            BUILD_DATE_SOURCE="run date (Asia/Shanghai)"
+          fi
+          echo "$D" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || { echo "::error::build_date 格式须为 YYYY-MM-DD，当前：$D"; exit 1; }
+          echo "BUILD_DATE=$D" >> "$GITHUB_ENV"
+          echo "BUILD_DATE_SOURCE=$BUILD_DATE_SOURCE" >> "$GITHUB_ENV"
+          echo "kBuildDate: $D（来源：$BUILD_DATE_SOURCE）"
           sed -i "s/const String kBuildDate = '.*';/const String kBuildDate = '$D';/" lib/build_info.dart
           grep kBuildDate lib/build_info.dart
 
@@ -158,6 +205,14 @@ jobs:
           print('已将 release signingConfig 改为 null（Runner 内临时修改，不提交）。')
           PYEOF
           git diff -- app/build.gradle.kts
+          # 构建配置改动身份（GPT PR-2）：此时工作树已有两处 Runner 临时修改
+          # （lib/build_info.dart 的 kBuildDate＋本步的 signingConfig），
+          # 取全量 git diff 的 SHA-256 作为 build_config_patch_sha。
+          PATCH_SHA=$(git diff | sha256sum | awk '{print $1}')
+          echo "BUILD_CONFIG_PATCH_SHA=$PATCH_SHA" >> "$GITHUB_ENV"
+          echo "build_config_patch_sha: $PATCH_SHA"
+          echo "本次构建对源码的临时改动（两处）："
+          git diff --stat
 
       - name: 拉依赖
         shell: bash
@@ -177,9 +232,13 @@ jobs:
       - name: 构建未签名 release APK
         shell: bash
         working-directory: android-app
-        run: flutter build apk --release
+        run: |
+          # 输出 tee 到 build-output.log，供验包步检测已知非阻断告警
+          # （CI-KOTLIN-CACHE-WARNING）；pipefail 保证构建失败仍使本步失败。
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee build-output.log
 
-      - name: 验包（未签名断言 + 版本 + SHA）
+      - name: 验包（未签名三层判定 + 版本 + SHA + 溯源记录）
         shell: bash
         working-directory: android-app
         run: |
@@ -193,34 +252,66 @@ jobs:
           echo "$BADGING" | grep -q "package: name='com.qfremote.android'" || { echo "::error::包名不符"; exit 1; }
           echo "$BADGING" | grep -q "versionCode='30000'" || { echo "::error::versionCode 不符（期望 30000）"; exit 1; }
           echo "$BADGING" | grep -q "versionName='3.0.0'" || { echo "::error::versionName 不符（期望 3.0.0）"; exit 1; }
-          # 未签名断言（结构层）：APK 顶层 META-INF 内不得有 v1 签名块文件
+          # 未签名判定第 1 层（结构）：APK 顶层 META-INF 内不得有 v1 签名块文件
           # （*.RSA/*.DSA/*.EC/*.SF）。只查顶层、只查这四种后缀、行尾锚定。
           # 教训（试跑 44723007019 实证）：依赖库会自带嵌套的 MANIFEST.MF
           # （如 META-INF/versions/9/OSGI-INF/MANIFEST.MF，145 字节 OSGi
           # 元数据）与大量 .version/.properties 文件——都不是签名；旧断言
           # 把 .MF 一概当签名块且未锚定行尾，误杀了这个合法的未签名包。
-          # MANIFEST.MF 本身不是签名（v1 签名 = .SF + 密钥文件）；真正的
-          # 未签名判定以下面的 apksigner verify 为准（覆盖 v1/v2/v3/v4）。
+          # MANIFEST.MF 本身不是签名（v1 签名 = .SF + 密钥文件）。
           echo "META-INF 清单（备查）："
           unzip -l "$APK" | grep -E 'META-INF/' || true
           if unzip -l "$APK" | awk '{print $4}' | grep -qE '^META-INF/[^/]+\.(RSA|DSA|EC|SF)$'; then
             echo "::error::产物含 v1 签名块，不是未签名包，拒绝上传"
             exit 1
           fi
-          echo "未签名断言通过：APK 顶层 META-INF 内无 v1 签名块"
-          # apksigner 必须校验失败（未签名是预期状态，覆盖 v1/v2/v3/v4）。
+          echo "未签名判定第 1 层通过：APK 顶层 META-INF 内无 v1 签名块"
+          # 未签名判定第 2 层（结构，Python）：APK 签名块魔数＋全包证书文件扫描。
+          # v2/v3/v4 签名块的魔数 "APK Sig Block 42" 必须不存在；任何
+          # .RSA/.DSA/.EC/.SF 文件（证书/签名文件）必须不存在。本地已对
+          # run5/run6 产物实测通过（无魔数、无此类文件）。
+          python - <<'PYEOF'
+          import sys, zipfile, re
+          apk = 'build/app/outputs/flutter-apk/app-release.apk'
+          data = open(apk, 'rb').read()
+          if b'APK Sig Block 42' in data:
+              print('::error::产物含 APK 签名块（v2/v3/v4），不是未签名包，拒绝上传')
+              sys.exit(1)
+          z = zipfile.ZipFile(apk)
+          certs = [n for n in z.namelist() if re.search(r'\.(RSA|DSA|EC|SF)$', n, re.I)]
+          if certs:
+              print('::error::产物含证书/签名文件：%s，拒绝上传' % certs)
+              sys.exit(1)
+          print('未签名判定第 2 层通过：无 APK 签名块、无任何证书/签名文件')
+          PYEOF
+          # 未签名判定第 3 层（权威校验，GPT PR-3）：apksigner verify --verbose。
+          # 只看“校验返回非零”不够——签名存在但损坏也会失败；必须核对失败的
+          # 明确原因：签名者数为 0（无签名证书），各方案均未验证。
           # 注意（试跑 44725118334 实证）：Windows 的 build-tools 里只有
           # apksigner.bat、没有 apksigner 可执行文件；直接调 apksigner
           # 会报 No such file（退出 127），旧写法把“命令不存在”误读成
           # “校验失败”——那一轮的 apksigner 证据无效。因此先断言二进制
-          # 存在，再要求输出含 DOES NOT VERIFY，两项缺一不可；缺二进制或
-          # 输出不对都直接失败，绝不把“没跑起来”当成“未签名”。
+          # 存在，再要求输出含 DOES NOT VERIFY 与 Number of signers: 0，
+          # 三项缺一不可；缺二进制或输出不对都直接失败，绝不把“没跑起来”
+          # 当成“未签名”。
           APKSIGNER="$ANDROID_HOME/build-tools/$BT/apksigner.bat"
           test -f "$APKSIGNER" || { echo "::error::找不到 apksigner.bat：$APKSIGNER"; exit 1; }
-          VERIFY_OUT=$("$APKSIGNER" verify "$APK" 2>&1 || true)
+          VERIFY_OUT=$("$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1 || true)
           echo "$VERIFY_OUT"
           echo "$VERIFY_OUT" | grep -q "DOES NOT VERIFY" || { echo "::error::apksigner 输出不含 DOES NOT VERIFY，无法证明未签名，拒绝上传"; exit 1; }
-          echo "apksigner 校验失败（DOES NOT VERIFY，符合未签名预期）"
+          echo "$VERIFY_OUT" | grep -q "Number of signers: 0" || { echo "::error::apksigner 未确认签名者数为 0，无法证明无签名证书，拒绝上传"; exit 1; }
+          echo "未签名判定第 3 层通过：apksigner 明确失败原因——无签名证书（Number of signers: 0）"
+          echo "三层判定全过，本产物统一标识为 UNSIGNED_BUILD_ONLY（不是 RELEASE_SIGNED，也不是 RC_APPROVED）"
+          # 已知非阻断告警检测（GPT PR-4）：Kotlin 增量缓存关闭异常在本轮
+          # 构建输出中出现即登记；Gradle 缓存保存失败发生在 Post 步骤，
+          # 步骤内无法采集，记 unknown-post-step，复验时从运行日志核对。
+          if grep -q "Could not close incremental caches" build-output.log; then
+            KOTLIN_WARN_DETECTED=true
+            echo "::warning::检测到已知非阻断告警 CI-KOTLIN-CACHE-WARNING（Kotlin 增量缓存关闭异常），已登记，不阻止合并"
+          else
+            KOTLIN_WARN_DETECTED=false
+            echo "本轮构建输出中未出现 CI-KOTLIN-CACHE-WARNING"
+          fi
           SHA=$(sha256sum "$APK" | awk '{print $1}')
           SIZE=$(stat -c%s "$APK")
           echo "SHA-256: $SHA"
@@ -229,7 +320,7 @@ jobs:
           echo "APK_SIZE=$SIZE" >> "$GITHUB_ENV"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk"
           cat > "build/app/outputs/flutter-apk/build-unsigned.json" <<EOF
-          {"version": "$APP_VERSION", "channel": "unsigned", "commit": "$GITHUB_SHA", "built_at": "$(date -u +%FT%TZ)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "sha256": "$SHA", "size_bytes": $SIZE, "note": "未签名 release APK，须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。"}
+          {"version": "$APP_VERSION", "build_label": "UNSIGNED_BUILD_ONLY", "channel": "unsigned", "commit": "$GITHUB_SHA", "checked_out_commit": "$CHECKED_OUT_COMMIT", "pr_head_commit": "$PR_HEAD_COMMIT", "base_commit": "$BASE_COMMIT", "source_tree_sha": "$SOURCE_TREE_SHA", "build_config_patch_sha": "$BUILD_CONFIG_PATCH_SHA", "apk_sha256": "$SHA", "size_bytes": $SIZE, "built_at": "$(date -u +%FT%TZ)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "modified_files": ["android-app/android/app/build.gradle.kts", "android-app/lib/build_info.dart"], "modified_files_note": "本轮 Runner 实际修改了 android-app/android/app/build.gradle.kts（release signingConfig 改为 null）与 android-app/lib/build_info.dart（kBuildDate）；产物来自执行了这些修改后的工作树。", "build_date": "$BUILD_DATE", "build_date_source": "$BUILD_DATE_SOURCE", "unsigned_verification": {"v1_top_meta_inf": "pass", "signing_block_magic": "absent", "certificate_files": "none", "apksigner": "DOES NOT VERIFY", "signers": 0}, "known_warnings": [{"id": "CI-KOTLIN-CACHE-WARNING", "description": "Kotlin 增量缓存关闭异常（Could not close incremental caches），构建仍成功", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": $KOTLIN_WARN_DETECTED}, {"id": "CI-GRADLE-CACHE-SAVE-WARNING", "description": "Post Gradle Cache 阶段 tar 读锁文件失败（.lock Read error，Device or resource busy），缓存保存失败", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": "unknown-post-step"}], "note": "未签名 release APK（UNSIGNED_BUILD_ONLY），须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。本标识不是 RELEASE_SIGNED，也不是 RC_APPROVED。"}
           EOF
           cat build/app/outputs/flutter-apk/build-unsigned.json
 
