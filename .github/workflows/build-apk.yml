@@ -193,14 +193,21 @@ jobs:
           echo "$BADGING" | grep -q "package: name='com.qfremote.android'" || { echo "::error::包名不符"; exit 1; }
           echo "$BADGING" | grep -q "versionCode='30000'" || { echo "::error::versionCode 不符（期望 30000）"; exit 1; }
           echo "$BADGING" | grep -q "versionName='3.0.0'" || { echo "::error::versionName 不符（期望 3.0.0）"; exit 1; }
-          # 未签名断言：APK 内不得有任何签名块（META-INF/*.RSA/*.DSA/*.EC/*.SF/*.MF）。
-          # 注意：META-INF/*.kotlin_module 等非签名文件是允许的，不在此列。
-          if unzip -l "$APK" | grep -qE 'META-INF/.*\.(RSA|DSA|EC|SF|MF)'; then
-            echo "::error::产物含签名块，不是未签名包，拒绝上传"
-            unzip -l "$APK" | grep -E 'META-INF/' || true
+          # 未签名断言（结构层）：APK 顶层 META-INF 内不得有 v1 签名块文件
+          # （*.RSA/*.DSA/*.EC/*.SF）。只查顶层、只查这四种后缀、行尾锚定。
+          # 教训（试跑 44723007019 实证）：依赖库会自带嵌套的 MANIFEST.MF
+          # （如 META-INF/versions/9/OSGI-INF/MANIFEST.MF，145 字节 OSGi
+          # 元数据）与大量 .version/.properties 文件——都不是签名；旧断言
+          # 把 .MF 一概当签名块且未锚定行尾，误杀了这个合法的未签名包。
+          # MANIFEST.MF 本身不是签名（v1 签名 = .SF + 密钥文件）；真正的
+          # 未签名判定以下面的 apksigner verify 为准（覆盖 v1/v2/v3/v4）。
+          echo "META-INF 清单（备查）："
+          unzip -l "$APK" | grep -E 'META-INF/' || true
+          if unzip -l "$APK" | awk '{print $4}' | grep -qE '^META-INF/[^/]+\.(RSA|DSA|EC|SF)$'; then
+            echo "::error::产物含 v1 签名块，不是未签名包，拒绝上传"
             exit 1
           fi
-          echo "未签名断言通过：APK 内无签名块"
+          echo "未签名断言通过：APK 顶层 META-INF 内无 v1 签名块"
           # apksigner 应校验失败（未签名是预期状态，只记录，不当作错误）。
           if "$ANDROID_HOME/build-tools/$BT/apksigner" verify "$APK" 2>&1; then
             echo "::error::apksigner 竟校验通过，产物并非未签名，拒绝上传"
