@@ -68,11 +68,11 @@ jobs:
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls "$ANDROID_HOME/build-tools" || true
-          SD KM=""
+          SDKM=""
           if [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" ]; then
             SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat"
           else
-            SD KM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager.bat 2>/dev/null | sort -V | tail -1)
+            SDKM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager.bat 2>/dev/null | sort -V | tail -1)
           fi
           [ -n "$SDKM" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
           echo "sdkmanager: $SDKM"
