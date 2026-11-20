@@ -286,21 +286,33 @@ jobs:
           PYEOF
           # 未签名判定第 3 层（权威校验，GPT PR-3）：apksigner verify --verbose。
           # 只看“校验返回非零”不够——签名存在但损坏也会失败；必须核对失败的
-          # 明确原因：签名者数为 0（无签名证书），各方案均未验证。
+          # 明确原因。本轮 apksigner 36.0.0 在失败时只输出两行（试跑
+          # 44731964516 实证）：“DOES NOT VERIFY”＋“ERROR: Missing
+          # META-INF/MANIFEST.MF”，没有“Number of signers: N”这一行——
+          # 不要再断言它。缺失 MANIFEST 本身就是明确原因：该包根本没有
+          # v1 签名结构；v2/v3/v4 签名块的有无由第 2 层魔数扫描判定。
+          # 另用 jarsigner（JDK 自带）作第二方明确判定：输出须含
+          # “jar is unsigned.”（本地已对 run6 产物实测：jarsigner 退出 0，
+          # 输出含 “no manifest.” 与 “jar is unsigned.”）。
           # 注意（试跑 44725118334 实证）：Windows 的 build-tools 里只有
           # apksigner.bat、没有 apksigner 可执行文件；直接调 apksigner
           # 会报 No such file（退出 127），旧写法把“命令不存在”误读成
           # “校验失败”——那一轮的 apksigner 证据无效。因此先断言二进制
-          # 存在，再要求输出含 DOES NOT VERIFY 与 Number of signers: 0，
-          # 三项缺一不可；缺二进制或输出不对都直接失败，绝不把“没跑起来”
-          # 当成“未签名”。
+          # 存在，再要求输出含 DOES NOT VERIFY 与 ERROR: Missing
+          # META-INF/MANIFEST.MF，并要求 jarsigner 明确判未签名；缺
+          # 二进制或输出不对都直接失败，绝不把“没跑起来”当成“未签名”。
           APKSIGNER="$ANDROID_HOME/build-tools/$BT/apksigner.bat"
           test -f "$APKSIGNER" || { echo "::error::找不到 apksigner.bat：$APKSIGNER"; exit 1; }
           VERIFY_OUT=$("$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1 || true)
           echo "$VERIFY_OUT"
           echo "$VERIFY_OUT" | grep -q "DOES NOT VERIFY" || { echo "::error::apksigner 输出不含 DOES NOT VERIFY，无法证明未签名，拒绝上传"; exit 1; }
-          echo "$VERIFY_OUT" | grep -q "Number of signers: 0" || { echo "::error::apksigner 未确认签名者数为 0，无法证明无签名证书，拒绝上传"; exit 1; }
-          echo "未签名判定第 3 层通过：apksigner 明确失败原因——无签名证书（Number of signers: 0）"
+          echo "$VERIFY_OUT" | grep -q "ERROR: Missing META-INF/MANIFEST.MF" || { echo "::error::apksigner 未给出明确失败原因（期望 ERROR: Missing META-INF/MANIFEST.MF），拒绝上传"; exit 1; }
+          echo "未签名判定第 3 层（apksigner）通过：明确失败原因——无 v1 清单（Missing META-INF/MANIFEST.MF）"
+          command -v jarsigner >/dev/null 2>&1 || { echo "::error::找不到 jarsigner（JDK 自带，应在 PATH 内）"; exit 1; }
+          JARSIGNER_OUT=$(jarsigner -verify "$APK" 2>&1 || true)
+          echo "$JARSIGNER_OUT" | tail -3
+          echo "$JARSIGNER_OUT" | grep -q "jar is unsigned." || { echo "::error::jarsigner 未明确判定未签名（期望 jar is unsigned.），拒绝上传"; exit 1; }
+          echo "未签名判定第 3 层（jarsigner）通过：jar is unsigned."
           echo "三层判定全过，本产物统一标识为 UNSIGNED_BUILD_ONLY（不是 RELEASE_SIGNED，也不是 RC_APPROVED）"
           # 已知非阻断告警检测（GPT PR-4）：Kotlin 增量缓存关闭异常在本轮
           # 构建输出中出现即登记；Gradle 缓存保存失败发生在 Post 步骤，
@@ -320,7 +332,7 @@ jobs:
           echo "APK_SIZE=$SIZE" >> "$GITHUB_ENV"
           cp "$APK" "build/app/outputs/flutter-apk/QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk"
           cat > "build/app/outputs/flutter-apk/build-unsigned.json" <<EOF
-          {"version": "$APP_VERSION", "build_label": "UNSIGNED_BUILD_ONLY", "channel": "unsigned", "commit": "$GITHUB_SHA", "checked_out_commit": "$CHECKED_OUT_COMMIT", "pr_head_commit": "$PR_HEAD_COMMIT", "base_commit": "$BASE_COMMIT", "source_tree_sha": "$SOURCE_TREE_SHA", "build_config_patch_sha": "$BUILD_CONFIG_PATCH_SHA", "apk_sha256": "$SHA", "size_bytes": $SIZE, "built_at": "$(date -u +%FT%TZ)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "modified_files": ["android-app/android/app/build.gradle.kts", "android-app/lib/build_info.dart"], "modified_files_note": "本轮 Runner 实际修改了 android-app/android/app/build.gradle.kts（release signingConfig 改为 null）与 android-app/lib/build_info.dart（kBuildDate）；产物来自执行了这些修改后的工作树。", "build_date": "$BUILD_DATE", "build_date_source": "$BUILD_DATE_SOURCE", "unsigned_verification": {"v1_top_meta_inf": "pass", "signing_block_magic": "absent", "certificate_files": "none", "apksigner": "DOES NOT VERIFY", "signers": 0}, "known_warnings": [{"id": "CI-KOTLIN-CACHE-WARNING", "description": "Kotlin 增量缓存关闭异常（Could not close incremental caches），构建仍成功", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": $KOTLIN_WARN_DETECTED}, {"id": "CI-GRADLE-CACHE-SAVE-WARNING", "description": "Post Gradle Cache 阶段 tar 读锁文件失败（.lock Read error，Device or resource busy），缓存保存失败", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": "unknown-post-step"}], "note": "未签名 release APK（UNSIGNED_BUILD_ONLY），须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。本标识不是 RELEASE_SIGNED，也不是 RC_APPROVED。"}
+          {"version": "$APP_VERSION", "build_label": "UNSIGNED_BUILD_ONLY", "channel": "unsigned", "commit": "$GITHUB_SHA", "checked_out_commit": "$CHECKED_OUT_COMMIT", "pr_head_commit": "$PR_HEAD_COMMIT", "base_commit": "$BASE_COMMIT", "source_tree_sha": "$SOURCE_TREE_SHA", "build_config_patch_sha": "$BUILD_CONFIG_PATCH_SHA", "apk_sha256": "$SHA", "size_bytes": $SIZE, "built_at": "$(date -u +%FT%TZ)", "artifact": "QFRemote-v$APP_VERSION-unsigned-$SHORT_SHA.apk", "modified_files": ["android-app/android/app/build.gradle.kts", "android-app/lib/build_info.dart"], "modified_files_note": "本轮 Runner 实际修改了 android-app/android/app/build.gradle.kts（release signingConfig 改为 null）与 android-app/lib/build_info.dart（kBuildDate）；产物来自执行了这些修改后的工作树。", "build_date": "$BUILD_DATE", "build_date_source": "$BUILD_DATE_SOURCE", "unsigned_verification": {"v1_top_meta_inf": "pass", "signing_block_magic": "absent", "certificate_files": "none", "apksigner": "DOES NOT VERIFY", "apksigner_error": "Missing META-INF/MANIFEST.MF", "jarsigner": "jar is unsigned."}, "known_warnings": [{"id": "CI-KOTLIN-CACHE-WARNING", "description": "Kotlin 增量缓存关闭异常（Could not close incremental caches），构建仍成功", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": $KOTLIN_WARN_DETECTED}, {"id": "CI-GRADLE-CACHE-SAVE-WARNING", "description": "Post Gradle Cache 阶段 tar 读锁文件失败（.lock Read error，Device or resource busy），缓存保存失败", "severity": "non-blocking", "first_observed_run": "44727945143", "detected_in_this_run": "unknown-post-step"}], "note": "未签名 release APK（UNSIGNED_BUILD_ONLY），须在可信设备 zipalign 后用正式密钥 apksigner 签名，验签通过后才可作 RC 候选；绝不直接分发。本标识不是 RELEASE_SIGNED，也不是 RC_APPROVED。"}
           EOF
           cat build/app/outputs/flutter-apk/build-unsigned.json
 
