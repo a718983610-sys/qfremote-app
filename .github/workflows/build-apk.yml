@@ -39,7 +39,10 @@ permissions:
 
 env:
   FLUTTER_VERSION: '3.47.8'        # 腾讯机第 5 轮成功构建的版本（Dart 3.13.7）
-  JAVA_VERSION: '21.0.13+9'        # Temurin JDK，腾讯机成功构建的版本
+  JAVA_VERSION: '21.0.13+9.0.LTS'  # Temurin JDK 21.0.13+9，腾讯机成功构建的版本；
+                                   # 注意：setup-java 经 Adoptium API 解析版本，该构建在 API
+                                   # 里登记为 21.0.13+9.0.LTS（java -version 只显示 21.0.13+9），
+                                   # 写 '21.0.13+9' 会报 No matching version（2026-11-20 试跑实证）
   BUILD_TOOLS_VERSION: '36.0.0'    # Android SDK build-tools，腾讯机成功构建的版本
   ANDROID_PLATFORM: 'android-36'   # compileSdk = flutter.compileSdkVersion = 36
 
