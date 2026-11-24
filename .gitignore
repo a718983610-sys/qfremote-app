@@ -22,3 +22,19 @@ dist/
 **/cert/
 config.json
 windows/build/installer-work/
+
+# 2026-11-25 3.0 整理提交：堵密钥/口令漏口（密钥审计 SECRETS-AUDIT-20261124.md §5）。
+# 误放的密钥、口令备份、签名证书、环境文件一律不入库；已跟踪文件不受影响。
+*.env
+.env*
+*.p12
+*.pfx
+*.jks
+*.keystore
+*password*
+*passwd*
+*credentials*
+key.properties
+KEYSTORE-README*
+*CREDENTIALS*
+*Credentials*
